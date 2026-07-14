@@ -35,7 +35,7 @@ if [ ! -f "$config" ]; then
   "$BIN_DIR/contextbridge" init --config "$config"
 fi
 
-if command -v systemctl >/dev/null 2>&1; then
+if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
   unit_dir="$HOME/.config/systemd/user"
   mkdir -p "$unit_dir"
   cat > "$unit_dir/contextbridge.service" <<EOF
@@ -51,9 +51,12 @@ RestartSec=3
 [Install]
 WantedBy=default.target
 EOF
-  systemctl --user daemon-reload
-  systemctl --user enable --now contextbridge.service
-  echo "ContextBridge user service enabled."
+  if systemctl --user daemon-reload 2>/dev/null && systemctl --user enable --now contextbridge.service 2>/dev/null; then
+    echo "ContextBridge user service enabled."
+  else
+    echo "The user service could not be enabled in this session."
+    echo "Start ContextBridge with: $BIN_DIR/contextbridge serve --config $config"
+  fi
 else
   echo "Start ContextBridge with: $BIN_DIR/contextbridge serve --config $config"
 fi

@@ -41,6 +41,9 @@ try {
     Expand-Archive -Path $archive -DestinationPath $temporary -Force
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     Copy-Item (Join-Path $temporary "contextbridge.exe") (Join-Path $InstallDir "contextbridge.exe") -Force
+    if (Test-Path (Join-Path $InstallDir "extension")) {
+        Remove-Item (Join-Path $InstallDir "extension") -Recurse -Force
+    }
     Copy-Item (Join-Path $temporary "extension") (Join-Path $InstallDir "extension") -Recurse -Force
     Copy-Item (Join-Path $temporary "config.example.yml") (Join-Path $InstallDir "config.example.yml") -Force
 } finally {
@@ -65,7 +68,7 @@ if ($Provider -eq "browser") {
     [IO.File]::WriteAllText($config, $yaml, (New-Object Text.UTF8Encoding($false)))
 }
 
-if (-not $NoAutostart) {
+if (-not $NoAutostart -and (Get-Command Register-ScheduledTask -ErrorAction SilentlyContinue)) {
     $taskName = "ContextBridge"
     $arguments = "serve --config `"$config`""
     $action = New-ScheduledTaskAction -Execute $exe -Argument $arguments
@@ -73,6 +76,8 @@ if (-not $NoAutostart) {
     $settings = New-ScheduledTaskSettingsSet -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Days 3650)
     Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Description "Local ContextBridge service" -Force | Out-Null
     Good "Autostart installed for this Windows account."
+} elseif (-not $NoAutostart) {
+    Muted "Windows Task Scheduler cmdlets are unavailable. Start ContextBridge manually when needed."
 }
 
 if (-not $NoStart) {
