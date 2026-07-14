@@ -1,0 +1,49 @@
+version: 1
+
+server:
+  listen: 127.0.0.1:32145
+  token: ${CONTEXTBRIDGE_TOKEN}
+
+storage:
+  directory: ./data
+  inbox: ./inbox
+
+routes:
+  default:
+    provider: ollama
+    fallback: [browser]
+    timeout_seconds: 180
+    browser_profile: chatgpt
+  inkwall:
+    provider: ollama
+    fallback: [browser]
+    timeout_seconds: 180
+    browser_profile: chatgpt
+
+providers:
+  ollama:
+    url: http://127.0.0.1:11434
+    model: gemma3:4b
+    images: true
+    timeout_seconds: 45
+  browser:
+    lease_seconds: 90
+
+browser_profiles:
+  chatgpt:
+    label: ChatGPT
+    match_url: https://chatgpt.com/*
+    selectors:
+      input: ['#prompt-textarea', '[contenteditable="true"]']
+      file_input: ['input[type="file"]']
+      submit: ['button[data-testid="send-button"]', 'button[aria-label*="Send"]']
+      response: ['[data-message-author-role="assistant"]']
+
+  custom_ai:
+    label: My browser AI
+    match_url: https://ai.example.com/*
+    selectors:
+      input: ['textarea[name="prompt"]']
+      file_input: ['input[type="file"]']
+      submit: ['button[type="submit"]']
+      response: ['.assistant-message']

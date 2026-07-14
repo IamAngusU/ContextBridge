@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - os: windows
+            arch: amd64
+            ext: .exe
+            format: zip
+          - os: windows
+            arch: arm64
+            ext: .exe
+            format: zip
+          - os: linux
+            arch: amd64
+            ext: ''
+            format: tar
+          - os: linux
+            arch: arm64
+            ext: ''
+            format: tar
+          - os: darwin
+            arch: amd64
+            ext: ''
+            format: tar
+          - os: darwin
+            arch: arm64
+            ext: ''
+            format: tar
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: Build
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: 0
+        run: go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" -o "dist/contextbridge${{ matrix.ext }}" ./cmd/contextbridge
+      - name: Bundle
+        shell: bash
+        run: |
+          cp -R extension dist/extension
+          cp config.example.yml README.md LICENSE dist/
+          if [ "${{ matrix.format }}" = "zip" ]; then
+            cd dist && zip -qr "../contextbridge_${{ matrix.os }}_${{ matrix.arch }}.zip" .
+          else
+            tar -czf "contextbridge_${{ matrix.os }}_${{ matrix.arch }}.tar.gz" -C dist .
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: contextbridge-${{ matrix.os }}-${{ matrix.arch }}
+          path: contextbridge_${{ matrix.os }}_${{ matrix.arch }}.*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: artifacts/*

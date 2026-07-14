@@ -1,0 +1,6 @@
+/contextbridge
+/dist/
+/data/
+/inbox/
+/config.yml
+*.log

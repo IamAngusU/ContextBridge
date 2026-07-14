@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ContextBridge</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main>
+    <header>
+      <span class="signal" aria-hidden="true"></span>
+      <div><strong>ContextBridge</strong><small id="status">Not paired</small></div>
+    </header>
+
+    <label>Local bridge URL
+      <input id="url" value="http://127.0.0.1:32145" spellcheck="false">
+    </label>
+    <label>Pairing token
+      <input id="token" type="password" autocomplete="off" spellcheck="false">
+    </label>
+    <label>Browser profile
+      <select id="profile"><option value="chatgpt">ChatGPT</option></select>
+    </label>
+    <label>AI tab
+      <select id="tab"></select>
+    </label>
+
+    <div class="actions">
+      <button id="test" type="button">Test bridge</button>
+      <button id="pair" class="primary" type="button">Pair selected tab</button>
+    </div>
+    <button id="stop" class="stop" type="button">Stop pairing</button>
+    <p class="note">Only the selected tab and its origin are authorized. ContextBridge never reads other page content.</p>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>
