@@ -1,5 +1,6 @@
 /contextbridge
 /dist/
+/release-artifacts/
 /data/
 /inbox/
 /config.yml

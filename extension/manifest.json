@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ContextBridge",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Connect one explicitly selected AI tab to a local ContextBridge service.",
   "permissions": ["storage", "tabs", "scripting"],
   "optional_host_permissions": ["http://127.0.0.1/*", "http://localhost/*", "https://*/*", "http://*/*"],

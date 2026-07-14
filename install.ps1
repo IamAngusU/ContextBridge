@@ -89,4 +89,9 @@ Write-Host "Config: $config"
 Write-Host "Browser extension: $(Join-Path $InstallDir 'extension')"
 if ($Provider -eq "browser") {
     Write-Host "Open chrome://extensions or edge://extensions, enable developer mode, and load that extension folder."
+    $tokenLine = Get-Content $config | Where-Object { $_ -match '^\s*token:\s*(\S+)\s*$' } | Select-Object -First 1
+    if ($tokenLine -match '^\s*token:\s*(\S+)\s*$' -and (Get-Command Set-Clipboard -ErrorAction SilentlyContinue)) {
+        Set-Clipboard -Value $Matches[1]
+        Good "The local pairing token is already in your clipboard."
+    }
 }

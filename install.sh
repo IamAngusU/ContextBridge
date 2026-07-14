@@ -44,7 +44,7 @@ Description=ContextBridge local model and browser bridge
 After=network-online.target
 
 [Service]
-ExecStart=$BIN_DIR/contextbridge serve --config $config
+ExecStart="$BIN_DIR/contextbridge" serve --config "$config"
 Restart=on-failure
 RestartSec=3
 

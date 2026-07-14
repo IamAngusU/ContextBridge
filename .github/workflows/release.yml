@@ -52,6 +52,7 @@ jobs:
         shell: bash
         run: |
           cp -R extension dist/extension
+          cp -R examples dist/examples
           cp config.example.yml README.md LICENSE dist/
           if [ "${{ matrix.format }}" = "zip" ]; then
             cd dist && zip -qr "../contextbridge_${{ matrix.os }}_${{ matrix.arch }}.zip" .

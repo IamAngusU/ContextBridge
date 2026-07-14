@@ -115,7 +115,13 @@ func submitCommand(args []string) error {
 	if *jobPath == "" {
 		return errors.New("--file is required")
 	}
-	raw, err := os.ReadFile(*jobPath)
+	var raw []byte
+	var err error
+	if *jobPath == "-" {
+		raw, err = io.ReadAll(io.LimitReader(os.Stdin, 12<<20))
+	} else {
+		raw, err = os.ReadFile(*jobPath)
+	}
 	if err != nil {
 		return err
 	}

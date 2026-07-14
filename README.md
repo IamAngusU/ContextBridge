@@ -67,6 +67,15 @@ contextbridge submit --file examples/job.json
 
 You can also write a JSON job into the configured inbox folder or call `POST /v1/jobs`. See [the protocol](docs/protocol.md).
 
+Use `--file -` to accept a job from standard input. That makes existing tools usable as sources without granting the bridge extra credentials:
+
+```bash
+ssh data-host '/opt/export-next-context-job' | contextbridge submit --file -
+curl -fsS http://127.0.0.1:9000/next-context-job | contextbridge submit --file -
+```
+
+Database workers can emit the same JSON protocol. ContextBridge never runs commands returned by a model; a source process and its credentials stay under the operator's control.
+
 InkWall uses:
 
 ```bash
