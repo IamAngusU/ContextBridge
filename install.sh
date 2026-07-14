@@ -21,11 +21,23 @@ asset="contextbridge_${os}_${arch}.tar.gz"
 api="https://api.github.com/repos/$REPO/releases/latest"
 url="$(curl -fsSL "$api" | sed -n "s/.*\"browser_download_url\": *\"\([^\"]*${asset}\)\".*/\1/p" | head -n 1)"
 [ -n "$url" ] || { echo "Release asset $asset was not found." >&2; exit 1; }
+checksums_url="$(curl -fsSL "$api" | sed -n 's/.*"browser_download_url": *"\([^"]*SHA256SUMS\)".*/\1/p' | head -n 1)"
+[ -n "$checksums_url" ] || { echo "Release checksums were not found." >&2; exit 1; }
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT INT TERM
 echo "Downloading ContextBridge for $os $arch..."
 curl -fsSL "$url" -o "$tmp/$asset"
+curl -fsSL "$checksums_url" -o "$tmp/SHA256SUMS"
+expected="$(awk -v name="$asset" '$2 == name || $2 ~ ("/" name "$") {print $1}' "$tmp/SHA256SUMS")"
+[ -n "$expected" ] || { echo "No checksum was published for $asset." >&2; exit 1; }
+if command -v sha256sum >/dev/null 2>&1; then
+  actual="$(sha256sum "$tmp/$asset" | awk '{print $1}')"
+else
+  actual="$(shasum -a 256 "$tmp/$asset" | awk '{print $1}')"
+fi
+[ "$actual" = "$expected" ] || { echo "ContextBridge download checksum mismatch." >&2; exit 1; }
+echo "Download checksum verified."
 mkdir -p "$INSTALL_DIR" "$BIN_DIR"
 tar -xzf "$tmp/$asset" -C "$INSTALL_DIR"
 install -m 0755 "$INSTALL_DIR/contextbridge" "$BIN_DIR/contextbridge"

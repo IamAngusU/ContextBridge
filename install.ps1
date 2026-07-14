@@ -31,6 +31,8 @@ $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/l
 $assetName = "contextbridge_windows_$architecture.zip"
 $asset = $release.assets | Where-Object { $_.name -eq $assetName } | Select-Object -First 1
 if (-not $asset) { throw "Release asset $assetName was not found." }
+$checksumAsset = $release.assets | Where-Object { $_.name -eq "SHA256SUMS" } | Select-Object -First 1
+if (-not $checksumAsset) { throw "Release checksums were not found." }
 
 $temporary = Join-Path ([IO.Path]::GetTempPath()) ("contextbridge-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force -Path $temporary | Out-Null
@@ -38,6 +40,14 @@ try {
     Info "Downloading $($release.tag_name) for Windows $architecture..."
     $archive = Join-Path $temporary $assetName
     Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $archive -UseBasicParsing
+    $checksums = Join-Path $temporary "SHA256SUMS"
+    Invoke-WebRequest -Uri $checksumAsset.browser_download_url -OutFile $checksums -UseBasicParsing
+    $checksumLine = Get-Content $checksums | Where-Object { $_ -match "\s$([regex]::Escape($assetName))$" } | Select-Object -First 1
+    if (-not $checksumLine) { throw "No checksum was published for $assetName." }
+    $expectedHash = ($checksumLine -split '\s+')[0].ToLowerInvariant()
+    $actualHash = (Get-FileHash -Path $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualHash -ne $expectedHash) { throw "ContextBridge download checksum mismatch." }
+    Good "Download checksum verified."
     Expand-Archive -Path $archive -DestinationPath $temporary -Force
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     Copy-Item (Join-Path $temporary "contextbridge.exe") (Join-Path $InstallDir "contextbridge.exe") -Force

@@ -72,6 +72,8 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+      - name: Checksums
+        run: cd artifacts && sha256sum contextbridge_* > SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
