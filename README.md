@@ -4,7 +4,7 @@
 
 <h1 align="center">ContextBridge</h1>
 
-<p align="center"><strong>Move structured jobs between your apps, local models, and one browser tab you explicitly teach.</strong></p>
+<p align="center"><strong>Route AI jobs across your apps, private computers, local models, and explicitly taught browser tabs.</strong></p>
 
 <p align="center">
   <a href="https://github.com/IamAngusU/ContextBridge/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/IamAngusU/ContextBridge?display_name=tag&sort=semver&style=flat-square&color=2a9d8f"></a>
@@ -15,7 +15,7 @@
   <a href="https://github.com/IamAngusU/ContextBridge/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/IamAngusU/ContextBridge?style=flat-square&color=d9a62e"></a>
 </p>
 
-ContextBridge is a local-first runtime and router for structured AI jobs. A source can be a folder, website, database worker, command pipeline, private server, or any application that can send JSON. A destination can be Ollama, a managed `llama.cpp` engine, or an AI page open in a browser tab.
+ContextBridge is a local-first runtime and decentralized compute router for structured AI jobs. A source can be a folder, website, database worker, command pipeline, private server, or any application that can send JSON. A destination can be one or many private computers running Ollama, a managed `llama.cpp` engine, or an AI page open in a browser tab.
 
 The browser workflow does not require hand-written CSS selectors. Choose a tab, click **Teach this page**, then click its prompt field, send control, answer area, and optional image upload. The learned profile stays in extension storage and can be replaced at any time.
 
@@ -24,6 +24,11 @@ The browser workflow does not require hand-written CSS selectors. Choose a tab, 
 ## Why ContextBridge
 
 - **Visual browser teaching:** point at page controls instead of reverse engineering selectors.
+- **1:1, 1:N, and N:N compute:** connect one app to one worker, distribute one queue across many workers, or share a capability-aware node pool between producers.
+- **Outbound worker connections:** workers join through WebSockets without router port forwarding or fixed public worker ports.
+- **Durable scheduling:** priority queue, history, bounded retries, disconnect recovery, groups, tags, task requirements, and VRAM-aware placement survive relay restarts.
+- **Optional E2EE jobs:** a producer can seal a payload for the selected worker with X25519 and AES-256-GCM so the relay cannot read the payload or result.
+- **Bounded model pipelines:** chain extraction, embeddings, retrieval, vision, and generation with fixed steps and explicit loop limits.
 - **Explicit scope:** only the chosen page origin and local service are requested.
 - **Local models:** route text and images to Ollama without adding another hosted service.
 - **Managed runtimes:** install an official `llama.cpp` release, verify its SHA256, and supervise it on localhost.
@@ -52,15 +57,55 @@ irm https://raw.githubusercontent.com/IamAngusU/ContextBridge/main/install.ps1 |
 curl -fsSL https://raw.githubusercontent.com/IamAngusU/ContextBridge/main/install.sh | sh
 ```
 
-The installer verifies the matching published release checksum, creates a private config, sets up user autostart where supported, starts the service, and opens the local dashboard. It can use an existing Ollama installation, install a managed `llama.cpp` runtime, or pair a browser tab.
+The installer verifies the matching published release checksum, creates a private config, asks whether this device is local-only, a relay, a worker, or both, sets up user autostart where supported, starts the service, and opens the dashboard. It can use an existing Ollama installation, install a managed `llama.cpp` runtime, or pair a browser tab.
 
 Manual installation is just as small:
 
 ```bash
 contextbridge init
-contextbridge serve
+contextbridge run
 contextbridge dashboard
 ```
+
+## Build A Compute Cluster
+
+The same protocol covers every topology. Workers always connect outward to a TLS relay, report current capabilities and load, and receive only jobs allowed by their token and group policy.
+
+### Relay
+
+```bash
+contextbridge cluster configure --mode relay --public-url https://relay.example.com
+contextbridge run
+contextbridge cluster dashboard
+```
+
+Place Caddy, nginx, or another TLS reverse proxy in front of the relay's localhost listener. No worker port needs to be opened in a home router.
+
+Production templates for a hardened systemd service and an nginx path proxy live in [`deploy/`](deploy/). Update the internal port if the installer selected another one.
+
+### Worker
+
+```bash
+contextbridge cluster configure --mode worker --relay-url https://relay.example.com
+contextbridge pair
+contextbridge run
+```
+
+The worker prints a short code. An admin approves it in the relay dashboard or with `contextbridge cluster pairing --approve CODE`. The node token and X25519 private key stay in the owner-only identity file.
+
+### Producer
+
+Create a scoped producer token once:
+
+```bash
+contextbridge cluster token --role producer --subject support-api
+contextbridge cluster submit --file examples/cluster-job.json --token cb_producer_TOKEN
+contextbridge cluster submit --file examples/cluster-job.json --token cb_producer_TOKEN --e2ee
+```
+
+Set requirements such as `task`, `group`, `model`, `vision`, `embedding`, tags, or minimum free VRAM. The scheduler chooses a compatible online node using live concurrency, queue, RAM, and VRAM data. Normal TLS jobs can move to another node after a disconnect. E2EE jobs are bound to the worker key selected during reservation and fail clearly if that worker disappears.
+
+This release uses one durable BoltDB file per relay process. It supports many producers and workers through one relay. Active-active relay replication is a separate deployment tier and requires a shared database and message broker rather than copying the BoltDB file.
 
 ## Teach A Browser Tab
 
@@ -80,7 +125,7 @@ See [Visual browser teaching](docs/browser-teaching.md) for exact browser steps 
 Install Ollama and start ContextBridge:
 
 ```bash
-contextbridge serve
+contextbridge run
 ```
 
 With `model: auto`, ContextBridge selects the smallest compatible local model. Image jobs prefer a vision-capable model and embedding jobs require an embedding-capable model. An explicit model name always wins. The default route tries Ollama first and uses the paired browser only when Ollama is unavailable.
@@ -125,6 +170,8 @@ A folder producer can place the same JSON document in the configured inbox. Cont
 ```
 
 See the [job protocol](docs/protocol.md) and [integration recipes](docs/integrations.md).
+
+Cluster jobs wrap that local job in routing requirements. See [examples/cluster-job.json](examples/cluster-job.json).
 
 Choose an explicit output contract per job:
 
@@ -179,16 +226,16 @@ Leave `browser_profile` empty for the profile taught in the extension. Set it to
 
 ```mermaid
 flowchart LR
-  A[App, folder, database, SSH] -->|Authenticated JSON job| B[ContextBridge]
-  B --> C[Ollama]
-  B --> D[Managed llama.cpp]
-  B --> E[Explicitly paired browser tab]
-  D --> F[Extraction or embeddings]
-  F --> G[Vector store]
-  C --> H[Validated output]
-  E --> H
-  G --> H
-  H --> A
+  A[Apps and producers] -->|Authenticated job| R[Durable relay]
+  W1[Private worker 1] -->|Outbound WSS| R
+  W2[Private worker 2] -->|Outbound WSS| R
+  R -->|Capability routing| W1
+  R -->|Load balancing| W2
+  W1 --> O[Ollama or llama.cpp]
+  W2 --> B[Explicit browser tab]
+  O --> R
+  B --> R
+  R --> A
 ```
 
 ContextBridge never executes commands returned by a model. Source credentials stay with the source process. Browser page content is treated as untrusted data and output is reduced to the configured decision vocabulary.
@@ -201,6 +248,7 @@ Read [Architecture](docs/architecture.md) and [Security](docs/security.md) befor
 | --- | --- |
 | `cmd/contextbridge` | Cross-platform CLI and service entry point |
 | `internal/bridge` | Routing, providers, local API, storage, and dashboard |
+| `internal/cluster` | Pairing, E2EE, durable queue, scheduler, relay, workers, pipelines, and cluster dashboard |
 | `internal/config` | YAML parsing, defaults, and validation |
 | `internal/modelregistry` | Verified GGUF model downloads and local registry |
 | `internal/systeminfo` | Cross-platform hardware and backend telemetry |
@@ -209,6 +257,7 @@ Read [Architecture](docs/architecture.md) and [Security](docs/security.md) befor
 | `extension/chromium` | Ready-to-load Chromium package |
 | `extension/firefox` | Ready-to-load Firefox package |
 | `scripts` | Reproducible extension and release checks |
+| `deploy` | Hardened systemd and nginx relay templates |
 | `docs` | Protocol, architecture, security, and integrations |
 
 ## Development
@@ -224,6 +273,6 @@ Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md), use a 
 
 ## Project Status
 
-ContextBridge is usable today for local and private workflows. Browser pages can change their HTML without notice, so visual profiles are testable and automation failures return `review`. Store distribution for browser extensions is planned; current release packages are ready for local loading and Mozilla signing.
+ContextBridge is usable today for local workflows and single-relay private compute clusters. Browser pages can change their HTML without notice, so visual profiles are testable and automation failures return `review`. Active-active relay HA and signed browser-store distribution remain future deployment tiers.
 
 MIT licensed. Built and maintained by [Angus Uelsmann](https://github.com/IamAngusU).

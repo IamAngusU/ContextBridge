@@ -111,3 +111,47 @@ An external tunnel supervisor can publish authenticated state at `POST /v1/tunne
 Unknown JSON fields are rejected. HTTP responses use `Cache-Control: no-store`.
 
 Client-supplied job IDs may contain 1 to 128 ASCII letters, numbers, dots, underscores, and hyphens. Path separators and repeated dots are rejected. A duplicate ID returns HTTP `409` and never replaces an earlier job.
+
+## Cluster Protocol
+
+Cluster endpoints use separate admin, observer, producer, and node bearer credentials. Pairing request and polling endpoints use short-lived device credentials and rate limits.
+
+| Method | Endpoint | Role | Purpose |
+| --- | --- | --- | --- |
+| `POST` | `/v1/pair/request` | Public, rate limited | Begin worker pairing |
+| `POST` | `/v1/pair/token` | Device code | Poll once for a node credential |
+| `GET` | `/v1/pairings` | Admin | List pending pairing requests |
+| `POST` | `/v1/pairings/{code}/approve` | Admin | Approve one worker |
+| `GET` | `/v1/cluster/overview` | Admin, observer, producer | Read aggregate status |
+| `GET` | `/v1/cluster/nodes` | Admin, observer, producer | Read node capabilities and load |
+| `POST` | `/v1/cluster/jobs` | Admin, producer | Queue a normal or sealed job |
+| `GET` | `/v1/cluster/jobs/{id}` | Scoped role | Read one allowed job |
+| `DELETE` | `/v1/cluster/jobs/{id}` | Admin, producer | Cancel one allowed job |
+| `POST` | `/v1/cluster/assign` | Admin, producer | Reserve an E2EE worker key |
+| `GET` | `/v1/cluster/workers/connect` | Node | Upgrade to the worker WebSocket |
+| `POST` | `/v1/cluster/pipelines/{name}/run` | Admin, producer | Start a declared pipeline |
+
+A cluster job contains routing metadata and one local ContextBridge job as its payload:
+
+```json
+{
+  "requirements": {
+    "task": "vision",
+    "group": "media",
+    "required_tags": ["private"],
+    "vision": true,
+    "min_free_vram_bytes": 8589934592
+  },
+  "payload": {
+    "route": "default",
+    "task": "generation",
+    "prompt": "Describe the image as structured JSON.",
+    "image_base64": "...",
+    "output": {"mode": "json"}
+  },
+  "priority": 20,
+  "max_attempts": 3
+}
+```
+
+For E2EE, call `/v1/cluster/assign`, encrypt the payload for the returned node public key, and submit the sealed envelope with the one-time assignment ID and secret. The authenticated additional data is `job:{job_id}:{node_id}`. Results use `result:{job_id}:{node_id}` and a separate derived key.

@@ -5,6 +5,7 @@ REPO="IamAngusU/ContextBridge"
 INSTALL_DIR="${CONTEXTBRIDGE_HOME:-$HOME/.local/share/contextbridge}"
 BIN_DIR="${CONTEXTBRIDGE_BIN_DIR:-$HOME/.local/bin}"
 provider="${CONTEXTBRIDGE_PROVIDER:-ask}"
+cluster_mode="${CONTEXTBRIDGE_CLUSTER_MODE:-ask}"
 
 if [ "$provider" = "ask" ] && [ -r /dev/tty ]; then
   printf '\nChoose the first local target:\n' >/dev/tty
@@ -66,6 +67,43 @@ if [ ! -f "$config" ]; then
   "$BIN_DIR/contextbridge" init --config "$config"
 fi
 
+if [ "$cluster_mode" = "ask" ] && [ -r /dev/tty ]; then
+  printf '\nChoose how this device participates:\n' >/dev/tty
+  printf '  1) Local bridge only (recommended for a first install)\n' >/dev/tty
+  printf '  2) Relay for other devices\n' >/dev/tty
+  printf '  3) Worker for an existing relay\n' >/dev/tty
+  printf '  4) Relay and worker on this device\n' >/dev/tty
+  printf 'Choose 1, 2, 3, or 4 [1]: ' >/dev/tty
+  read -r cluster_choice </dev/tty || cluster_choice="1"
+  case "${cluster_choice:-1}" in 2) cluster_mode="relay" ;; 3) cluster_mode="worker" ;; 4) cluster_mode="all" ;; *) cluster_mode="local" ;; esac
+elif [ "$cluster_mode" = "ask" ]; then
+  cluster_mode="local"
+fi
+
+relay_url=""
+public_url=""
+if [ "$cluster_mode" = "worker" ] && [ -r /dev/tty ]; then
+  printf 'Public HTTPS relay URL: ' >/dev/tty
+  read -r relay_url </dev/tty
+  [ -n "$relay_url" ] || { echo "A relay URL is required for worker mode." >&2; exit 1; }
+fi
+if [ "$cluster_mode" = "relay" ] && [ -r /dev/tty ]; then
+  printf 'Public HTTPS relay URL, or leave empty while configuring the reverse proxy: ' >/dev/tty
+  read -r public_url </dev/tty || public_url=""
+fi
+if [ -n "$relay_url" ]; then
+  "$BIN_DIR/contextbridge" cluster configure --config "$config" --mode "$cluster_mode" --relay-url "$relay_url"
+elif [ -n "$public_url" ]; then
+  "$BIN_DIR/contextbridge" cluster configure --config "$config" --mode "$cluster_mode" --listen auto --public-url "$public_url"
+elif [ "$cluster_mode" = "relay" ] || [ "$cluster_mode" = "all" ]; then
+  "$BIN_DIR/contextbridge" cluster configure --config "$config" --mode "$cluster_mode" --listen auto
+else
+  "$BIN_DIR/contextbridge" cluster configure --config "$config" --mode "$cluster_mode"
+fi
+if [ "$cluster_mode" = "worker" ] || [ "$cluster_mode" = "all" ]; then
+  "$BIN_DIR/contextbridge" pair --config "$config"
+fi
+
 if [ "$provider" = "browser" ]; then
   sed -i.bak \
     -e '/^  default:/,/^  [A-Za-z0-9_-]*:/{s/^    provider: ollama$/    provider: browser/;s/^    fallback: \[browser\]$/    fallback: []/;}' \
@@ -112,7 +150,7 @@ Description=ContextBridge local model and browser bridge
 After=network-online.target
 
 [Service]
-ExecStart="$BIN_DIR/contextbridge" serve --config "$config"
+ExecStart="$BIN_DIR/contextbridge" run --config "$config"
 Restart=on-failure
 RestartSec=3
 
@@ -123,7 +161,7 @@ EOF
     echo "ContextBridge user service enabled."
   else
     echo "The user service could not be enabled in this session."
-    echo "Start ContextBridge with: $BIN_DIR/contextbridge serve --config $config"
+    echo "Start ContextBridge with: $BIN_DIR/contextbridge run --config $config"
   fi
 elif [ "$os" = "darwin" ]; then
   agent_dir="$HOME/Library/LaunchAgents"
@@ -134,7 +172,7 @@ elif [ "$os" = "darwin" ]; then
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>de.angusu.contextbridge</string>
-  <key>ProgramArguments</key><array><string>$BIN_DIR/contextbridge</string><string>serve</string><string>--config</string><string>$config</string></array>
+  <key>ProgramArguments</key><array><string>$BIN_DIR/contextbridge</string><string>run</string><string>--config</string><string>$config</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
   <key>StandardOutPath</key><string>$INSTALL_DIR/contextbridge.log</string>
@@ -145,10 +183,10 @@ EOF
   if launchctl bootstrap "gui/$(id -u)" "$agent" >/dev/null 2>&1; then
     echo "ContextBridge launch agent enabled."
   else
-    echo "Start ContextBridge with: $BIN_DIR/contextbridge serve --config $config"
+    echo "Start ContextBridge with: $BIN_DIR/contextbridge run --config $config"
   fi
 else
-  echo "Start ContextBridge with: $BIN_DIR/contextbridge serve --config $config"
+  echo "Start ContextBridge with: $BIN_DIR/contextbridge run --config $config"
 fi
 
 echo "Config: $config"

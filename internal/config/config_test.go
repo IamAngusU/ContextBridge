@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/IamAngusU/ContextBridge/internal/cluster"
 )
 
 func TestDefaultConfigLoads(t *testing.T) {
@@ -21,8 +23,34 @@ func TestDefaultConfigLoads(t *testing.T) {
 	if len(cfg.Server.Token) < 40 {
 		t.Fatal("generated token is too short")
 	}
+	if len(cfg.Cluster.Relay.AdminToken) < 40 || cfg.Cluster.Relay.AdminToken == cfg.Server.Token {
+		t.Fatal("cluster admin token must be strong and independent")
+	}
 	if _, err := os.Stat(cfg.Storage.Inbox); !os.IsNotExist(err) {
 		t.Fatal("loading config should not create the inbox")
+	}
+}
+
+func TestConfigSaveRoundTripCluster(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := Default(path); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Cluster.Relay.Enabled = true
+	cfg.Cluster.Pipelines["two_step"] = cluster.Pipeline{Steps: []cluster.PipelineStep{{Name: "first", Requirements: cluster.Requirements{Task: "generation"}, Input: "${input}"}}}
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded.Cluster.Relay.Enabled || len(reloaded.Cluster.Pipelines["two_step"].Steps) != 1 {
+		t.Fatal("cluster config did not survive save")
 	}
 }
 

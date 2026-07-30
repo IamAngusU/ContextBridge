@@ -21,6 +21,12 @@ All notable changes are documented here. ContextBridge follows semantic versioni
 - Persistent route, task, provider, model, flag, latency, failure, and embedding metrics
 - Authenticated external tunnel heartbeat endpoint
 - `status`, `hardware`, `models`, `pull`, and `runtime install` CLI commands
+- Durable single-relay compute clustering for 1:1, 1:N, and N:N producer-worker topologies
+- Outbound WebSocket workers with pairing codes, scoped credentials, groups, capability discovery, and VRAM-aware scheduling
+- Priority queue, history, bounded retries, disconnect recovery, resource learning, token usage, compute cost, and savings metrics
+- Optional X25519 and AES-256-GCM E2EE payloads bound to a reserved worker
+- Declarative multi-model pipelines with fixed routes, JSON templates, retries, timeouts, and bounded loops
+- Embedded one-file cluster dashboard and `relay`, `worker`, `pair`, `run`, and `cluster` CLI commands
 
 ### Changed
 
@@ -29,6 +35,7 @@ All notable changes are documented here. ContextBridge follows semantic versioni
 - Failed browser result delivery is retained and retried instead of rerunning the page job
 - Ollama can select a compatible installed model when configured with `model: auto`
 - Provider and model telemetry now comes from trusted routing config, not model output
+- Browser completion delivery now copies mutable decision data at the synchronization boundary
 
 ## 0.1.1 - 2026-07-14
 

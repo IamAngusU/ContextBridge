@@ -101,6 +101,61 @@ rag:
   embedding_route: embedding
   max_documents: 10000
 
+cluster:
+  relay:
+    enabled: false
+    listen: 127.0.0.1:32150
+    public_url: https://relay.example.com
+    database: ./data/cluster.db
+    admin_token: ${CONTEXTBRIDGE_CLUSTER_ADMIN_TOKEN}
+    allowed_origins: [relay.example.com]
+    max_queue: 10000
+    max_job_bytes: 12582912
+    pairing_ttl_seconds: 600
+  worker:
+    enabled: false
+    relay_url: https://relay.example.com
+    identity_file: ./data/cluster-identity.json
+    node_name: auto
+    groups: [default]
+    tags: [private]
+    max_concurrent: 1
+    local_url: http://127.0.0.1:32145
+    local_token: ${CONTEXTBRIDGE_TOKEN}
+    heartbeat_seconds: 5
+  policies:
+    allowed_tasks: [moderation, generation, extraction, embedding, rag_ingest, rag_query, vision]
+    max_attempts: 3
+    max_job_runtime_seconds: 900
+    max_pipeline_steps: 24
+    max_pipeline_runtime_seconds: 1800
+  pricing:
+    compute_per_hour_usd: 0.18
+    input_per_million_usd: 0
+    output_per_million_usd: 0
+    equivalent_input_per_million_usd: 0.15
+    equivalent_output_per_million_usd: 0.60
+  pipelines:
+    ticket_resolution:
+      max_runtime_seconds: 900
+      max_iterations: 3
+      steps:
+        - name: retrieve
+          requirements:
+            task: rag_query
+            group: support
+            embedding: true
+          input: '${input}'
+          retries: 2
+          timeout_seconds: 180
+        - name: draft
+          requirements:
+            task: generation
+            group: support
+          input: '{"route":"default","task":"generation","prompt":"Draft a support reply from this retrieved context.","text":${steps.retrieve.output},"output":{"mode":"text"}}'
+          retries: 1
+          timeout_seconds: 240
+
 browser_profiles:
   chatgpt:
     label: ChatGPT

@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -24,6 +25,7 @@ import (
 	"time"
 
 	"github.com/IamAngusU/ContextBridge/internal/bridge"
+	"github.com/IamAngusU/ContextBridge/internal/cluster"
 	"github.com/IamAngusU/ContextBridge/internal/config"
 	"github.com/IamAngusU/ContextBridge/internal/llamaruntime"
 	"github.com/IamAngusU/ContextBridge/internal/modelregistry"
@@ -44,6 +46,8 @@ func main() {
 		err = initCommand(os.Args[2:])
 	case "serve":
 		err = serveCommand(os.Args[2:])
+	case "run":
+		err = runCommand(os.Args[2:])
 	case "submit":
 		err = submitCommand(os.Args[2:])
 	case "review":
@@ -62,6 +66,14 @@ func main() {
 		err = pullCommand(os.Args[2:])
 	case "runtime":
 		err = runtimeCommand(os.Args[2:])
+	case "relay":
+		err = relayCommand(os.Args[2:])
+	case "pair":
+		err = pairCommand(os.Args[2:])
+	case "worker":
+		err = workerCommand(os.Args[2:])
+	case "cluster":
+		err = clusterCommand(os.Args[2:])
 	case "version", "--version", "-version":
 		fmt.Println(version)
 		return
@@ -81,6 +93,7 @@ func usage() {
 Usage:
   contextbridge init [--config path]
   contextbridge serve [--config path]
+  contextbridge run [--config path]
   contextbridge submit --file job.json [--config path]
   contextbridge review --job-dir path [--config path]
   contextbridge health [--config path]
@@ -90,6 +103,10 @@ Usage:
   contextbridge models [--config path] [--json]
   contextbridge pull [--config path] MODEL
   contextbridge runtime install [--config path] llama.cpp
+  contextbridge relay [--config path]
+  contextbridge pair [--config path] [--relay URL] [--name NAME]
+  contextbridge worker [--config path]
+  contextbridge cluster status|submit|token|pairing [options]
   contextbridge version`)
 }
 
@@ -127,6 +144,53 @@ func serveCommand(args []string) error {
 	logger.Printf("version %s", version)
 	logger.Printf("routes: %d, browser profiles: %d", len(cfg.Routes), len(cfg.BrowserProfiles))
 	return server.Run(ctx)
+}
+
+func runCommand(args []string) error {
+	flags := flag.NewFlagSet("run", flag.ContinueOnError)
+	path := flags.String("config", defaultConfigPath(), "config path")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	errorsCh := make(chan error, 3)
+	logger := log.New(os.Stdout, "ContextBridge  ", log.LstdFlags)
+	local, err := bridge.NewServer(cfg, logger)
+	if err != nil {
+		return err
+	}
+	go func() { errorsCh <- local.Run(ctx) }()
+	components := 1
+	if cfg.Cluster.Relay.Enabled {
+		relay, err := cluster.NewRelay(relayConfig(cfg), logger)
+		if err != nil {
+			return err
+		}
+		defer relay.Close()
+		components++
+		go func() { errorsCh <- relay.Run(ctx) }()
+	}
+	if cfg.Cluster.Worker.Enabled {
+		worker, err := configuredWorker(cfg)
+		if err != nil {
+			return err
+		}
+		components++
+		go func() { errorsCh <- worker.Run(ctx, logger.Printf) }()
+	}
+	logger.Printf("running %d component(s): local bridge%s%s", components, enabledLabel(cfg.Cluster.Relay.Enabled, ", relay"), enabledLabel(cfg.Cluster.Worker.Enabled, ", worker"))
+	for i := 0; i < components; i++ {
+		if err := <-errorsCh; err != nil {
+			stop()
+			return err
+		}
+	}
+	return nil
 }
 
 func submitCommand(args []string) error {
@@ -473,6 +537,460 @@ func runtimeCommand(args []string) error {
 		return err
 	}
 	fmt.Println("Runtime ready:", executable)
+	return nil
+}
+
+func relayCommand(args []string) error {
+	flags := flag.NewFlagSet("relay", flag.ContinueOnError)
+	path := flags.String("config", defaultConfigPath(), "config path")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	if !cfg.Cluster.Relay.Enabled {
+		return errors.New("cluster.relay.enabled is false in the config")
+	}
+	logger := log.New(os.Stdout, "ContextBridge relay  ", log.LstdFlags)
+	relay, err := cluster.NewRelay(relayConfig(cfg), logger)
+	if err != nil {
+		return err
+	}
+	defer relay.Close()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return relay.Run(ctx)
+}
+
+func pairCommand(args []string) error {
+	flags := flag.NewFlagSet("pair", flag.ContinueOnError)
+	path := flags.String("config", defaultConfigPath(), "config path")
+	relayURL := flags.String("relay", "", "public relay URL")
+	name := flags.String("name", "", "node name")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	if *relayURL == "" {
+		*relayURL = cfg.Cluster.Worker.RelayURL
+	}
+	if *relayURL == "" {
+		return errors.New("--relay or cluster.worker.relay_url is required")
+	}
+	if *name == "" || *name == "auto" {
+		*name, _ = os.Hostname()
+	}
+	if cfg.Cluster.Relay.Enabled && *relayURL == "http://"+cfg.Cluster.Relay.Listen {
+		if err := cluster.BootstrapWorkerIdentity(cfg.Cluster.Relay.Database, *relayURL, *name, cfg.Cluster.Worker.IdentityFile, cfg.Cluster.Worker.Groups); err != nil {
+			return err
+		}
+		fmt.Println("Local worker paired directly with the relay database.")
+		return nil
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return cluster.PairWorker(ctx, *relayURL, *name, cfg.Cluster.Worker.IdentityFile, cfg.Cluster.Worker.Groups, func(pair cluster.PairResponse) {
+		fmt.Println("Pair this worker")
+		fmt.Println("  Code:", pair.UserCode)
+		fmt.Println("  Open:", pair.VerificationURI)
+		fmt.Println("Waiting for approval. The code expires at", pair.ExpiresAt.Local().Format(time.RFC1123))
+	})
+}
+
+func workerCommand(args []string) error {
+	flags := flag.NewFlagSet("worker", flag.ContinueOnError)
+	path := flags.String("config", defaultConfigPath(), "config path")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	if !cfg.Cluster.Worker.Enabled {
+		return errors.New("cluster.worker.enabled is false in the config")
+	}
+	name := cfg.Cluster.Worker.NodeName
+	if name == "" || name == "auto" {
+		name, _ = os.Hostname()
+	}
+	cfg.Cluster.Worker.NodeName = name
+	worker, err := configuredWorker(cfg)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return worker.Run(ctx, func(format string, values ...interface{}) {
+		fmt.Printf(time.Now().Format("15:04:05")+"  "+format+"\n", values...)
+	})
+}
+
+func relayConfig(cfg config.Config) cluster.RelayConfig {
+	return cluster.RelayConfig{Listen: cfg.Cluster.Relay.Listen, PublicURL: cfg.Cluster.Relay.PublicURL, Database: cfg.Cluster.Relay.Database, AdminToken: cfg.Cluster.Relay.AdminToken, AllowedOrigins: cfg.Cluster.Relay.AllowedOrigins, MaxJobBytes: cfg.Cluster.Relay.MaxJobBytes, MaxQueuedJobs: cfg.Cluster.Relay.MaxQueue, PairingTTL: time.Duration(cfg.Cluster.Relay.PairingTTLSeconds) * time.Second, Pricing: cfg.Cluster.Pricing, AllowedTasks: cfg.Cluster.Policies.AllowedTasks, MaxAttempts: cfg.Cluster.Policies.MaxAttempts, Pipelines: cfg.Cluster.Pipelines, MaxPipelineRuntime: time.Duration(cfg.Cluster.Policies.MaxRuntime) * time.Second, JobTimeout: time.Duration(cfg.Cluster.Policies.MaxJobRuntime) * time.Second}
+}
+
+func configuredWorker(cfg config.Config) (*cluster.Worker, error) {
+	name := cfg.Cluster.Worker.NodeName
+	if name == "" || name == "auto" {
+		name, _ = os.Hostname()
+	}
+	return cluster.LoadWorker(cluster.WorkerConfig{RelayURL: cfg.Cluster.Worker.RelayURL, IdentityFile: cfg.Cluster.Worker.IdentityFile, Name: name, Groups: cfg.Cluster.Worker.Groups, Tags: cfg.Cluster.Worker.Tags, MaxConcurrent: cfg.Cluster.Worker.MaxConcurrent, LocalURL: cfg.Cluster.Worker.LocalURL, LocalToken: cfg.Cluster.Worker.LocalToken, HeartbeatEvery: time.Duration(cfg.Cluster.Worker.HeartbeatSeconds) * time.Second, AllowedTasks: cfg.Cluster.Policies.AllowedTasks})
+}
+
+func enabledLabel(enabled bool, label string) string {
+	if enabled {
+		return label
+	}
+	return ""
+}
+
+func freeLocalAddress() (string, error) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", err
+	}
+	defer listener.Close()
+	return listener.Addr().String(), nil
+}
+
+func clusterCommand(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: contextbridge cluster status|submit|token|pairing")
+	}
+	switch args[0] {
+	case "status":
+		return clusterStatusCommand(args[1:])
+	case "submit":
+		return clusterSubmitCommand(args[1:])
+	case "token":
+		return clusterTokenCommand(args[1:])
+	case "pairing":
+		return clusterPairingCommand(args[1:])
+	case "configure":
+		return clusterConfigureCommand(args[1:])
+	case "dashboard":
+		return clusterDashboardCommand(args[1:])
+	case "pipeline":
+		return clusterPipelineCommand(args[1:])
+	default:
+		return fmt.Errorf("unknown cluster command %s", args[0])
+	}
+}
+
+func clusterConfigureCommand(args []string) error {
+	flags := flag.NewFlagSet("cluster configure", flag.ContinueOnError)
+	path := flags.String("config", defaultConfigPath(), "config path")
+	mode := flags.String("mode", "local", "local, relay, worker, or all")
+	relayURL := flags.String("relay-url", "", "public relay URL for this worker")
+	publicURL := flags.String("public-url", "", "public HTTPS URL of this relay")
+	name := flags.String("name", "auto", "worker node name")
+	listen := flags.String("listen", "", "relay listen address or auto")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	switch *mode {
+	case "local":
+		cfg.Cluster.Relay.Enabled, cfg.Cluster.Worker.Enabled = false, false
+	case "relay":
+		cfg.Cluster.Relay.Enabled, cfg.Cluster.Worker.Enabled = true, false
+	case "worker":
+		cfg.Cluster.Relay.Enabled, cfg.Cluster.Worker.Enabled = false, true
+	case "all":
+		cfg.Cluster.Relay.Enabled, cfg.Cluster.Worker.Enabled = true, true
+	default:
+		return errors.New("--mode must be local, relay, worker, or all")
+	}
+	if *publicURL != "" {
+		cfg.Cluster.Relay.PublicURL = strings.TrimRight(*publicURL, "/")
+	}
+	if *listen == "auto" {
+		address, err := freeLocalAddress()
+		if err != nil {
+			return err
+		}
+		cfg.Cluster.Relay.Listen = address
+	} else if *listen != "" {
+		if !strings.HasPrefix(*listen, "127.0.0.1:") && !strings.HasPrefix(*listen, "localhost:") {
+			return errors.New("--listen must use localhost")
+		}
+		cfg.Cluster.Relay.Listen = *listen
+	}
+	if *relayURL != "" {
+		cfg.Cluster.Worker.RelayURL = strings.TrimRight(*relayURL, "/")
+	}
+	if *mode == "all" && cfg.Cluster.Worker.RelayURL == "" {
+		cfg.Cluster.Worker.RelayURL = "http://" + cfg.Cluster.Relay.Listen
+	}
+	if cfg.Cluster.Worker.Enabled && cfg.Cluster.Worker.RelayURL == "" {
+		return errors.New("--relay-url is required for worker mode")
+	}
+	cfg.Cluster.Worker.NodeName = *name
+	if err := config.Save(*path, cfg); err != nil {
+		return err
+	}
+	fmt.Printf("Cluster mode saved: %s\n", *mode)
+	if cfg.Cluster.Worker.Enabled {
+		fmt.Println("Next: contextbridge pair --config", *path)
+	}
+	return nil
+}
+
+func clusterDashboardCommand(args []string) error {
+	flags := flag.NewFlagSet("cluster dashboard", flag.ContinueOnError)
+	path := flags.String("config", defaultConfigPath(), "config path")
+	noOpen := flags.Bool("no-open", false, "print URL only")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	target := clusterBaseURL(cfg) + "/#token=" + url.QueryEscape(cfg.Cluster.Relay.AdminToken)
+	if *noOpen {
+		fmt.Println(target)
+		return nil
+	}
+	return openBrowser(target)
+}
+
+func clusterPipelineCommand(args []string) error {
+	flags := flag.NewFlagSet("cluster pipeline", flag.ContinueOnError)
+	path := flags.String("config", defaultConfigPath(), "config path")
+	name := flags.String("name", "", "pipeline name")
+	file := flags.String("file", "", "pipeline input JSON")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *name == "" || *file == "" {
+		return errors.New("--name and --file are required")
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	raw, err := os.ReadFile(*file)
+	if err != nil {
+		return err
+	}
+	var run cluster.PipelineRun
+	if err := clusterPOST(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/pipelines/"+url.PathEscape(*name)+"/run", cfg.Cluster.Relay.AdminToken, json.RawMessage(raw), &run); err != nil {
+		return err
+	}
+	fmt.Println("Pipeline run:", run.ID)
+	for {
+		time.Sleep(500 * time.Millisecond)
+		if err := clusterGET(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/pipeline-runs/"+url.PathEscape(run.ID), cfg.Cluster.Relay.AdminToken, &run); err != nil {
+			return err
+		}
+		if run.Status == "completed" {
+			return json.NewEncoder(os.Stdout).Encode(run.Output)
+		}
+		if run.Status == "failed" {
+			return errors.New(run.Error)
+		}
+	}
+}
+
+func clusterStatusCommand(args []string) error {
+	flags := flag.NewFlagSet("cluster status", flag.ContinueOnError)
+	path := flags.String("config", defaultConfigPath(), "config path")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	var overview cluster.Overview
+	if err := clusterGET(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/overview", cfg.Cluster.Relay.AdminToken, &overview); err != nil {
+		return err
+	}
+	fmt.Printf("Nodes: %d online of %d\n", overview.NodesOnline, overview.NodesTotal)
+	fmt.Printf("Jobs: %d queued, %d running, %d completed, %d failed\n", overview.JobsByState[cluster.JobQueued], overview.JobsByState[cluster.JobRunning]+overview.JobsByState[cluster.JobAssigned], overview.JobsByState[cluster.JobCompleted], overview.JobsByState[cluster.JobFailed])
+	fmt.Printf("Usage: %d tokens, %.2f compute hours, $%.4f estimated savings\n", overview.Usage.TotalTokens, float64(overview.Usage.ComputeMS)/3600000, overview.Usage.SavedCostUSD)
+	return nil
+}
+
+func clusterSubmitCommand(args []string) error {
+	flags := flag.NewFlagSet("cluster submit", flag.ContinueOnError)
+	path := flags.String("config", defaultConfigPath(), "config path")
+	file := flags.String("file", "", "cluster job JSON file")
+	token := flags.String("token", "", "producer token; defaults to local admin token")
+	wait := flags.Bool("wait", true, "wait for a final result")
+	sealed := flags.Bool("e2ee", false, "encrypt payload for the selected worker")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *file == "" {
+		return errors.New("--file is required")
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	if *token == "" {
+		*token = cfg.Cluster.Relay.AdminToken
+	}
+	raw, err := os.ReadFile(*file)
+	if err != nil {
+		return err
+	}
+	var input cluster.SubmitRequest
+	if err := json.Unmarshal(raw, &input); err != nil {
+		return err
+	}
+	shared := ""
+	if *sealed {
+		var reservation cluster.AssignmentResponse
+		if err := clusterPOST(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/assign", *token, input.Requirements, &reservation); err != nil {
+			return err
+		}
+		envelope, sharedKey, err := cluster.SealFor(reservation.Assignment.PublicKey, input.Payload, []byte("job:"+reservation.Assignment.JobID+":"+reservation.Assignment.NodeID))
+		if err != nil {
+			return err
+		}
+		shared = sharedKey
+		input.ID = reservation.Assignment.JobID
+		input.Payload = nil
+		input.Sealed = envelope
+		input.AssignmentID = reservation.Assignment.ID
+		input.AssignmentSecret = reservation.Secret
+	}
+	var job cluster.Job
+	if err := clusterPOST(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/jobs", *token, input, &job); err != nil {
+		return err
+	}
+	fmt.Println("Queued:", job.ID)
+	if !*wait {
+		return nil
+	}
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+		if err := clusterGET(ctx, clusterBaseURL(cfg)+"/v1/cluster/jobs/"+url.PathEscape(job.ID), *token, &job); err != nil {
+			return err
+		}
+		switch job.Status {
+		case cluster.JobCompleted:
+			if job.SealedResult != nil {
+				raw, err := cluster.OpenResponse(shared, job.SealedResult, []byte("result:"+job.ID+":"+job.AssignedNode))
+				if err != nil {
+					return err
+				}
+				_, err = os.Stdout.Write(append(raw, '\n'))
+				return err
+			}
+			return json.NewEncoder(os.Stdout).Encode(job.Result)
+		case cluster.JobFailed, cluster.JobCancelled:
+			return fmt.Errorf("job %s: %s", job.Status, job.Error)
+		}
+	}
+}
+
+func clusterTokenCommand(args []string) error {
+	flags := flag.NewFlagSet("cluster token", flag.ContinueOnError)
+	path := flags.String("config", defaultConfigPath(), "config path")
+	role := flags.String("role", "producer", "producer or observer")
+	subject := flags.String("subject", "client", "token label")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	var output map[string]interface{}
+	if err := clusterPOST(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/tokens", cfg.Cluster.Relay.AdminToken, map[string]interface{}{"role": *role, "subject": *subject}, &output); err != nil {
+		return err
+	}
+	return json.NewEncoder(os.Stdout).Encode(output)
+}
+
+func clusterPairingCommand(args []string) error {
+	flags := flag.NewFlagSet("cluster pairing", flag.ContinueOnError)
+	path := flags.String("config", defaultConfigPath(), "config path")
+	approve := flags.String("approve", "", "approve pairing code")
+	deny := flags.String("deny", "", "deny pairing code")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	decision, code := "approve", *approve
+	if *deny != "" {
+		decision, code = "deny", *deny
+	}
+	if code == "" {
+		var pairings []cluster.Pairing
+		if err := clusterGET(context.Background(), clusterBaseURL(cfg)+"/v1/pairings", cfg.Cluster.Relay.AdminToken, &pairings); err != nil {
+			return err
+		}
+		for _, pairing := range pairings {
+			fmt.Printf("%s  %-24s expires %s\n", pairing.UserCode, pairing.NodeName, pairing.ExpiresAt.Local().Format("15:04:05"))
+		}
+		return nil
+	}
+	var result cluster.Pairing
+	return clusterPOST(context.Background(), clusterBaseURL(cfg)+"/v1/pairings/"+url.PathEscape(code)+"/"+decision, cfg.Cluster.Relay.AdminToken, map[string]interface{}{}, &result)
+}
+
+func clusterBaseURL(cfg config.Config) string {
+	if cfg.Cluster.Relay.PublicURL != "" {
+		return strings.TrimRight(cfg.Cluster.Relay.PublicURL, "/")
+	}
+	return "http://" + cfg.Cluster.Relay.Listen
+}
+
+func clusterGET(ctx context.Context, target, token string, output interface{}) error {
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("relay returned %s: %s", resp.Status, strings.TrimSpace(string(raw)))
+	}
+	return json.Unmarshal(raw, output)
+}
+
+func clusterPOST(ctx context.Context, target, token string, input, output interface{}) error {
+	raw, _ := json.Marshal(input)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(raw))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("relay returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	if output != nil {
+		return json.Unmarshal(body, output)
+	}
 	return nil
 }
 

@@ -1,6 +1,7 @@
 param(
     [string]$InstallDir = "$env:LOCALAPPDATA\ContextBridge",
     [ValidateSet("ask", "ollama", "managed", "browser", "later")][string]$Provider = "ask",
+    [ValidateSet("ask", "local", "relay", "worker", "all")][string]$ClusterMode = "ask",
     [ValidateSet("jina", "nuextract", "both")][string]$ManagedModel = "jina",
     [switch]$NoAutostart,
     [switch]$NoStart,
@@ -78,6 +79,33 @@ if (-not (Test-Path $config)) {
     & $exe init --config $config
 }
 
+if ($ClusterMode -eq "ask") {
+    Write-Host ""
+    Write-Host "Choose how this device participates:"
+    Write-Host "  1) Local bridge only (recommended for a first install)"
+    Write-Host "  2) Relay for other devices"
+    Write-Host "  3) Worker for an existing relay"
+    Write-Host "  4) Relay and worker on this device"
+    $clusterChoice = Read-Host "Choose 1, 2, 3, or 4 [1]"
+    $ClusterMode = if ($clusterChoice -eq "2") { "relay" } elseif ($clusterChoice -eq "3") { "worker" } elseif ($clusterChoice -eq "4") { "all" } else { "local" }
+}
+$clusterArguments = @("cluster", "configure", "--config", $config, "--mode", $ClusterMode)
+if ($ClusterMode -in @("relay", "all")) { $clusterArguments += @("--listen", "auto") }
+if ($ClusterMode -eq "worker") {
+    $relayUrl = Read-Host "Public HTTPS relay URL"
+    if (-not $relayUrl) { throw "A relay URL is required for worker mode." }
+    $clusterArguments += @("--relay-url", $relayUrl)
+} elseif ($ClusterMode -eq "relay") {
+    $publicUrl = Read-Host "Public HTTPS relay URL, or leave empty while configuring the reverse proxy"
+    if ($publicUrl) { $clusterArguments += @("--public-url", $publicUrl) }
+}
+& $exe @clusterArguments
+if ($LASTEXITCODE -ne 0) { throw "Cluster mode could not be configured." }
+if ($ClusterMode -in @("worker", "all")) {
+    & $exe pair --config $config
+    if ($LASTEXITCODE -ne 0) { throw "Worker pairing did not complete." }
+}
+
 if ($Provider -eq "browser") {
     $yaml = Get-Content $config -Raw
     $yaml = [regex]::Replace($yaml, '(?ms)(^  (?:default|inkwall):\r?\n(?:(?!^  [A-Za-z0-9_-]+:).)*?^    provider:\s*)ollama\s*$', '${1}browser')
@@ -112,7 +140,7 @@ if ($Provider -eq "browser") {
 
 if (-not $NoAutostart -and (Get-Command Register-ScheduledTask -ErrorAction SilentlyContinue)) {
     $taskName = "ContextBridge"
-    $arguments = "serve --config `"$config`""
+    $arguments = "run --config `"$config`""
     $action = New-ScheduledTaskAction -Execute $exe -Argument $arguments
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
     $settings = New-ScheduledTaskSettingsSet -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Days 3650)
@@ -125,7 +153,7 @@ if (-not $NoAutostart -and (Get-Command Register-ScheduledTask -ErrorAction Sile
 if (-not $NoStart) {
     $existing = Get-Process contextbridge -ErrorAction SilentlyContinue
     if (-not $existing) {
-        Start-Process -FilePath $exe -ArgumentList @("serve", "--config", $config) -WindowStyle Hidden
+        Start-Process -FilePath $exe -ArgumentList @("run", "--config", $config) -WindowStyle Hidden
         Start-Sleep -Milliseconds 600
     }
 }

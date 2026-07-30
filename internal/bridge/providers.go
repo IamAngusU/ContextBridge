@@ -103,7 +103,9 @@ func (p *Processor) ollama(parent context.Context, job Job, route config.Route, 
 		return Output{}, fmt.Errorf("ollama returned %s", resp.Status)
 	}
 	var answer struct {
-		Response string `json:"response"`
+		Response        string `json:"response"`
+		PromptEvalCount uint64 `json:"prompt_eval_count"`
+		EvalCount       uint64 `json:"eval_count"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(&answer); err != nil {
 		return Output{}, err
@@ -112,6 +114,8 @@ func (p *Processor) ollama(parent context.Context, job Job, route config.Route, 
 		return Output{}, errors.New("ollama returned an empty response")
 	}
 	output := NormalizeOutput([]byte(answer.Response), job.Output, "ollama", model, time.Since(started))
+	output.InputTokens, output.OutputTokens = answer.PromptEvalCount, answer.EvalCount
+	output.TotalTokens = output.InputTokens + output.OutputTokens
 	if output.Error != "" {
 		return Output{}, errors.New(output.Error)
 	}
@@ -184,12 +188,15 @@ func (p *Processor) ollamaEmbedding(ctx context.Context, job Job, engine config.
 		return Output{}, fmt.Errorf("ollama embeddings returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
 	var answer struct {
-		Embeddings [][]float32 `json:"embeddings"`
+		Embeddings      [][]float32 `json:"embeddings"`
+		PromptEvalCount uint64      `json:"prompt_eval_count"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<20)).Decode(&answer); err != nil {
 		return Output{}, err
 	}
-	return embeddingOutput(answer.Embeddings, job.TenantID, "ollama", model, time.Since(started))
+	output, err := embeddingOutput(answer.Embeddings, job.TenantID, "ollama", model, time.Since(started))
+	output.InputTokens, output.TotalTokens = answer.PromptEvalCount, answer.PromptEvalCount
+	return output, err
 }
 
 func (p *Processor) llamaCPP(parent context.Context, job Job, route config.Route, engine config.Engine) (Output, error) {
@@ -236,6 +243,10 @@ func (p *Processor) llamaCPP(parent context.Context, job Job, route config.Route
 				Embedding []float32 `json:"embedding"`
 				Index     int       `json:"index"`
 			} `json:"data"`
+			Usage struct {
+				PromptTokens uint64 `json:"prompt_tokens"`
+				TotalTokens  uint64 `json:"total_tokens"`
+			} `json:"usage"`
 		}
 		if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<20)).Decode(&answer); err != nil {
 			return Output{}, err
@@ -246,7 +257,9 @@ func (p *Processor) llamaCPP(parent context.Context, job Job, route config.Route
 				embeddings[item.Index] = item.Embedding
 			}
 		}
-		return embeddingOutput(embeddings, job.TenantID, "llama_cpp", model, time.Since(started))
+		output, err := embeddingOutput(embeddings, job.TenantID, "llama_cpp", model, time.Since(started))
+		output.InputTokens, output.TotalTokens = answer.Usage.PromptTokens, answer.Usage.TotalTokens
+		return output, err
 	}
 	prompt := trustedPrompt(job)
 	content := []map[string]interface{}{{"type": "text", "text": prompt}}
@@ -275,6 +288,11 @@ func (p *Processor) llamaCPP(parent context.Context, job Job, route config.Route
 				Content string `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
+		Usage struct {
+			PromptTokens     uint64 `json:"prompt_tokens"`
+			CompletionTokens uint64 `json:"completion_tokens"`
+			TotalTokens      uint64 `json:"total_tokens"`
+		} `json:"usage"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&answer); err != nil {
 		return Output{}, err
@@ -283,6 +301,7 @@ func (p *Processor) llamaCPP(parent context.Context, job Job, route config.Route
 		return Output{}, errors.New("llama.cpp returned no choices")
 	}
 	output := NormalizeOutput([]byte(answer.Choices[0].Message.Content), job.Output, "llama_cpp", model, time.Since(started))
+	output.InputTokens, output.OutputTokens, output.TotalTokens = answer.Usage.PromptTokens, answer.Usage.CompletionTokens, answer.Usage.TotalTokens
 	if output.Error != "" {
 		return Output{}, errors.New(output.Error)
 	}

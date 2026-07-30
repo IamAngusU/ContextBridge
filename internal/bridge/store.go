@@ -263,7 +263,8 @@ func (s *Store) Complete(id string, output Output) bool {
 		return false
 	}
 	delete(s.queued, id)
-	s.completed[id] = output
+	completed := cloneOutput(output)
+	s.completed[id] = completed
 	message := "Browser result received"
 	if output.Decision != nil {
 		message += ": " + output.Decision.Verdict
@@ -271,9 +272,19 @@ func (s *Store) Complete(id string, output Output) bool {
 		message += ": " + output.Error
 	}
 	s.addActivityLocked("completed", message, id)
-	item.done <- output
+	item.done <- completed
 	close(item.done)
 	return true
+}
+
+func cloneOutput(output Output) Output {
+	clone := output
+	if output.Decision != nil {
+		decision := *output.Decision
+		decision.Flags = append([]string(nil), output.Decision.Flags...)
+		clone.Decision = &decision
+	}
+	return clone
 }
 
 func (s *Store) Cancel(id string) {

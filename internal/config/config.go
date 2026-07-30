@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/IamAngusU/ContextBridge/internal/cluster"
 	"gopkg.in/yaml.v3"
 )
 
@@ -25,6 +26,7 @@ type Config struct {
 	RAG             RAG                       `yaml:"rag"`
 	Tunnel          Tunnel                    `yaml:"tunnel"`
 	BrowserProfiles map[string]BrowserProfile `yaml:"browser_profiles"`
+	Cluster         Cluster                   `yaml:"cluster"`
 }
 
 type Server struct {
@@ -113,6 +115,47 @@ type BrowserProfile struct {
 	Selectors Selectors `yaml:"selectors" json:"selectors"`
 }
 
+type Cluster struct {
+	Relay     ClusterRelay                `yaml:"relay" json:"relay"`
+	Worker    ClusterWorker               `yaml:"worker" json:"worker"`
+	Policies  ClusterPolicies             `yaml:"policies" json:"policies"`
+	Pricing   cluster.Pricing             `yaml:"pricing" json:"pricing"`
+	Pipelines map[string]cluster.Pipeline `yaml:"pipelines" json:"pipelines"`
+}
+
+type ClusterRelay struct {
+	Enabled           bool     `yaml:"enabled" json:"enabled"`
+	Listen            string   `yaml:"listen" json:"listen"`
+	PublicURL         string   `yaml:"public_url" json:"public_url"`
+	Database          string   `yaml:"database" json:"database"`
+	AdminToken        string   `yaml:"admin_token" json:"-"`
+	AllowedOrigins    []string `yaml:"allowed_origins" json:"allowed_origins"`
+	MaxQueue          int      `yaml:"max_queue" json:"max_queue"`
+	MaxJobBytes       int64    `yaml:"max_job_bytes" json:"max_job_bytes"`
+	PairingTTLSeconds int      `yaml:"pairing_ttl_seconds" json:"pairing_ttl_seconds"`
+}
+
+type ClusterWorker struct {
+	Enabled          bool     `yaml:"enabled" json:"enabled"`
+	RelayURL         string   `yaml:"relay_url" json:"relay_url"`
+	IdentityFile     string   `yaml:"identity_file" json:"identity_file"`
+	NodeName         string   `yaml:"node_name" json:"node_name"`
+	Groups           []string `yaml:"groups" json:"groups"`
+	Tags             []string `yaml:"tags" json:"tags"`
+	MaxConcurrent    int      `yaml:"max_concurrent" json:"max_concurrent"`
+	LocalURL         string   `yaml:"local_url" json:"local_url"`
+	LocalToken       string   `yaml:"local_token" json:"-"`
+	HeartbeatSeconds int      `yaml:"heartbeat_seconds" json:"heartbeat_seconds"`
+}
+
+type ClusterPolicies struct {
+	AllowedTasks  []string `yaml:"allowed_tasks" json:"allowed_tasks"`
+	MaxAttempts   int      `yaml:"max_attempts" json:"max_attempts"`
+	MaxJobRuntime int      `yaml:"max_job_runtime_seconds" json:"max_job_runtime_seconds"`
+	MaxSteps      int      `yaml:"max_pipeline_steps" json:"max_pipeline_steps"`
+	MaxRuntime    int      `yaml:"max_pipeline_runtime_seconds" json:"max_pipeline_runtime_seconds"`
+}
+
 type Selectors struct {
 	Input     []string `yaml:"input" json:"input"`
 	FileInput []string `yaml:"file_input" json:"file_input"`
@@ -135,6 +178,21 @@ func Load(path string) (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func Save(path string, cfg Config) error {
+	raw, err := yaml.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	temporary := path + ".tmp"
+	if err := os.WriteFile(temporary, raw, 0600); err != nil {
+		return err
+	}
+	return os.Rename(temporary, path)
 }
 
 func (c Config) Validate() error {
@@ -235,6 +293,32 @@ func (c Config) Validate() error {
 			return fmt.Errorf("RAG embedding route %s does not exist", c.RAG.EmbeddingRoute)
 		}
 	}
+	if c.Cluster.Relay.Enabled {
+		if len(c.Cluster.Relay.AdminToken) < 32 || strings.Contains(c.Cluster.Relay.AdminToken, "${") {
+			return errors.New("cluster.relay.admin_token must contain at least 32 resolved characters")
+		}
+		if !strings.HasPrefix(c.Cluster.Relay.Listen, "127.0.0.1:") && !strings.HasPrefix(c.Cluster.Relay.Listen, "localhost:") {
+			return errors.New("cluster.relay.listen must use localhost; publish it through a TLS reverse proxy")
+		}
+	}
+	if c.Cluster.Worker.Enabled && !strings.HasPrefix(c.Cluster.Worker.RelayURL, "https://") && !strings.HasPrefix(c.Cluster.Worker.RelayURL, "http://127.0.0.1:") && !strings.HasPrefix(c.Cluster.Worker.RelayURL, "http://localhost:") {
+		return errors.New("cluster.worker.relay_url must use HTTPS or localhost")
+	}
+	for name, pipeline := range c.Cluster.Pipelines {
+		if !safeNamePattern.MatchString(name) || len(pipeline.Steps) == 0 || len(pipeline.Steps) > c.Cluster.Policies.MaxSteps {
+			return fmt.Errorf("pipeline %s must have between 1 and %d steps", name, c.Cluster.Policies.MaxSteps)
+		}
+		seen := map[string]bool{}
+		for _, step := range pipeline.Steps {
+			if !safeNamePattern.MatchString(step.Name) || seen[step.Name] {
+				return fmt.Errorf("pipeline %s has an invalid or duplicate step name", name)
+			}
+			seen[step.Name] = true
+			if step.Retries < 0 || step.Retries > c.Cluster.Policies.MaxAttempts {
+				return fmt.Errorf("pipeline %s step %s has invalid retries", name, step.Name)
+			}
+		}
+	}
 	return nil
 }
 
@@ -266,7 +350,12 @@ func Default(path string) error {
 	if err != nil {
 		return err
 	}
+	clusterSecret, err := newSecret()
+	if err != nil {
+		return err
+	}
 	content := strings.ReplaceAll(defaultYAML, "GENERATED_TOKEN", secret)
+	content = strings.ReplaceAll(content, "GENERATED_CLUSTER_ADMIN_TOKEN", clusterSecret)
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
@@ -352,6 +441,64 @@ func applyDefaults(cfg *Config, base string) {
 			route.TimeoutSeconds = 180
 		}
 		cfg.Routes[name] = route
+	}
+	if cfg.Cluster.Relay.Listen == "" {
+		cfg.Cluster.Relay.Listen = "127.0.0.1:32150"
+	}
+	if cfg.Cluster.Relay.Database == "" {
+		cfg.Cluster.Relay.Database = filepath.Join(cfg.Storage.Directory, "cluster.db")
+	} else if !filepath.IsAbs(cfg.Cluster.Relay.Database) {
+		cfg.Cluster.Relay.Database = filepath.Join(base, cfg.Cluster.Relay.Database)
+	}
+	if cfg.Cluster.Relay.MaxQueue <= 0 {
+		cfg.Cluster.Relay.MaxQueue = 10000
+	}
+	if cfg.Cluster.Relay.MaxJobBytes <= 0 {
+		cfg.Cluster.Relay.MaxJobBytes = 12 << 20
+	}
+	if cfg.Cluster.Relay.PairingTTLSeconds <= 0 {
+		cfg.Cluster.Relay.PairingTTLSeconds = 600
+	}
+	if cfg.Cluster.Worker.IdentityFile == "" {
+		cfg.Cluster.Worker.IdentityFile = filepath.Join(cfg.Storage.Directory, "cluster-identity.json")
+	} else if !filepath.IsAbs(cfg.Cluster.Worker.IdentityFile) {
+		cfg.Cluster.Worker.IdentityFile = filepath.Join(base, cfg.Cluster.Worker.IdentityFile)
+	}
+	if cfg.Cluster.Worker.NodeName == "" {
+		cfg.Cluster.Worker.NodeName = "auto"
+	}
+	if len(cfg.Cluster.Worker.Groups) == 0 {
+		cfg.Cluster.Worker.Groups = []string{"default"}
+	}
+	if cfg.Cluster.Worker.MaxConcurrent <= 0 {
+		cfg.Cluster.Worker.MaxConcurrent = 1
+	}
+	if cfg.Cluster.Worker.LocalURL == "" {
+		cfg.Cluster.Worker.LocalURL = "http://" + cfg.Server.Listen
+	}
+	if cfg.Cluster.Worker.LocalToken == "" {
+		cfg.Cluster.Worker.LocalToken = cfg.Server.Token
+	}
+	if cfg.Cluster.Worker.HeartbeatSeconds <= 0 {
+		cfg.Cluster.Worker.HeartbeatSeconds = 5
+	}
+	if len(cfg.Cluster.Policies.AllowedTasks) == 0 {
+		cfg.Cluster.Policies.AllowedTasks = []string{"moderation", "generation", "extraction", "embedding", "rag_ingest", "rag_query", "vision"}
+	}
+	if cfg.Cluster.Policies.MaxAttempts <= 0 {
+		cfg.Cluster.Policies.MaxAttempts = 3
+	}
+	if cfg.Cluster.Policies.MaxJobRuntime <= 0 {
+		cfg.Cluster.Policies.MaxJobRuntime = 900
+	}
+	if cfg.Cluster.Policies.MaxSteps <= 0 {
+		cfg.Cluster.Policies.MaxSteps = 24
+	}
+	if cfg.Cluster.Policies.MaxRuntime <= 0 {
+		cfg.Cluster.Policies.MaxRuntime = 1800
+	}
+	if cfg.Cluster.Pipelines == nil {
+		cfg.Cluster.Pipelines = map[string]cluster.Pipeline{}
 	}
 }
 
@@ -485,6 +632,42 @@ rag:
   directory: ./data/rag
   embedding_route: embedding
   max_documents: 10000
+
+cluster:
+  relay:
+    enabled: false
+    listen: 127.0.0.1:32150
+    public_url: ""
+    database: ./data/cluster.db
+    admin_token: GENERATED_CLUSTER_ADMIN_TOKEN
+    allowed_origins: []
+    max_queue: 10000
+    max_job_bytes: 12582912
+    pairing_ttl_seconds: 600
+  worker:
+    enabled: false
+    relay_url: ""
+    identity_file: ./data/cluster-identity.json
+    node_name: auto
+    groups: [default]
+    tags: []
+    max_concurrent: 1
+    local_url: http://127.0.0.1:32145
+    local_token: GENERATED_TOKEN
+    heartbeat_seconds: 5
+  policies:
+    allowed_tasks: [moderation, generation, extraction, embedding, rag_ingest, rag_query, vision]
+    max_attempts: 3
+    max_job_runtime_seconds: 900
+    max_pipeline_steps: 24
+    max_pipeline_runtime_seconds: 1800
+  pricing:
+    compute_per_hour_usd: 0
+    input_per_million_usd: 0
+    output_per_million_usd: 0
+    equivalent_input_per_million_usd: 0
+    equivalent_output_per_million_usd: 0
+  pipelines: {}
 
 browser_profiles:
   chatgpt:

@@ -52,19 +52,22 @@ type Submission struct {
 }
 
 type Output struct {
-	Mode       string              `json:"mode"`
-	JSON       json.RawMessage     `json:"json,omitempty"`
-	Text       string              `json:"text,omitempty"`
-	Embeddings [][]float32         `json:"embeddings,omitempty"`
-	Dimensions int                 `json:"dimensions,omitempty"`
-	TenantID   string              `json:"tenant_id,omitempty"`
-	Matches    []vectorstore.Match `json:"matches,omitempty"`
-	Indexed    int                 `json:"indexed,omitempty"`
-	Decision   *Decision           `json:"decision,omitempty"`
-	Model      string              `json:"model,omitempty"`
-	Provider   string              `json:"provider,omitempty"`
-	LatencyMS  int64               `json:"latency_ms,omitempty"`
-	Error      string              `json:"error,omitempty"`
+	Mode         string              `json:"mode"`
+	JSON         json.RawMessage     `json:"json,omitempty"`
+	Text         string              `json:"text,omitempty"`
+	Embeddings   [][]float32         `json:"embeddings,omitempty"`
+	Dimensions   int                 `json:"dimensions,omitempty"`
+	TenantID     string              `json:"tenant_id,omitempty"`
+	Matches      []vectorstore.Match `json:"matches,omitempty"`
+	Indexed      int                 `json:"indexed,omitempty"`
+	Decision     *Decision           `json:"decision,omitempty"`
+	Model        string              `json:"model,omitempty"`
+	Provider     string              `json:"provider,omitempty"`
+	LatencyMS    int64               `json:"latency_ms,omitempty"`
+	InputTokens  uint64              `json:"input_tokens,omitempty"`
+	OutputTokens uint64              `json:"output_tokens,omitempty"`
+	TotalTokens  uint64              `json:"total_tokens,omitempty"`
+	Error        string              `json:"error,omitempty"`
 }
 
 type browserJob struct {
