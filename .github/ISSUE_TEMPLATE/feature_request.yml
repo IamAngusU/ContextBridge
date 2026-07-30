@@ -1,0 +1,38 @@
+name: Feature request
+description: Propose a focused source, provider, workflow, or usability improvement
+title: "[Feature] "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What workflow is difficult or impossible today?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe behavior, not only a preferred implementation.
+    validations:
+      required: true
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Area
+      options:
+        - Source adapter
+        - Provider
+        - Browser teaching
+        - Dashboard
+        - Installer
+        - Protocol
+        - Documentation
+    validations:
+      required: true
+  - type: textarea
+    id: security
+    attributes:
+      label: Permissions or security impact
+      description: Note any new credentials, browser access, network exposure, or execution behavior.

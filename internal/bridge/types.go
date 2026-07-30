@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	"github.com/IamAngusU/ContextBridge/internal/vectorstore"
 )
 
 type Job struct {
@@ -11,12 +14,25 @@ type Job struct {
 	Source         string                 `json:"source,omitempty"`
 	Route          string                 `json:"route,omitempty"`
 	Kind           string                 `json:"kind,omitempty"`
+	Task           string                 `json:"task,omitempty"`
 	Prompt         string                 `json:"prompt"`
 	Text           string                 `json:"text,omitempty"`
+	Texts          []string               `json:"texts,omitempty"`
+	TenantID       string                 `json:"tenant_id,omitempty"`
+	Documents      []vectorstore.Document `json:"documents,omitempty"`
+	Query          string                 `json:"query,omitempty"`
+	TopK           int                    `json:"top_k,omitempty"`
 	ImageBase64    string                 `json:"image_base64,omitempty"`
 	ImageMediaType string                 `json:"image_media_type,omitempty"`
 	Metadata       map[string]interface{} `json:"metadata,omitempty"`
+	Output         OutputSpec             `json:"output,omitempty"`
 	CreatedAt      time.Time              `json:"created_at,omitempty"`
+}
+
+type OutputSpec struct {
+	Mode         string   `json:"mode,omitempty"`
+	RequiredKeys []string `json:"required_keys,omitempty"`
+	MaxBytes     int      `json:"max_bytes,omitempty"`
 }
 
 type Decision struct {
@@ -31,7 +47,24 @@ type Decision struct {
 type Submission struct {
 	Job      Job       `json:"job"`
 	Decision *Decision `json:"decision,omitempty"`
+	Output   *Output   `json:"output,omitempty"`
 	Status   string    `json:"status"`
+}
+
+type Output struct {
+	Mode       string              `json:"mode"`
+	JSON       json.RawMessage     `json:"json,omitempty"`
+	Text       string              `json:"text,omitempty"`
+	Embeddings [][]float32         `json:"embeddings,omitempty"`
+	Dimensions int                 `json:"dimensions,omitempty"`
+	TenantID   string              `json:"tenant_id,omitempty"`
+	Matches    []vectorstore.Match `json:"matches,omitempty"`
+	Indexed    int                 `json:"indexed,omitempty"`
+	Decision   *Decision           `json:"decision,omitempty"`
+	Model      string              `json:"model,omitempty"`
+	Provider   string              `json:"provider,omitempty"`
+	LatencyMS  int64               `json:"latency_ms,omitempty"`
+	Error      string              `json:"error,omitempty"`
 }
 
 type browserJob struct {
@@ -59,9 +92,7 @@ func NormalizeDecision(raw []byte, provider, model string, latency time.Duration
 	if parsed.Confidence < 0 || parsed.Confidence > 1 {
 		parsed.Confidence = 0.5
 	}
-	if parsed.Model == "" {
-		parsed.Model = model
-	}
+	parsed.Model = truncateUTF8(strings.TrimSpace(model), 80)
 	parsed.Provider = provider
 	parsed.LatencyMS = latency.Milliseconds()
 	if parsed.Flags == nil {
@@ -70,7 +101,131 @@ func NormalizeDecision(raw []byte, provider, model string, latency time.Duration
 	if len(parsed.Flags) > 20 {
 		parsed.Flags = parsed.Flags[:20]
 	}
+	cleanFlags := make([]string, 0, len(parsed.Flags))
+	for _, flag := range parsed.Flags {
+		flag = truncateUTF8(strings.TrimSpace(flag), 80)
+		if flag != "" {
+			cleanFlags = append(cleanFlags, flag)
+		}
+	}
+	parsed.Flags = cleanFlags
 	return parsed
+}
+
+func NormalizeOutput(raw []byte, spec OutputSpec, provider, model string, latency time.Duration) Output {
+	mode := outputMode(spec)
+	if mode == "decision" {
+		decision := NormalizeDecision(raw, provider, model, latency)
+		return Output{Mode: mode, Decision: &decision, Model: decision.Model, Provider: provider, LatencyMS: decision.LatencyMS}
+	}
+	var envelope Output
+	if json.Unmarshal(raw, &envelope) == nil && envelope.Mode == mode {
+		if envelope.Error != "" {
+			return OutputError(mode, provider, model, envelope.Error, latency)
+		}
+		if mode == "json" && len(envelope.JSON) > 0 {
+			raw = envelope.JSON
+		} else if mode == "text" && envelope.Text != "" {
+			raw = []byte(envelope.Text)
+		}
+	}
+
+	limit := outputLimit(spec)
+	clean := strings.TrimSpace(string(raw))
+	if mode == "text" {
+		if len(clean) > limit {
+			clean = truncateUTF8(clean, limit)
+		}
+		if clean == "" {
+			return OutputError(mode, provider, model, "empty_response", latency)
+		}
+		return Output{Mode: mode, Text: clean, Model: model, Provider: provider, LatencyMS: latency.Milliseconds()}
+	}
+
+	if start := strings.IndexAny(clean, "[{"); start >= 0 {
+		var end int
+		if clean[start] == '[' {
+			end = strings.LastIndex(clean, "]")
+		} else {
+			end = strings.LastIndex(clean, "}")
+		}
+		if end > start {
+			clean = clean[start : end+1]
+		}
+	}
+	if len(clean) > limit || !json.Valid([]byte(clean)) {
+		return OutputError(mode, provider, model, "invalid_json", latency)
+	}
+	if len(spec.RequiredKeys) > 0 {
+		var object map[string]interface{}
+		if json.Unmarshal([]byte(clean), &object) != nil {
+			return OutputError(mode, provider, model, "json_object_required", latency)
+		}
+		for _, key := range spec.RequiredKeys {
+			if _, ok := object[key]; !ok {
+				return OutputError(mode, provider, model, "missing_required_key:"+key, latency)
+			}
+		}
+	}
+	return Output{Mode: mode, JSON: json.RawMessage(clean), Model: model, Provider: provider, LatencyMS: latency.Milliseconds()}
+}
+
+func OutputError(mode, provider, model, message string, latency time.Duration) Output {
+	return Output{Mode: mode, Provider: provider, Model: model, LatencyMS: latency.Milliseconds(), Error: message}
+}
+
+func outputMode(spec OutputSpec) string {
+	mode := strings.ToLower(strings.TrimSpace(spec.Mode))
+	if mode == "" {
+		return "decision"
+	}
+	return mode
+}
+
+func jobTask(job Job, routeTask string) string {
+	task := strings.ToLower(strings.TrimSpace(routeTask))
+	if task != "" {
+		return task
+	}
+	task = strings.ToLower(strings.TrimSpace(job.Task))
+	if task == "" {
+		task = strings.ToLower(strings.TrimSpace(job.Kind))
+	}
+	if task == "" {
+		task = "generation"
+	}
+	return task
+}
+
+func applyTaskOutput(job *Job, routeTask string) {
+	switch jobTask(*job, routeTask) {
+	case "moderation":
+		job.Output.Mode = "decision"
+	case "extraction":
+		job.Output.Mode = "json"
+	case "embedding":
+		job.Output.Mode = "embedding"
+	case "rag_ingest", "rag_query":
+		job.Output.Mode = "rag"
+	}
+}
+
+func outputLimit(spec OutputSpec) int {
+	if spec.MaxBytes >= 256 && spec.MaxBytes <= 1<<20 {
+		return spec.MaxBytes
+	}
+	return 64 << 10
+}
+
+func truncateUTF8(value string, limit int) string {
+	if limit < 0 || len(value) <= limit {
+		return value
+	}
+	value = value[:limit]
+	for value != "" && !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value
 }
 
 func ReviewDecision(provider, model, flag string, latency time.Duration) Decision {

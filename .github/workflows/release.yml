@@ -51,9 +51,12 @@ jobs:
       - name: Bundle
         shell: bash
         run: |
-          cp -R extension dist/extension
+          ./scripts/package-extensions.sh
+          mkdir -p dist/extension
+          cp extension/README.md dist/extension/
+          cp -R extension/chromium extension/firefox dist/extension/
           cp -R examples dist/examples
-          cp config.example.yml README.md LICENSE dist/
+          cp config.example.yml README.md LICENSE CHANGELOG.md dist/
           if [ "${{ matrix.format }}" = "zip" ]; then
             cd dist && zip -qr "../contextbridge_${{ matrix.os }}_${{ matrix.arch }}.zip" .
           else
@@ -64,8 +67,23 @@ jobs:
           name: contextbridge-${{ matrix.os }}-${{ matrix.arch }}
           path: contextbridge_${{ matrix.os }}_${{ matrix.arch }}.*
 
+  extensions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package browser extensions
+        run: |
+          ./scripts/package-extensions.sh
+          ./scripts/verify-extensions.sh
+          (cd extension/chromium && zip -qr ../../contextbridge_extension_chromium.zip .)
+          (cd extension/firefox && zip -qr ../../contextbridge_extension_firefox.zip .)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: contextbridge-browser-extensions
+          path: contextbridge_extension_*.zip
+
   publish:
-    needs: build
+    needs: [build, extensions]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

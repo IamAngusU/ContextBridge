@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>ContextBridge</title>
+  <link rel="icon" href="/mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/dashboard.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="identity" href="/" aria-label="ContextBridge dashboard"><img src="/mark.svg" alt="" width="34" height="34"><span><strong>ContextBridge</strong><small id="version">local control center</small></span></a>
+    <div class="service-state" id="service-state" data-state="checking"><i aria-hidden="true"></i><span>Checking service</span></div>
+  </header>
+
+  <main>
+    <section class="auth-band" id="auth-band">
+      <div><p class="eyebrow">Local access</p><h1>Connect this dashboard</h1><p>Enter the token from your ContextBridge config. It stays in this browser session.</p></div>
+      <form id="auth-form"><label for="token">Pairing token</label><div><input id="token" type="password" autocomplete="off" spellcheck="false"><button type="submit">Connect</button></div><p id="auth-error" role="alert"></p></form>
+    </section>
+
+    <div id="workspace" hidden>
+      <section class="status-grid" aria-label="Service status">
+        <article><span class="metric-label">Service</span><strong id="service-metric">Online</strong><small id="listen">127.0.0.1</small></article>
+        <article><span class="metric-label">Browser tab</span><strong id="browser-metric">Not connected</strong><small id="browser-detail">Open the extension to pair a tab</small></article>
+        <article><span class="metric-label">Queue</span><strong id="queue-metric">0</strong><small id="completed-metric">0 completed this session</small></article>
+        <article><span class="metric-label">Secure tunnel</span><strong id="tunnel-metric">Not connected</strong><small id="tunnel-detail">No heartbeat received</small></article>
+        <article><span class="metric-label">Hardware</span><strong id="hardware-metric">Detecting</strong><small id="hardware-detail">Local capabilities</small></article>
+      </section>
+
+      <section class="content-band split runtime-band">
+        <div>
+          <div class="section-heading"><div><p class="eyebrow">Local runtime</p><h2>Engines and loaded models</h2></div><span class="refresh-time" id="refresh-time"></span></div>
+          <div class="engine-list" id="engine-list"></div>
+        </div>
+        <aside class="hardware-panel">
+          <p class="eyebrow">Hardware capabilities</p>
+          <h2 id="cpu-name">Detecting hardware</h2>
+          <dl><div><dt>Memory</dt><dd id="memory-detail">Unknown</dd></div><div><dt>GPU</dt><dd id="gpu-detail">Not detected</dd></div><div><dt>Backends</dt><dd id="backend-detail">Detecting</dd></div></dl>
+        </aside>
+      </section>
+
+      <section class="content-band split">
+        <div>
+          <div class="section-heading"><div><p class="eyebrow">Live routing</p><h2>Routes and providers</h2></div></div>
+          <div class="route-list" id="route-list"></div>
+        </div>
+        <aside class="browser-panel">
+          <p class="eyebrow">Selected browser worker</p>
+          <h2 id="tab-title">No tab connected</h2>
+          <dl><div><dt>Origin</dt><dd id="tab-origin">None</dd></div><div><dt>Profile</dt><dd id="tab-profile">None</dd></div><div><dt>State</dt><dd id="tab-state">Paused</dd></div><div><dt>Last signal</dt><dd id="tab-seen">Never</dd></div></dl>
+        </aside>
+      </section>
+
+      <section class="content-band split models-band">
+        <div>
+          <div class="section-heading"><div><p class="eyebrow">Model registry</p><h2>Configured local artifacts</h2></div><span id="model-summary" class="refresh-time"></span></div>
+          <div class="model-list" id="model-list"></div>
+        </div>
+        <aside class="rag-panel">
+          <p class="eyebrow">Retrieval</p>
+          <h2 id="rag-state">RAG is disabled</h2>
+          <dl><div><dt>Backend</dt><dd id="rag-backend">None</dd></div><div><dt>Documents</dt><dd id="rag-documents">0</dd></div><div><dt>Embedding</dt><dd id="rag-route">None</dd></div></dl>
+        </aside>
+      </section>
+
+      <section class="content-band metrics-band">
+        <div class="section-heading"><div><p class="eyebrow">Local statistics</p><h2>Runtime activity</h2></div><span id="metrics-updated" class="refresh-time">Waiting for the first job</span></div>
+        <div class="metrics-summary"><div><span>Jobs</span><strong id="metrics-jobs">0</strong></div><div><span>Average latency</span><strong id="metrics-latency">No samples</strong></div><div><span>Failure rate</span><strong id="metrics-failure">0%</strong></div><div><span>Embedded vectors</span><strong id="metrics-vectors">0</strong></div></div>
+        <div class="metric-breakdowns"><section><h3>Routes</h3><ul id="metrics-routes"></ul></section><section><h3>Tasks</h3><ul id="metrics-tasks"></ul></section><section><h3>Providers</h3><ul id="metrics-providers"></ul></section><section><h3>Models</h3><ul id="metrics-models"></ul></section><section><h3>Flags</h3><ul id="metrics-flags"></ul></section></div>
+      </section>
+
+      <section class="content-band activity-band">
+        <div class="section-heading"><div><p class="eyebrow">Recent activity</p><h2>Jobs and decisions</h2></div><button id="refresh" class="outline" type="button">Refresh</button></div>
+        <ol id="activity" class="activity"><li class="empty">No jobs have passed through this service yet.</li></ol>
+      </section>
+
+      <section class="content-band paths-band">
+        <div><p class="eyebrow">Local paths</p><h2>Storage</h2></div>
+        <dl><div><dt>Inbox</dt><dd id="inbox-path"></dd></div><div><dt>Data</dt><dd id="data-path"></dd></div><div><dt>Models</dt><dd id="models-path"></dd></div></dl>
+      </section>
+    </div>
+  </main>
+
+  <footer><span>ContextBridge runs on localhost.</span><button id="forget-token" type="button">Forget dashboard token</button></footer>
+  <script src="/dashboard.js"></script>
+</body>
+</html>

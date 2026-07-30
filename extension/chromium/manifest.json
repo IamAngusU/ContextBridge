@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "ContextBridge",
+  "short_name": "ContextBridge",
+  "version": "0.2.0",
+  "description": "Teach one browser tab how to exchange structured jobs with your local ContextBridge service.",
+  "permissions": ["storage", "activeTab", "scripting"],
+  "optional_permissions": ["tabs"],
+  "optional_host_permissions": ["http://127.0.0.1/*", "http://localhost/*", "https://*/*", "http://*/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "ContextBridge",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "content_security_policy": {
+    "extension_pages": "default-src 'self'; script-src 'self'; object-src 'self'; connect-src http://127.0.0.1:* http://localhost:*"
+  }
+}

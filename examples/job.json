@@ -3,5 +3,8 @@
   "route": "default",
   "kind": "moderation",
   "prompt": "Review the submitted content for a public community page. Return allow only when it is safe.",
-  "text": "Hello from ContextBridge"
+  "text": "Hello from ContextBridge",
+  "output": {
+    "mode": "decision"
+  }
 }

@@ -4,6 +4,25 @@ set -eu
 REPO="IamAngusU/ContextBridge"
 INSTALL_DIR="${CONTEXTBRIDGE_HOME:-$HOME/.local/share/contextbridge}"
 BIN_DIR="${CONTEXTBRIDGE_BIN_DIR:-$HOME/.local/bin}"
+provider="${CONTEXTBRIDGE_PROVIDER:-ask}"
+
+if [ "$provider" = "ask" ] && [ -r /dev/tty ]; then
+  printf '\nChoose the first local target:\n' >/dev/tty
+  printf '  1) Existing Ollama, with automatic local model detection (recommended)\n' >/dev/tty
+  printf '  2) Managed llama.cpp runtime and a verified GGUF model\n' >/dev/tty
+  printf '  3) A visually taught browser tab\n' >/dev/tty
+  printf '  4) Configure it later in YAML\n' >/dev/tty
+  printf 'Choose 1, 2, 3, or 4 [1]: ' >/dev/tty
+  read -r choice </dev/tty || choice="1"
+  case "${choice:-1}" in
+    2) provider="managed" ;;
+    3) provider="browser" ;;
+    4) provider="later" ;;
+    *) provider="ollama" ;;
+  esac
+elif [ "$provider" = "ask" ]; then
+  provider="ollama"
+fi
 
 case "$(uname -s)" in
   Linux) os="linux" ;;
@@ -47,7 +66,44 @@ if [ ! -f "$config" ]; then
   "$BIN_DIR/contextbridge" init --config "$config"
 fi
 
-if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+if [ "$provider" = "browser" ]; then
+  sed -i.bak \
+    -e '/^  default:/,/^  [A-Za-z0-9_-]*:/{s/^    provider: ollama$/    provider: browser/;s/^    fallback: \[browser\]$/    fallback: []/;}' \
+    -e '/^  inkwall:/,/^  [A-Za-z0-9_-]*:/{s/^    provider: ollama$/    provider: browser/;s/^    fallback: \[browser\]$/    fallback: []/;}' \
+    "$config"
+  rm -f "$config.bak"
+elif [ "$provider" = "ollama" ]; then
+  sed -i.bak \
+    -e '/^  default:/,/^  [A-Za-z0-9_-]*:/{s/^    provider: browser$/    provider: ollama/;s/^    fallback: \[\]$/    fallback: [browser]/;}' \
+    -e '/^  inkwall:/,/^  [A-Za-z0-9_-]*:/{s/^    provider: browser$/    provider: ollama/;s/^    fallback: \[\]$/    fallback: [browser]/;}' \
+    "$config"
+  rm -f "$config.bak"
+elif [ "$provider" = "managed" ]; then
+  managed_model="${CONTEXTBRIDGE_MANAGED_MODEL:-jina}"
+  if [ -r /dev/tty ] && [ -z "${CONTEXTBRIDGE_MANAGED_MODEL:-}" ]; then
+    printf '\nChoose the first managed workload:\n' >/dev/tty
+    printf '  1) Jina v4 retrieval embeddings\n' >/dev/tty
+    printf '  2) NuExtract3 structured extraction\n' >/dev/tty
+    printf '  3) Both models\n' >/dev/tty
+    printf 'Choose 1, 2, or 3 [1]: ' >/dev/tty
+    read -r model_choice </dev/tty || model_choice="1"
+    case "${model_choice:-1}" in 2) managed_model="nuextract" ;; 3) managed_model="both" ;; *) managed_model="jina" ;; esac
+  fi
+  echo "Installing the verified llama.cpp runtime..."
+  "$BIN_DIR/contextbridge" runtime install --config "$config" llama.cpp
+  if [ "$managed_model" = "jina" ] || [ "$managed_model" = "both" ]; then
+    sed -i.bak '/^  jina:/,/^  [A-Za-z0-9_-]*:/{s/^    auto_start: false$/    auto_start: true/;}' "$config"
+    rm -f "$config.bak"
+    "$BIN_DIR/contextbridge" pull --config "$config" jina-v4-retrieval
+  fi
+  if [ "$managed_model" = "nuextract" ] || [ "$managed_model" = "both" ]; then
+    sed -i.bak '/^  nuextract:/,/^  [A-Za-z0-9_-]*:/{s/^    auto_start: false$/    auto_start: true/;}' "$config"
+    rm -f "$config.bak"
+    "$BIN_DIR/contextbridge" pull --config "$config" nuextract3
+  fi
+fi
+
+if [ "$os" = "linux" ] && command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
   unit_dir="$HOME/.config/systemd/user"
   mkdir -p "$unit_dir"
   cat > "$unit_dir/contextbridge.service" <<EOF
@@ -69,9 +125,41 @@ EOF
     echo "The user service could not be enabled in this session."
     echo "Start ContextBridge with: $BIN_DIR/contextbridge serve --config $config"
   fi
+elif [ "$os" = "darwin" ]; then
+  agent_dir="$HOME/Library/LaunchAgents"
+  agent="$agent_dir/de.angusu.contextbridge.plist"
+  mkdir -p "$agent_dir"
+  cat > "$agent" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>de.angusu.contextbridge</string>
+  <key>ProgramArguments</key><array><string>$BIN_DIR/contextbridge</string><string>serve</string><string>--config</string><string>$config</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>StandardOutPath</key><string>$INSTALL_DIR/contextbridge.log</string>
+  <key>StandardErrorPath</key><string>$INSTALL_DIR/contextbridge-error.log</string>
+</dict></plist>
+EOF
+  launchctl bootout "gui/$(id -u)" "$agent" >/dev/null 2>&1 || true
+  if launchctl bootstrap "gui/$(id -u)" "$agent" >/dev/null 2>&1; then
+    echo "ContextBridge launch agent enabled."
+  else
+    echo "Start ContextBridge with: $BIN_DIR/contextbridge serve --config $config"
+  fi
 else
   echo "Start ContextBridge with: $BIN_DIR/contextbridge serve --config $config"
 fi
 
 echo "Config: $config"
-echo "Browser extension: $INSTALL_DIR/extension"
+echo "Chromium extension: $INSTALL_DIR/extension/chromium"
+echo "Firefox extension: $INSTALL_DIR/extension/firefox"
+
+if [ "${CONTEXTBRIDGE_NO_DASHBOARD:-0}" != "1" ]; then
+  if [ "$os" = "darwin" ] || [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+    sleep 1
+    "$BIN_DIR/contextbridge" dashboard --config "$config" || true
+  else
+    echo "Dashboard: http://127.0.0.1:32145"
+  fi
+fi

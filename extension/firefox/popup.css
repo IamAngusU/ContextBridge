@@ -1,0 +1,21 @@
+:root{color-scheme:light dark;font:13px/1.45 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{margin:0;width:410px;min-width:360px;background:#f6f6f1;color:#20231f;letter-spacing:0}
+button,input,select{font:inherit;letter-spacing:0}
+button{cursor:pointer}
+main{display:grid}
+.app-header{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:10px;padding:14px 16px;border-bottom:1px solid #cfd1c8;background:#fbfbf7}
+.app-header img{border-radius:5px}.brand{display:grid;line-height:1.15}.brand strong{font-size:14px}.brand span{color:#737a72;font:10px/1.2 ui-monospace,SFMono-Regular,Consolas,monospace}
+.connection{display:flex;align-items:center;gap:6px;color:#687068;font-size:11px}.connection i{width:8px;height:8px;border-radius:50%;background:#a3a7a0}.connection[data-state="live"] i{background:#2a9d8f}.connection[data-state="error"] i{background:#d7422f}
+.step{display:grid;gap:10px;padding:14px 16px;border-bottom:1px solid #d9dbd3}.step-heading{display:flex;align-items:center;gap:9px}.step-heading>span{color:#2a9d8f;font:700 10px/1 ui-monospace,SFMono-Regular,Consolas,monospace}.step-heading h1,.step-heading h2{margin:0;font-size:12px;font-weight:700;text-transform:uppercase}.final-step{border-bottom:0}
+.field-row,.secret-row,.button-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:7px}.select-field{min-width:0}
+input,select,button{min-height:38px;border:1px solid #afb4ac;border-radius:4px;background:#fff;color:#20231f;padding:8px 10px}
+input,select{width:100%}select{overflow:hidden;text-overflow:ellipsis}
+button:hover:not(:disabled){border-color:#20231f}button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid #2a9d8f;outline-offset:2px}
+button:disabled{cursor:not-allowed;opacity:.48}.primary{border-color:#20231f;background:#20231f;color:#fff;font-weight:700}.secondary{background:#f9f9f5}.compact{min-width:68px;padding-inline:10px}.full{width:100%}.danger{border-color:#c97366;background:transparent;color:#9d3022}.text-button{justify-self:start;min-height:auto;border:0;background:transparent;padding:0;color:#4f635e;text-decoration:underline;text-underline-offset:3px;font-size:11px}.button-row>*{min-width:128px}
+.profile-state{display:grid;grid-template-columns:auto 1fr;gap:9px;align-items:center;padding:10px;border:1px solid #cfd2ca;border-radius:4px;background:#fbfbf7}.profile-state>div{display:grid;min-width:0}.profile-state strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}.profile-state small{color:#6c746c;font-size:10px}.profile-signal{width:9px;height:9px;border-radius:50%;background:#a3a7a0}.profile-state.ready .profile-signal{background:#2a9d8f}.profile-state.invalid .profile-signal{background:#d7422f}
+.advanced{border-top:1px solid #cfd1c8;border-bottom:1px solid #cfd1c8;background:#eeefe9}.advanced summary{padding:12px 16px;cursor:pointer;font-size:11px;font-weight:700;list-style-position:inside}.advanced-body{display:grid;gap:11px;padding:3px 16px 16px}.advanced-body>label:not(.mode){display:grid;gap:5px;color:#596159;font-size:10px;text-transform:uppercase}.mode{display:flex;align-items:center;gap:8px}.mode input{width:16px;min-height:16px;accent-color:#2a9d8f}.mode span{font-size:11px}.privacy{margin:0;padding:11px 16px;color:#717871;font-size:10px;background:#fbfbf7}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+@media(prefers-color-scheme:dark){body{background:#202520;color:#eff1eb}.app-header,.privacy{background:#252b25;border-color:#464d46}.step{border-color:#414841}.brand span,.connection,.profile-state small,.privacy{color:#abb2aa}input,select,button,.profile-state{border-color:#596159;background:#2b312b;color:#eff1eb}.primary{border-color:#eff1eb;background:#eff1eb;color:#20231f}.secondary{background:#292f29}.advanced{border-color:#464d46;background:#1d221d}.text-button{color:#7ed5ca}.danger{border-color:#b96c61;color:#e19a8f}}
+@media(prefers-reduced-motion:no-preference){button,.profile-state,.connection i{transition:border-color .16s ease,background-color .16s ease,color .16s ease,opacity .16s ease}}

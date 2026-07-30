@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title">
+  <title id="title">ContextBridge</title>
+  <rect width="128" height="128" rx="20" fill="#20231f"/>
+  <path d="M31 36h27c14 0 23 8 23 20 0 7-3 13-9 16 9 3 14 11 14 21 0 15-11 24-28 24H31V36Zm26 32c8 0 12-4 12-11s-4-10-12-10H44v21h13Zm1 38c10 0 15-5 15-14 0-8-5-13-15-13H44v27h14Z" fill="#f6f6f1"/>
+  <path d="M91 28h8v72h-8z" fill="#2ec4b6"/>
+  <circle cx="95" cy="108" r="6" fill="#d7422f"/>
+</svg>

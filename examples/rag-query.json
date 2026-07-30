@@ -1,0 +1,7 @@
+{
+  "source": "support-assistant",
+  "route": "rag_query",
+  "tenant_id": "acme",
+  "query": "When is support available?",
+  "top_k": 5
+}

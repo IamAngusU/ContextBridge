@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/IamAngusU/ContextBridge/internal/config"
+	"github.com/IamAngusU/ContextBridge/internal/vectorstore"
 )
 
 func TestBrowserJobRoundTrip(t *testing.T) {
@@ -71,6 +72,16 @@ func TestBrowserJobRoundTrip(t *testing.T) {
 	if work.Job.ID == "" {
 		t.Fatal("browser job was not queued")
 	}
+	leaseReq, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/browser/jobs/"+work.Job.ID+"/lease", nil)
+	leaseReq.Header.Set("Authorization", "Bearer "+cfg.Server.Token)
+	leaseResp, leaseErr := http.DefaultClient.Do(leaseReq)
+	if leaseErr != nil {
+		t.Fatal(leaseErr)
+	}
+	leaseResp.Body.Close()
+	if leaseResp.StatusCode != http.StatusOK {
+		t.Fatalf("lease renewal returned %s", leaseResp.Status)
+	}
 
 	decisionRaw := []byte(`{"verdict":"allow","flags":[],"confidence":0.9,"model":"test-ai"}`)
 	req, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/browser/jobs/"+work.Job.ID+"/complete", bytes.NewReader(decisionRaw))
@@ -92,5 +103,263 @@ func TestBrowserJobRoundTrip(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("submission did not complete")
+	}
+}
+
+func TestBrowserHeartbeatAndDashboardStatus(t *testing.T) {
+	cfg := config.Config{
+		Version: 1,
+		Server:  config.Server{Listen: "127.0.0.1:32145", Token: "test-token-that-is-long-enough"},
+		Storage: config.Storage{Directory: t.TempDir(), Inbox: t.TempDir()},
+		Routes: map[string]config.Route{
+			"default": {Provider: "browser", TimeoutSeconds: 5, BrowserProfile: "test"},
+		},
+		Providers: config.Providers{Browser: config.BrowserProvider{LeaseSeconds: 5}},
+		BrowserProfiles: map[string]config.BrowserProfile{
+			"test": {Label: "Test AI", MatchURL: "https://example.test/*"},
+		},
+	}
+	server, err := NewServer(cfg, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+
+	heartbeat := []byte(`{"state":"waiting","origin":"https://example.test","tab_title":"Test tab","profile_label":"Visual test","selectors_ready":true,"extension_version":"0.2.0","browser":"firefox"}`)
+	req, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/browser/heartbeat", bytes.NewReader(heartbeat))
+	req.Header.Set("Authorization", "Bearer "+cfg.Server.Token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("heartbeat returned %s", resp.Status)
+	}
+
+	req, _ = http.NewRequest(http.MethodGet, httpServer.URL+"/v1/status", nil)
+	req.Header.Set("Authorization", "Bearer "+cfg.Server.Token)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var status struct {
+		Browser BrowserClientStatus `json:"browser"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		t.Fatal(err)
+	}
+	if !status.Browser.Connected || status.Browser.TabTitle != "Test tab" {
+		t.Fatalf("unexpected browser status: %#v", status.Browser)
+	}
+
+	resp, err = http.Get(httpServer.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || !bytes.Contains(body, []byte("ContextBridge")) {
+		t.Fatalf("dashboard was not served: %s", resp.Status)
+	}
+	if resp.Header.Get("X-Frame-Options") != "DENY" || resp.Header.Get("Content-Security-Policy") == "" {
+		t.Fatal("dashboard security headers are missing")
+	}
+}
+
+func TestBrowserJSONOutputRoundTrip(t *testing.T) {
+	cfg := config.Config{
+		Version: 1,
+		Server:  config.Server{Listen: "127.0.0.1:32145", Token: "test-token-that-is-long-enough"},
+		Storage: config.Storage{Directory: t.TempDir(), Inbox: t.TempDir()},
+		Routes: map[string]config.Route{
+			"default": {Provider: "browser", TimeoutSeconds: 5},
+		},
+		Providers: config.Providers{Browser: config.BrowserProvider{LeaseSeconds: 5}},
+	}
+	server, err := NewServer(cfg, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+
+	result := make(chan Submission, 1)
+	go func() {
+		job := Job{
+			Prompt: "Extract a summary", Text: "hello",
+			Output: OutputSpec{Mode: "json", RequiredKeys: []string{"summary"}},
+		}
+		jobRaw, _ := json.Marshal(job)
+		req, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/jobs", bytes.NewReader(jobRaw))
+		req.Header.Set("Authorization", "Bearer "+cfg.Server.Token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, requestErr := http.DefaultClient.Do(req)
+		if requestErr != nil {
+			return
+		}
+		defer resp.Body.Close()
+		var submission Submission
+		json.NewDecoder(resp.Body).Decode(&submission)
+		result <- submission
+	}()
+
+	var work browserJob
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		req, _ := http.NewRequest(http.MethodGet, httpServer.URL+"/v1/browser/jobs/next?wait=0", nil)
+		req.Header.Set("Authorization", "Bearer "+cfg.Server.Token)
+		resp, requestErr := http.DefaultClient.Do(req)
+		if requestErr == nil && resp.StatusCode == http.StatusOK {
+			json.NewDecoder(resp.Body).Decode(&work)
+			resp.Body.Close()
+			break
+		}
+		if resp != nil {
+			resp.Body.Close()
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if work.Job.ID == "" {
+		t.Fatal("generic browser job was not queued")
+	}
+
+	outputRaw := []byte(`{"mode":"json","json":{"summary":"Hello"},"model":"browser-model"}`)
+	req, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/browser/jobs/"+work.Job.ID+"/complete", bytes.NewReader(outputRaw))
+	req.Header.Set("Authorization", "Bearer "+cfg.Server.Token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("completion returned %s", resp.Status)
+	}
+
+	select {
+	case submission := <-result:
+		if submission.Output == nil || string(submission.Output.JSON) != `{"summary":"Hello"}` {
+			t.Fatalf("unexpected generic submission: %#v", submission)
+		}
+		if submission.Output.Model != "browser-tab" {
+			t.Fatalf("browser supplied untrusted model metadata: %#v", submission.Output)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("generic submission did not complete")
+	}
+}
+
+func TestExpiredBrowserLeaseCannotComplete(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := Job{ID: "expired-job", Prompt: "Review"}
+	store.Queue(job, nil, time.Millisecond)
+	time.Sleep(5 * time.Millisecond)
+	decision := ReviewDecision("browser", "test", "late", 0)
+	if store.Complete(job.ID, Output{Mode: "decision", Decision: &decision}) {
+		t.Fatal("an expired browser lease must not accept a late result")
+	}
+}
+
+func TestEmbeddingAndRAGRoundTrip(t *testing.T) {
+	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/embed" {
+			http.NotFound(w, r)
+			return
+		}
+		var request struct {
+			Input []string `json:"input"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		vectors := make([][]float32, len(request.Input))
+		for index, input := range request.Input {
+			if bytes.Contains([]byte(input), []byte("banana")) {
+				vectors[index] = []float32{0, 1}
+			} else {
+				vectors[index] = []float32{1, 0}
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"embeddings": vectors})
+	}))
+	defer ollama.Close()
+	cfg := config.Config{
+		Version: 1,
+		Server:  config.Server{Listen: "127.0.0.1:32145", Token: "test-token-that-is-long-enough"},
+		Storage: config.Storage{Directory: t.TempDir(), Inbox: t.TempDir(), Models: t.TempDir()},
+		Routes: map[string]config.Route{
+			"default":    {Provider: "ollama"},
+			"embedding":  {Provider: "ollama", Task: "embedding"},
+			"rag_ingest": {Provider: "ollama", Task: "rag_ingest"},
+			"rag_query":  {Provider: "ollama", Task: "rag_query"},
+		},
+		Providers: config.Providers{Ollama: config.OllamaProvider{URL: ollama.URL, Model: "embed-test", Timeout: 5}},
+		RAG:       config.RAG{Enabled: true, Backend: "local", Directory: t.TempDir(), EmbeddingRoute: "embedding", MaxDocuments: 10},
+	}
+	server, err := NewServer(cfg, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	post := func(payload interface{}) Submission {
+		raw, _ := json.Marshal(payload)
+		req, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/jobs", bytes.NewReader(raw))
+		req.Header.Set("Authorization", "Bearer "+cfg.Server.Token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, requestErr := http.DefaultClient.Do(req)
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("request failed: %s %s", resp.Status, body)
+		}
+		var submission Submission
+		if err := json.NewDecoder(resp.Body).Decode(&submission); err != nil {
+			t.Fatal(err)
+		}
+		return submission
+	}
+	ingest := post(Job{Route: "rag_ingest", TenantID: "docs", Documents: []vectorstore.Document{{ID: "apple", Text: "apple document"}, {ID: "banana", Text: "banana document"}}})
+	if ingest.Output == nil || ingest.Output.Indexed != 2 {
+		t.Fatalf("unexpected ingest output: %#v", ingest)
+	}
+	query := post(Job{Route: "rag_query", TenantID: "docs", Query: "apple question", TopK: 1})
+	if query.Output == nil || len(query.Output.Matches) != 1 || query.Output.Matches[0].ID != "apple" {
+		t.Fatalf("unexpected query output: %#v", query)
+	}
+}
+
+func TestTunnelHeartbeatAppearsInStatus(t *testing.T) {
+	cfg := config.Config{Version: 1, Server: config.Server{Listen: "127.0.0.1:32145", Token: "test-token-that-is-long-enough"}, Storage: config.Storage{Directory: t.TempDir(), Inbox: t.TempDir()}, Routes: map[string]config.Route{"default": {Provider: "browser"}}, Providers: config.Providers{Browser: config.BrowserProvider{LeaseSeconds: 5}}}
+	server, err := NewServer(cfg, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	payload := []byte(`{"state":"connected","target":"admin@example.test","transport":"SSH with encrypted payloads","local_port":8788,"remote_port":8788}`)
+	req, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/tunnel/heartbeat", bytes.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer "+cfg.Server.Token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("heartbeat returned %s", resp.Status)
+	}
+	if status := server.store.TunnelStatus(); !status.Connected || status.Target != "admin@example.test" {
+		t.Fatalf("unexpected tunnel status: %#v", status)
 	}
 }

@@ -12,16 +12,22 @@ import (
 	"log"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/IamAngusU/ContextBridge/internal/bridge"
 	"github.com/IamAngusU/ContextBridge/internal/config"
+	"github.com/IamAngusU/ContextBridge/internal/llamaruntime"
+	"github.com/IamAngusU/ContextBridge/internal/modelregistry"
+	"github.com/IamAngusU/ContextBridge/internal/systeminfo"
 )
 
 var version = "dev"
@@ -44,6 +50,18 @@ func main() {
 		err = reviewCommand(os.Args[2:])
 	case "health":
 		err = healthCommand(os.Args[2:])
+	case "dashboard":
+		err = dashboardCommand(os.Args[2:])
+	case "status":
+		err = statusCommand(os.Args[2:])
+	case "hardware":
+		err = hardwareCommand(os.Args[2:])
+	case "models":
+		err = modelsCommand(os.Args[2:])
+	case "pull":
+		err = pullCommand(os.Args[2:])
+	case "runtime":
+		err = runtimeCommand(os.Args[2:])
 	case "version", "--version", "-version":
 		fmt.Println(version)
 		return
@@ -66,6 +84,12 @@ Usage:
   contextbridge submit --file job.json [--config path]
   contextbridge review --job-dir path [--config path]
   contextbridge health [--config path]
+  contextbridge dashboard [--config path] [--no-open]
+  contextbridge status [--config path] [--json]
+  contextbridge hardware [--json]
+  contextbridge models [--config path] [--json]
+  contextbridge pull [--config path] MODEL
+  contextbridge runtime install [--config path] llama.cpp
   contextbridge version`)
 }
 
@@ -129,11 +153,17 @@ func submitCommand(args []string) error {
 	if err := json.Unmarshal(raw, &job); err != nil {
 		return err
 	}
-	decision, err := submit(*path, job)
+	submission, err := submit(*path, job)
 	if err != nil {
 		return err
 	}
-	return json.NewEncoder(os.Stdout).Encode(decision)
+	if submission.Decision != nil {
+		return json.NewEncoder(os.Stdout).Encode(submission.Decision)
+	}
+	if submission.Output != nil {
+		return json.NewEncoder(os.Stdout).Encode(submission.Output)
+	}
+	return errors.New("bridge returned no output")
 }
 
 func reviewCommand(args []string) error {
@@ -153,13 +183,17 @@ func reviewCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	decision, err := submit(*path, job)
+	submission, err := submit(*path, job)
 	if err != nil {
 		fallback := bridge.ReviewDecision("contextbridge", "unavailable", "bridge_unavailable", 0)
 		json.NewEncoder(os.Stdout).Encode(fallback)
 		return nil
 	}
-	return json.NewEncoder(os.Stdout).Encode(decision)
+	if submission.Decision == nil {
+		fallback := bridge.ReviewDecision("contextbridge", "invalid", "decision_missing", 0)
+		return json.NewEncoder(os.Stdout).Encode(fallback)
+	}
+	return json.NewEncoder(os.Stdout).Encode(submission.Decision)
 }
 
 func healthCommand(args []string) error {
@@ -185,37 +219,321 @@ func healthCommand(args []string) error {
 	return nil
 }
 
-func submit(configPath string, job bridge.Job) (bridge.Decision, error) {
+func dashboardCommand(args []string) error {
+	flags := flag.NewFlagSet("dashboard", flag.ContinueOnError)
+	path := flags.String("config", defaultConfigPath(), "config path")
+	noOpen := flags.Bool("no-open", false, "print the dashboard address without opening a browser")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	base := baseURL(cfg) + "/"
+	if *noOpen {
+		fmt.Println(base)
+		fmt.Println("Open the dashboard and enter the pairing token from your config.")
+		return nil
+	}
+	dashboardURL := base + "#token=" + url.QueryEscape(cfg.Server.Token)
+	if err := openBrowser(dashboardURL); err != nil {
+		fmt.Println(base)
+		return fmt.Errorf("could not open the default browser: %w", err)
+	}
+	fmt.Println("Opened the local ContextBridge dashboard.")
+	return nil
+}
+
+func statusCommand(args []string) error {
+	flags := flag.NewFlagSet("status", flag.ContinueOnError)
+	path := flags.String("config", defaultConfigPath(), "config path")
+	asJSON := flags.Bool("json", false, "print machine-readable JSON")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	req, _ := http.NewRequest(http.MethodGet, baseURL(cfg)+"/v1/status", nil)
+	req.Header.Set("Authorization", "Bearer "+cfg.Server.Token)
+	resp, err := (&http.Client{Timeout: 8 * time.Second}).Do(req)
+	if err != nil {
+		return fmt.Errorf("service is not reachable: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("status returned %s: %s", resp.Status, strings.TrimSpace(string(raw)))
+	}
+	if *asJSON {
+		_, err = os.Stdout.Write(raw)
+		return err
+	}
+	var status struct {
+		Version   string               `json:"version"`
+		Listen    string               `json:"listen"`
+		Queued    int                  `json:"queued"`
+		Completed int                  `json:"completed"`
+		Tunnel    bridge.TunnelStatus  `json:"tunnel"`
+		Runtime   bridge.RuntimeStatus `json:"runtime"`
+		Metrics   bridge.Metrics       `json:"metrics"`
+	}
+	if err := json.Unmarshal(raw, &status); err != nil {
+		return err
+	}
+	fmt.Printf("ContextBridge %s\n", status.Version)
+	fmt.Printf("Service: online at http://%s\n", status.Listen)
+	if status.Tunnel.Connected {
+		fmt.Printf("Tunnel: connected to %s\n", status.Tunnel.Target)
+	} else {
+		fmt.Printf("Tunnel: %s\n", status.Tunnel.State)
+	}
+	fmt.Printf("Queue: %d waiting, %d completed this session\n", status.Queued, status.Completed)
+	fmt.Printf("Jobs: %d total, %d failed\n", status.Metrics.JobsTotal, status.Metrics.JobsFailed)
+	providers := make([]string, 0, len(status.Metrics.ByProvider))
+	for provider := range status.Metrics.ByProvider {
+		providers = append(providers, provider)
+	}
+	sort.Strings(providers)
+	for _, provider := range providers {
+		count := status.Metrics.ByProvider[provider]
+		detail := ""
+		if samples := status.Metrics.ProviderSamples[provider]; samples > 0 {
+			detail = fmt.Sprintf(", %d ms average", status.Metrics.ProviderLatency[provider]/samples)
+		}
+		if failed := status.Metrics.ProviderFailures[provider]; failed > 0 {
+			detail += fmt.Sprintf(", %d failed", failed)
+		}
+		fmt.Printf("Provider %s: %d jobs%s\n", provider, count, detail)
+	}
+	for name, engine := range status.Runtime.Engines {
+		detail := engine.Affinity
+		if detail == "" {
+			detail = engine.Model
+		}
+		fmt.Printf("Engine %s: %s", name, engine.State)
+		if detail != "" {
+			fmt.Printf(" (%s)", detail)
+		}
+		fmt.Println()
+		if engine.Warning != "" {
+			fmt.Printf("  Warning: %s\n", engine.Warning)
+		}
+		if len(engine.Models) > 0 {
+			loaded := 0
+			for _, model := range engine.Models {
+				if model.Loaded {
+					loaded++
+					memory := fmt.Sprintf("%s model", formatBytes(uint64(model.Size)))
+					if model.VRAM > 0 {
+						memory = fmt.Sprintf("%s VRAM", formatBytes(uint64(model.VRAM)))
+					}
+					fmt.Printf("  Loaded: %s on %s, %s\n", model.Name, model.Affinity, memory)
+				}
+			}
+			fmt.Printf("  Model cache: %d available, %d loaded\n", len(engine.Models), loaded)
+		}
+	}
+	for _, gpu := range status.Runtime.Hardware.GPUs {
+		fmt.Printf("GPU: %s, %s, %s free of %s\n", gpu.Name, gpu.Backend, formatBytes(gpu.MemoryFree), formatBytes(gpu.MemoryTotal))
+	}
+	return nil
+}
+
+func hardwareCommand(args []string) error {
+	flags := flag.NewFlagSet("hardware", flag.ContinueOnError)
+	asJSON := flags.Bool("json", false, "print machine-readable JSON")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	snapshot := systeminfo.Detect(ctx)
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(snapshot)
+	}
+	fmt.Printf("%s/%s, %d CPU cores\n", snapshot.OS, snapshot.Architecture, snapshot.CPUCores)
+	fmt.Printf("CPU: %s\n", snapshot.CPU)
+	fmt.Printf("Memory: %s available of %s\n", formatBytes(snapshot.MemoryAvailable), formatBytes(snapshot.MemoryTotal))
+	if len(snapshot.GPUs) == 0 {
+		fmt.Println("GPU: no supported telemetry tool detected")
+	}
+	for _, gpu := range snapshot.GPUs {
+		fmt.Printf("GPU: %s, %s, %s free of %s\n", gpu.Name, gpu.Backend, formatBytes(gpu.MemoryFree), formatBytes(gpu.MemoryTotal))
+	}
+	for _, backend := range snapshot.Backends {
+		state := "not detected"
+		if backend.Available {
+			state = "available"
+		}
+		fmt.Printf("Backend %s: %s\n", backend.Name, state)
+	}
+	return nil
+}
+
+func modelsCommand(args []string) error {
+	flags := flag.NewFlagSet("models", flag.ContinueOnError)
+	path := flags.String("config", defaultConfigPath(), "config path")
+	asJSON := flags.Bool("json", false, "print machine-readable JSON")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	models := modelregistry.List(cfg)
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(models)
+	}
+	if len(models) == 0 {
+		fmt.Println("No models are declared in the config.")
+		return nil
+	}
+	for _, model := range models {
+		state := "not installed"
+		if model.Installed {
+			state = formatBytes(uint64(model.Size))
+		}
+		fmt.Printf("%-24s %-14s %s\n", model.Name, state, model.Repository+"/"+model.File)
+	}
+	return nil
+}
+
+func pullCommand(args []string) error {
+	flags := flag.NewFlagSet("pull", flag.ContinueOnError)
+	path := flags.String("config", defaultConfigPath(), "config path")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 1 {
+		return errors.New("one configured model alias is required")
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	lastLine := ""
+	entries, err := modelregistry.Pull(ctx, cfg, flags.Arg(0), func(message string, received, total int64) {
+		line := message
+		if total > 0 {
+			line += fmt.Sprintf(" %d%%", received*100/total)
+		}
+		if line != lastLine {
+			fmt.Println(line)
+			lastLine = line
+		}
+	})
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		fmt.Printf("Ready: %s (%s)\n", entry.Path, formatBytes(uint64(entry.Size)))
+	}
+	return nil
+}
+
+func runtimeCommand(args []string) error {
+	if len(args) == 0 || args[0] != "install" {
+		return errors.New("usage: contextbridge runtime install [--config path] llama.cpp")
+	}
+	flags := flag.NewFlagSet("runtime install", flag.ContinueOnError)
+	path := flags.String("config", defaultConfigPath(), "config path")
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	if flags.NArg() != 1 || flags.Arg(0) != "llama.cpp" {
+		return errors.New("only llama.cpp is supported by this installer")
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	lastLine := ""
+	executable, err := llamaruntime.Install(ctx, filepath.Join(cfg.Storage.Directory, "runtime", "llama.cpp"), func(message string, received, total int64) {
+		line := message
+		if total > 0 {
+			line += fmt.Sprintf(" %d%%", received*100/total)
+		}
+		if line != lastLine {
+			fmt.Println(line)
+			lastLine = line
+		}
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Println("Runtime ready:", executable)
+	return nil
+}
+
+func formatBytes(value uint64) string {
+	if value == 0 {
+		return "unknown"
+	}
+	units := []string{"B", "KB", "MB", "GB", "TB"}
+	size := float64(value)
+	unit := 0
+	for size >= 1024 && unit < len(units)-1 {
+		size /= 1024
+		unit++
+	}
+	return fmt.Sprintf("%.1f %s", size, units[unit])
+}
+
+func openBrowser(target string) error {
+	var command *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		command = exec.Command("rundll32", "url.dll,FileProtocolHandler", target)
+	case "darwin":
+		command = exec.Command("open", target)
+	default:
+		command = exec.Command("xdg-open", target)
+	}
+	return command.Start()
+}
+
+func submit(configPath string, job bridge.Job) (bridge.Submission, error) {
 	cfg, err := config.Load(configPath)
 	if err != nil {
-		return bridge.Decision{}, err
+		return bridge.Submission{}, err
 	}
 	raw, _ := json.Marshal(job)
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL(cfg)+"/v1/jobs", bytes.NewReader(raw))
 	if err != nil {
-		return bridge.Decision{}, err
+		return bridge.Submission{}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+cfg.Server.Token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return bridge.Decision{}, err
+		return bridge.Submission{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-		return bridge.Decision{}, fmt.Errorf("bridge returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
+		return bridge.Submission{}, fmt.Errorf("bridge returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
 	var result bridge.Submission
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(&result); err != nil {
-		return bridge.Decision{}, err
+		return bridge.Submission{}, err
 	}
-	if result.Decision == nil {
-		return bridge.Decision{}, errors.New("bridge returned no decision")
+	if result.Decision == nil && result.Output == nil {
+		return bridge.Submission{}, errors.New("bridge returned no output")
 	}
-	return *result.Decision, nil
+	return result, nil
 }
 
 func readInkWallJob(dir string) (bridge.Job, error) {
@@ -251,6 +569,7 @@ func readInkWallJob(dir string) (bridge.Job, error) {
 		Metadata: map[string]interface{}{
 			"inkwall_job_dir": dir,
 		},
+		Output: bridge.OutputSpec{Mode: "decision"},
 	}
 	images, _ := filepath.Glob(filepath.Join(dir, "image.*"))
 	if len(images) > 0 {
