@@ -56,7 +56,8 @@ jobs:
           cp extension/README.md dist/extension/
           cp -R extension/chromium extension/firefox dist/extension/
           cp -R examples dist/examples
-          cp config.example.yml README.md LICENSE CHANGELOG.md dist/
+          cp -R deploy web dist/
+          cp config.example.yml README.md LICENSE CHANGELOG.md install.sh install.ps1 dist/
           if [ "${{ matrix.format }}" = "zip" ]; then
             cd dist && zip -qr "../contextbridge_${{ matrix.os }}_${{ matrix.arch }}.zip" .
           else
