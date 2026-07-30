@@ -23,6 +23,7 @@ $('auth-form').addEventListener('submit', async (event) => {
   await refresh();
 });
 $('refresh').addEventListener('click', refresh);
+$('update-toggle').addEventListener('change', updateAutomaticUpdates);
 $('forget-token').addEventListener('click', () => {
   sessionStorage.removeItem('contextbridge-token');
   token = '';
@@ -76,6 +77,7 @@ function render(data) {
   $('inbox-path').textContent = data.storage?.inbox || '';
   $('data-path').textContent = data.storage?.directory || '';
   $('models-path').textContent = data.storage?.models || '';
+  renderUpdates(data.updates || null);
   renderTunnel(data.tunnel || {});
   renderRuntime(data.runtime || {});
   renderModels(data.runtime?.models || [], data.rag || {});
@@ -83,6 +85,42 @@ function render(data) {
   renderBrowser(data.browser || {});
   renderRoutes(data.routes || {});
   renderActivity(data.activity || []);
+}
+
+function renderUpdates(updates) {
+  const toggle = $('update-toggle');
+  if (!updates) {
+    toggle.checked = false;
+    toggle.disabled = true;
+    $('update-state').textContent = 'Update manager unavailable';
+    return;
+  }
+  toggle.disabled = false;
+  toggle.checked = Boolean(updates.enabled);
+  $('update-state').textContent = updates.enabled ? `Enabled, ${updates.channel || 'stable'} channel` : 'Disabled on this device';
+  const checked = meaningfulTimestamp(updates.last_checked) ? ` Last checked ${relativeTime(updates.last_checked)}.` : '';
+  const available = updates.update_available ? ` Version ${updates.available_version} is ready.` : '';
+  $('update-detail').textContent = `Current ${versionLabel(updates.current_version)}.${available}${checked}`;
+}
+
+async function updateAutomaticUpdates() {
+  const toggle = $('update-toggle');
+  const enabled = toggle.checked;
+  toggle.disabled = true;
+  try {
+    const response = await fetch('/v1/settings/updates', {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled })
+    });
+    if (!response.ok) throw new Error(`Setting update failed: ${response.status}`);
+    renderUpdates(await response.json());
+  } catch (error) {
+    toggle.checked = !enabled;
+    $('update-state').textContent = error.message || String(error);
+  } finally {
+    toggle.disabled = false;
+  }
 }
 
 function renderTunnel(tunnel) {

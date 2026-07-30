@@ -48,16 +48,32 @@ The browser workflow does not require hand-written CSS selectors. Choose a tab, 
 Open PowerShell and run:
 
 ```powershell
-irm https://raw.githubusercontent.com/IamAngusU/ContextBridge/main/install.ps1 | iex
+irm https://angusu.de/contextbridge/install.ps1 | iex
 ```
 
 ### Linux or macOS
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/IamAngusU/ContextBridge/main/install.sh | sh
+curl -fsSL https://angusu.de/contextbridge/install.sh | sh
 ```
 
 The installer verifies the matching published release checksum, creates a private config, asks whether this device is local-only, a relay, a worker, or both, sets up user autostart where supported, starts the service, and opens the dashboard. It can use an existing Ollama installation, install a managed `llama.cpp` runtime, or pair a browser tab.
+
+## Automatic Updates
+
+Verified stable updates are enabled by default. The Go service checks independently of the dashboard, and supported installers also register a daily operating-system update job. A JavaScript or dashboard failure cannot disable the updater.
+
+```bash
+contextbridge update status
+contextbridge update check
+contextbridge update apply
+contextbridge update disable
+contextbridge update enable
+```
+
+An update is downloaded beside the current executable, checked against both `SHA256SUMS` and the GitHub release asset digest, started once to verify its reported version, then activated atomically. The previous executable remains as `.previous` for rollback. Windows uses a short-lived local PowerShell helper after the running process exits; Linux and macOS replace the executable directly and let the managed service restart.
+
+The public installer endpoint counts total requests and privacy-preserving unique installer starts. Unique values use an HMAC of a masked network prefix and short user-agent family. Raw IP addresses, cookies, prompts, results, device names, and model activity are not collected. Self-hosted installations do not send runtime telemetry to `angusu.de`.
 
 Manual installation is just as small:
 
@@ -258,6 +274,7 @@ Read [Architecture](docs/architecture.md) and [Security](docs/security.md) befor
 | `extension/firefox` | Ready-to-load Firefox package |
 | `scripts` | Reproducible extension and release checks |
 | `deploy` | Hardened systemd and nginx relay templates |
+| `web` | Public one-file welcome page, cached repository stats, and installer counters |
 | `docs` | Protocol, architecture, security, and integrations |
 
 ## Development

@@ -26,6 +26,9 @@ func TestDefaultConfigLoads(t *testing.T) {
 	if len(cfg.Cluster.Relay.AdminToken) < 40 || cfg.Cluster.Relay.AdminToken == cfg.Server.Token {
 		t.Fatal("cluster admin token must be strong and independent")
 	}
+	if !cfg.Updates.DefaultEnabled() || cfg.Updates.Channel != "stable" {
+		t.Fatal("automatic stable updates should be enabled by default")
+	}
 	if _, err := os.Stat(cfg.Storage.Inbox); !os.IsNotExist(err) {
 		t.Fatal("loading config should not create the inbox")
 	}

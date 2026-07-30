@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/IamAngusU/ContextBridge/internal/config"
+	"github.com/IamAngusU/ContextBridge/internal/updater"
 	"github.com/IamAngusU/ContextBridge/internal/vectorstore"
 )
 
@@ -103,6 +104,46 @@ func TestBrowserJobRoundTrip(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("submission did not complete")
+	}
+}
+
+func TestAutomaticUpdatePreferenceEndpoint(t *testing.T) {
+	data := t.TempDir()
+	cfg := config.Config{
+		Version: 1,
+		Server:  config.Server{Listen: "127.0.0.1:32145", Token: "test-token-that-is-long-enough"},
+		Storage: config.Storage{Directory: data, Inbox: t.TempDir()},
+		Routes:  map[string]config.Route{"default": {Provider: "ollama"}},
+	}
+	server, err := NewServer(cfg, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := updater.New(cfg.Updates, data, "v0.1.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.SetUpdater(manager)
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+
+	request, _ := http.NewRequest(http.MethodPut, httpServer.URL+"/v1/settings/updates", bytes.NewBufferString(`{"enabled":false}`))
+	request.Header.Set("Authorization", "Bearer "+cfg.Server.Token)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("update preference returned %s", response.Status)
+	}
+	var status updater.Status
+	if err := json.NewDecoder(response.Body).Decode(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status.Enabled || manager.LocalStatus().Enabled {
+		t.Fatal("update preference was not persisted")
 	}
 }
 

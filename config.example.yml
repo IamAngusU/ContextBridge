@@ -12,6 +12,12 @@ storage:
 runtime:
   hardware_refresh_seconds: 10
 
+updates:
+  enabled: true
+  channel: stable
+  repository: IamAngusU/ContextBridge
+  check_interval_hours: 24
+
 routes:
   default:
     provider: ollama

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/IamAngusU/ContextBridge/internal/cluster"
+	"github.com/IamAngusU/ContextBridge/internal/updater"
 	"gopkg.in/yaml.v3"
 )
 
@@ -19,6 +20,7 @@ type Config struct {
 	Server          Server                    `yaml:"server"`
 	Storage         Storage                   `yaml:"storage"`
 	Runtime         Runtime                   `yaml:"runtime"`
+	Updates         updater.Settings          `yaml:"updates" json:"updates"`
 	Routes          map[string]Route          `yaml:"routes"`
 	Providers       Providers                 `yaml:"providers"`
 	Engines         map[string]Engine         `yaml:"engines"`
@@ -207,6 +209,9 @@ func (c Config) Validate() error {
 	}
 	if !strings.HasPrefix(c.Server.Listen, "127.0.0.1:") && !strings.HasPrefix(c.Server.Listen, "localhost:") {
 		return errors.New("server.listen must use localhost unless the source is reviewed and TLS is placed in front")
+	}
+	if err := c.Updates.Validate(); err != nil {
+		return err
 	}
 	if _, ok := c.Routes["default"]; !ok {
 		return errors.New("routes.default is required")
@@ -436,6 +441,7 @@ func applyDefaults(cfg *Config, base string) {
 	if cfg.Providers.Browser.LeaseSeconds == 0 {
 		cfg.Providers.Browser.LeaseSeconds = 90
 	}
+	cfg.Updates.ApplyDefaults()
 	for name, route := range cfg.Routes {
 		if route.TimeoutSeconds == 0 {
 			route.TimeoutSeconds = 180
@@ -543,6 +549,12 @@ storage:
 
 runtime:
   hardware_refresh_seconds: 10
+
+updates:
+  enabled: true
+  channel: stable
+  repository: IamAngusU/ContextBridge
+  check_interval_hours: 24
 
 routes:
   default:

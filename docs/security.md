@@ -16,6 +16,10 @@ Prompt injection cannot be solved by one instruction. ContextBridge therefore us
 
 Managed model and runtime downloads have two independent integrity boundaries. `llama.cpp` archives are accepted only with the SHA256 digest published on the official GitHub release asset. GGUF files are checked against Hugging Face LFS SHA256 metadata or an explicit manifest digest. Archive entries are path-normalized before extraction.
 
+ContextBridge application updates are handled by the Go core, not by dashboard JavaScript. Stable release archives must match both the release `SHA256SUMS` entry and the GitHub asset digest. The staged executable must start and report the expected version before it replaces the current executable. Replacement is atomic where the operating system permits it, and the previous executable remains available for rollback. A process-wide mutex and an owner-only cross-process lock prevent the service and scheduled updater from replacing the binary concurrently.
+
+The hosted installer endpoint records aggregate request counts and an HMAC fingerprint derived from a masked network prefix and shortened user-agent value. It does not store raw IP addresses, cookies, prompts, results, node identities, or model activity. This counter belongs to the hosted website only and is not part of the local runtime or self-hosted relay.
+
 Engine processes receive explicit argument arrays without a shell. Model output cannot alter process arguments, routes, executable paths, or GPU policy. Managed engines bind to localhost.
 
 Do not expose the local port directly to a network. Use an authenticated tunnel or a TLS reverse proxy with an additional access policy when a remote source must reach ContextBridge. Keep the YAML token and browser extension pairing private.

@@ -157,7 +157,29 @@ RestartSec=3
 [Install]
 WantedBy=default.target
 EOF
-  if systemctl --user daemon-reload 2>/dev/null && systemctl --user enable --now contextbridge.service 2>/dev/null; then
+  cat > "$unit_dir/contextbridge-update.service" <<EOF
+[Unit]
+Description=ContextBridge verified automatic update
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart="$BIN_DIR/contextbridge" update auto --config "$config"
+EOF
+  cat > "$unit_dir/contextbridge-update.timer" <<EOF
+[Unit]
+Description=Check for ContextBridge updates daily
+
+[Timer]
+OnBootSec=15m
+OnUnitActiveSec=24h
+RandomizedDelaySec=2h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+  if systemctl --user daemon-reload 2>/dev/null && systemctl --user enable --now contextbridge.service contextbridge-update.timer 2>/dev/null; then
     echo "ContextBridge user service enabled."
   else
     echo "The user service could not be enabled in this session."
@@ -166,6 +188,7 @@ EOF
 elif [ "$os" = "darwin" ]; then
   agent_dir="$HOME/Library/LaunchAgents"
   agent="$agent_dir/de.angusu.contextbridge.plist"
+  update_agent="$agent_dir/de.angusu.contextbridge.update.plist"
   mkdir -p "$agent_dir"
   cat > "$agent" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -179,8 +202,22 @@ elif [ "$os" = "darwin" ]; then
   <key>StandardErrorPath</key><string>$INSTALL_DIR/contextbridge-error.log</string>
 </dict></plist>
 EOF
+  cat > "$update_agent" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>de.angusu.contextbridge.update</string>
+  <key>ProgramArguments</key><array><string>$BIN_DIR/contextbridge</string><string>update</string><string>auto</string><string>--config</string><string>$config</string></array>
+  <key>StartInterval</key><integer>86400</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>$INSTALL_DIR/contextbridge-update.log</string>
+  <key>StandardErrorPath</key><string>$INSTALL_DIR/contextbridge-update-error.log</string>
+</dict></plist>
+EOF
   launchctl bootout "gui/$(id -u)" "$agent" >/dev/null 2>&1 || true
+  launchctl bootout "gui/$(id -u)" "$update_agent" >/dev/null 2>&1 || true
   if launchctl bootstrap "gui/$(id -u)" "$agent" >/dev/null 2>&1; then
+    launchctl bootstrap "gui/$(id -u)" "$update_agent" >/dev/null 2>&1 || true
     echo "ContextBridge launch agent enabled."
   else
     echo "Start ContextBridge with: $BIN_DIR/contextbridge run --config $config"

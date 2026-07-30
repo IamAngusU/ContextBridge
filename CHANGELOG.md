@@ -2,7 +2,7 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
-## Unreleased
+## 0.2.0 - 2026-07-30
 
 ### Added
 
@@ -27,6 +27,8 @@ All notable changes are documented here. ContextBridge follows semantic versioni
 - Optional X25519 and AES-256-GCM E2EE payloads bound to a reserved worker
 - Declarative multi-model pipelines with fixed routes, JSON templates, retries, timeouts, and bounded loops
 - Embedded one-file cluster dashboard and `relay`, `worker`, `pair`, `run`, and `cluster` CLI commands
+- Core-managed automatic updates with a dashboard toggle, daily OS jobs, checksum and asset-digest verification, staged execution, atomic activation, and rollback
+- Public ContextBridge welcome page with cached GitHub stars, release download totals, and privacy-preserving unique installer counts
 
 ### Changed
 

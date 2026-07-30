@@ -160,7 +160,7 @@ func (r *Relay) handlePairRequest(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("valid node_name and public_key are required"))
 		return
 	}
-	uri := strings.TrimRight(r.cfg.PublicURL, "/") + "/#pair"
+	uri := strings.TrimRight(r.cfg.PublicURL, "/") + "/dashboard/#pair"
 	response, err := r.store.CreatePairing(input, uri, r.cfg.PairingTTL)
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err)

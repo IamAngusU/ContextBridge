@@ -23,6 +23,8 @@ jobs:
       - run: go vet ./...
       - run: go build ./cmd/contextbridge
       - run: bash -n install.sh
+      - run: php -l web/index.php
+      - run: node --check internal/bridge/dashboard/dashboard.js
       - shell: pwsh
         run: "[scriptblock]::Create((Get-Content './install.ps1' -Raw)) | Out-Null"
       - run: ./scripts/package-extensions.sh

@@ -30,6 +30,7 @@ import (
 	"github.com/IamAngusU/ContextBridge/internal/llamaruntime"
 	"github.com/IamAngusU/ContextBridge/internal/modelregistry"
 	"github.com/IamAngusU/ContextBridge/internal/systeminfo"
+	"github.com/IamAngusU/ContextBridge/internal/updater"
 )
 
 var version = "dev"
@@ -74,6 +75,8 @@ func main() {
 		err = workerCommand(os.Args[2:])
 	case "cluster":
 		err = clusterCommand(os.Args[2:])
+	case "update":
+		err = updateCommand(os.Args[2:])
 	case "version", "--version", "-version":
 		fmt.Println(version)
 		return
@@ -107,6 +110,7 @@ Usage:
   contextbridge pair [--config path] [--relay URL] [--name NAME]
   contextbridge worker [--config path]
   contextbridge cluster status|submit|token|pairing [options]
+  contextbridge update status|check|apply|enable|disable|auto [options]
   contextbridge version`)
 }
 
@@ -139,8 +143,14 @@ func serveCommand(args []string) error {
 	if err != nil {
 		return err
 	}
+	updateManager, err := updater.New(cfg.Updates, cfg.Storage.Directory, version)
+	if err != nil {
+		return err
+	}
+	server.SetUpdater(updateManager)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	startUpdater(ctx, updateManager, logger)
 	logger.Printf("version %s", version)
 	logger.Printf("routes: %d, browser profiles: %d", len(cfg.Routes), len(cfg.BrowserProfiles))
 	return server.Run(ctx)
@@ -164,6 +174,12 @@ func runCommand(args []string) error {
 	if err != nil {
 		return err
 	}
+	updateManager, err := updater.New(cfg.Updates, cfg.Storage.Directory, version)
+	if err != nil {
+		return err
+	}
+	local.SetUpdater(updateManager)
+	startUpdater(ctx, updateManager, logger)
 	go func() { errorsCh <- local.Run(ctx) }()
 	components := 1
 	if cfg.Cluster.Relay.Enabled {
@@ -191,6 +207,109 @@ func runCommand(args []string) error {
 		}
 	}
 	return nil
+}
+
+func startUpdater(ctx context.Context, manager *updater.Manager, logger *log.Logger) {
+	go manager.Run(ctx, func(result updater.Result, err error) {
+		if err != nil {
+			logger.Printf("automatic update check: %v", err)
+			return
+		}
+		if !result.Applied {
+			return
+		}
+		logger.Printf("updated to %s; restarting the managed service", result.Status.CurrentVersion)
+		if err := updater.RestartCurrentProcess(); err != nil {
+			logger.Printf("restart handoff: %v", err)
+		}
+		os.Exit(75)
+	})
+}
+
+func updateCommand(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: contextbridge update status|check|apply|enable|disable|auto")
+	}
+	action := args[0]
+	flags := flag.NewFlagSet("update "+action, flag.ContinueOnError)
+	path := flags.String("config", defaultConfigPath(), "config path")
+	force := flags.Bool("force", false, "allow replacing a development build")
+	jsonOutput := flags.Bool("json", false, "print machine-readable JSON")
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	manager, err := updater.New(cfg.Updates, cfg.Storage.Directory, version)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	var value interface{}
+	switch action {
+	case "status":
+		value = manager.LocalStatus()
+	case "check":
+		status, checkErr := manager.Check(ctx)
+		value, err = status, checkErr
+	case "apply":
+		result, applyErr := manager.Apply(ctx, *force)
+		value, err = result, applyErr
+	case "auto":
+		result, autoErr := manager.Auto(ctx)
+		value, err = result, autoErr
+	case "enable", "disable":
+		status, setErr := manager.SetEnabled(action == "enable")
+		value, err = status, setErr
+	default:
+		return fmt.Errorf("unknown update command %s", action)
+	}
+	if *jsonOutput {
+		_ = json.NewEncoder(os.Stdout).Encode(value)
+	} else {
+		printUpdateResult(value)
+	}
+	return err
+}
+
+func printUpdateResult(value interface{}) {
+	raw, _ := json.Marshal(value)
+	var result struct {
+		Status  updater.Status `json:"status"`
+		Applied bool           `json:"applied"`
+	}
+	if json.Unmarshal(raw, &result) == nil && result.Status.Repository != "" {
+		fmt.Printf("Current: %s\n", result.Status.CurrentVersion)
+		fmt.Printf("Available: %s\n", emptyLabel(result.Status.AvailableVersion, "not checked"))
+		fmt.Printf("Automatic updates: %s\n", onOffLabel(result.Status.Enabled))
+		if result.Applied {
+			fmt.Println("The verified update was installed. The managed service will restart with the new version.")
+		}
+		return
+	}
+	var status updater.Status
+	if json.Unmarshal(raw, &status) == nil && status.Repository != "" {
+		fmt.Printf("Current: %s\n", status.CurrentVersion)
+		fmt.Printf("Available: %s\n", emptyLabel(status.AvailableVersion, "not checked"))
+		fmt.Printf("Automatic updates: %s\n", onOffLabel(status.Enabled))
+	}
+}
+
+func emptyLabel(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
+}
+
+func onOffLabel(value bool) string {
+	if value {
+		return "enabled"
+	}
+	return "disabled"
 }
 
 func submitCommand(args []string) error {
@@ -561,6 +680,11 @@ func relayCommand(args []string) error {
 	defer relay.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	updateManager, err := updater.New(cfg.Updates, cfg.Storage.Directory, version)
+	if err != nil {
+		return err
+	}
+	startUpdater(ctx, updateManager, logger)
 	return relay.Run(ctx)
 }
 
@@ -626,6 +750,11 @@ func workerCommand(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	updateManager, err := updater.New(cfg.Updates, cfg.Storage.Directory, version)
+	if err != nil {
+		return err
+	}
+	startUpdater(ctx, updateManager, log.New(os.Stdout, "ContextBridge worker  ", log.LstdFlags))
 	return worker.Run(ctx, func(format string, values ...interface{}) {
 		fmt.Printf(time.Now().Format("15:04:05")+"  "+format+"\n", values...)
 	})
@@ -756,7 +885,7 @@ func clusterDashboardCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	target := clusterBaseURL(cfg) + "/#token=" + url.QueryEscape(cfg.Cluster.Relay.AdminToken)
+	target := clusterBaseURL(cfg) + "/dashboard/#token=" + url.QueryEscape(cfg.Cluster.Relay.AdminToken)
 	if *noOpen {
 		fmt.Println(target)
 		return nil

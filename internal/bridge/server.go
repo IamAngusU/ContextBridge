@@ -20,6 +20,7 @@ import (
 	"unicode"
 
 	"github.com/IamAngusU/ContextBridge/internal/config"
+	"github.com/IamAngusU/ContextBridge/internal/updater"
 	"github.com/IamAngusU/ContextBridge/internal/vectorstore"
 )
 
@@ -28,8 +29,13 @@ type Server struct {
 	store     *Store
 	processor *Processor
 	runtime   *RuntimeManager
+	updates   *updater.Manager
 	rag       vectorstore.Store
 	logger    *log.Logger
+}
+
+func (s *Server) SetUpdater(manager *updater.Manager) {
+	s.updates = manager
 }
 
 func NewServer(cfg config.Config, logger *log.Logger) (*Server, error) {
@@ -62,6 +68,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/browser/jobs/next", s.auth(s.handleBrowserNext))
 	mux.HandleFunc("/v1/browser/heartbeat", s.auth(s.handleBrowserHeartbeat))
 	mux.HandleFunc("/v1/tunnel/heartbeat", s.auth(s.handleTunnelHeartbeat))
+	mux.HandleFunc("/v1/settings/updates", s.auth(s.handleUpdateSettings))
 	mux.HandleFunc("/v1/browser/jobs/", s.auth(s.handleBrowserJobAction))
 	mux.HandleFunc("/v1/browser/profiles", s.auth(s.handleProfiles))
 	mux.Handle("/", dashboardHandler())
@@ -192,6 +199,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"tunnel":    s.store.TunnelStatus(),
 		"runtime":   runtimeStatus,
 		"metrics":   s.store.Metrics(),
+		"updates":   updateStatus(s.updates),
 		"rag": map[string]interface{}{
 			"enabled": s.rag != nil, "backend": s.cfg.RAG.Backend,
 			"documents": ragCount(s.rag), "embedding_route": s.cfg.RAG.EmbeddingRoute,
@@ -207,6 +215,41 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"storage":  map[string]string{"directory": s.cfg.Storage.Directory, "inbox": s.cfg.Storage.Inbox, "models": s.cfg.Storage.Models},
 		"activity": s.store.Activity(),
 	})
+}
+
+func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
+	if s.updates == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "the update manager is unavailable"})
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, s.updates.LocalStatus())
+	case http.MethodPut:
+		var input struct {
+			Enabled *bool `json:"enabled"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&input); err != nil || input.Enabled == nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "enabled must be true or false"})
+			return
+		}
+		status, err := s.updates.SetEnabled(*input.Enabled)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "update preference could not be stored"})
+			return
+		}
+		writeJSON(w, http.StatusOK, status)
+	default:
+		w.Header().Set("Allow", "GET, PUT")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET or PUT required"})
+	}
+}
+
+func updateStatus(manager *updater.Manager) interface{} {
+	if manager == nil {
+		return nil
+	}
+	return manager.LocalStatus()
 }
 
 func (s *Server) handleTunnelHeartbeat(w http.ResponseWriter, r *http.Request) {
