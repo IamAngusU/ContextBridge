@@ -3,6 +3,7 @@
   "tenant_id": "tenant-42",
   "requirements": {
     "task": "generation",
+    "session_id": "support-case-42",
     "group": "default",
     "required_tags": ["private"],
     "min_free_vram_bytes": 4294967296
@@ -15,7 +16,9 @@
     "text": "Customer supplied content",
     "output": {
       "mode": "text",
-      "max_bytes": 8192
+      "max_bytes": 8192,
+      "artifacts": true,
+      "max_artifact_bytes": 6291456
     }
   },
   "priority": 10,

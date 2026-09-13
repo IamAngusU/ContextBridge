@@ -137,3 +137,24 @@ func TestStoreTracksProgressOnlyForAssignedPlaintextJob(t *testing.T) {
 		t.Fatalf("successful completion did not finalize progress: %#v", job.Progress)
 	}
 }
+
+func TestStoreKeepsSessionAffinityPrivateToProducer(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "cluster.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	job, err := store.CreateJob(SubmitRequest{OwnerSubject: "producer-a", Requirements: Requirements{Task: "generation", SessionID: "chat-42"}, Payload: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AssignJob(job.ID, "browser-node"); err != nil {
+		t.Fatal(err)
+	}
+	if node, ok := store.RecentSessionNode("producer-a", "chat-42"); !ok || node != "browser-node" {
+		t.Fatalf("session node was not found: %q %v", node, ok)
+	}
+	if _, ok := store.RecentSessionNode("producer-b", "chat-42"); ok {
+		t.Fatal("session affinity leaked across producer identities")
+	}
+}

@@ -56,6 +56,31 @@ type Worker struct {
 	hardwareAt time.Time
 }
 
+const (
+	WorkerConnecting   = "connecting"
+	WorkerRetrying     = "retrying"
+	WorkerConnected    = "connected"
+	WorkerJobStarted   = "job_started"
+	WorkerJobProgress  = "job_progress"
+	WorkerJobCompleted = "job_completed"
+	WorkerJobFailed    = "job_failed"
+)
+
+type WorkerEvent struct {
+	Kind      string
+	NodeName  string
+	Slots     int
+	Attempt   int
+	RetryIn   time.Duration
+	Error     string
+	JobID     string
+	Task      string
+	Phase     string
+	ComputeMS uint64
+}
+
+type WorkerReporter func(WorkerEvent)
+
 func LoadWorker(cfg WorkerConfig) (*Worker, error) {
 	if cfg.RelayURL == "" || cfg.IdentityFile == "" {
 		return nil, errors.New("relay URL and identity file are required")
@@ -157,22 +182,47 @@ func (w *Worker) Run(ctx context.Context, logger func(string, ...interface{})) e
 	if logger == nil {
 		logger = func(string, ...interface{}) {}
 	}
+	return w.RunWithEvents(ctx, func(event WorkerEvent) {
+		switch event.Kind {
+		case WorkerRetrying:
+			logger("worker connection ended: %s; retrying in %s", event.Error, event.RetryIn.Round(time.Millisecond))
+		case WorkerConnected:
+			logger("connected as %s with %d job slot(s)", event.NodeName, event.Slots)
+		case WorkerJobStarted:
+			logger("received %s for task %s", event.JobID, event.Task)
+		case WorkerJobFailed:
+			logger("job %s failed: %s", event.JobID, event.Error)
+		case WorkerJobCompleted:
+			logger("completed %s in %d ms", event.JobID, event.ComputeMS)
+		}
+	})
+}
+
+func (w *Worker) RunWithEvents(ctx context.Context, report WorkerReporter) error {
+	if report == nil {
+		report = func(WorkerEvent) {}
+	}
 	backoff := time.Second
+	attempt := 0
 	for ctx.Err() == nil {
+		attempt++
+		report(WorkerEvent{Kind: WorkerConnecting, NodeName: w.cfg.Name, Attempt: attempt})
 		connectedAt := time.Now()
-		err := w.connect(ctx, logger)
+		err := w.connect(ctx, report)
 		if ctx.Err() != nil {
 			return nil
 		}
-		logger("worker connection ended: %v", err)
 		if time.Since(connectedAt) >= 30*time.Second {
 			backoff = time.Second
+			attempt = 1
 		}
 		jitter := time.Duration(rand.Int63n(int64(backoff / 3)))
+		retryIn := backoff + jitter
+		report(WorkerEvent{Kind: WorkerRetrying, NodeName: w.cfg.Name, Attempt: attempt, RetryIn: retryIn, Error: err.Error()})
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-time.After(backoff + jitter):
+		case <-time.After(retryIn):
 		}
 		if backoff < 30*time.Second {
 			backoff *= 2
@@ -181,7 +231,7 @@ func (w *Worker) Run(ctx context.Context, logger func(string, ...interface{})) e
 	return nil
 }
 
-func (w *Worker) connect(ctx context.Context, logger func(string, ...interface{})) error {
+func (w *Worker) connect(ctx context.Context, report WorkerReporter) error {
 	capabilities := w.capabilities(ctx)
 	node := Node{ID: w.identity.NodeID, Name: w.cfg.Name, PublicKey: w.identity.PublicKey, Capabilities: capabilities, State: "online", Connected: true, LastSeen: time.Now().UTC()}
 	target, err := websocketURL(endpoint(w.cfg.RelayURL, "/v1/cluster/workers/connect"))
@@ -206,7 +256,7 @@ func (w *Worker) connect(ctx context.Context, logger func(string, ...interface{}
 	if err := write(WireMessage{Type: "hello", Node: &node}); err != nil {
 		return err
 	}
-	logger("connected as %s with %d job slot(s)", node.Name, capabilities.MaxConcurrent)
+	report(WorkerEvent{Kind: WorkerConnected, NodeName: node.Name, Slots: capabilities.MaxConcurrent})
 	heartbeatCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go func() {
@@ -237,16 +287,17 @@ func (w *Worker) connect(ctx context.Context, logger func(string, ...interface{}
 		go func() {
 			defer func() { <-w.sem; w.changeRunning(-1) }()
 			_ = write(WireMessage{Type: "started", JobID: job.ID})
-			logger("received %s for task %s", job.ID, job.Requirements.Task)
+			report(WorkerEvent{Kind: WorkerJobStarted, NodeName: node.Name, JobID: job.ID, Task: job.Requirements.Task})
 			result, sealed, usage, runErr := w.execute(ctx, job, func(progress JobProgress) {
 				_ = write(WireMessage{Type: "progress", JobID: job.ID, Progress: &progress})
+				report(WorkerEvent{Kind: WorkerJobProgress, NodeName: node.Name, JobID: job.ID, Task: job.Requirements.Task, Phase: progress.Phase})
 			})
 			errorText := ""
 			if runErr != nil {
 				errorText = runErr.Error()
-				logger("job %s failed: %v", job.ID, runErr)
+				report(WorkerEvent{Kind: WorkerJobFailed, NodeName: node.Name, JobID: job.ID, Task: job.Requirements.Task, Error: errorText})
 			} else {
-				logger("completed %s in %d ms", job.ID, usage.ComputeMS)
+				report(WorkerEvent{Kind: WorkerJobCompleted, NodeName: node.Name, JobID: job.ID, Task: job.Requirements.Task, ComputeMS: usage.ComputeMS})
 			}
 			_ = write(WireMessage{Type: "result", JobID: job.ID, Result: result, SealedResult: sealed, Usage: usage, Error: errorText})
 		}()

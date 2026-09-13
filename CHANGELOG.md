@@ -2,6 +2,20 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.4.4 - 2026-09-13
+
+### Added
+
+- `contextbridge cluster chat`, a streaming terminal conversation with automatic browser-session affinity
+- producer-scoped `requirements.session_id` routing so follow-up turns prefer the same browser worker without disabling failover
+- bounded response artifacts for generated images, download links, and code files, with SHA-256 normalization and safe local materialization
+- `submit --artifacts` and `cluster submit --artifacts`; interactive chat saves artifacts automatically
+
+### Changed
+
+- Reconnect log floods are now an animated terminal status with an indeterminate progress bar, compact lifecycle events, and deduplicated non-interactive retry logs
+- Zero-GPU scheduling and parallel worker placement remain available while ordered worker preferences are deterministic
+
 ## 0.4.3 - 2026-09-13
 
 ### Fixed

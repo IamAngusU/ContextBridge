@@ -297,7 +297,7 @@ async function processWork(cfg, work) {
     const results = await api.scripting.executeScript({
       target: { tabId: cfg.tabId },
       func: automate,
-      args: [work.job, effectiveProfile]
+      args: [work.job, effectiveProfile, work.deadline]
     });
     const answer = results?.[0]?.result;
     if (!answer?.ok) throw new Error(answer?.error || 'No browser response was captured');
@@ -310,7 +310,7 @@ async function processWork(cfg, work) {
         busy: false
       });
     }
-    decision = parseOutput(answer.text, work.job.output || {}, effectiveProfile.label || 'browser');
+    decision = parseOutput(answer.text, work.job.output || {}, effectiveProfile.label || 'browser', answer.artifacts || []);
   } catch (error) {
     const mode = outputMode(work.job.output || {});
     decision = mode === 'decision'
@@ -387,7 +387,7 @@ async function flushPendingCompletions(cfg) {
   }
 }
 
-function automate(job, profile) {
+function automate(job, profile, jobDeadline) {
   const selectors = profile.selectors || {};
   const isVisible = (element) => Boolean(element && (element.offsetWidth || element.offsetHeight || element.getClientRects().length));
   const first = (items) => (items || []).map((selector) => {
@@ -444,6 +444,102 @@ function automate(job, profile) {
     element.dispatchEvent(new Event('change', { bubbles: true }));
   };
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+	const cleanFileName = (value, fallback) => {
+		const clean = String(value || '').split(/[\\/]/).pop().replace(/[\u0000-\u001f<>:"|?*]/g, '-').trim().slice(0, 180);
+		return clean && clean !== '.' ? clean : fallback;
+	};
+	const extensionFor = (mediaType) => ({
+		'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif',
+		'image/svg+xml': 'svg', 'application/pdf': 'pdf', 'application/zip': 'zip',
+		'application/json': 'json', 'text/csv': 'csv', 'text/plain': 'txt'
+	}[String(mediaType || '').toLowerCase()] || 'bin');
+	const mediaTypeFor = (url, fallback) => {
+		const value = String(url || '').split(/[?#]/)[0].toLowerCase();
+		if (value.endsWith('.png')) return 'image/png';
+		if (/\.jpe?g$/.test(value)) return 'image/jpeg';
+		if (value.endsWith('.webp')) return 'image/webp';
+		if (value.endsWith('.gif')) return 'image/gif';
+		if (value.endsWith('.svg')) return 'image/svg+xml';
+		if (value.endsWith('.pdf')) return 'application/pdf';
+		if (value.endsWith('.zip')) return 'application/zip';
+		if (value.endsWith('.json')) return 'application/json';
+		if (value.endsWith('.csv')) return 'text/csv';
+		if (/\.(txt|md|js|ts|tsx|jsx|py|go|rs|java|c|cpp|h|css|html|xml|ya?ml)$/.test(value)) return 'text/plain';
+		return fallback || 'application/octet-stream';
+	};
+	const bytesToBase64 = (bytes) => {
+		let binary = '';
+		for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+			binary += String.fromCharCode(...bytes.subarray(offset, Math.min(offset + 0x8000, bytes.length)));
+		}
+		return btoa(binary);
+	};
+	const digestHex = async (bytes) => {
+		const digest = await crypto.subtle.digest('SHA-256', bytes);
+		return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join('');
+	};
+	const collectArtifacts = async (responseElement, spec) => {
+		if (!spec?.artifacts || !responseElement) return [];
+		const maxBytes = Math.max(1024, Math.min(Number(spec.max_artifact_bytes) || 6 * 1024 * 1024, 6 * 1024 * 1024));
+		const candidates = [];
+		const seen = new Set();
+		const add = (url, name, mediaType) => {
+			url = String(url || '').trim();
+			if (!url || seen.has(url) || !/^(https:|blob:|data:)/i.test(url)) return;
+			seen.add(url);
+			candidates.push({ url, name, mediaType });
+		};
+		for (const image of responseElement.querySelectorAll('img')) {
+			if ((image.naturalWidth && image.naturalWidth < 128) || (image.naturalHeight && image.naturalHeight < 128)) continue;
+			const source = image.currentSrc || image.src;
+			const mediaType = mediaTypeFor(source, 'image/png');
+			let name = '';
+			try { name = new URL(source, location.href).pathname.split('/').pop(); } catch (_) {}
+			add(source, cleanFileName(name, `image-${candidates.length + 1}.${extensionFor(mediaType)}`), mediaType);
+		}
+		for (const anchor of responseElement.querySelectorAll('a[href]')) {
+			const href = anchor.href;
+			const label = `${anchor.download || ''} ${anchor.getAttribute('aria-label') || ''} ${visibleText(anchor)}`.toLowerCase();
+			const path = (() => { try { return new URL(href, location.href).pathname; } catch (_) { return ''; } })();
+			if (!anchor.hasAttribute('download') && !/download|herunterladen|save|speichern/.test(label) && !/\.(pdf|zip|json|csv|txt|md|docx|xlsx|pptx|png|jpe?g|webp|gif)(?:$|[?#])/i.test(href)) continue;
+			const mediaType = mediaTypeFor(href);
+			add(href, cleanFileName(anchor.download || path.split('/').pop(), `file-${candidates.length + 1}.${extensionFor(mediaType)}`), mediaType);
+		}
+		const artifacts = [];
+		let total = 0;
+		for (const candidate of candidates.slice(0, 4)) {
+			const artifact = { name: candidate.name, media_type: candidate.mediaType };
+			try {
+				const response = await fetch(candidate.url, { credentials: 'include' });
+				if (!response.ok) throw new Error(`HTTP ${response.status}`);
+				const blob = await response.blob();
+				if (!blob.size || total + blob.size > maxBytes) throw new Error('artifact exceeds transfer limit');
+				const bytes = new Uint8Array(await blob.arrayBuffer());
+				artifact.media_type = mediaTypeFor(candidate.url, blob.type || candidate.mediaType);
+				artifact.size = bytes.length;
+				artifact.sha256 = await digestHex(bytes);
+				artifact.data_base64 = bytesToBase64(bytes);
+				total += bytes.length;
+			} catch (_) {
+				if (/^https:/i.test(candidate.url)) artifact.url = candidate.url;
+			}
+			if (artifact.data_base64 || artifact.url) artifacts.push(artifact);
+		}
+		for (const code of [...responseElement.querySelectorAll('pre code')].slice(0, Math.max(0, 4 - artifacts.length))) {
+			const content = String(code.textContent || '');
+			if (!content.trim()) continue;
+			const bytes = new TextEncoder().encode(content);
+			if (total + bytes.length > maxBytes) continue;
+			const language = [...code.classList].map((item) => item.match(/(?:language-|lang-)([a-z0-9_+-]+)/i)?.[1]).find(Boolean) || 'txt';
+			artifacts.push({
+				name: cleanFileName(`code-${artifacts.length + 1}.${language}`, `code-${artifacts.length + 1}.txt`),
+				media_type: 'text/plain', size: bytes.length,
+				sha256: await digestHex(bytes), data_base64: bytesToBase64(bytes)
+			});
+			total += bytes.length;
+		}
+		return artifacts;
+	};
 
   return new Promise(async (resolve) => {
     try {
@@ -472,7 +568,11 @@ function automate(job, profile) {
         input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
       }
 
-      const deadline = Date.now() + 120000;
+		const suppliedDeadline = Date.parse(jobDeadline || '');
+		const defaultWait = job.output?.artifacts ? 300000 : 180000;
+		const deadline = Number.isFinite(suppliedDeadline)
+			? Math.min(Date.now() + defaultWait, suppliedDeadline - 1000)
+			: Date.now() + defaultWait;
       let stableText = '';
       let stableSince = 0;
       let sawBusy = false;
@@ -484,9 +584,14 @@ function automate(job, profile) {
         const changedResponse = latestElement !== previousElement || responses.length > before.length || latest !== previousText;
         const busy = pageBusy();
         sawBusy = sawBusy || busy;
-        if (!latest || !changedResponse) continue;
-        if (latest !== stableText) {
-          stableText = latest;
+		const artifactCount = job.output?.artifacts && latestElement
+			? [...latestElement.querySelectorAll('img')].filter((image) => (!image.naturalWidth || image.naturalWidth >= 128) && (!image.naturalHeight || image.naturalHeight >= 128)).length
+				+ latestElement.querySelectorAll('a[download], pre code').length
+			: 0;
+		const stableValue = latest || (artifactCount ? `artifact:${artifactCount}` : '');
+		if (!stableValue || !changedResponse) continue;
+		if (stableValue !== stableText) {
+			stableText = stableValue;
           stableSince = Date.now();
           continue;
         }
@@ -494,7 +599,8 @@ function automate(job, profile) {
         const structured = mode === 'text' || ((latest.includes('{') && latest.includes('}')) || (latest.includes('[') && latest.includes(']')));
         const stableFor = sawBusy ? 1300 : 2600;
         if (Date.now() - stableSince >= stableFor && structured && !busy) {
-          resolve({ ok: true, text: latest });
+		  const artifacts = await collectArtifacts(latestElement, job.output || {});
+		  resolve({ ok: true, text: latest || `Generated ${artifacts.length} artifact(s).`, artifacts });
           return;
         }
       }
@@ -570,11 +676,11 @@ function parseDecision(text, model) {
   }
 }
 
-function parseOutput(text, spec, model) {
+function parseOutput(text, spec, model, artifacts = []) {
   const mode = outputMode(spec);
-  if (mode === 'decision') return parseDecision(text, model);
+	if (mode === 'decision') return { ...parseDecision(text, model), artifacts };
   const clean = String(text || '').trim();
-  if (mode === 'text') return { mode, text: clean, model };
+	if (mode === 'text') return { mode, text: clean, model, artifacts };
   try {
     const objectStart = clean.indexOf('{');
     const arrayStart = clean.indexOf('[');
@@ -582,9 +688,9 @@ function parseOutput(text, spec, model) {
     const end = start >= 0 && clean[start] === '[' ? clean.lastIndexOf(']') : clean.lastIndexOf('}');
     if (start < 0 || end <= start) throw new Error('No JSON value');
     const json = JSON.parse(clean.slice(start, end + 1));
-    return { mode, json, model };
+	return { mode, json, model, artifacts };
   } catch (_) {
-    return { mode, error: 'browser_invalid_json', model };
+	return { mode, error: 'browser_invalid_json', model, artifacts };
   }
 }
 

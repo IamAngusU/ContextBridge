@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"encoding/base64"
 	"testing"
 	"time"
 
@@ -11,6 +12,24 @@ func TestNormalizeDecisionNeverBlocks(t *testing.T) {
 	decision := NormalizeDecision([]byte(`{"verdict":"block","flags":["hate"],"confidence":0.9}`), "test", "model", time.Millisecond)
 	if decision.Verdict != "review" {
 		t.Fatalf("expected review, got %s", decision.Verdict)
+	}
+}
+
+func TestNormalizeBrowserArtifactsRecomputesIntegrityAndBounds(t *testing.T) {
+	data := []byte("generated file")
+	raw := []byte(`{"mode":"text","text":"done","artifacts":[{"name":"../answer.txt","media_type":"text/plain","size":999,"sha256":"forged","data_base64":"` + base64.StdEncoding.EncodeToString(data) + `"},{"name":"ignored.exe","media_type":"application/x-msdownload","data_base64":"AA=="}]}`)
+	output := NormalizeOutput(raw, OutputSpec{Mode: "text", Artifacts: true}, "browser", "tab", time.Millisecond)
+	if len(output.Artifacts) != 1 {
+		t.Fatalf("expected one safe artifact, got %#v", output.Artifacts)
+	}
+	artifact := output.Artifacts[0]
+	if artifact.Name != "answer.txt" || artifact.Size != len(data) || len(artifact.SHA256) != 64 {
+		t.Fatalf("artifact was not normalized: %#v", artifact)
+	}
+
+	withoutOptIn := NormalizeOutput(raw, OutputSpec{Mode: "text"}, "browser", "tab", time.Millisecond)
+	if len(withoutOptIn.Artifacts) != 0 {
+		t.Fatal("artifacts must require explicit output.artifacts opt-in")
 	}
 }
 

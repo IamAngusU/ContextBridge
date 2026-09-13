@@ -49,8 +49,13 @@ func RankWithEstimate(nodes []Node, requirements Requirements, estimatedVRAM uin
 				score += 8
 			}
 		}
-		if contains(requirements.PreferredNodes, node.ID) || contains(requirements.PreferredNodes, node.Name) {
-			score -= 25
+		for index, preferred := range requirements.PreferredNodes {
+			if preferred == node.ID || preferred == node.Name {
+				// The first preference is strongest. Relay-injected session
+				// affinity therefore wins ties without becoming a hard lock.
+				score -= math.Max(10, 30-float64(index)*3)
+				break
+			}
 		}
 		candidates = append(candidates, Candidate{Node: node, Score: score})
 	}

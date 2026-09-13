@@ -1,9 +1,15 @@
 package bridge
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/IamAngusU/ContextBridge/internal/vectorstore"
@@ -31,9 +37,24 @@ type Job struct {
 }
 
 type OutputSpec struct {
-	Mode         string   `json:"mode,omitempty"`
-	RequiredKeys []string `json:"required_keys,omitempty"`
-	MaxBytes     int      `json:"max_bytes,omitempty"`
+	Mode             string   `json:"mode,omitempty"`
+	RequiredKeys     []string `json:"required_keys,omitempty"`
+	MaxBytes         int      `json:"max_bytes,omitempty"`
+	Artifacts        bool     `json:"artifacts,omitempty"`
+	MaxArtifactBytes int      `json:"max_artifact_bytes,omitempty"`
+}
+
+// Artifact is a file or image found in the final browser response. DataBase64
+// is present when the browser can read the resource directly. URL is retained
+// as a fallback for provider-hosted files that require the user's browser
+// session or are too large to embed.
+type Artifact struct {
+	Name       string `json:"name"`
+	MediaType  string `json:"media_type,omitempty"`
+	Size       int    `json:"size,omitempty"`
+	SHA256     string `json:"sha256,omitempty"`
+	DataBase64 string `json:"data_base64,omitempty"`
+	URL        string `json:"url,omitempty"`
 }
 
 type Decision struct {
@@ -68,6 +89,7 @@ type Output struct {
 	InputTokens  uint64              `json:"input_tokens,omitempty"`
 	OutputTokens uint64              `json:"output_tokens,omitempty"`
 	TotalTokens  uint64              `json:"total_tokens,omitempty"`
+	Artifacts    []Artifact          `json:"artifacts,omitempty"`
 	Error        string              `json:"error,omitempty"`
 }
 
@@ -126,11 +148,15 @@ func NormalizeDecision(raw []byte, provider, model string, latency time.Duration
 
 func NormalizeOutput(raw []byte, spec OutputSpec, provider, model string, latency time.Duration) Output {
 	mode := outputMode(spec)
+	var artifacts []Artifact
+	var envelope Output
+	if json.Unmarshal(raw, &envelope) == nil {
+		artifacts = NormalizeArtifacts(envelope.Artifacts, spec)
+	}
 	if mode == "decision" {
 		decision := NormalizeDecision(raw, provider, model, latency)
-		return Output{Mode: mode, Decision: &decision, Model: decision.Model, Provider: provider, LatencyMS: decision.LatencyMS}
+		return Output{Mode: mode, Decision: &decision, Model: decision.Model, Provider: provider, LatencyMS: decision.LatencyMS, Artifacts: artifacts}
 	}
-	var envelope Output
 	if json.Unmarshal(raw, &envelope) == nil && envelope.Mode == mode {
 		if envelope.Error != "" {
 			return OutputError(mode, provider, model, envelope.Error, latency)
@@ -151,7 +177,7 @@ func NormalizeOutput(raw []byte, spec OutputSpec, provider, model string, latenc
 		if clean == "" {
 			return OutputError(mode, provider, model, "empty_response", latency)
 		}
-		return Output{Mode: mode, Text: clean, Model: model, Provider: provider, LatencyMS: latency.Milliseconds()}
+		return Output{Mode: mode, Text: clean, Model: model, Provider: provider, LatencyMS: latency.Milliseconds(), Artifacts: artifacts}
 	}
 
 	if start := strings.IndexAny(clean, "[{"); start >= 0 {
@@ -179,7 +205,94 @@ func NormalizeOutput(raw []byte, spec OutputSpec, provider, model string, latenc
 			}
 		}
 	}
-	return Output{Mode: mode, JSON: json.RawMessage(clean), Model: model, Provider: provider, LatencyMS: latency.Milliseconds()}
+	return Output{Mode: mode, JSON: json.RawMessage(clean), Model: model, Provider: provider, LatencyMS: latency.Milliseconds(), Artifacts: artifacts}
+}
+
+// NormalizeArtifacts applies the protocol's bounded, deterministic artifact
+// rules. Invalid entries are omitted without discarding an otherwise useful
+// model answer.
+func NormalizeArtifacts(input []Artifact, spec OutputSpec) []Artifact {
+	if !spec.Artifacts || len(input) == 0 {
+		return nil
+	}
+	limit := spec.MaxArtifactBytes
+	if limit <= 0 || limit > 6<<20 {
+		limit = 6 << 20
+	}
+	result := make([]Artifact, 0, min(len(input), 4))
+	total := 0
+	for _, item := range input {
+		if len(result) == 4 {
+			break
+		}
+		item.Name = artifactName(item.Name, len(result)+1)
+		item.MediaType = strings.ToLower(strings.TrimSpace(item.MediaType))
+		if len(item.MediaType) > 100 || !allowedArtifactMediaType(item.MediaType) {
+			continue
+		}
+		item.URL = safeArtifactURL(item.URL)
+		if item.DataBase64 != "" {
+			decoded, err := base64.StdEncoding.DecodeString(item.DataBase64)
+			if err != nil || len(decoded) == 0 || total+len(decoded) > limit {
+				item.DataBase64 = ""
+				item.Size = 0
+				item.SHA256 = ""
+			} else {
+				total += len(decoded)
+				item.Size = len(decoded)
+				digest := sha256.Sum256(decoded)
+				item.SHA256 = fmt.Sprintf("%x", digest[:])
+			}
+		}
+		if item.DataBase64 == "" && item.URL == "" {
+			continue
+		}
+		result = append(result, item)
+	}
+	return result
+}
+
+func artifactName(value string, index int) string {
+	value = strings.TrimSpace(strings.ReplaceAll(value, "\\", "/"))
+	value = filepath.Base(value)
+	value = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || r == '/' || r == '\\' {
+			return -1
+		}
+		return r
+	}, value)
+	value = truncateUTF8(value, 180)
+	if value == "" || value == "." {
+		return fmt.Sprintf("artifact-%d", index)
+	}
+	return value
+}
+
+func safeArtifactURL(value string) string {
+	if value == "" || len(value) > 4096 {
+		return ""
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
+		return ""
+	}
+	parsed.Fragment = ""
+	return parsed.String()
+}
+
+func allowedArtifactMediaType(value string) bool {
+	if strings.HasPrefix(value, "image/") || strings.HasPrefix(value, "text/") {
+		return true
+	}
+	switch value {
+	case "application/pdf", "application/zip", "application/json", "application/octet-stream",
+		"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+		"application/vnd.openxmlformats-officedocument.presentationml.presentation":
+		return true
+	default:
+		return false
+	}
 }
 
 func OutputError(mode, provider, model, message string, latency time.Duration) Output {

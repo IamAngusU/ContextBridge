@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -57,6 +58,13 @@ func TestOutputModelComesFromTrustedProviderConfig(t *testing.T) {
 	output := NormalizeOutput([]byte(`{"mode":"text","text":"ok","model":"forged-model"}`), OutputSpec{Mode: "text"}, "ollama", "actual-local-model", time.Second)
 	if output.Model != "actual-local-model" {
 		t.Fatalf("model metadata was not trusted: %#v", output)
+	}
+}
+
+func TestTrustedPromptAllowsExplicitArtifactCreation(t *testing.T) {
+	prompt := trustedPrompt(Job{Prompt: "Create an image", Output: OutputSpec{Mode: "text", Artifacts: true}})
+	if !strings.Contains(prompt, "create images or downloadable files") {
+		t.Fatalf("artifact-capable browser prompt was constrained to text: %s", prompt)
 	}
 }
 

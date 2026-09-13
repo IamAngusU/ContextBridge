@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -47,6 +49,7 @@ func TestConfigSaveRoundTripCluster(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg.Cluster.Relay.Enabled = true
+	cfg.Cluster.ClientToken = "cb_producer_secret-value-for-test"
 	cfg.Cluster.Pipelines["two_step"] = cluster.Pipeline{Steps: []cluster.PipelineStep{{Name: "first", Requirements: cluster.Requirements{Task: "generation"}, Input: "${input}"}}}
 	if err := Save(path, cfg); err != nil {
 		t.Fatal(err)
@@ -55,8 +58,12 @@ func TestConfigSaveRoundTripCluster(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reloaded.Cluster.Relay.Enabled || len(reloaded.Cluster.Pipelines["two_step"].Steps) != 1 {
+	if !reloaded.Cluster.Relay.Enabled || reloaded.Cluster.ClientToken != cfg.Cluster.ClientToken || len(reloaded.Cluster.Pipelines["two_step"].Steps) != 1 {
 		t.Fatal("cluster config did not survive save")
+	}
+	public, err := json.Marshal(reloaded)
+	if err != nil || bytes.Contains(public, []byte(cfg.Cluster.ClientToken)) {
+		t.Fatal("client token leaked through the public JSON config shape")
 	}
 }
 

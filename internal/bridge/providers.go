@@ -404,7 +404,11 @@ Never return block or reject. Use review when uncertain.`
 			responseContract += " The top-level object must contain these keys: " + strings.Join(job.Output.RequiredKeys, ", ") + "."
 		}
 	case "text":
-		responseContract = "Return only the requested plain text with no markdown fences or surrounding commentary."
+		if job.Output.Artifacts {
+			responseContract = "Complete the requested task. You may create images or downloadable files when asked. Also return a concise plain-text confirmation or explanation."
+		} else {
+			responseContract = "Return only the requested plain text with no markdown fences or surrounding commentary."
+		}
 	case "embedding":
 		responseContract = "Return no prose. This task is handled by the configured embedding endpoint."
 	}

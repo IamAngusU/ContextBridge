@@ -60,3 +60,15 @@ func TestProviderRequirementSelectsReadyBrowserWorker(t *testing.T) {
 		t.Fatalf("browser provider requirement was not enforced: %#v", ranked)
 	}
 }
+
+func TestFirstPreferredNodeWinsEqualLoad(t *testing.T) {
+	now := time.Now().UTC()
+	nodes := []Node{
+		{ID: "node-a", Connected: true, LastSeen: now, Capabilities: Capabilities{Tasks: []string{"generation"}, MaxConcurrent: 1}},
+		{ID: "node-b", Connected: true, LastSeen: now, Capabilities: Capabilities{Tasks: []string{"generation"}, MaxConcurrent: 1}},
+	}
+	ranked := Rank(nodes, Requirements{Task: "generation", PreferredNodes: []string{"node-b"}})
+	if len(ranked) != 2 || ranked[0].Node.ID != "node-b" {
+		t.Fatalf("preferred node did not win: %#v", ranked)
+	}
+}

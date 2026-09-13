@@ -421,7 +421,7 @@ func (s *Server) handleBrowserJobAction(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var raw json.RawMessage
-	if err := decodeJSON(r.Body, &raw, 1<<20); err != nil {
+	if err := decodeJSON(r.Body, &raw, 12<<20); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -659,6 +659,9 @@ func validateJob(job Job) error {
 	}
 	if job.Output.MaxBytes != 0 && (job.Output.MaxBytes < 256 || job.Output.MaxBytes > 1<<20) {
 		return errors.New("output.max_bytes must be between 256 and 1048576")
+	}
+	if job.Output.MaxArtifactBytes != 0 && (job.Output.MaxArtifactBytes < 1024 || job.Output.MaxArtifactBytes > 6<<20) {
+		return errors.New("output.max_artifact_bytes must be between 1024 and 6291456")
 	}
 	if len(job.Output.RequiredKeys) > 50 {
 		return errors.New("output.required_keys accepts at most 50 keys")

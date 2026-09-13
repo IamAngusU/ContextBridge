@@ -108,6 +108,9 @@ rag:
   max_documents: 10000
 
 cluster:
+  # Optional scoped producer credential used by `cluster submit` and `cluster chat`.
+  # Prefer an environment expansion in real deployments.
+  client_token: ""
   relay:
     enabled: false
     listen: 127.0.0.1:32150

@@ -23,6 +23,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/IamAngusU/ContextBridge/internal/bridge"
 	"github.com/IamAngusU/ContextBridge/internal/cluster"
@@ -30,6 +31,7 @@ import (
 	"github.com/IamAngusU/ContextBridge/internal/llamaruntime"
 	"github.com/IamAngusU/ContextBridge/internal/modelregistry"
 	"github.com/IamAngusU/ContextBridge/internal/systeminfo"
+	"github.com/IamAngusU/ContextBridge/internal/terminalui"
 	"github.com/IamAngusU/ContextBridge/internal/updater"
 )
 
@@ -112,7 +114,7 @@ Usage:
   contextbridge relay [--config path]
   contextbridge pair [--config path] [--relay URL] [--name NAME]
   contextbridge worker [--config path]
-  contextbridge cluster status|submit|token|pairing [options]
+  contextbridge cluster status|submit|chat|login|token|pairing [options]
   contextbridge update status|check|apply|enable|disable|auto [options]
   contextbridge version`)
 }
@@ -141,7 +143,9 @@ func serveCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	logger := log.New(os.Stdout, "ContextBridge  ", log.LstdFlags)
+	session := terminalui.New(os.Stdout)
+	defer session.Close()
+	logger := log.New(session, "", 0)
 	server, err := bridge.NewServer(cfg, logger)
 	if err != nil {
 		return err
@@ -172,7 +176,9 @@ func runCommand(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	errorsCh := make(chan error, 3)
-	logger := log.New(os.Stdout, "ContextBridge  ", log.LstdFlags)
+	session := terminalui.New(os.Stdout)
+	defer session.Close()
+	logger := log.New(session, "", 0)
 	local, err := bridge.NewServer(cfg, logger)
 	if err != nil {
 		return err
@@ -183,26 +189,32 @@ func runCommand(args []string) error {
 	}
 	local.SetUpdater(updateManager)
 	startUpdater(ctx, updateManager, logger)
-	go func() { errorsCh <- local.Run(ctx) }()
 	components := 1
+	var relay *cluster.Relay
+	var worker *cluster.Worker
 	if cfg.Cluster.Relay.Enabled {
-		relay, err := cluster.NewRelay(relayConfig(cfg), logger)
+		relay, err = cluster.NewRelay(relayConfig(cfg), logger)
 		if err != nil {
 			return err
 		}
 		defer relay.Close()
 		components++
-		go func() { errorsCh <- relay.Run(ctx) }()
 	}
 	if cfg.Cluster.Worker.Enabled {
-		worker, err := configuredWorker(cfg)
+		worker, err = configuredWorker(cfg)
 		if err != nil {
 			return err
 		}
 		components++
-		go func() { errorsCh <- worker.Run(ctx, logger.Printf) }()
 	}
-	logger.Printf("running %d component(s): local bridge%s%s", components, enabledLabel(cfg.Cluster.Relay.Enabled, ", relay"), enabledLabel(cfg.Cluster.Worker.Enabled, ", worker"))
+	session.Banner(version, fmt.Sprintf("%d components · local bridge%s%s", components, enabledLabel(cfg.Cluster.Relay.Enabled, " · relay"), enabledLabel(cfg.Cluster.Worker.Enabled, " · worker")))
+	go func() { errorsCh <- local.Run(ctx) }()
+	if relay != nil {
+		go func() { errorsCh <- relay.Run(ctx) }()
+	}
+	if worker != nil {
+		go func() { errorsCh <- worker.RunWithEvents(ctx, session.HandleWorker) }()
+	}
 	for i := 0; i < components; i++ {
 		if err := <-errorsCh; err != nil {
 			stop()
@@ -319,6 +331,7 @@ func submitCommand(args []string) error {
 	flags := flag.NewFlagSet("submit", flag.ContinueOnError)
 	path := flags.String("config", defaultConfigPath(), "config path")
 	jobPath := flags.String("file", "", "job JSON file")
+	artifactDir := flags.String("artifacts", "", "save returned images and files in this directory")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -347,6 +360,11 @@ func submitCommand(args []string) error {
 		return json.NewEncoder(os.Stdout).Encode(submission.Decision)
 	}
 	if submission.Output != nil {
+		paths, references, err := saveOutputArtifacts(submission.Output, *artifactDir)
+		if err != nil {
+			return err
+		}
+		reportSavedArtifacts(paths, references)
 		return json.NewEncoder(os.Stdout).Encode(submission.Output)
 	}
 	return errors.New("bridge returned no output")
@@ -757,10 +775,12 @@ func workerCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	startUpdater(ctx, updateManager, log.New(os.Stdout, "ContextBridge worker  ", log.LstdFlags))
-	return worker.Run(ctx, func(format string, values ...interface{}) {
-		fmt.Printf(time.Now().Format("15:04:05")+"  "+format+"\n", values...)
-	})
+	session := terminalui.New(os.Stdout)
+	defer session.Close()
+	logger := log.New(session, "", 0)
+	startUpdater(ctx, updateManager, logger)
+	session.Banner(version, "worker · "+name)
+	return worker.RunWithEvents(ctx, session.HandleWorker)
 }
 
 func relayConfig(cfg config.Config) cluster.RelayConfig {
@@ -793,13 +813,17 @@ func freeLocalAddress() (string, error) {
 
 func clusterCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: contextbridge cluster status|submit|token|pairing")
+		return errors.New("usage: contextbridge cluster status|submit|chat|login|token|pairing")
 	}
 	switch args[0] {
 	case "status":
 		return clusterStatusCommand(args[1:])
 	case "submit":
 		return clusterSubmitCommand(args[1:])
+	case "chat":
+		return clusterChatCommand(args[1:])
+	case "login":
+		return clusterLoginCommand(args[1:])
 	case "token":
 		return clusterTokenCommand(args[1:])
 	case "pairing":
@@ -961,6 +985,7 @@ func clusterSubmitCommand(args []string) error {
 	token := flags.String("token", "", "producer token; defaults to local admin token")
 	wait := flags.Bool("wait", true, "wait for a final result")
 	stream := flags.Bool("stream", false, "print progressive browser text to stderr while waiting")
+	artifactDir := flags.String("artifacts", "", "save returned images and files in this directory")
 	sealed := flags.Bool("e2ee", false, "encrypt payload for the selected worker")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -973,7 +998,7 @@ func clusterSubmitCommand(args []string) error {
 		return err
 	}
 	if *token == "" {
-		*token = cfg.Cluster.Relay.AdminToken
+		*token = clusterClientToken(cfg, "")
 	}
 	raw, err := os.ReadFile(*file)
 	if err != nil {
@@ -1049,10 +1074,21 @@ func clusterSubmitCommand(args []string) error {
 				if err != nil {
 					return err
 				}
+				raw, paths, references, err := materializeClusterArtifacts(raw, *artifactDir)
+				if err != nil {
+					return err
+				}
+				reportSavedArtifacts(paths, references)
 				_, err = os.Stdout.Write(append(raw, '\n'))
 				return err
 			}
-			return json.NewEncoder(os.Stdout).Encode(job.Result)
+			raw, paths, references, err := materializeClusterArtifacts(job.Result, *artifactDir)
+			if err != nil {
+				return err
+			}
+			reportSavedArtifacts(paths, references)
+			_, err = os.Stdout.Write(append(raw, '\n'))
+			return err
 		case cluster.JobFailed, cluster.JobCancelled:
 			return fmt.Errorf("job %s: %s", job.Status, job.Error)
 		}
@@ -1076,6 +1112,45 @@ func clusterTokenCommand(args []string) error {
 		return err
 	}
 	return json.NewEncoder(os.Stdout).Encode(output)
+}
+
+func clusterLoginCommand(args []string) error {
+	flags := flag.NewFlagSet("cluster login", flag.ContinueOnError)
+	path := flags.String("config", defaultConfigPath(), "config path")
+	tokenFile := flags.String("token-file", "", "file containing a producer token or token JSON")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *tokenFile == "" {
+		return errors.New("--token-file is required so credentials do not enter shell history")
+	}
+	raw, err := os.ReadFile(*tokenFile)
+	if err != nil {
+		return err
+	}
+	if len(raw) > 32<<10 {
+		return errors.New("token file is unexpectedly large")
+	}
+	token := strings.TrimSpace(string(raw))
+	var envelope struct {
+		Token string `json:"token"`
+	}
+	if json.Unmarshal(raw, &envelope) == nil && envelope.Token != "" {
+		token = strings.TrimSpace(envelope.Token)
+	}
+	if !strings.HasPrefix(token, "cb_") || len(token) < 24 || strings.IndexFunc(token, unicode.IsSpace) >= 0 {
+		return errors.New("token file does not contain a valid ContextBridge credential")
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	cfg.Cluster.ClientToken = token
+	if err := config.Save(*path, cfg); err != nil {
+		return err
+	}
+	fmt.Println("Producer credential saved. cluster chat and cluster submit are ready.")
+	return nil
 }
 
 func clusterPairingCommand(args []string) error {
@@ -1111,6 +1186,9 @@ func clusterPairingCommand(args []string) error {
 func clusterBaseURL(cfg config.Config) string {
 	if cfg.Cluster.Relay.PublicURL != "" {
 		return strings.TrimRight(cfg.Cluster.Relay.PublicURL, "/")
+	}
+	if cfg.Cluster.Worker.RelayURL != "" {
+		return strings.TrimRight(cfg.Cluster.Worker.RelayURL, "/")
 	}
 	return "http://" + cfg.Cluster.Relay.Listen
 }

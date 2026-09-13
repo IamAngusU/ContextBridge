@@ -397,7 +397,8 @@ func (r *Relay) handleReserve(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	nodes, _ := r.store.ListNodes()
-	candidates := RankWithEstimate(nodes, requirements, r.store.EstimateVRAM(requirements))
+	routingRequirements := r.withSessionAffinity(requirements, record.Subject)
+	candidates := RankWithEstimate(nodes, routingRequirements, r.store.EstimateVRAM(requirements))
 	if len(candidates) == 0 {
 		writeError(w, http.StatusServiceUnavailable, errors.New("no online node satisfies these requirements"))
 		return
@@ -575,7 +576,7 @@ func (r *Relay) dispatch() {
 	}
 	r.mu.RUnlock()
 	for _, queued := range jobs {
-		routingRequirements := queued.Requirements
+		routingRequirements := r.withSessionAffinity(queued.Requirements, queued.OwnerSubject)
 		estimatedVRAM := r.store.EstimateVRAM(queued.Requirements)
 		candidates := RankWithEstimate(nodes, routingRequirements, estimatedVRAM)
 		for _, candidate := range candidates {
@@ -645,10 +646,20 @@ func (r *Relay) validateRequirements(requirements Requirements) error {
 	if len(requirements.RequiredTags) > 32 || len(requirements.PreferredNodes) > 32 {
 		return errors.New("too many routing selectors")
 	}
+	if len(requirements.SessionID) > 128 || strings.TrimSpace(requirements.SessionID) != requirements.SessionID || strings.IndexFunc(requirements.SessionID, unicode.IsControl) >= 0 {
+		return errors.New("requirements.session_id must be at most 128 bytes without surrounding whitespace or control characters")
+	}
 	if len(requirements.Provider) > 80 || strings.TrimSpace(requirements.Provider) != requirements.Provider || strings.Contains(requirements.Provider, "..") || strings.IndexFunc(requirements.Provider, unicode.IsControl) >= 0 {
 		return errors.New("requirements.provider is invalid")
 	}
 	return nil
+}
+
+func (r *Relay) withSessionAffinity(requirements Requirements, owner string) Requirements {
+	if nodeID, ok := r.store.RecentSessionNode(owner, requirements.SessionID); ok && !contains(requirements.PreferredNodes, nodeID) {
+		requirements.PreferredNodes = append([]string{nodeID}, requirements.PreferredNodes...)
+	}
+	return requirements
 }
 
 func (r *Relay) authorize(roles ...string) func(http.HandlerFunc) http.HandlerFunc {

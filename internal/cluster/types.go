@@ -19,6 +19,7 @@ const (
 
 type Requirements struct {
 	Task           string   `json:"task,omitempty" yaml:"task,omitempty"`
+	SessionID      string   `json:"session_id,omitempty" yaml:"session_id,omitempty"`
 	Provider       string   `json:"provider,omitempty" yaml:"provider,omitempty"`
 	Model          string   `json:"model,omitempty" yaml:"model,omitempty"`
 	Group          string   `json:"group,omitempty" yaml:"group,omitempty"`

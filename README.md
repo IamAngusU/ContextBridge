@@ -25,6 +25,8 @@ ChatGPT and Gemini are detected automatically from stable DOM and accessibility 
 
 - **Visual browser teaching:** point at page controls instead of reverse engineering selectors.
 - **Progressive browser output:** follow a web-chat answer while it is generated, through the worker and relay, with `cluster submit --stream`.
+- **Stateful browser conversations:** pin related turns to one browser worker with `session_id`, or use the streaming `cluster chat` terminal.
+- **Images and files back:** opt in to bounded response artifacts, verify their SHA-256, and save them with `--artifacts`.
 - **1:1, 1:N, and N:N compute:** connect one app to one worker, distribute one queue across many workers, or share a capability-aware node pool between producers.
 - **Outbound worker connections:** workers join through WebSockets without router port forwarding or fixed public worker ports.
 - **Durable scheduling:** priority queue, history, bounded retries, disconnect recovery, groups, tags, task requirements, and VRAM-aware placement survive relay restarts.
@@ -123,9 +125,12 @@ Create a scoped producer token once:
 contextbridge cluster token --role producer --subject support-api
 contextbridge cluster submit --file examples/cluster-job.json --token cb_producer_TOKEN
 contextbridge cluster submit --file examples/cluster-job.json --token cb_producer_TOKEN --e2ee
+contextbridge cluster chat --token cb_producer_TOKEN
 ```
 
 Set requirements such as `task`, `provider`, `group`, `model`, `vision`, `embedding`, tags, or minimum free VRAM. Use `provider: browser` to require a live, taught web-chat tab, or `provider: ollama` to require a local Ollama engine. The scheduler chooses a compatible online node using live concurrency, queue, RAM, and VRAM data. Measured VRAM demand is a preference, not a hidden requirement, so CPU-only workers remain useful unless `min_free_vram_bytes` is explicitly set. Normal TLS jobs can move to another node after a disconnect. E2EE jobs are bound to the worker key selected during reservation and fail clearly if that worker disappears.
+
+Use the same non-secret `requirements.session_id` for follow-up turns. The relay keeps that producer's conversation on the most recently used compatible worker, while retaining failover when the node is offline. The selected ChatGPT or Gemini tab supplies the actual conversation history. `contextbridge cluster chat` manages the ID automatically and provides a streaming `you ›` / `ai ›` terminal session. A producer token may be passed with `--token`, stored safely from a credential file with `contextbridge cluster login --token-file producer.json`, or supplied through `CONTEXTBRIDGE_CLUSTER_TOKEN`.
 
 This release uses one durable BoltDB file per relay process. It supports many producers and workers through one relay. Active-active relay replication is a separate deployment tier and requires a shared database and message broker rather than copying the BoltDB file.
 
@@ -139,6 +144,10 @@ This release uses one durable BoltDB file per relay process. It supports many pr
 4. For another provider, choose **Customize detection** and click the requested controls directly in the page.
 
 Add `--stream` to `contextbridge cluster submit` to print progressive browser text while the final normalized result remains on stdout. Plaintext progress is deliberately disabled for E2EE jobs.
+
+Set `output.artifacts: true` on a browser text/JSON job to collect up to four generated images, download links, or code files from the final response. Embedded files are capped by `max_artifact_bytes` (6 MiB maximum), normalized, and SHA-256 verified. Save them with `contextbridge cluster submit --artifacts ./downloads ...`; provider-hosted resources that the page cannot read remain HTTPS references in the JSON result. The interactive `cluster chat` command saves artifacts automatically under the local ContextBridge storage directory unless `--artifacts off` is used. See [`examples/browser-image-job.json`](examples/browser-image-job.json).
+
+Each browser extension instance is one serial UI slot. For parallel browser jobs, pair multiple workers with independently selected tabs (for example separate browser profiles) and let the relay distribute sessions between them. Local Ollama/llama.cpp jobs can use higher worker concurrency and continue to participate without a GPU; GPU headroom only influences placement unless a job explicitly requires VRAM.
 
 The Chromium package works with Manifest V3 browsers. The Firefox package has its own background manifest and localhost policy. Local Firefox development installs use `about:debugging`; a permanent consumer install requires a Mozilla-signed package.
 

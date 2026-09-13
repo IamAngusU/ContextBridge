@@ -386,6 +386,31 @@ func (s *Store) GetJob(id string) (Job, error) {
 	return job, err
 }
 
+// RecentSessionNode returns the worker most recently used by this producer's
+// logical session. A session is only an affinity hint: the relay can still use
+// another compatible worker when the previous one is offline.
+func (s *Store) RecentSessionNode(owner, session string) (string, bool) {
+	owner = cleanLabel(owner, 120)
+	session = strings.TrimSpace(session)
+	if session == "" {
+		return "", false
+	}
+	var selected Job
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketJobs).ForEach(func(_, value []byte) error {
+			var job Job
+			if json.Unmarshal(value, &job) != nil || job.OwnerSubject != owner || job.Requirements.SessionID != session || job.AssignedNode == "" {
+				return nil
+			}
+			if selected.ID == "" || job.UpdatedAt.After(selected.UpdatedAt) {
+				selected = job
+			}
+			return nil
+		})
+	})
+	return selected.AssignedNode, err == nil && selected.AssignedNode != ""
+}
+
 func (s *Store) SaveJob(job Job) error {
 	job.UpdatedAt = time.Now().UTC()
 	return s.db.Update(func(tx *bolt.Tx) error { return putJSON(tx.Bucket(bucketJobs), job.ID, job) })

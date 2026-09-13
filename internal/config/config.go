@@ -118,11 +118,12 @@ type BrowserProfile struct {
 }
 
 type Cluster struct {
-	Relay     ClusterRelay                `yaml:"relay" json:"relay"`
-	Worker    ClusterWorker               `yaml:"worker" json:"worker"`
-	Policies  ClusterPolicies             `yaml:"policies" json:"policies"`
-	Pricing   cluster.Pricing             `yaml:"pricing" json:"pricing"`
-	Pipelines map[string]cluster.Pipeline `yaml:"pipelines" json:"pipelines"`
+	Relay       ClusterRelay                `yaml:"relay" json:"relay"`
+	Worker      ClusterWorker               `yaml:"worker" json:"worker"`
+	ClientToken string                      `yaml:"client_token,omitempty" json:"-"`
+	Policies    ClusterPolicies             `yaml:"policies" json:"policies"`
+	Pricing     cluster.Pricing             `yaml:"pricing" json:"pricing"`
+	Pipelines   map[string]cluster.Pipeline `yaml:"pipelines" json:"pipelines"`
 }
 
 type ClusterRelay struct {

@@ -315,6 +315,7 @@ func (s *Store) Complete(id string, output Output) bool {
 
 func cloneOutput(output Output) Output {
 	clone := output
+	clone.Artifacts = append([]Artifact{}, output.Artifacts...)
 	if output.Decision != nil {
 		decision := *output.Decision
 		decision.Flags = append([]string{}, output.Decision.Flags...)

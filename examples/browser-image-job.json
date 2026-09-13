@@ -1,0 +1,21 @@
+{
+  "source": "creative-terminal",
+  "requirements": {
+    "task": "generation",
+    "provider": "browser",
+    "session_id": "campaign-image-1"
+  },
+  "payload": {
+    "source": "creative-terminal",
+    "task": "generation",
+    "prompt": "Create a polished editorial illustration of a bridge connecting local devices to a private AI compute cloud. Do not add text.",
+    "output": {
+      "mode": "text",
+      "max_bytes": 1048576,
+      "artifacts": true,
+      "max_artifact_bytes": 6291456
+    }
+  },
+  "priority": 10,
+  "max_attempts": 2
+}
