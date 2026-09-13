@@ -1025,6 +1025,16 @@ function automate(job, profile, jobDeadline) {
       const resumeOnly = Boolean(job.metadata?.contextbridge_resume_only);
       const selectedModel = !resumeOnly && job.model ? await choosePreference('model', job.model) : String(job.model || '');
       const selectedReasoning = !resumeOnly && job.reasoning ? await choosePreference('reasoning', job.reasoning) : String(job.reasoning || '');
+	  if (!resumeOnly && (job.model || job.reasoning)) {
+		// Switching a provider mode may replace the entire composer. Never
+		// type into the detached element captured before the menu was opened.
+		input = null;
+		for (let attempt = 0; attempt < 12 && !input; attempt += 1) {
+			input = first(selectors.input);
+			if (!input) await wait(150);
+		}
+		if (!input) throw new Error('Prompt input disappeared after selecting the model');
+	  }
 	  if (!resumeOnly && job.metadata?.contextbridge_image_tool) {
 		await chooseImageTool(input);
 		input = first(selectors.input);
@@ -1041,13 +1051,18 @@ function automate(job, profile, jobDeadline) {
       if (!resumeOnly) {
         setInput(input, job.prompt);
         await wait(300);
+		if (input.isConnected === false || !String(input.value || input.innerText || input.textContent || '').includes(job.prompt)) {
+			throw new Error('Prompt editor did not retain the submitted text');
+		}
         let submit = first(selectors.submit);
-        for (let attempt = 0; !submit && attempt < 8; attempt += 1) {
+        for (let attempt = 0; (!submit || submit.disabled || submit.getAttribute('aria-disabled') === 'true') && attempt < 20; attempt += 1) {
           await wait(150);
           submit = first(selectors.submit);
         }
-        if (submit) {
+        if (submit && !submit.disabled && submit.getAttribute('aria-disabled') !== 'true') {
           submit.click();
+        } else if (submit) {
+			throw new Error('Send button stayed disabled after filling the prompt');
         } else {
           input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
           input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
@@ -1136,8 +1151,9 @@ function automate(job, profile, jobDeadline) {
       const code = /requested model|model selector/i.test(message)
 		? 'browser_model_unavailable'
 		: (/requested reasoning|reasoning selector/i.test(message) ? 'browser_reasoning_unavailable'
+			: (/send button stayed disabled|prompt editor did not retain/i.test(message) ? 'browser_submit_unavailable'
 			: (/image creation is rate limited/i.test(message) ? 'browser_rate_limited'
-				: (/image creation tool|image tool menu/i.test(message) ? 'browser_image_tool_unavailable' : 'browser_automation_error')));
+				: (/image creation tool|image tool menu/i.test(message) ? 'browser_image_tool_unavailable' : 'browser_automation_error'))));
       resolve({ ok: false, error: message, code });
     }
   });
@@ -1184,7 +1200,17 @@ function captureProgress(selectors) {
       }
     } catch (_) {}
   }
-  return { text: responses.length ? responseText(responses[responses.length - 1]) : '', busy, percent, detail: detail || (busy ? 'Generating' : '') };
+  const latestText = responses.length ? responseText(responses[responses.length - 1]) : '';
+  const alerts = ['[role="alert"]', '[aria-live="assertive"]', '[data-testid*="error" i]', '.toast-error', '.error-message']
+    .flatMap((selector) => { try { return [...document.querySelectorAll(selector)].filter(isVisible); } catch (_) { return []; } })
+    .map(visibleText).filter(Boolean).join(' ');
+  const retryVisible = [...document.querySelectorAll('button')].filter(isVisible)
+    .some((button) => /retry|try again|regenerate|erneut|noch einmal|wiederholen/i.test(`${visibleText(button)} ${button.getAttribute('aria-label') || ''}`));
+  const failureText = alerts || (retryVisible ? latestText : '');
+  if (/rate.?limit|usage.?limit|quota|capacity|limit erreicht|höchstgrenze erreicht|zu viele anfragen|too many requests|try again later|später erneut|temporarily unavailable|something went wrong|etwas ist schief/i.test(failureText)) {
+    return { text: '', busy: false, percent: 0, detail: 'Provider error' };
+  }
+  return { text: latestText, busy, percent, detail: detail || (busy ? 'Generating' : '') };
 }
 
 function inspectSelectors(selectors) {

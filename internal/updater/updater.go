@@ -180,8 +180,8 @@ func New(settings Settings, dataDir, currentVersion string) (*Manager, error) {
 }
 
 func (m *Manager) LocalStatus() Status {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	// Status must remain responsive while a background update waits for a
+	// cross-process lock or a slow release download. State writes use rename.
 	state, _ := m.loadState()
 	return m.status(state)
 }
@@ -748,9 +748,22 @@ func (m *Manager) acquireLock(ctx context.Context) (func(), error) {
 		if !errors.Is(err, os.ErrExist) {
 			return nil, err
 		}
-		if info, statErr := os.Stat(path); statErr == nil && time.Since(info.ModTime()) > 15*time.Minute {
-			_ = os.Remove(path)
-			continue
+		if info, statErr := os.Stat(path); statErr == nil {
+			contents, readErr := os.ReadFile(path)
+			owner, parseErr := strconv.Atoi(strings.TrimSpace(strings.SplitN(string(contents), "\n", 2)[0]))
+			// The Windows replacement helper can briefly outlive its Go owner.
+			// Give it time to finish before reclaiming an abandoned lock.
+			orphaned := readErr == nil && parseErr == nil && owner > 0 && !lockProcessAlive(owner) && time.Since(info.ModTime()) > 3*time.Minute
+			expired := time.Since(info.ModTime()) > 15*time.Minute
+			if orphaned || expired {
+				// Recheck identity so a newly replaced lock is not mistaken for
+				// the stale file that was just inspected.
+				if current, checkErr := os.Stat(path); checkErr == nil && os.SameFile(info, current) {
+					if os.Remove(path) == nil {
+						continue
+					}
+				}
+			}
 		}
 		select {
 		case <-ctx.Done():

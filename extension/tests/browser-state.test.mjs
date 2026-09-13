@@ -45,6 +45,21 @@ const element = (text = '', attributes = {}) => ({
 }
 
 {
+  const failure = element('Du hast deine Höchstgrenze erreicht. Versuche es später erneut.');
+  const retry = element('Erneut versuchen');
+  context.document = {
+    querySelectorAll(selector) {
+      if (selector === '#response') return [failure];
+      if (selector === 'button') return [retry];
+      return [];
+    }
+  };
+  const snapshot = context.captureProgress({ response: ['#response'] });
+  assert.equal(snapshot.text, '');
+  assert.equal(snapshot.detail, 'Provider error');
+}
+
+{
   const input = element();
   const response = element('Previous answer');
   const alert = element('Usage limit reached. Try again later.');
@@ -167,10 +182,11 @@ const element = (text = '', attributes = {}) => ({
     click() { selectedPro = true; }
   };
   const flash = { ...element('Flash\nErweitert'), querySelector: () => element('Flash'), click() {} };
-  const input = { ...element(), focus() { throw new Error('Stop after model choice'); } };
+  const oldInput = { ...element(), focus() { throw new Error('Stale composer was used'); } };
+  const newInput = { ...element(), focus() { throw new Error('Fresh composer was used'); } };
   context.document = {
     querySelectorAll(selector) {
-      if (selector === '#input') return [input];
+      if (selector === '#input') return [selectedPro ? newInput : oldInput];
       if (selector === 'bard-mode-switcher button[aria-haspopup]') return [picker];
       if (selector === 'button[aria-haspopup="menu"]') return [account];
       return [];
@@ -178,10 +194,11 @@ const element = (text = '', attributes = {}) => ({
     getElementById: () => ({ querySelectorAll: () => [flash, pro] }),
     dispatchEvent() {}
   };
-  await context.automate({ prompt: 'test', model: 'Pro', output: { mode: 'text' } },
+  const result = await context.automate({ prompt: 'test', model: 'Pro', output: { mode: 'text' } },
     { name: 'gemini', selectors: { input: ['#input'], response: ['#response'], submit: [] } },
     new Date(Date.now() + 5000).toISOString());
   assert.equal(selectedPro, true);
+  assert.equal(result.error, 'Fresh composer was used');
 }
 
 {

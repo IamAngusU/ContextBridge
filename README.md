@@ -146,7 +146,7 @@ contextbridge cluster chat --provider browser --profile chatgpt --model gpt-6-as
 contextbridge cluster chat --provider browser --profile gemini --model pro --reasoning high
 ```
 
-Inside interactive chat, `/model …`, `/reasoning …`, `/profile …`, `/image on|off`, `/min-artifacts 0…12`, and `/e2ee on|off` change subsequent turns; `/settings` shows the active choices. E2EE encrypts prompts and final results for one reserved worker; plaintext streaming and transparent failover are intentionally unavailable for that turn. The same `model`, `reasoning`, `browser_profile`, and `session_id` fields can be placed in an individual browser job payload. Choices are matched against the provider's visible localized menu. An unavailable choice fails clearly instead of silently running a different model.
+Inside interactive chat, `/model …`, `/reasoning …`, `/profile …`, `/image on|off`, `/min-artifacts 0…12`, and `/e2ee on|off` change subsequent turns; `/settings` shows the active choices. E2EE encrypts prompts and final results for one reserved worker; plaintext streaming and transparent failover are intentionally unavailable for that turn. The same `model`, `reasoning`, `browser_profile`, and `session_id` fields can be placed in an individual browser job payload. Choices are matched against the provider's visible localized menu; use the exact scanned label (for example, `3.1 Pro` rather than `Pro`). An unavailable choice fails clearly instead of silently running a different model.
 
 ## Connect A Browser Tab
 

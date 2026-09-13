@@ -2,6 +2,18 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.9 - 2026-09-13
+
+### Fixed
+
+- recover orphaned updater locks after a short helper-safety grace period; status remains responsive during an update check
+- rebind Gemini's prompt editor after a model switch, verify the entered prompt, and fail promptly if the send button stays disabled
+- keep visible provider rate-limit/error messages out of progressive answer text
+
+### Verified
+
+- live Gemini mode discovery on a German page reports the account's four offered choices; requests must use their exact visible labels (for example `3.1 Pro`, not just `Pro`)
+
 ## 0.5.8 - 2026-09-13
 
 ### Added

@@ -2,10 +2,71 @@ package updater
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 	"time"
 )
+
+func TestAcquireLockRecoversExitedOwner(t *testing.T) {
+	manager, err := New(Settings{}, t.TempDir(), "v0.5.9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := manager.dataDir + string(os.PathSeparator) + "update.lock"
+	if err := os.WriteFile(path, []byte("2147483000\n2026-09-13T12:00:00Z\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	stale := time.Now().Add(-4 * time.Minute)
+	if err := os.Chtimes(path, stale, stale); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	unlock, err := manager.acquireLock(ctx)
+	if err != nil {
+		t.Fatalf("dead update owner should not block: %v", err)
+	}
+	unlock()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("lock should be released: %v", err)
+	}
+}
+
+func TestAcquireLockKeepsLiveOwner(t *testing.T) {
+	manager, err := New(Settings{}, t.TempDir(), "v0.5.9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := manager.dataDir + string(os.PathSeparator) + "update.lock"
+	if err := os.WriteFile(path, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	if _, err := manager.acquireLock(ctx); err == nil {
+		t.Fatal("live owner lock was stolen")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("live lock disappeared: %v", err)
+	}
+}
+
+func TestLocalStatusDoesNotWaitForUpdateMutex(t *testing.T) {
+	manager, err := New(Settings{}, t.TempDir(), "v0.5.9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	done := make(chan struct{})
+	go func() { _ = manager.LocalStatus(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("status blocked by an ongoing update")
+	}
+}
 
 func TestNewerVersion(t *testing.T) {
 	tests := []struct {
