@@ -2,6 +2,13 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.18 - 2026-09-13
+
+### Fixed
+
+- scope Gemini's Quill text replacement to its prompt editor; `selectAll` could select the entire page after a locally preserved draft was cleared, leaving the new prompt unsent
+- recover a plain ChatGPT text turn once if the Stop control stays visible despite 90 seconds of unchanged answer text; reload and verify the same conversation without resending the prompt, while image/media jobs and disabled auto-reload remain untouched
+
 ## 0.5.17 - 2026-09-13
 
 ### Fixed

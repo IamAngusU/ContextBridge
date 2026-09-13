@@ -971,7 +971,13 @@ function automate(job, profile, jobDeadline) {
     } else {
       if (profile.name === 'gemini' && element.matches?.('.ql-editor[contenteditable="true"]')) {
         if (document.activeElement !== element) throw new Error('Gemini editor did not accept focus');
-        document.execCommand('selectAll', false, null);
+        const selection = window.getSelection();
+        const range = document.createRange();
+        // Never use execCommand('selectAll') here: after a draft clear it can
+        // select the whole Gemini page instead of just this Quill editor.
+        range.selectNodeContents(element);
+        selection.removeAllRanges();
+        selection.addRange(range);
         if (!document.execCommand('insertText', false, value)) throw new Error('Gemini editor did not accept input');
       } else {
         const selection = window.getSelection();
@@ -1451,6 +1457,15 @@ function automate(job, profile, jobDeadline) {
 		const providerFailure = providerError(latestElement, changedResponse, beforeUserTurns);
 		if (providerFailure && !busy) {
 			resolve({ ok: false, error: providerFailure.message, code: providerFailure.code, retryable: providerFailure.retryable });
+			return;
+		}
+		const plainTextJob = String(job.output?.mode || '').toLowerCase() === 'text'
+			&& !Number(job.output?.min_artifacts || 0) && !Number(job.output?.min_images || 0) && !Number(job.output?.min_media || 0)
+			&& !job.metadata?.contextbridge_image_tool && !job.metadata?.contextbridge_music_tool;
+		if (profile.name === 'chatgpt' && plainTextJob && !resumeOnly && job.metadata?.contextbridge_auto_reload !== false
+			&& state.busyReasons.length === 1 && state.busyReasons[0] === 'stop_button'
+			&& changedResponse && stableText && stableSince > 0 && Date.now() - stableSince >= 90000) {
+			resolve({ ok: false, error: 'ChatGPT kept Stop visible after 90 seconds of unchanged text; reloading once to verify the finished turn', code: 'stalled_response', recoverable: true });
 			return;
 		}
 		if (job.output?.min_images > 0 && changedResponse && !busy && latest) {

@@ -165,6 +165,8 @@ Set `output.artifacts: true` on a browser text/JSON job to collect up to twelve 
 
 For local selector troubleshooting, run `contextbridge browser inspect --config ./config.yml`. The paired extension reports a small, read-only DOM snapshot for each attached tab: prompt and send controls, whether a draft exists and its length, file inputs (including hidden ones), selected tool controls, response-image counts, image progress, and a whitelisted last-failure reason. It does **not** provide full HTML, prompt values, chat text, file contents, or cookies. With multiple tabs, specify `--tab ID`; the snapshot is refreshed roughly every five seconds without reloading any page and is not sent to the relay. Gemini's choices come from its live, lazily rendered mode picker, not a hard-coded global list. Automatic discovery opens and closes that picker only on an idle attached tab with an empty composer, at most once per 30 minutes; the scan button remains available for immediate refresh.
 
+Gemini **video generation is not yet tested**. The live Music run produced an MP4 with a real audio track, but that is not evidence that Gemini's separate video-generation workflow works. We deliberately have not spent paid credits on that test, so ContextBridge makes no verified video-generation claim yet.
+
 See [known browser edge cases](docs/known-browser-edge-cases.md) for observed provider states, recovery boundaries, and cases still awaiting a safe reproduction.
 Cross-browser control and a shared multi-relay hardware budget are proposed in the [interoperability roadmap](docs/roadmap.md), not presented as finished features.
 

@@ -594,6 +594,10 @@ const element = (text = '', attributes = {}) => ({
 
 {
   let insertions = 0;
+  let scopedNode = null;
+  const commands = [];
+  const selection = { anchorNode: null, removeAllRanges() {}, addRange(range) { this.anchorNode = range.node; } };
+  context.window = { getSelection: () => selection };
   const input = {
     ...element(''),
     matches: (selector) => selector.startsWith('.ql-editor'),
@@ -603,17 +607,66 @@ const element = (text = '', attributes = {}) => ({
   const send = { ...element(''), click() { throw new Error('Quill send was used'); } };
   context.document = {
     activeElement: null,
+    createRange: () => ({ node: null, selectNodeContents(node) { this.node = node; scopedNode = node; } }),
     querySelectorAll(selector) { return selector === '#input' ? [input] : selector === '#send' ? [send] : []; },
     execCommand(command, _show, value) {
+      commands.push(command);
       if (command === 'insertText') { insertions += 1; input.innerText = value; return true; }
       return true;
     }
   };
-  const result = await context.automate({ prompt: 'One Quill input', output: { mode: 'text' } },
+  // executeScript serializes this function without the background script's
+  // top-level scope. Test that injected path, not only the in-file VM call.
+  const isolated = vm.createContext({ document: context.document, window: context.window,
+    HTMLTextAreaElement: context.HTMLTextAreaElement, HTMLInputElement: context.HTMLInputElement,
+    InputEvent: context.InputEvent, Event: context.Event, setTimeout, clearTimeout, Date, Promise });
+  const injectedAutomate = vm.runInContext(`(${context.automate.toString()})`, isolated);
+  const result = await injectedAutomate({ prompt: 'One Quill input', output: { mode: 'text' } },
     { name: 'gemini', selectors: { input: ['#input'], response: [], submit: ['#send'] } },
     new Date(Date.now() + 5000).toISOString());
   assert.equal(insertions, 1);
+  assert.equal(scopedNode, input);
+  assert.deepEqual(commands, ['insertText']);
   assert.equal(result.error, 'Quill send was used');
+}
+
+{
+  let sent = false;
+  let now = Date.now();
+  class FastDate extends Date {
+    static now() { now += 5000; return now; }
+    static parse(value) { return Date.parse(value); }
+  }
+  class TextArea {
+    constructor() { this.value = ''; this.offsetWidth = 1; }
+    getClientRects() { return [1]; }
+    focus() {}
+    dispatchEvent() {}
+  }
+  const input = new TextArea();
+  const send = { ...element(), click() { sent = true; } };
+  const stop = element('', { 'data-testid': 'stop-button' });
+  const response = element('READY');
+  const document = {
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === '#send') return [send];
+      if (selector === '#response') return sent ? [response] : [];
+      if (sent && selector.includes('stop')) return [stop];
+      return [];
+    }
+  };
+  const isolated = vm.createContext({ document, window: {}, HTMLTextAreaElement: TextArea,
+    HTMLInputElement: class {}, InputEvent: class {}, Event: class {},
+    setTimeout: (callback) => callback(), clearTimeout() {}, Date: FastDate, Promise });
+  const injectedAutomate = vm.runInContext(`(${context.automate.toString()})`, isolated);
+  const result = await injectedAutomate(
+    { prompt: 'READY', output: { mode: 'text' } },
+    { name: 'chatgpt', selectors: { input: ['#input'], submit: ['#send'], response: ['#response'] } },
+    new Date(Date.now() + 3600000).toISOString()
+  );
+  assert.equal(result.code, 'stalled_response');
+  assert.equal(result.recoverable, true);
 }
 
 {
