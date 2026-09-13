@@ -2,6 +2,12 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.4.3 - 2026-09-13
+
+### Fixed
+
+- Successful jobs now finalize the last progressive browser snapshot atomically as `final` and not busy
+
 ## 0.4.2 - 2026-09-13
 
 ### Fixed

@@ -501,6 +501,12 @@ func (s *Store) CompleteJob(id string, result json.RawMessage, sealed *SealedEnv
 		job.FinishedAt = time.Now().UTC()
 		job.UpdatedAt = job.FinishedAt
 		if jobError == "" {
+			if job.Progress != nil {
+				job.Progress.Sequence++
+				job.Progress.Phase = "final"
+				job.Progress.Busy = false
+				job.Progress.UpdatedAt = job.FinishedAt
+			}
 			job.Status = JobCompleted
 		} else if job.Attempt < job.MaxAttempts && job.SealedPayload == nil {
 			job.Status = JobQueued

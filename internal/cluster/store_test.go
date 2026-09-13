@@ -129,4 +129,11 @@ func TestStoreTracksProgressOnlyForAssignedPlaintextJob(t *testing.T) {
 	if _, err := store.UpdateJobProgress(job.ID, "different-node", JobProgress{Sequence: 2, Text: "wrong"}); err == nil {
 		t.Fatal("a different node must not update job progress")
 	}
+	job, err = store.CompleteJob(job.ID, json.RawMessage(`{"ok":true}`), nil, Usage{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Progress == nil || job.Progress.Sequence != 2 || job.Progress.Phase != "final" || job.Progress.Busy {
+		t.Fatalf("successful completion did not finalize progress: %#v", job.Progress)
+	}
 }
