@@ -1,0 +1,10 @@
+# Next interoperability milestones
+
+These are design candidates, **not shipped capabilities**:
+
+1. **Cross-browser session registry.** Give every extension installation a persistent random instance ID. The local bridge should aggregate per-instance tab heartbeats instead of overwriting one browser status. Its popup could list all connected sessions read-only, then send an authenticated, instance-targeted detach request to the owning extension. A tab ID alone is not globally unique across browsers, so use `(instance ID, tab ID)` throughout leases and session affinity. Do not broadcast prompt text or full DOM.
+2. **Passive, polymorphic model discovery.** Observe when a user or provider naturally opens a model menu and derive choices from semantic roles/labels. Re-scan on meaningful menu mutations, account change, or new chat, with a bounded idle fallback. Validate choices against the active conversation and remember provider/locale/version. Never assume that a public model catalog equals an account's available modes. A scan must not send a prompt, reload a page, or interrupt a draft.
+3. **Shared multi-relay resource budget.** Replace independently configured worker-process slot limits with one local admission controller. Allocate browser tabs, RAM, GPU memory, CPU and loaded-model capacity across relays under owner-defined quotas. Reserve per-job resources before accepting a relay assignment; release them on completion, cancellation or crash. A measured VRAM estimate alone is not a guaranteed safe limit.
+4. **Provider state fixtures.** Collect redacted, minimal DOM fixtures for ChatGPT's safety-check pause, short parallel-work pause, temporary tool modes, Gemini's disabled send control, and provider rate limits. Classify each before including any text in a streamed answer. Prefer state recovery over unconditional tab reloads.
+
+The useful differentiator is user-owned execution policy: each attached tab and local model is an explicit capability, the producer sees progress and artifacts, and a relay can schedule work without receiving browser credentials or unrestricted access to the worker PC.

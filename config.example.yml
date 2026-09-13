@@ -129,6 +129,9 @@ cluster:
     groups: [default]
     tags: [private]
     max_concurrent: 1
+    allowed_tasks: []
+    allowed_providers: []
+    allowed_models: []
     local_url: http://127.0.0.1:32145
     local_token: ${CONTEXTBRIDGE_TOKEN}
     heartbeat_seconds: 5

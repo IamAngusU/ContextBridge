@@ -12,6 +12,9 @@ const chrome = {
 };
 const context = vm.createContext({ chrome, console, URL, setTimeout, clearTimeout, setInterval, clearInterval, Date, Promise });
 vm.runInContext(source, context);
+assert.equal(context.classifyFailureReason('Prompt editor did not retain the submitted text'), 'prompt_not_retained');
+assert.equal(context.classifyFailureReason('Send button stayed disabled after filling the prompt'), 'send_disabled');
+assert.equal(context.classifyFailureReason('A provider error containing private text'), 'other');
 
 const element = (text = '', attributes = {}) => ({
   offsetWidth: 1,
@@ -165,8 +168,20 @@ const element = (text = '', attributes = {}) => ({
     getElementById: (id) => id === 'gemini-mode-menu' ? menu : null
   };
   assert.equal(context.inspectPageCapabilities().currentModel, 'Flash Erweitert');
+  assert.deepEqual(Array.from(context.inspectPageCapabilities().models), ['Flash Erweitert', 'Pro', 'Flash-Lite']);
   const capabilities = await context.discoverPageCapabilities();
   assert.deepEqual(Array.from(capabilities.models), ['Flash Erweitert', 'Pro', 'Flash-Lite']);
+}
+
+{
+  const composer = element('');
+  context.document = {
+    querySelector: () => composer,
+    querySelectorAll: () => []
+  };
+  assert.equal(context.safeToDiscoverPageCapabilities(), true);
+  composer.innerText = 'Unsent private draft';
+  assert.equal(context.safeToDiscoverPageCapabilities(), false);
 }
 
 {
@@ -199,6 +214,75 @@ const element = (text = '', attributes = {}) => ({
     new Date(Date.now() + 5000).toISOString());
   assert.equal(selectedPro, true);
   assert.equal(result.error, 'Fresh composer was used');
+}
+
+{
+  let musicSelected = true;
+  const removeMusic = { ...element('', { 'aria-label': 'Auswahl von „Musik“ aufheben' }), click() { musicSelected = false; } };
+  const composer = { querySelectorAll: () => musicSelected ? [removeMusic] : [] };
+  const oldInput = { ...element(), closest: () => composer, focus() { throw new Error('Stale music composer was used'); } };
+  const newInput = { ...element(), closest: () => composer, focus() { throw new Error('Fresh text composer was used'); } };
+  context.document = {
+    querySelectorAll(selector) { return selector === '#input' ? [musicSelected ? oldInput : newInput] : []; },
+    dispatchEvent() {}
+  };
+  const result = await context.automate({ prompt: 'plain text', output: { mode: 'text' } },
+    { name: 'gemini', selectors: { input: ['#input'], response: [], submit: [] } },
+    new Date(Date.now() + 5000).toISOString());
+  assert.equal(musicSelected, false);
+  assert.equal(result.error, 'Fresh text composer was used');
+}
+
+{
+  const removeMusic = element('', { 'aria-label': 'Auswahl von „Musik“ aufheben' });
+  const composer = { querySelectorAll: () => [removeMusic] };
+  const input = { ...element(), tagName: 'DIV', closest: () => composer };
+  context.document = {
+    querySelectorAll(selector) { return selector === '#input' ? [input] : []; },
+    querySelector: () => null
+  };
+  const snapshot = context.inspectPageDOM({ input: ['#input'], submit: [], response: [] });
+  assert.equal(snapshot.tools[0].aria_label, 'Auswahl von „Musik“ aufheben');
+  assert.equal(snapshot.input_has_text, false);
+}
+
+{
+  const input = { ...element('My unsent draft'), closest: () => null };
+  context.document = { querySelectorAll: (selector) => selector === '#input' ? [input] : [] };
+  const result = await context.automate({ prompt: 'Different job', output: { mode: 'text' } },
+    { name: 'gemini', selectors: { input: ['#input'], response: [], submit: [] } },
+    new Date(Date.now() + 5000).toISOString());
+  assert.equal(result.code, 'browser_composer_busy');
+}
+
+{
+  class MockTextArea {
+    constructor(onFocus) { this.value = ''; this.offsetWidth = 1; this.offsetHeight = 1; this.onFocus = onFocus; }
+    getClientRects() { return [1]; }
+    focus() { this.onFocus?.(); }
+    dispatchEvent() {}
+  }
+  context.HTMLTextAreaElement = MockTextArea;
+  context.HTMLInputElement = class {};
+  context.InputEvent = class {};
+  context.Event = class {};
+  let liveInput;
+  const second = new MockTextArea();
+  const first = new MockTextArea(() => { liveInput = second; });
+  liveInput = first;
+  const send = { ...element('', { 'aria-label': 'Nachricht senden' }), click() { throw new Error('Fresh send control was used'); } };
+  context.document = {
+    querySelectorAll(selector) {
+      if (selector === '#input') return [liveInput];
+      if (selector === '#send') return [send];
+      return [];
+    }
+  };
+  const result = await context.automate({ prompt: 'CB-PRO-TEST', output: { mode: 'text' } },
+    { name: 'gemini', selectors: { input: ['#input'], response: [], submit: ['#send'] } },
+    new Date(Date.now() + 5000).toISOString());
+  assert.equal(second.value, 'CB-PRO-TEST');
+  assert.equal(result.error, 'Fresh send control was used');
 }
 
 {

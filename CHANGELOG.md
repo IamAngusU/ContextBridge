@@ -2,6 +2,24 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.10 - 2026-09-13
+
+### Added
+
+- live All/Attached/Not attached tab filtering across windows of one browser, with working and cooldown state in the extension popup
+- safe automatic Gemini mode discovery on an idle attached tab with an empty draft; no provider page reload
+- per-worker task, provider and model allow-lists enforced on the PC, plus session-only `--slots` and Windows `--topmost`
+- separate `--relay` and `--identity` overrides for pairing and worker sessions so one PC can join independent servers with distinct policies
+
+### Fixed
+
+- clear an incompatible selected Gemini tool before a plain-text job and rebind the composer after the tool switch
+- recognize Gemini's localized "Nachricht senden" control, rebind a composer replaced while typing, and never overwrite an unrelated unsent draft
+- report selected Gemini tools, prompt presence/length, and a whitelisted failure reason in the content-free local DOM snapshot
+- keep browser-tab capacity separate from local-model worker capacity when scheduling parallel jobs
+
+See [multiple-server setup](docs/multiple-servers.md) for the current per-process hardware-budget limitation.
+
 ## 0.5.9 - 2026-09-13
 
 ### Fixed

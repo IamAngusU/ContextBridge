@@ -49,6 +49,11 @@ assert.equal(context.isFreshChatURL(activeChat.url), false);
 assert.equal(context.isFreshChatURL(gemini.url), false);
 assert.equal(context.isFreshChatURL(freshChatGPT.url), true);
 assert.equal(context.isFreshChatURL(freshGemini.url), true);
+assert.deepEqual(Array.from(context.filterTabList([freshChatGPT, freshGemini], 'attached', [27]), (tab) => tab.id), [27]);
+assert.deepEqual(Array.from(context.filterTabList([freshChatGPT, freshGemini], 'available', [27]), (tab) => tab.id), [28]);
+assert.equal(context.tabDisplayState(true, 'working'), 'Working');
+assert.equal(context.tabDisplayState(true, 'rate_limited'), 'Cooling down');
+assert.equal(context.tabDisplayState(false, 'working'), 'Available');
 
 context.loadTabs = async () => {};
 context.refreshState = async () => {};

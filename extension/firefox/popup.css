@@ -10,6 +10,7 @@ main{display:grid}
 .connection{display:flex;align-items:center;gap:6px;color:#687068;font-size:11px}.connection i{width:8px;height:8px;border-radius:50%;background:#a3a7a0}.connection[data-state="live"] i{background:#2a9d8f}.connection[data-state="error"] i{background:#d7422f}
 .step{display:grid;gap:10px;padding:14px 16px;border-bottom:1px solid #d9dbd3}.step-heading{display:flex;align-items:center;gap:9px}.step-heading>span{color:#2a9d8f;font:700 10px/1 ui-monospace,SFMono-Regular,Consolas,monospace}.step-heading h1,.step-heading h2{margin:0;font-size:12px;font-weight:700;text-transform:uppercase}.final-step{border-bottom:0}
 .field-row,.secret-row,.button-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:7px}.select-field{min-width:0}
+.tab-filter{display:flex;align-items:center;gap:8px;color:#687068;font-size:11px}.tab-filter select{width:auto;min-height:30px;padding:4px 8px}
 input,select,button{min-height:38px;border:1px solid #afb4ac;border-radius:4px;background:#fff;color:#20231f;padding:8px 10px}
 input,select{width:100%}select{overflow:hidden;text-overflow:ellipsis}
 select[multiple]{min-height:92px;overflow:auto}.field-hint{color:#687068;font-size:10px}

@@ -72,6 +72,8 @@ type Capabilities struct {
 	Groups         []string          `json:"groups,omitempty"`
 	MaxConcurrent  int               `json:"max_concurrent"`
 	Running        int               `json:"running"`
+	BrowserTabs    int               `json:"browser_tabs,omitempty"`
+	BrowserBusy    int               `json:"browser_busy_tabs,omitempty"`
 	QueueDepth     int               `json:"queue_depth"`
 }
 

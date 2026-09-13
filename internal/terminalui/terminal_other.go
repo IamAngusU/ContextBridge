@@ -2,7 +2,14 @@
 
 package terminalui
 
-import "os"
+import (
+	"errors"
+	"os"
+)
+
+func Topmost() (func(), error) {
+	return nil, errors.New("--topmost is only available for a Windows console")
+}
 
 func enableVirtualTerminal(_ *os.File) bool {
 	return true

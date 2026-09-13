@@ -73,7 +73,14 @@ type BrowserTabStatus struct {
 	CurrentReasoning string              `json:"current_reasoning,omitempty"`
 	Models           []string            `json:"models,omitempty"`
 	ReasoningLevels  []string            `json:"reasoning_levels,omitempty"`
+	LastFailure      *BrowserTabFailure  `json:"last_failure,omitempty"`
 	DOM              *BrowserDOMSnapshot `json:"dom,omitempty"`
+}
+
+type BrowserTabFailure struct {
+	Code   string    `json:"code"`
+	Reason string    `json:"reason,omitempty"`
+	At     time.Time `json:"at"`
 }
 
 // BrowserDOMSnapshot contains selector diagnostics only. It deliberately never
@@ -81,6 +88,8 @@ type BrowserTabStatus struct {
 type BrowserDOMSnapshot struct {
 	CapturedAt         time.Time           `json:"captured_at"`
 	Inputs             []BrowserDOMControl `json:"inputs,omitempty"`
+	InputHasText       bool                `json:"input_has_text,omitempty"`
+	InputCharacters    int                 `json:"input_characters,omitempty"`
 	Submit             []BrowserDOMControl `json:"submit,omitempty"`
 	FileInputs         []BrowserDOMControl `json:"file_inputs,omitempty"`
 	Tools              []BrowserDOMControl `json:"tools,omitempty"`

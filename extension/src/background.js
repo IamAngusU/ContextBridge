@@ -6,6 +6,7 @@ const api = globalThis.browser || globalThis.chrome;
 
 let stopRequested = false;
 let heartbeatTimer = 0;
+let heartbeatInFlight = null;
 const pollers = new Map();
 const busyTabs = new Set();
 const freshTabChecks = new Map();
@@ -15,7 +16,11 @@ const acceptedModelLabel = /^(?:gpt[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:astra|sol|
 api.runtime.onInstalled.addListener(() => resume());
 api.runtime.onStartup.addListener(() => resume());
 api.tabs.onUpdated?.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.status === 'complete') scheduleFreshTabCheck(tabId, tab?.url || changeInfo.url || '');
+  if (changeInfo.status !== 'complete') return;
+  scheduleFreshTabCheck(tabId, tab?.url || changeInfo.url || '');
+  void settings().then((cfg) => {
+    if (cfg.running && configuredTabIDs(cfg).includes(tabId)) return sendHeartbeat('waiting');
+  }).catch(() => {});
 });
 api.tabs.onRemoved?.addListener((tabId) => {
   if (freshTabChecks.has(tabId)) clearTimeout(freshTabChecks.get(tabId));
@@ -183,14 +188,18 @@ async function discoverFreshTabs() {
 async function detachClosedTab(tabId) {
   const cfg = await settings();
   const autoAttachBlockedTabIds = cfg.autoAttachBlockedTabIds.filter((id) => id !== tabId);
+  const tabCapabilities = { ...cfg.tabCapabilities };
+  const tabCapabilityScans = { ...cfg.tabCapabilityScans };
+  const tabFailures = { ...cfg.tabFailures };
+  delete tabCapabilities[tabId];
+  delete tabCapabilityScans[tabId];
+  delete tabFailures[tabId];
   if (!configuredTabIDs(cfg).includes(tabId)) {
-    if (autoAttachBlockedTabIds.length !== cfg.autoAttachBlockedTabIds.length) await api.storage.local.set({ autoAttachBlockedTabIds });
+    await api.storage.local.set({ autoAttachBlockedTabIds, tabCapabilities, tabCapabilityScans, tabFailures });
     return;
   }
   const tabIds = configuredTabIDs(cfg).filter((id) => id !== tabId);
-  const tabCapabilities = { ...cfg.tabCapabilities };
-  delete tabCapabilities[tabId];
-  await api.storage.local.set({ tabId: tabIds[0] || 0, tabIds, tabCapabilities, autoAttachBlockedTabIds });
+  await api.storage.local.set({ tabId: tabIds[0] || 0, tabIds, tabCapabilities, tabCapabilityScans, tabFailures, autoAttachBlockedTabIds });
   if (cfg.running) await sendHeartbeat('waiting');
 }
 
@@ -211,7 +220,16 @@ async function currentStatus() {
   for (const tabId of configuredTabIDs(cfg)) {
     try {
       const tab = await api.tabs.get(tabId);
-      tabs.push({ ...tabSummary(tab), busy: busyTabs.has(tabId), profile: profileForTab(cfg, tab)?.name || '' });
+      const busy = busyTabs.has(tabId);
+      const coolingDown = Number(cfg.tabCooldowns?.[tabId] || 0) > Date.now();
+      tabs.push({
+        ...tabSummary(tab),
+        busy,
+        state: busy ? 'working' : (coolingDown ? 'rate_limited' : 'waiting'),
+        profile: profileForTab(cfg, tab)?.name || '',
+        currentModel: cfg.tabCapabilities?.[tabId]?.currentModel || '',
+        lastFailure: cfg.tabFailures?.[tabId] || null
+      });
     } catch (_) {}
   }
   const tab = tabs[0] || null;
@@ -306,7 +324,8 @@ async function scanPageCapabilities(tabId) {
   const capabilities = results?.[0]?.result || {};
   const cfg = await settings();
   const tabCapabilities = { ...(cfg.tabCapabilities || {}), [tabId]: capabilities };
-  await api.storage.local.set({ tabCapabilities });
+  const tabCapabilityScans = { ...(cfg.tabCapabilityScans || {}), [tabId]: Date.now() };
+  await api.storage.local.set({ tabCapabilities, tabCapabilityScans });
   return { ok: true, capabilities };
 }
 
@@ -413,11 +432,18 @@ async function processWork(cfg, work, claimedTabId) {
   let tabId = claimedTabId;
   let tabSlotHeld = false;
   let failureCode = 'browser_automation_error';
+  let failureReason = 'other';
   await api.storage.local.set({ lastError: '' });
   try {
     tabId = await resolveWorkTab(cfg, work, claimedTabId);
     await waitForTabSlot(tabId, work.deadline);
     tabSlotHeld = true;
+    const previousFailures = (await api.storage.local.get({ tabFailures: {} })).tabFailures;
+    if (previousFailures[tabId]) {
+      const tabFailures = { ...previousFailures };
+      delete tabFailures[tabId];
+      await api.storage.local.set({ tabFailures });
+    }
     tab = await api.tabs.get(tabId);
     const taught = cfg.useVisualProfile ? profileForTab(cfg, tab) : null;
     if (taught) effectiveProfile = taught;
@@ -480,6 +506,7 @@ async function processWork(cfg, work, claimedTabId) {
     }
     if (!answer?.ok) {
       failureCode = /^browser_[a-z_]+$/.test(String(answer?.code || '')) ? answer.code : failureCode;
+      failureReason = classifyFailureReason(answer?.error);
       if (failureCode === 'browser_rate_limited') {
 		await coolDownTab(tabId, 5 * 60 * 1000);
         progressSequence += 1;
@@ -518,7 +545,9 @@ async function processWork(cfg, work, claimedTabId) {
     decision = mode === 'decision'
       ? { verdict: 'review', flags: [failureCode], confidence: 0.4, model: effectiveProfile?.label || 'browser' }
       : { mode, error: failureCode, model: effectiveProfile?.label || 'browser' };
-    await api.storage.local.set({ lastError: error.message || String(error) });
+    const tabFailures = { ...(await api.storage.local.get({ tabFailures: {} })).tabFailures };
+    if (tabId) tabFailures[tabId] = { code: failureCode, reason: failureReason === 'other' ? classifyFailureReason(error.message) : failureReason, at: new Date().toISOString() };
+    await api.storage.local.set({ lastError: error.message || String(error), tabFailures });
   } finally {
     if (leaseTimer) clearInterval(leaseTimer);
     if (progressTimer) clearInterval(progressTimer);
@@ -529,6 +558,16 @@ async function processWork(cfg, work, claimedTabId) {
   await api.storage.local.set({ pendingCompletions });
   await completeWork(await settings(), work.job.id, decision);
   await sendHeartbeat('waiting');
+}
+
+function classifyFailureReason(message) {
+  const text = String(message || '');
+  if (/prompt editor did not retain/i.test(text)) return 'prompt_not_retained';
+  if (/send button stayed disabled/i.test(text)) return 'send_disabled';
+  if (/send button is not visible/i.test(text)) return 'send_missing';
+  if (/prompt editor contains another draft/i.test(text)) return 'composer_draft';
+  if (/incompatible selected tool/i.test(text)) return 'incompatible_tool';
+  return 'other';
 }
 
 async function coolDownTab(tabId, duration) {
@@ -798,6 +837,25 @@ function automate(job, profile, jobDeadline) {
     element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
     element.dispatchEvent(new Event('change', { bubbles: true }));
   };
+  const clearIncompatibleGeminiTools = async (job) => {
+    if (profile.name !== 'gemini') return false;
+    const wantsImage = Number(job.output?.min_images || 0) > 0 || Boolean(job.metadata?.contextbridge_image_tool);
+    let cleared = false;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const composer = first(selectors.input)?.closest?.('[data-node-type="input-area"]');
+      if (!composer) return cleared;
+      const selected = [...composer.querySelectorAll('button[aria-label]')].find((button) => {
+        const label = String(button.getAttribute('aria-label') || '');
+        if (!/(?:auswahl von .+ aufheben|remove .+ selection|deselect .+|clear .+ tool)/i.test(label)) return false;
+        return !wantsImage || !/(?:bild|image)/i.test(label);
+      });
+      if (!selected) return cleared;
+      selected.click();
+      cleared = true;
+      await wait(250);
+    }
+    throw new Error('Gemini kept an incompatible selected tool after clearing it');
+  };
   const addImage = (element, encoded, mediaType) => {
     const bytes = Uint8Array.from(atob(encoded), (char) => char.charCodeAt(0));
     const extension = (mediaType || 'image/png').split('/')[1]?.replace(/[^a-z0-9]/gi, '') || 'png';
@@ -1025,7 +1083,8 @@ function automate(job, profile, jobDeadline) {
       const resumeOnly = Boolean(job.metadata?.contextbridge_resume_only);
       const selectedModel = !resumeOnly && job.model ? await choosePreference('model', job.model) : String(job.model || '');
       const selectedReasoning = !resumeOnly && job.reasoning ? await choosePreference('reasoning', job.reasoning) : String(job.reasoning || '');
-	  if (!resumeOnly && (job.model || job.reasoning)) {
+	  const clearedGeminiTool = !resumeOnly && await clearIncompatibleGeminiTools(job);
+	  if (!resumeOnly && (job.model || job.reasoning || clearedGeminiTool)) {
 		// Switching a provider mode may replace the entire composer. Never
 		// type into the detached element captured before the menu was opened.
 		input = null;
@@ -1049,11 +1108,26 @@ function automate(job, profile, jobDeadline) {
         await wait(1000);
       }
       if (!resumeOnly) {
-        setInput(input, job.prompt);
-        await wait(300);
-		if (input.isConnected === false || !String(input.value || input.innerText || input.textContent || '').includes(job.prompt)) {
-			throw new Error('Prompt editor did not retain the submitted text');
-		}
+        const editorText = (element) => String(element?.value || element?.innerText || element?.textContent || '');
+        const draft = editorText(input).trim();
+        if (draft && draft !== String(job.prompt).trim()) throw new Error('Prompt editor contains another draft');
+        if (!draft) setInput(input, job.prompt);
+        let retained = false;
+        for (let attempt = 0; attempt < 6; attempt += 1) {
+          const liveInput = first(selectors.input);
+          const liveText = editorText(liveInput);
+          if (liveInput && liveText.includes(job.prompt)) {
+            input = liveInput;
+            retained = true;
+            break;
+          }
+          if (liveInput && liveInput !== input && !liveText.trim() && attempt < 3) {
+            input = liveInput;
+            setInput(input, job.prompt);
+          }
+          await wait(150);
+        }
+        if (!retained) throw new Error('Prompt editor did not retain the submitted text');
         let submit = first(selectors.submit);
         for (let attempt = 0; (!submit || submit.disabled || submit.getAttribute('aria-disabled') === 'true') && attempt < 20; attempt += 1) {
           await wait(150);
@@ -1064,6 +1138,7 @@ function automate(job, profile, jobDeadline) {
         } else if (submit) {
 			throw new Error('Send button stayed disabled after filling the prompt');
         } else {
+          if (profile.name === 'gemini') throw new Error('Send button is not visible after filling the prompt');
           input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
           input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
         }
@@ -1151,9 +1226,10 @@ function automate(job, profile, jobDeadline) {
       const code = /requested model|model selector/i.test(message)
 		? 'browser_model_unavailable'
 		: (/requested reasoning|reasoning selector/i.test(message) ? 'browser_reasoning_unavailable'
-			: (/send button stayed disabled|prompt editor did not retain/i.test(message) ? 'browser_submit_unavailable'
+			: (/send button stayed disabled|send button is not visible|prompt editor did not retain|incompatible selected tool/i.test(message) ? 'browser_submit_unavailable'
+			: (/prompt editor contains another draft/i.test(message) ? 'browser_composer_busy'
 			: (/image creation is rate limited/i.test(message) ? 'browser_rate_limited'
-				: (/image creation tool|image tool menu/i.test(message) ? 'browser_image_tool_unavailable' : 'browser_automation_error'))));
+				: (/image creation tool|image tool menu/i.test(message) ? 'browser_image_tool_unavailable' : 'browser_automation_error')))));
       resolve({ ok: false, error: message, code });
     }
   });
@@ -1283,7 +1359,7 @@ function matches(url, pattern) {
 
 function startHeartbeat() {
   stopHeartbeat();
-  heartbeatTimer = setInterval(() => sendHeartbeat('waiting'), 12000);
+  heartbeatTimer = setInterval(() => sendHeartbeat('waiting'), 5000);
 }
 
 function stopHeartbeat() {
@@ -1291,7 +1367,13 @@ function stopHeartbeat() {
   heartbeatTimer = 0;
 }
 
-async function sendHeartbeat(state) {
+function sendHeartbeat(state) {
+  if (heartbeatInFlight) return heartbeatInFlight;
+  heartbeatInFlight = sendHeartbeatOnce(state).finally(() => { heartbeatInFlight = null; });
+  return heartbeatInFlight;
+}
+
+async function sendHeartbeatOnce(state) {
   const cfg = await settings();
   if (!cfg.token) return;
   const tabs = [];
@@ -1301,6 +1383,21 @@ async function sendHeartbeat(state) {
       const profile = profileForTab(cfg, tab);
       let capabilities = cfg.tabCapabilities?.[tabId] || {};
       let dom = null;
+      if (profile?.name === 'gemini' && !busyTabs.has(tabId)
+          && Date.now() - Number(cfg.tabCapabilityScans?.[tabId] || 0) > 30 * 60 * 1000) {
+        try {
+          const safe = await api.scripting.executeScript({ target: { tabId }, func: safeToDiscoverPageCapabilities });
+          if (safe?.[0]?.result === true) {
+            const scanned = await api.scripting.executeScript({ target: { tabId }, func: discoverPageCapabilities });
+            capabilities = scanned?.[0]?.result || capabilities;
+            const latest = await api.storage.local.get({ tabCapabilities: {}, tabCapabilityScans: {} });
+            await api.storage.local.set({
+              tabCapabilities: { ...latest.tabCapabilities, [tabId]: capabilities },
+              tabCapabilityScans: { ...latest.tabCapabilityScans, [tabId]: Date.now() }
+            });
+          }
+        } catch (_) {}
+      }
       try {
         const report = await api.scripting.executeScript({ target: { tabId }, func: inspectPageCapabilities });
         const live = report?.[0]?.result || {};
@@ -1327,7 +1424,8 @@ async function sendHeartbeat(state) {
         title: tab?.title || '', profile: profile?.name || '',
         state: busyTabs.has(tabId) ? 'working' : (Number(cfg.tabCooldowns?.[tabId] || 0) > Date.now() ? 'rate_limited' : 'waiting'),
         current_model: capabilities.currentModel || '', current_reasoning: capabilities.currentReasoning || '',
-        models: capabilities.models || [], reasoning_levels: capabilities.reasoningLevels || [], dom
+        models: capabilities.models || [], reasoning_levels: capabilities.reasoningLevels || [],
+        last_failure: cfg.tabFailures?.[tabId] || null, dom
       });
     } catch (_) {}
   }
@@ -1368,6 +1466,8 @@ async function settings() {
     taughtProfiles: {},
     sessionTabs: {},
     tabCapabilities: {},
+    tabCapabilityScans: {},
+    tabFailures: {},
     tabCooldowns: {},
     pendingCompletions: {},
     lastError: ''
@@ -1377,6 +1477,13 @@ async function settings() {
 function configuredTabIDs(cfg) {
   const values = Array.isArray(cfg?.tabIds) && cfg.tabIds.length ? cfg.tabIds : [cfg?.tabId];
   return [...new Set(values.map(Number).filter((value) => Number.isInteger(value) && value > 0))].slice(0, 16);
+}
+
+function safeToDiscoverPageCapabilities() {
+  const composer = document.querySelector('rich-textarea [contenteditable="true"][role="textbox"], div.ql-editor[contenteditable="true"][role="textbox"]');
+  if (!composer || String(composer.innerText || composer.textContent || '').trim()) return false;
+  return ![...document.querySelectorAll('[aria-busy="true"], button[data-testid*="stop" i], button[aria-label*="stop" i]')]
+    .some((element) => element.offsetWidth || element.offsetHeight || element.getClientRects().length);
 }
 
 function inspectPageCapabilities() {
@@ -1396,10 +1503,18 @@ function inspectPageCapabilities() {
   const currentReasoning = text(controls.find((element) => semantic(element, /reason|denk|effort|thinking/i) || reasoningPattern.test(text(element))));
   const geminiPicker = document.querySelector?.('bard-mode-switcher button[aria-haspopup]');
   const geminiCurrent = geminiPicker?.getAttribute('aria-label')?.match(/(?:derzeit ausgewählt|currently selected|selected)\s*:\s*(.+)$/i)?.[1]?.trim().slice(0, 100) || '';
+  const geminiMenu = geminiPicker?.getAttribute('aria-controls') && document.getElementById?.(geminiPicker.getAttribute('aria-controls'));
+  const visibleGeminiModels = geminiMenu ? [...geminiMenu.querySelectorAll('button, [role="menuitem"], [role="option"], [role="menuitemradio"]')]
+    .filter((item) => visible(item) && !item.disabled && item.getAttribute('aria-disabled') !== 'true')
+    .map((item) => {
+      const primary = text(item.querySelector?.('.picker-primary-text, .mode-name, .model-name'));
+      const secondary = text(item.querySelector?.('.picker-secondary-text'));
+      return primary ? `${primary} ${secondary}`.trim() : text(item);
+    }) : [];
   return {
     currentModel: geminiCurrent || currentModel,
     currentReasoning: geminiCurrent ? '' : currentReasoning,
-    models: geminiCurrent ? [] : unique(options.map(text).filter((value) => modelPattern.test(value)), 50),
+    models: geminiCurrent ? unique(visibleGeminiModels, 50) : unique(options.map(text).filter((value) => modelPattern.test(value)), 50),
     reasoningLevels: geminiCurrent ? [] : unique(options.map(text).filter((value) => reasoningPattern.test(value)), 20)
   };
 }
@@ -1441,7 +1556,7 @@ function inspectPageDOM(selectors) {
   const inputs = bySelectors(selectors.input, 8);
   const submit = bySelectors(selectors.submit, 8);
   const fileInputs = [...document.querySelectorAll('input[type="file"]')].slice(0, 12);
-  const composer = inputs[0]?.closest('form') || document.querySelector('form[data-type="unified-composer"]') || document.querySelector('form');
+  const composer = inputs[0]?.closest('[data-node-type="input-area"], form') || document.querySelector('form[data-type="unified-composer"]') || document.querySelector('form');
   const tools = [...(composer?.querySelectorAll('button, [role="button"]') || [])].filter(visible);
   const seenTools = new Set(tools);
   for (const element of document.querySelectorAll('[role="menuitem"], [role="option"]')) {
@@ -1457,10 +1572,13 @@ function inspectPageDOM(selectors) {
   for (const element of document.querySelectorAll('[data-testid="image-gen-loading-progress"], [role="progressbar"][aria-valuenow]')) {
     if (visible(element)) imageProgress = Math.max(imageProgress, Number(element.getAttribute('aria-valuenow')) || 0);
   }
-  const relevant = /bild|image|file|datei|ordner|folder|upload|attach|tool|werkzeug/i;
+  const relevant = /bild|image|file|datei|ordner|folder|upload|attach|tool|werkzeug|auswahl von|selection of|deselect/i;
+  const inputCharacters = String(inputs[0]?.value || inputs[0]?.innerText || inputs[0]?.textContent || '').trim().length;
   return {
     captured_at: new Date().toISOString(),
     inputs: inputs.map((element) => describe(element)),
+    input_has_text: inputCharacters > 0,
+    input_characters: Math.min(inputCharacters, 100000),
     submit: submit.map((element) => describe(element)),
     file_inputs: fileInputs.map((element) => describe(element)),
     tools: tools.slice(0, 32).map((element) => {

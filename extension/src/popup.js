@@ -3,12 +3,13 @@ const $ = (id) => document.getElementById(id);
 let currentTab = null;
 let currentProfile = null;
 let attachedTabIDs = [];
+let liveTabState = new Map();
 
 document.addEventListener('DOMContentLoaded', initialize);
 api.storage.onChanged?.addListener((changes, area) => {
-  if (area !== 'local' || !changes.tabIds) return;
-  attachedTabIDs = [...new Set((changes.tabIds.newValue || []).map(Number).filter(Boolean))];
-  void hasTabsPermission().then((allowed) => loadTabs(primaryTabID(), allowed)).then(refreshState);
+  if (area !== 'local') return;
+  if (changes.tabIds) attachedTabIDs = [...new Set((changes.tabIds.newValue || []).map(Number).filter(Boolean))];
+  if (changes.tabIds || changes.tabCapabilities || changes.tabCooldowns || changes.tabFailures || changes.lastError) void refreshLiveTabs(Boolean(changes.tabIds));
 });
 
 async function initialize() {
@@ -23,9 +24,18 @@ async function initialize() {
   await loadTabs(attachedTabIDs[0] || 0, false);
   await loadProfiles(saved);
   await refreshState();
+  setInterval(() => { if (!document.hidden) void refreshLiveTabs(); }, 2500);
+}
+
+async function refreshLiveTabs(refreshProfile = false) {
+  try {
+    await loadTabs(primaryTabID(), await hasTabsPermission());
+    if (refreshProfile) await refreshState();
+  } catch (_) {}
 }
 
 $('refresh-tabs').addEventListener('click', () => loadTabs(primaryTabID(), false));
+$('tab-filter').addEventListener('change', () => loadTabs(primaryTabID(), false));
 $('select-ai-tabs').addEventListener('click', async () => {
   try {
     const granted = await api.permissions.request({ permissions: ['tabs'] });
@@ -265,27 +275,67 @@ async function loadTabs(selected, allWindows) {
   } catch (_) {
     tabs = await api.tabs.query({ active: true, currentWindow: true });
   }
-  const eligible = tabs.filter((tab) => tab.id && /^https?:/i.test(tab.url || ''));
+  const filter = $('tab-filter').value || 'all';
+  const eligible = filterTabList(tabs, filter, attachedTabIDs);
+  let runtimeTabs = new Map();
+  try {
+    const status = await api.runtime.sendMessage({ type: 'status' });
+    runtimeTabs = new Map((status?.tabs || []).map((tab) => [tab.id, tab]));
+  } catch (_) {}
+  liveTabState = runtimeTabs;
   const focusedID = Number(selected) || attachedTabIDs[0] || eligible.find((tab) => tab.active)?.id || 0;
-  $('tab').textContent = '';
-  for (const tab of eligible) {
-    const option = document.createElement('option');
-    option.value = String(tab.id);
+  const desired = eligible.map((tab) => {
     const host = safeHost(tab.url);
     const windowLabel = allWindows ? `W${tab.windowId}  ` : '';
     const attached = attachedTabIDs.includes(tab.id);
-    option.textContent = `${attached ? '● Attached' : '○ Available'} · ${windowLabel}${tab.title || 'Untitled'}  |  ${host}`;
-    option.selected = focusedID === tab.id;
-    $('tab').append(option);
+    const live = runtimeTabs.get(tab.id);
+    const state = tabDisplayState(attached, live?.state);
+    const model = attached && live?.currentModel ? ` · ${live.currentModel}` : '';
+    return { id: tab.id, label: `${attached ? '●' : '○'} ${state}${model} · ${windowLabel}${tab.title || 'Untitled'}  |  ${host}` };
+  });
+  const existing = [...$('tab').options];
+  if (existing.length !== desired.length || desired.some((item, index) => existing[index]?.value !== String(item.id) || existing[index]?.textContent !== item.label)) {
+    const scrollTop = $('tab').scrollTop;
+    $('tab').replaceChildren(...desired.map((item) => {
+      const option = document.createElement('option');
+      option.value = String(item.id);
+      option.textContent = item.label;
+      option.selected = focusedID === item.id;
+      return option;
+    }));
+    $('tab').scrollTop = scrollTop;
   }
   if (!$('tab').selectedOptions.length && eligible[0]) $('tab').options[0].selected = true;
   $('all-tabs').hidden = await hasTabsPermission();
   describeSelectedTab();
 }
 
+function filterTabList(tabs, filter, attachedIDs) {
+  return tabs.filter((tab) => tab.id && /^https?:/i.test(tab.url || ''))
+    .filter((tab) => filter === 'all' || (filter === 'attached') === attachedIDs.includes(tab.id));
+}
+
+function tabDisplayState(attached, liveState) {
+  if (!attached) return 'Available';
+  if (liveState === 'working') return 'Working';
+  if (liveState === 'rate_limited') return 'Cooling down';
+  return 'Attached';
+}
+
 async function setAttachedTabIDs(values) {
+  const previous = new Set(attachedTabIDs);
   attachedTabIDs = [...new Set(values.map(Number).filter(Boolean))].slice(0, 16);
-  await api.storage.local.set({ tabId: attachedTabIDs[0] || 0, tabIds: attachedTabIDs });
+  const removed = [...previous].filter((id) => !attachedTabIDs.includes(id));
+  const updates = { tabId: attachedTabIDs[0] || 0, tabIds: attachedTabIDs };
+  if (removed.length) {
+    const saved = await settings();
+    for (const key of ['tabCapabilities', 'tabCapabilityScans', 'tabFailures']) {
+      const entries = { ...(saved[key] || {}) };
+      for (const id of removed) delete entries[id];
+      updates[key] = entries;
+    }
+  }
+  await api.storage.local.set(updates);
   await api.runtime.sendMessage({ type: 'refresh-tabs' });
 }
 
@@ -302,11 +352,13 @@ async function blockAutoAttach(tabIds, blocked) {
 function describeSelectedTab() {
   const id = primaryTabID();
   const attached = attachedTabIDs.includes(id);
+  const live = liveTabState.get(id);
   $('attach-tab').disabled = !id || attached || attachedTabIDs.length >= 16;
   $('detach-tab').disabled = !attached;
   $('detach-all').disabled = attachedTabIDs.length === 0;
   $('tab-state').textContent = !id ? 'Choose a tab to inspect or attach.'
-    : attached ? 'Attached: this tab can receive jobs. Detach it here at any time.'
+    : attached && live?.lastFailure ? `Attached · last job: ${live.lastFailure.code} (${live.lastFailure.reason || 'other'}). Detach at any time.`
+    : attached ? `Attached · ${tabDisplayState(true, live?.state)}${live?.currentModel ? ` · ${live.currentModel}` : ''}. Detach at any time.`
       : 'Not attached. Allow this tab explicitly, including its existing conversation if present.';
 }
 
@@ -432,6 +484,9 @@ async function settings() {
     autoAttachBlockedTabIds: [],
     useVisualProfile: true,
     taughtProfiles: {},
+    tabCapabilities: {},
+    tabCapabilityScans: {},
+    tabFailures: {},
     lastError: ''
   });
 }

@@ -512,12 +512,25 @@ func (s *Server) handleBrowserHeartbeat(w http.ResponseWriter, r *http.Request) 
 		status.Tabs[index].CurrentReasoning = limitedValue(status.Tabs[index].CurrentReasoning, 100)
 		status.Tabs[index].Models = limitedStrings(status.Tabs[index].Models, 50, 100)
 		status.Tabs[index].ReasoningLevels = limitedStrings(status.Tabs[index].ReasoningLevels, 20, 100)
+		if failure := status.Tabs[index].LastFailure; failure != nil {
+			failure.Code = limitedValue(failure.Code, 80)
+			if !strings.HasPrefix(failure.Code, "browser_") {
+				status.Tabs[index].LastFailure = nil
+			} else {
+				switch failure.Reason {
+				case "prompt_not_retained", "send_disabled", "send_missing", "composer_draft", "incompatible_tool", "other":
+				default:
+					failure.Reason = "other"
+				}
+			}
+		}
 		if dom := status.Tabs[index].DOM; dom != nil {
 			dom.Inputs = limitedDOMControls(dom.Inputs, 8)
 			dom.Submit = limitedDOMControls(dom.Submit, 8)
 			dom.FileInputs = limitedDOMControls(dom.FileInputs, 12)
 			dom.Tools = limitedDOMControls(dom.Tools, 32)
 			dom.AssistantTurns = max(0, min(dom.AssistantTurns, 10000))
+			dom.InputCharacters = max(0, min(dom.InputCharacters, 100000))
 			dom.LastResponseImages = max(0, min(dom.LastResponseImages, 100))
 			dom.ImageProgress = max(0, min(dom.ImageProgress, 100))
 		}

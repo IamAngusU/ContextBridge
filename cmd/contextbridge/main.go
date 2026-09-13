@@ -107,7 +107,7 @@ func usage() {
 Usage:
   contextbridge init [--config path]
   contextbridge serve [--config path]
-  contextbridge run [--config path]
+  contextbridge run [--config path] [--slots N] [--topmost]
   contextbridge submit --file job.json [--config path]
   contextbridge review --job-dir path [--config path]
   contextbridge health [--config path]
@@ -120,8 +120,8 @@ Usage:
   contextbridge pull [--config path] MODEL
   contextbridge runtime install [--config path] llama.cpp
   contextbridge relay [--config path]
-  contextbridge pair [--config path] [--relay URL] [--name NAME]
-  contextbridge worker [--config path]
+  contextbridge pair [--config path] [--relay URL] [--identity path] [--name NAME]
+  contextbridge worker [--config path] [--relay URL] [--identity path] [--slots N] [--providers LIST] [--models LIST] [--tasks LIST] [--topmost]
   contextbridge cluster status|submit|chat|login|token|pairing [options]
   contextbridge update status|check|apply|enable|disable|auto [options]
   contextbridge version`)
@@ -176,12 +176,27 @@ func serveCommand(args []string) error {
 func runCommand(args []string) error {
 	flags := flag.NewFlagSet("run", flag.ContinueOnError)
 	path := flags.String("config", defaultConfigPath(), "config path")
+	slots := flags.Int("slots", 0, "session-only worker job limit; 1-64")
+	topmost := flags.Bool("topmost", false, "keep this Windows console above other windows for this session")
 	if err := flags.Parse(args); err != nil {
 		return err
+	}
+	if *slots < 0 || *slots > 64 {
+		return errors.New("--slots must be between 1 and 64")
 	}
 	cfg, err := config.Load(*path)
 	if err != nil {
 		return err
+	}
+	if *slots > 0 {
+		cfg.Cluster.Worker.MaxConcurrent = *slots
+	}
+	if *topmost {
+		restore, err := terminalui.Topmost()
+		if err != nil {
+			return err
+		}
+		defer restore()
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -945,6 +960,7 @@ func pairCommand(args []string) error {
 	flags := flag.NewFlagSet("pair", flag.ContinueOnError)
 	path := flags.String("config", defaultConfigPath(), "config path")
 	relayURL := flags.String("relay", "", "public relay URL")
+	identityFile := flags.String("identity", "", "identity file for this relay")
 	name := flags.String("name", "", "node name")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -956,14 +972,20 @@ func pairCommand(args []string) error {
 	if *relayURL == "" {
 		*relayURL = cfg.Cluster.Worker.RelayURL
 	}
+	if *identityFile == "" {
+		*identityFile = cfg.Cluster.Worker.IdentityFile
+	}
 	if *relayURL == "" {
 		return errors.New("--relay or cluster.worker.relay_url is required")
+	}
+	if !strings.HasPrefix(*relayURL, "https://") && !strings.HasPrefix(*relayURL, "http://127.0.0.1:") && !strings.HasPrefix(*relayURL, "http://localhost:") {
+		return errors.New("pairing requires HTTPS or a localhost relay URL")
 	}
 	if *name == "" || *name == "auto" {
 		*name, _ = os.Hostname()
 	}
 	if cfg.Cluster.Relay.Enabled && *relayURL == "http://"+cfg.Cluster.Relay.Listen {
-		if err := cluster.BootstrapWorkerIdentity(cfg.Cluster.Relay.Database, *relayURL, *name, cfg.Cluster.Worker.IdentityFile, cfg.Cluster.Worker.Groups); err != nil {
+		if err := cluster.BootstrapWorkerIdentity(cfg.Cluster.Relay.Database, *relayURL, *name, *identityFile, cfg.Cluster.Worker.Groups); err != nil {
 			return err
 		}
 		fmt.Println("Local worker paired directly with the relay database.")
@@ -971,7 +993,7 @@ func pairCommand(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return cluster.PairWorker(ctx, *relayURL, *name, cfg.Cluster.Worker.IdentityFile, cfg.Cluster.Worker.Groups, func(pair cluster.PairResponse) {
+	return cluster.PairWorker(ctx, *relayURL, *name, *identityFile, cfg.Cluster.Worker.Groups, func(pair cluster.PairResponse) {
 		fmt.Println("Pair this worker")
 		fmt.Println("  Code:", pair.UserCode)
 		fmt.Println("  Open:", pair.VerificationURI)
@@ -982,12 +1004,64 @@ func pairCommand(args []string) error {
 func workerCommand(args []string) error {
 	flags := flag.NewFlagSet("worker", flag.ContinueOnError)
 	path := flags.String("config", defaultConfigPath(), "config path")
+	relayURL := flags.String("relay", "", "relay URL for this worker session")
+	identityFile := flags.String("identity", "", "identity file paired to this relay")
+	slots := flags.Int("slots", 0, "session-only worker job limit; 1-64")
+	providers := flags.String("providers", "", "comma-separated providers this relay may use")
+	models := flags.String("models", "", "comma-separated models this relay may use")
+	tasks := flags.String("tasks", "", "comma-separated tasks this relay may use")
+	groups := flags.String("groups", "", "comma-separated scheduling groups")
+	noUpdates := flags.Bool("no-updates", false, "do not run a second updater in this worker process")
+	topmost := flags.Bool("topmost", false, "keep this Windows console above other windows for this session")
 	if err := flags.Parse(args); err != nil {
 		return err
+	}
+	if *slots < 0 || *slots > 64 {
+		return errors.New("--slots must be between 1 and 64")
 	}
 	cfg, err := config.Load(*path)
 	if err != nil {
 		return err
+	}
+	if *slots > 0 {
+		cfg.Cluster.Worker.MaxConcurrent = *slots
+	}
+	if *relayURL != "" {
+		cfg.Cluster.Worker.RelayURL = strings.TrimRight(*relayURL, "/")
+	}
+	if *identityFile != "" {
+		cfg.Cluster.Worker.IdentityFile = *identityFile
+	}
+	if *providers != "" {
+		cfg.Cluster.Worker.AllowedProviders = splitWorkerList(*providers)
+		if len(cfg.Cluster.Worker.AllowedProviders) == 0 {
+			return errors.New("--providers must contain at least one provider")
+		}
+	}
+	if *models != "" {
+		cfg.Cluster.Worker.AllowedModels = splitWorkerList(*models)
+		if len(cfg.Cluster.Worker.AllowedModels) == 0 {
+			return errors.New("--models must contain at least one model")
+		}
+	}
+	if *tasks != "" {
+		cfg.Cluster.Worker.AllowedTasks = splitWorkerList(*tasks)
+		if len(cfg.Cluster.Worker.AllowedTasks) == 0 {
+			return errors.New("--tasks must contain at least one task")
+		}
+	}
+	if *groups != "" {
+		cfg.Cluster.Worker.Groups = splitWorkerList(*groups)
+		if len(cfg.Cluster.Worker.Groups) == 0 {
+			return errors.New("--groups must contain at least one group")
+		}
+	}
+	if *topmost {
+		restore, err := terminalui.Topmost()
+		if err != nil {
+			return err
+		}
+		defer restore()
 	}
 	if !cfg.Cluster.Worker.Enabled {
 		return errors.New("cluster.worker.enabled is false in the config")
@@ -1003,17 +1077,30 @@ func workerCommand(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	updateManager, err := updater.New(cfg.Updates, cfg.Storage.Directory, version)
-	if err != nil {
-		return err
-	}
-	updateManager.SetConfigPath(*path)
 	session := terminalui.New(os.Stdout)
 	defer session.Close()
 	logger := log.New(session, "", 0)
-	startUpdater(ctx, updateManager, logger, func(context.Context) bool { return worker.Idle() })
+	if !*noUpdates {
+		updateManager, updateErr := updater.New(cfg.Updates, cfg.Storage.Directory, version)
+		if updateErr != nil {
+			return updateErr
+		}
+		updateManager.SetConfigPath(*path)
+		startUpdater(ctx, updateManager, logger, func(context.Context) bool { return worker.Idle() })
+	}
 	session.Banner(version, "worker · "+name)
 	return worker.RunWithEvents(ctx, session.HandleWorker)
+}
+
+func splitWorkerList(raw string) []string {
+	parts := strings.Split(raw, ",")
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if value := strings.TrimSpace(part); value != "" {
+			values = append(values, value)
+		}
+	}
+	return values
 }
 
 func relayConfig(cfg config.Config) cluster.RelayConfig {
@@ -1025,7 +1112,11 @@ func configuredWorker(cfg config.Config) (*cluster.Worker, error) {
 	if name == "" || name == "auto" {
 		name, _ = os.Hostname()
 	}
-	return cluster.LoadWorker(cluster.WorkerConfig{RelayURL: cfg.Cluster.Worker.RelayURL, IdentityFile: cfg.Cluster.Worker.IdentityFile, Name: name, Groups: cfg.Cluster.Worker.Groups, Tags: cfg.Cluster.Worker.Tags, MaxConcurrent: cfg.Cluster.Worker.MaxConcurrent, LocalURL: cfg.Cluster.Worker.LocalURL, LocalToken: cfg.Cluster.Worker.LocalToken, HeartbeatEvery: time.Duration(cfg.Cluster.Worker.HeartbeatSeconds) * time.Second, AllowedTasks: cfg.Cluster.Policies.AllowedTasks, Version: version})
+	allowedTasks := cfg.Cluster.Policies.AllowedTasks
+	if len(cfg.Cluster.Worker.AllowedTasks) > 0 {
+		allowedTasks = cfg.Cluster.Worker.AllowedTasks
+	}
+	return cluster.LoadWorker(cluster.WorkerConfig{RelayURL: cfg.Cluster.Worker.RelayURL, IdentityFile: cfg.Cluster.Worker.IdentityFile, Name: name, Groups: cfg.Cluster.Worker.Groups, Tags: cfg.Cluster.Worker.Tags, MaxConcurrent: cfg.Cluster.Worker.MaxConcurrent, LocalURL: cfg.Cluster.Worker.LocalURL, LocalToken: cfg.Cluster.Worker.LocalToken, HeartbeatEvery: time.Duration(cfg.Cluster.Worker.HeartbeatSeconds) * time.Second, AllowedTasks: allowedTasks, AllowedProviders: cfg.Cluster.Worker.AllowedProviders, AllowedModels: cfg.Cluster.Worker.AllowedModels, Version: version})
 }
 
 func enabledLabel(enabled bool, label string) string {

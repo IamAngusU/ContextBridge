@@ -40,6 +40,7 @@
         submit: [
           'button[data-test-id="send-button"]',
           'button[data-testid="send-button"]',
+          'button[aria-label*="nachricht senden" i]',
           'button[aria-label*="prompt senden" i]',
           'button[aria-label*="send message" i]',
           'button[aria-label="Send"]'

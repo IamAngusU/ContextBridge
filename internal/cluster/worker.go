@@ -23,18 +23,20 @@ import (
 )
 
 type WorkerConfig struct {
-	RelayURL       string
-	IdentityFile   string
-	Name           string
-	Groups         []string
-	Tags           []string
-	MaxConcurrent  int
-	LocalURL       string
-	LocalToken     string
-	HeartbeatEvery time.Duration
-	RequestTimeout time.Duration
-	AllowedTasks   []string
-	Version        string
+	RelayURL         string
+	IdentityFile     string
+	Name             string
+	Groups           []string
+	Tags             []string
+	MaxConcurrent    int
+	LocalURL         string
+	LocalToken       string
+	HeartbeatEvery   time.Duration
+	RequestTimeout   time.Duration
+	AllowedTasks     []string
+	AllowedProviders []string
+	AllowedModels    []string
+	Version          string
 }
 
 type WorkerIdentity struct {
@@ -97,6 +99,9 @@ func LoadWorker(cfg WorkerConfig) (*Worker, error) {
 	if cfg.RelayURL == "" || cfg.IdentityFile == "" {
 		return nil, errors.New("relay URL and identity file are required")
 	}
+	if !strings.HasPrefix(cfg.RelayURL, "https://") && !strings.HasPrefix(cfg.RelayURL, "http://127.0.0.1:") && !strings.HasPrefix(cfg.RelayURL, "http://localhost:") {
+		return nil, errors.New("worker relay URL must use HTTPS or localhost")
+	}
 	raw, err := os.ReadFile(cfg.IdentityFile)
 	if err != nil {
 		return nil, fmt.Errorf("load worker identity: %w", err)
@@ -104,6 +109,9 @@ func LoadWorker(cfg WorkerConfig) (*Worker, error) {
 	var identity WorkerIdentity
 	if err := json.Unmarshal(raw, &identity); err != nil || identity.NodeID == "" || identity.NodeToken == "" || identity.PrivateKey == "" {
 		return nil, errors.New("worker identity is incomplete; run contextbridge pair first")
+	}
+	if identity.RelayURL != "" && strings.TrimRight(identity.RelayURL, "/") != strings.TrimRight(cfg.RelayURL, "/") {
+		return nil, errors.New("worker identity belongs to another relay; pair this identity with the selected server")
 	}
 	if cfg.Name == "" {
 		cfg.Name, _ = os.Hostname()
@@ -330,8 +338,12 @@ func (w *Worker) execute(ctx context.Context, job Job, emitProgress func(JobProg
 	if !json.Valid(payload) {
 		return nil, nil, Usage{}, errors.New("job payload must be valid JSON")
 	}
+	requirements, err := w.applyPolicy(job.Requirements)
+	if err != nil {
+		return nil, nil, Usage{}, err
+	}
 	localJobID := localExecutionID(job)
-	payload, err := prepareLocalPayload(payload, job.Requirements, localJobID)
+	payload, err = prepareLocalPayload(payload, requirements, localJobID)
 	if err != nil {
 		return nil, nil, Usage{}, err
 	}
@@ -350,7 +362,7 @@ func (w *Worker) execute(ctx context.Context, job Job, emitProgress func(JobProg
 	}()
 	progressCtx, stopProgress := context.WithCancel(ctx)
 	var progressWG sync.WaitGroup
-	if emitProgress != nil && job.SealedPayload == nil && strings.EqualFold(job.Requirements.Provider, "browser") {
+	if emitProgress != nil && job.SealedPayload == nil && strings.EqualFold(requirements.Provider, "browser") {
 		progressWG.Add(1)
 		go func() {
 			defer progressWG.Done()
@@ -396,6 +408,34 @@ func (w *Worker) execute(ctx context.Context, job Job, emitProgress func(JobProg
 		return nil, sealed, usage, sealErr
 	}
 	return json.RawMessage(raw), nil, usage, nil
+}
+
+// applyPolicy is the worker-side boundary. A relay may suggest a job, but it
+// cannot make this device use a provider, model, or task excluded by its owner.
+func (w *Worker) applyPolicy(requirements Requirements) (Requirements, error) {
+	if requirements.Task == "" {
+		requirements.Task = "generation"
+	}
+	if len(w.cfg.AllowedTasks) > 0 && !containsFold(w.cfg.AllowedTasks, requirements.Task) {
+		return Requirements{}, fmt.Errorf("worker policy rejects task %q", requirements.Task)
+	}
+	if len(w.cfg.AllowedProviders) > 0 {
+		if requirements.Provider == "" {
+			requirements.Provider = w.cfg.AllowedProviders[0]
+		}
+		if !containsFold(w.cfg.AllowedProviders, requirements.Provider) {
+			return Requirements{}, fmt.Errorf("worker policy rejects provider %q", requirements.Provider)
+		}
+	}
+	if len(w.cfg.AllowedModels) > 0 {
+		if requirements.Model == "" {
+			requirements.Model = w.cfg.AllowedModels[0]
+		}
+		if !containsFold(w.cfg.AllowedModels, requirements.Model) {
+			return Requirements{}, fmt.Errorf("worker policy rejects model %q", requirements.Model)
+		}
+	}
+	return requirements, nil
 }
 
 func (w *Worker) monitorResources(parent context.Context) func() Usage {
@@ -457,6 +497,10 @@ func prepareLocalPayload(payload []byte, requirements Requirements, localJobID s
 	if provider != "" {
 		rawProvider, _ := json.Marshal(provider)
 		job["provider"] = rawProvider
+	}
+	if model := strings.TrimSpace(requirements.Model); model != "" {
+		rawModel, _ := json.Marshal(model)
+		job["model"] = rawModel
 	}
 	rawID, _ := json.Marshal(localJobID)
 	job["id"] = rawID
@@ -553,12 +597,34 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 		}
 		if response.StatusCode == http.StatusOK && json.NewDecoder(io.LimitReader(response.Body, 4<<20)).Decode(&status) == nil {
 			capability.QueueDepth = status.Queued
-			if status.Browser.ActiveTabs > 0 && status.Browser.ActiveTabs < capability.MaxConcurrent {
-				capability.MaxConcurrent = status.Browser.ActiveTabs
-			}
+			// Browser tabs are separate serial UI slots. They must not lower the
+			// worker-wide limit for Ollama or other local-model jobs.
+			capability.BrowserTabs = status.Browser.ActiveTabs
+			capability.BrowserBusy = status.Browser.BusyTabs
 			seenTasks := map[string]bool{}
 			seenProviders := map[string]bool{}
+			providerAllowed := func(provider string) bool {
+				return len(w.cfg.AllowedProviders) == 0 || containsFold(w.cfg.AllowedProviders, provider)
+			}
+			modelAllowed := func(model string) bool {
+				return len(w.cfg.AllowedModels) == 0 || containsFold(w.cfg.AllowedModels, model)
+			}
+			allowedModelTasks := func(tasks []string) []string {
+				if len(w.cfg.AllowedTasks) == 0 {
+					return tasks
+				}
+				allowed := make([]string, 0, len(tasks))
+				for _, task := range tasks {
+					if containsFold(w.cfg.AllowedTasks, task) {
+						allowed = append(allowed, task)
+					}
+				}
+				return allowed
+			}
 			providerOnline := func(provider string) bool {
+				if !providerAllowed(provider) {
+					return false
+				}
 				if provider == "browser" {
 					return status.Browser.Connected && status.Browser.SelectorsReady
 				}
@@ -585,13 +651,15 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 					capability.Tasks = append(capability.Tasks, task)
 					seenTasks[task] = true
 				}
-				if route.Model != "" && providerOnline(route.Provider) {
+				if route.Model != "" && providerOnline(route.Provider) && modelAllowed(route.Model) {
 					vision, embedding := modelFeatures(route.Model, task)
-					capability.Models = append(capability.Models, ModelCapability{Name: route.Model, Tasks: modelTasks(task, vision, embedding), Provider: route.Provider, Vision: vision, Embedding: embedding})
+					if tasks := allowedModelTasks(modelTasks(task, vision, embedding)); len(tasks) > 0 {
+						capability.Models = append(capability.Models, ModelCapability{Name: route.Model, Tasks: tasks, Provider: route.Provider, Vision: vision, Embedding: embedding})
+					}
 				}
 			}
 			for provider, engine := range status.Runtime.Engines {
-				if engine.State != "online" {
+				if engine.State != "online" || !providerAllowed(provider) {
 					continue
 				}
 				if !seenProviders[provider] {
@@ -599,23 +667,33 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 					seenProviders[provider] = true
 				}
 				for _, model := range engine.Models {
+					if !modelAllowed(model.Name) {
+						continue
+					}
 					vision, embedding := modelFeatures(model.Name, "generation")
-					capability.Models = append(capability.Models, ModelCapability{Name: model.Name, Provider: provider, Size: model.Size, VRAM: model.VRAM, Loaded: model.Loaded, Vision: vision, Embedding: embedding, Tasks: modelTasks("generation", vision, embedding)})
+					if tasks := allowedModelTasks(modelTasks("generation", vision, embedding)); len(tasks) > 0 {
+						capability.Models = append(capability.Models, ModelCapability{Name: model.Name, Provider: provider, Size: model.Size, VRAM: model.VRAM, Loaded: model.Loaded, Vision: vision, Embedding: embedding, Tasks: tasks})
+					}
 				}
 			}
 			seenBrowserModels := map[string]bool{}
 			for _, tab := range status.Browser.Tabs {
+				if !providerAllowed("browser") {
+					break
+				}
 				models := append([]string{}, tab.Models...)
 				if tab.CurrentModel != "" {
 					models = append(models, tab.CurrentModel)
 				}
 				for _, model := range models {
 					key := strings.ToLower(strings.TrimSpace(tab.Profile + ":" + model))
-					if model == "" || seenBrowserModels[key] {
+					if model == "" || seenBrowserModels[key] || !modelAllowed(model) {
 						continue
 					}
 					seenBrowserModels[key] = true
-					capability.Models = append(capability.Models, ModelCapability{Name: model, Provider: "browser", Vision: true, Tasks: []string{"generation", "vision"}})
+					if tasks := allowedModelTasks([]string{"generation", "vision"}); len(tasks) > 0 {
+						capability.Models = append(capability.Models, ModelCapability{Name: model, Provider: "browser", Vision: true, Tasks: tasks})
+					}
 				}
 			}
 		}

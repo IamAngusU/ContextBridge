@@ -20,6 +20,7 @@
         <label class="select-field"><span class="sr-only">Browser tabs</span><select id="tab" size="5"></select></label>
         <button id="refresh-tabs" class="secondary compact" type="button">Refresh</button>
       </div>
+      <label class="tab-filter">Show <select id="tab-filter" aria-label="Filter browser tabs"><option value="all">All tabs</option><option value="attached">Attached</option><option value="available">Not attached</option></select></label>
       <small class="field-hint" id="tab-state">Choosing a tab does not grant access. Attach it explicitly, including any existing conversation.</small>
       <div class="button-row"><button id="attach-tab" class="primary" type="button">Allow this tab</button><button id="detach-tab" class="secondary" type="button">Detach this tab</button></div>
       <button id="select-ai-tabs" class="secondary full" type="button">Attach fresh ChatGPT + Gemini chats</button>

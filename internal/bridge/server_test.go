@@ -193,7 +193,7 @@ func TestBrowserHeartbeatAndDashboardStatus(t *testing.T) {
 	httpServer := httptest.NewServer(server.Handler())
 	defer httpServer.Close()
 
-	heartbeat := []byte(`{"state":"waiting","origin":"https://example.test","tab_title":"Test tab","profile_label":"Visual test","selectors_ready":true,"extension_version":"0.2.0","browser":"firefox","tabs":[{"id":42,"title":"Test tab","dom":{"inputs":[{"tag":"div","id":"prompt","visible":true}],"file_inputs":[{"tag":"input","id":"upload-photos","type":"file","accept":"image/*","visible":false}],"assistant_turns":3,"last_response_images":2}}]}`)
+	heartbeat := []byte(`{"state":"waiting","origin":"https://example.test","tab_title":"Test tab","profile_label":"Visual test","selectors_ready":true,"extension_version":"0.2.0","browser":"firefox","tabs":[{"id":42,"title":"Test tab","last_failure":{"code":"browser_submit_unavailable","reason":"raw private page content"},"dom":{"inputs":[{"tag":"div","id":"prompt","visible":true}],"input_has_text":true,"input_characters":999999,"file_inputs":[{"tag":"input","id":"upload-photos","type":"file","accept":"image/*","visible":false}],"assistant_turns":3,"last_response_images":2}}]}`)
 	req, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/browser/heartbeat", bytes.NewReader(heartbeat))
 	req.Header.Set("Authorization", "Bearer "+cfg.Server.Token)
 	req.Header.Set("Content-Type", "application/json")
@@ -224,6 +224,9 @@ func TestBrowserHeartbeatAndDashboardStatus(t *testing.T) {
 	}
 	if len(status.Browser.Tabs) != 1 || status.Browser.Tabs[0].DOM == nil || status.Browser.Tabs[0].DOM.FileInputs[0].ID != "upload-photos" {
 		t.Fatalf("selector diagnostics were not reported: %#v", status.Browser.Tabs)
+	}
+	if status.Browser.Tabs[0].LastFailure.Reason != "other" || status.Browser.Tabs[0].DOM.InputCharacters != 100000 || !status.Browser.Tabs[0].DOM.InputHasText {
+		t.Fatalf("browser diagnostics were not safely bounded: %#v", status.Browser.Tabs[0])
 	}
 
 	resp, err = http.Get(httpServer.URL + "/")

@@ -146,6 +146,9 @@ type ClusterWorker struct {
 	Groups           []string `yaml:"groups" json:"groups"`
 	Tags             []string `yaml:"tags" json:"tags"`
 	MaxConcurrent    int      `yaml:"max_concurrent" json:"max_concurrent"`
+	AllowedTasks     []string `yaml:"allowed_tasks,omitempty" json:"allowed_tasks,omitempty"`
+	AllowedProviders []string `yaml:"allowed_providers,omitempty" json:"allowed_providers,omitempty"`
+	AllowedModels    []string `yaml:"allowed_models,omitempty" json:"allowed_models,omitempty"`
 	LocalURL         string   `yaml:"local_url" json:"local_url"`
 	LocalToken       string   `yaml:"local_token" json:"-"`
 	HeartbeatSeconds int      `yaml:"heartbeat_seconds" json:"heartbeat_seconds"`
@@ -201,6 +204,9 @@ func Save(path string, cfg Config) error {
 func (c Config) Validate() error {
 	if c.Version != 1 {
 		return fmt.Errorf("unsupported config version %d", c.Version)
+	}
+	if c.Cluster.Worker.MaxConcurrent > 64 {
+		return errors.New("cluster.worker.max_concurrent must not exceed 64")
 	}
 	if c.Server.Token == "" || strings.Contains(c.Server.Token, "change-me") || strings.Contains(c.Server.Token, "${") {
 		return errors.New("server.token must be a strong secret or environment reference")
@@ -672,6 +678,9 @@ cluster:
     groups: [default]
     tags: []
     max_concurrent: 1
+    allowed_tasks: []
+    allowed_providers: []
+    allowed_models: []
     local_url: http://127.0.0.1:32145
     local_token: GENERATED_TOKEN
     heartbeat_seconds: 5

@@ -45,6 +45,9 @@ func RankWithEstimate(nodes []Node, requirements Requirements, estimatedVRAM uin
 		}
 		cpuPressure := float64(node.Capabilities.CPUUtilization) / 100
 		score := busy*60 + queue*20 + memoryPressure*10 + cpuPressure*10 + gpuPressure*15 - vramHeadroom*12
+		if strings.EqualFold(requirements.Provider, "browser") && node.Capabilities.BrowserTabs > 0 {
+			score += float64(node.Capabilities.BrowserBusy) / float64(node.Capabilities.BrowserTabs) * 40
+		}
 		if requirements.MinFreeVRAM == 0 && estimatedVRAM > 0 {
 			if hasVRAM(node, estimatedVRAM) {
 				score -= 10
@@ -95,16 +98,19 @@ func matchesNode(node Node, requirements Requirements) bool {
 	if requirements.Provider != "" && !containsFold(capability.Providers, requirements.Provider) {
 		return false
 	}
+	if strings.EqualFold(requirements.Provider, "browser") && capability.BrowserTabs > 0 && capability.BrowserBusy >= capability.BrowserTabs {
+		return false
+	}
 	if requirements.Task != "" && !containsFold(capability.Tasks, requirements.Task) && !modelSupports(capability.Models, requirements) {
 		return false
 	}
-	if requirements.Model != "" && !hasModel(capability.Models, requirements.Model) {
+	if requirements.Model != "" && !hasModel(capability.Models, requirements.Model, requirements.Provider) {
 		return false
 	}
-	if requirements.Vision && !modelFeature(capability.Models, true, false) {
+	if requirements.Vision && !modelFeature(capability.Models, requirements.Provider, true, false) {
 		return false
 	}
-	if requirements.Embedding && !modelFeature(capability.Models, false, true) {
+	if requirements.Embedding && !modelFeature(capability.Models, requirements.Provider, false, true) {
 		return false
 	}
 	if requirements.MinFreeVRAM > 0 {
@@ -124,29 +130,33 @@ func matchesNode(node Node, requirements Requirements) bool {
 
 func modelSupports(models []ModelCapability, requirements Requirements) bool {
 	for _, model := range models {
-		if requirements.Task != "" && containsFold(model.Tasks, requirements.Task) {
+		if modelMatchesProvider(model, requirements.Provider) && requirements.Task != "" && containsFold(model.Tasks, requirements.Task) {
 			return true
 		}
 	}
 	return false
 }
 
-func hasModel(models []ModelCapability, name string) bool {
+func hasModel(models []ModelCapability, name, provider string) bool {
 	for _, model := range models {
-		if strings.EqualFold(model.Name, name) {
+		if modelMatchesProvider(model, provider) && strings.EqualFold(model.Name, name) {
 			return true
 		}
 	}
 	return false
 }
 
-func modelFeature(models []ModelCapability, vision, embedding bool) bool {
+func modelFeature(models []ModelCapability, provider string, vision, embedding bool) bool {
 	for _, model := range models {
-		if (!vision || model.Vision) && (!embedding || model.Embedding) {
+		if modelMatchesProvider(model, provider) && (!vision || model.Vision) && (!embedding || model.Embedding) {
 			return true
 		}
 	}
 	return false
+}
+
+func modelMatchesProvider(model ModelCapability, provider string) bool {
+	return provider == "" || model.Provider == "" || strings.EqualFold(model.Provider, provider)
 }
 
 func bestVRAMHeadroom(node Node, required uint64) float64 {

@@ -66,11 +66,12 @@ func browserCommand(args []string) error {
 			return errors.New("the extension has not reported a DOM snapshot yet; retry after its next heartbeat")
 		}
 		result := struct {
-			TabID   int                        `json:"tab_id"`
-			Title   string                     `json:"title"`
-			Profile string                     `json:"profile"`
-			DOM     *bridge.BrowserDOMSnapshot `json:"dom"`
-		}{TabID: tab.ID, Title: tab.Title, Profile: tab.Profile, DOM: tab.DOM}
+			TabID       int                        `json:"tab_id"`
+			Title       string                     `json:"title"`
+			Profile     string                     `json:"profile"`
+			LastFailure *bridge.BrowserTabFailure  `json:"last_failure,omitempty"`
+			DOM         *bridge.BrowserDOMSnapshot `json:"dom"`
+		}{TabID: tab.ID, Title: tab.Title, Profile: tab.Profile, LastFailure: tab.LastFailure, DOM: tab.DOM}
 		encoded, err := json.MarshalIndent(result, "", "  ")
 		if err != nil {
 			return err

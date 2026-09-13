@@ -61,6 +61,38 @@ func TestProviderRequirementSelectsReadyBrowserWorker(t *testing.T) {
 	}
 }
 
+func TestBusyBrowserTabsDoNotHideLocalModelCapacity(t *testing.T) {
+	now := time.Now().UTC()
+	node := Node{ID: "mixed", Connected: true, LastSeen: now, Capabilities: Capabilities{
+		Tasks: []string{"generation"}, Providers: []string{"browser", "ollama"},
+		MaxConcurrent: 4, Running: 1, BrowserTabs: 1, BrowserBusy: 1,
+	}}
+	if got := Rank([]Node{node}, Requirements{Task: "generation", Provider: "browser"}); len(got) != 0 {
+		t.Fatalf("browser job routed to a worker with no free tab: %#v", got)
+	}
+	if got := Rank([]Node{node}, Requirements{Task: "generation", Provider: "ollama"}); len(got) != 1 {
+		t.Fatalf("busy browser tab incorrectly blocked a local-model job: %#v", got)
+	}
+}
+
+func TestModelCapabilityCannotCrossProviderBoundary(t *testing.T) {
+	node := Node{ID: "mixed", Connected: true, LastSeen: time.Now().UTC(), Capabilities: Capabilities{
+		Tasks: []string{"generation"}, Providers: []string{"browser", "ollama"}, MaxConcurrent: 2,
+		Models: []ModelCapability{{Name: "web-vision", Provider: "browser", Vision: true, Tasks: []string{"generation", "vision"}}},
+	}}
+	for _, request := range []Requirements{
+		{Task: "vision", Provider: "ollama", Vision: true},
+		{Task: "generation", Provider: "ollama", Model: "web-vision"},
+	} {
+		if got := Rank([]Node{node}, request); len(got) != 0 {
+			t.Fatalf("browser-only model leaked into Ollama capability: %#v", got)
+		}
+	}
+	if got := Rank([]Node{node}, Requirements{Task: "vision", Provider: "browser", Vision: true}); len(got) != 1 {
+		t.Fatalf("valid browser vision job was excluded: %#v", got)
+	}
+}
+
 func TestFirstPreferredNodeWinsEqualLoad(t *testing.T) {
 	now := time.Now().UTC()
 	nodes := []Node{
