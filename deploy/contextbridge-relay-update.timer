@@ -1,0 +1,12 @@
+[Unit]
+Description=Hourly idle-aware ContextBridge relay update check
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+RandomizedDelaySec=5min
+Persistent=true
+Unit=contextbridge-relay-update.service
+
+[Install]
+WantedBy=timers.target

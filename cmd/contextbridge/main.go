@@ -242,6 +242,10 @@ func runCommand(args []string) error {
 }
 
 func startUpdater(ctx context.Context, manager *updater.Manager, logger *log.Logger, idle func(context.Context) bool) {
+	if os.Getenv("CONTEXTBRIDGE_UPDATES_EXTERNAL") == "1" {
+		logger.Printf("external privileged updater owns this installation")
+		return
+	}
 	manager.SetIdleCheck(idle)
 	go func() {
 		if err := manager.ConfirmStartup(ctx); err != nil {
@@ -274,8 +278,18 @@ func updateCommand(args []string) error {
 	path := flags.String("config", defaultConfigPath(), "config path")
 	force := flags.Bool("force", false, "allow replacing a development build")
 	jsonOutput := flags.Bool("json", false, "print machine-readable JSON")
+	managedService := flags.String("managed-service", "", "root-managed systemd service to restart and verify after an update")
+	relayOnly := flags.Bool("relay-only", false, "only the local relay health endpoint must be idle")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
+	}
+	if *managedService != "" {
+		if runtime.GOOS != "linux" || os.Geteuid() != 0 || !validManagedService(*managedService) {
+			return errors.New("--managed-service requires root on Linux and a contextbridge*.service name")
+		}
+		if action != "auto" && action != "apply" {
+			return errors.New("--managed-service is only valid with update auto or apply")
+		}
 	}
 	cfg, err := config.Load(*path)
 	if err != nil {
@@ -290,8 +304,11 @@ func updateCommand(args []string) error {
 	}
 	manager.SetHealthURL(localHealthURL(cfg.Server.Listen))
 	manager.SetConfigPath(*path)
-	if cfg.Cluster.Relay.Enabled && !cfg.Cluster.Worker.Enabled {
+	if *relayOnly || (cfg.Cluster.Relay.Enabled && !cfg.Cluster.Worker.Enabled) {
 		manager.SetHealthURL(localHealthURL(cfg.Cluster.Relay.Listen))
+	}
+	if *relayOnly && !cfg.Cluster.Relay.Enabled {
+		return errors.New("--relay-only requires an enabled local relay")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -304,10 +321,18 @@ func updateCommand(args []string) error {
 		value, err = status, checkErr
 	case "apply":
 		result, applyErr := manager.Apply(ctx, *force)
+		if applyErr == nil && result.Applied && *managedService != "" {
+			applyErr = finishManagedUpdate(ctx, manager, *managedService, result.Status.CurrentVersion)
+			result.RestartRequired = applyErr != nil
+		}
 		value, err = result, applyErr
 	case "auto":
-		manager.SetIdleCheck(func(ctx context.Context) bool { return installedServiceIdle(ctx, cfg) })
+		manager.SetIdleCheck(func(ctx context.Context) bool { return installedServiceIdle(ctx, cfg, *relayOnly) })
 		result, autoErr := manager.Auto(ctx)
+		if autoErr == nil && result.Applied && *managedService != "" {
+			autoErr = finishManagedUpdate(ctx, manager, *managedService, result.Status.CurrentVersion)
+			result.RestartRequired = autoErr != nil
+		}
 		value, err = result, autoErr
 	case "enable", "disable":
 		status, setErr := manager.SetEnabled(action == "enable")
@@ -325,7 +350,7 @@ func updateCommand(args []string) error {
 
 // The scheduled updater is a separate process: it must consult the running
 // service instead of assuming that a quiet updater means a quiet worker.
-func installedServiceIdle(ctx context.Context, cfg config.Config) bool {
+func installedServiceIdle(ctx context.Context, cfg config.Config, relayOnly bool) bool {
 	check := func(address string) bool {
 		host, _, err := net.SplitHostPort(address)
 		if err != nil {
@@ -353,10 +378,48 @@ func installedServiceIdle(ctx context.Context, cfg config.Config) bool {
 		}
 		return json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&health) == nil && health.Idle
 	}
+	if relayOnly {
+		return cfg.Cluster.Relay.Enabled && check(cfg.Cluster.Relay.Listen)
+	}
 	if cfg.Cluster.Relay.Enabled && !check(cfg.Cluster.Relay.Listen) {
 		return false
 	}
 	return check(cfg.Server.Listen)
+}
+
+func validManagedService(value string) bool {
+	if !strings.HasPrefix(value, "contextbridge") || !strings.HasSuffix(value, ".service") || len(value) > 100 {
+		return false
+	}
+	for _, char := range value {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') || char == '-' || char == '_' || char == '.' || char == '@' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func finishManagedUpdate(ctx context.Context, manager *updater.Manager, service, expected string) error {
+	restart := func() error {
+		commandCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		output, err := exec.CommandContext(commandCtx, "systemctl", "restart", service).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("restart %s: %s: %w", service, strings.TrimSpace(string(output)), err)
+		}
+		return nil
+	}
+	if err := restart(); err != nil {
+		rollbackErr := updater.RollbackFailedStart(expected)
+		restartErr := restart()
+		return fmt.Errorf("updated service could not restart (%v); rollback: %v; previous restart: %v", err, rollbackErr, restartErr)
+	}
+	if err := manager.ConfirmInstalled(ctx, expected); err != nil {
+		restartErr := restart()
+		return fmt.Errorf("updated service failed health check (%v); previous restart: %v", err, restartErr)
+	}
+	return nil
 }
 
 func localHealthURL(address string) string {

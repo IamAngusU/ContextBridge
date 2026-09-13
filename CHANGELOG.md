@@ -2,6 +2,14 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.7 - 2026-09-13
+
+### Added
+
+- a root-owned systemd timer can update a least-privileged relay installation while the relay itself remains unable to modify `/usr/local/bin`
+- `update auto --managed-service contextbridge-relay.service --relay-only` checks relay idleness, validates the release, restarts the systemd unit, confirms its versioned health endpoint, and rolls back on failure
+- `CONTEXTBRIDGE_UPDATES_EXTERNAL=1` disables only the unprivileged in-process update loop; the configured automatic-update preference still controls the privileged timer
+
 ## 0.5.6 - 2026-09-13
 
 ### Fixed

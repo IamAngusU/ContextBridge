@@ -383,6 +383,13 @@ func (m *Manager) ConfirmStartup(ctx context.Context) error {
 	if !pendingUpdateFor(m.executable, m.currentVersion) {
 		return nil
 	}
+	return m.ConfirmInstalled(ctx, m.currentVersion)
+}
+
+func (m *Manager) ConfirmInstalled(ctx context.Context, expectedVersion string) error {
+	if !pendingUpdateFor(m.executable, expectedVersion) {
+		return errors.New("updated executable has no pending rollback marker")
+	}
 	if m.healthURL == "" {
 		select {
 		case <-ctx.Done():
@@ -406,7 +413,7 @@ func (m *Manager) ConfirmStartup(ctx context.Context) error {
 				}
 				decodeErr := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&health)
 				_ = response.Body.Close()
-				if response.StatusCode == http.StatusOK && decodeErr == nil && health.OK && health.Version == m.currentVersion {
+				if response.StatusCode == http.StatusOK && decodeErr == nil && health.OK && health.Version == expectedVersion {
 					return clearPendingUpdate(m.executable)
 				}
 			}
@@ -415,7 +422,7 @@ func (m *Manager) ConfirmStartup(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-deadline.C:
-			if err := RollbackFailedStart(m.currentVersion); err != nil {
+			if err := RollbackFailedStart(expectedVersion); err != nil {
 				return fmt.Errorf("updated service failed health check and rollback failed: %w", err)
 			}
 			return errors.New("updated service failed health check; previous version restored")

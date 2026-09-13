@@ -19,15 +19,33 @@ func TestScheduledUpdaterRequiresIdleService(t *testing.T) {
 	defer service.Close()
 	address := strings.TrimPrefix(service.URL, "http://")
 	cfg := config.Config{Server: config.Server{Listen: address}}
-	if installedServiceIdle(context.Background(), cfg) {
+	if installedServiceIdle(context.Background(), cfg, false) {
 		t.Fatal("active service should defer update")
 	}
 	idle = true
-	if !installedServiceIdle(context.Background(), cfg) {
+	if !installedServiceIdle(context.Background(), cfg, false) {
 		t.Fatal("idle service should permit update")
 	}
-	cfg.Server.Listen = "0.0.0.0:32145"
-	if installedServiceIdle(context.Background(), cfg) {
+	cfg.Server.Listen = "192.0.2.1:32145"
+	if installedServiceIdle(context.Background(), cfg, false) {
 		t.Fatal("non-loopback health endpoint must not authorize update")
+	}
+	cfg.Cluster.Relay.Enabled = true
+	cfg.Cluster.Relay.Listen = address
+	if !installedServiceIdle(context.Background(), cfg, true) {
+		t.Fatal("privileged relay updater should use relay health without requiring a local bridge")
+	}
+}
+
+func TestManagedServiceNameIsConstrained(t *testing.T) {
+	for _, name := range []string{"contextbridge-relay.service", "contextbridge@worker.service"} {
+		if !validManagedService(name) {
+			t.Fatalf("valid service rejected: %s", name)
+		}
+	}
+	for _, name := range []string{"ssh.service", "contextbridge-relay.service;reboot", "contextbridge/relay.service"} {
+		if validManagedService(name) {
+			t.Fatalf("unsafe service accepted: %s", name)
+		}
 	}
 }

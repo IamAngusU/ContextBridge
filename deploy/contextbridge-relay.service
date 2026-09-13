@@ -8,6 +8,7 @@ Type=simple
 User=contextbridge
 Group=contextbridge
 WorkingDirectory=/var/lib/contextbridge
+Environment=CONTEXTBRIDGE_UPDATES_EXTERNAL=1
 ExecStart=/usr/local/bin/contextbridge relay --config /var/lib/contextbridge/config.yml
 Restart=on-failure
 RestartSec=3
