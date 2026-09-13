@@ -97,6 +97,8 @@ type BrowserDOMSnapshot struct {
 	LastResponseCharacters   int                 `json:"last_response_characters,omitempty"`
 	LastResponseBusy         bool                `json:"last_response_busy,omitempty"`
 	BusyIndicators           []string            `json:"busy_indicators,omitempty"`
+	StopButtonDisabled       bool                `json:"stop_button_disabled,omitempty"`
+	StopButtonSpinning       bool                `json:"stop_button_spinning,omitempty"`
 	LastResponseImages       int                 `json:"last_response_images"`
 	LastResponseLoadedImages int                 `json:"last_response_loaded_images,omitempty"`
 	ImageProgress            int                 `json:"image_progress,omitempty"`

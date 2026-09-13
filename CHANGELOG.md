@@ -2,6 +2,18 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.25 - 2026-09-13
+
+### Fixed
+
+- recheck the exact session tab, submitted ContextBridge user turn, empty composer, absent unsent attachments, and closed edit dialogs immediately before any automatic recovery reload; a changed tab or personal draft now fails closed
+- recover a pre-existing ChatGPT stale Stop only when the last ContextBridge-owned turn has a visible completed answer, Stop is disabled, and the answer fingerprint remains unchanged for 30 seconds; reload once and verify the same chat before sending the next job
+- detect an accepted text prompt that still has a disabled Stop but no new answer after 105 seconds, then use the same guarded, resume-only recovery without submitting it twice
+
+### Added
+
+- local browser diagnostics for whether a visible Stop button is disabled or still spinning, without collecting prompt or response text
+
 ## 0.5.24 - 2026-09-13
 
 ### Fixed

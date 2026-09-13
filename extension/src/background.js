@@ -494,6 +494,15 @@ async function processWork(cfg, work, claimedTabId) {
     if (taught) effectiveProfile = taught;
     if (!effectiveProfile?.selectors) throw new Error('No usable page profile is available');
     if (!matches(tab.url || '', effectiveProfile.match_url || '')) throw new Error('The selected tab no longer matches its taught page');
+    await sendHeartbeat('working');
+    leaseTimer = setInterval(() => renewLease(cfg, work.job.id), 25000);
+    if (effectiveProfile.name === 'chatgpt') {
+      failureCode = 'browser_provider_busy';
+      await recoverPriorStall(work, tabId, effectiveProfile, binding?.ownedTurn || null);
+      failureCode = 'browser_automation_error';
+      tab = await api.tabs.get(tabId);
+      await assertSessionTab(workSessionKey(work), tabId);
+    }
     if (cfg.preserveDrafts) {
       try {
         await preserveAndClearDraft(cfg, tabId, tab, effectiveProfile, work.job);
@@ -503,8 +512,6 @@ async function processWork(cfg, work, claimedTabId) {
         throw error;
       }
     }
-    await sendHeartbeat('working');
-    leaseTimer = setInterval(() => renewLease(cfg, work.job.id), 25000);
     const initial = await captureTabProgress(tabId, effectiveProfile.selectors);
     baselineText = initial.text || '';
     latestProgressText = baselineText;
@@ -559,16 +566,31 @@ async function processWork(cfg, work, claimedTabId) {
       progressSequence += 1;
       await reportProgress(cfg, work.job.id, { sequence: progressSequence, text: '', phase: 'recovering', detail: 'The tab navigated; reattaching to the conversation', busy: true });
       await waitForTabReady(tabId, effectiveProfile.selectors, 30000);
+      failureCode = 'browser_recovery_unsafe';
+      await assertRecoveryTab(workSessionKey(work), tabId);
+      await requireSafeReloadState(tabId, effectiveProfile, { prompt: work.job.prompt }, false);
+      failureCode = 'browser_navigation_interrupted';
       const resumeJob = { ...work.job, metadata: { ...(work.job.metadata || {}), contextbridge_resume_only: true, contextbridge_baseline_text: baselineText } };
       const resumed = await api.scripting.executeScript({ target: { tabId }, func: automate, args: [resumeJob, effectiveProfile, work.deadline] });
       answer = resumed?.[0]?.result;
     }
     if (!answer?.ok && answer?.recoverable) {
+      failureCode = 'browser_recovery_unsafe';
+      await assertRecoveryTab(workSessionKey(work), tabId);
+      await requireSafeReloadState(tabId, effectiveProfile, { prompt: work.job.prompt }, false);
       failureCode = 'browser_recovery_failed';
       progressSequence += 1;
       await reportProgress(cfg, work.job.id, { sequence: progressSequence, text: '', phase: 'recovering', detail: answer.error || 'Recovering browser tab', percent: Number(answer.percent) || 0, busy: true });
+      failureCode = 'browser_recovery_unsafe';
+      await assertRecoveryTab(workSessionKey(work), tabId);
+      await requireSafeReloadState(tabId, effectiveProfile, { prompt: work.job.prompt }, false);
+      failureCode = 'browser_recovery_failed';
       await api.tabs.reload(tabId);
       await waitForTabReady(tabId, effectiveProfile.selectors, 30000);
+      await assertRecoveryTab(workSessionKey(work), tabId);
+      failureCode = 'browser_recovery_unsafe';
+      await requireSafeReloadState(tabId, effectiveProfile, { prompt: work.job.prompt }, false);
+      failureCode = 'browser_recovery_failed';
       const resumeJob = { ...work.job, metadata: { ...(work.job.metadata || {}), contextbridge_resume_only: true, contextbridge_baseline_text: baselineText } };
       const resumed = await api.scripting.executeScript({ target: { tabId }, func: automate, args: [resumeJob, effectiveProfile, work.deadline] });
       answer = resumed?.[0]?.result;
@@ -830,6 +852,135 @@ async function inspectLatestOwnedTurn(expectedPrompt, provider) {
   return { id, digest: [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join(''), provider };
 }
 
+// This probe returns only ownership and UI-state evidence. Chat content and
+// draft values stay inside the provider tab, including during stall sampling.
+async function inspectRecoveryState(selectors, provider, expected) {
+  const visible = (element) => Boolean(element && (element.offsetWidth || element.offsetHeight || element.getClientRects().length));
+  const matches = (items) => (items || []).flatMap((selector) => {
+    try { return [...document.querySelectorAll(selector)]; } catch (_) { return []; }
+  });
+  const normalize = (value) => String(value || '').normalize('NFKC').replace(/\s+/g, ' ').trim();
+  const digest = async (value) => {
+    const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+    return [...new Uint8Array(bytes)].map((part) => part.toString(16).padStart(2, '0')).join('');
+  };
+  const stop = matches(provider === 'chatgpt'
+    ? ['button[data-testid="stop-button"]', 'button[aria-label="Antwort stoppen"]', 'button[aria-label="Stop generating"]']
+    : ['button[data-testid*="stop" i]', 'button[aria-label*="stop" i]',
+      'button[aria-label*="beenden" i]', 'button[aria-label*="abbrechen" i]']).find(visible);
+  const input = matches(selectors?.input).find(visible);
+  const scope = input?.closest?.('form, [data-node-type="input-area"]');
+  const draft = String(typeof input?.value === 'string' ? input.value : (input?.innerText || input?.textContent || ''));
+  const hasAttachments = Boolean(scope && ([...scope.querySelectorAll('input[type="file"]')].some((field) => field.files?.length)
+    || scope.querySelector('[data-testid*="attachment-chip" i], [data-testid*="attached-file" i], [data-testid*="file-thumbnail" i], [data-test-id*="attachment" i]')));
+  const editOpen = [...document.querySelectorAll('section[data-turn="user"] textarea, user-query textarea, [role="dialog"] textarea, [role="dialog"] [contenteditable="true"]')].some(visible);
+  const turn = [...document.querySelectorAll(provider === 'chatgpt' ? 'section[data-turn="user"]' : 'user-query')].at(-1);
+  const content = provider === 'chatgpt'
+    ? turn?.querySelector?.('[data-message-author-role="user"]')
+    : turn?.querySelector?.('[id^="user-query-content-"]');
+  const turnID = provider === 'chatgpt' ? turn?.getAttribute?.('data-turn-id') : content?.id;
+  const turnText = normalize(content?.textContent);
+  let ownedTurnMatches = false;
+  if (turnID && turnText && expected?.ownedTurn?.id && expected.ownedTurn.provider === provider) {
+    ownedTurnMatches = turnID === expected.ownedTurn.id && await digest(turnText) === expected.ownedTurn.digest;
+  } else if (turnID && turnText && expected?.prompt) {
+    ownedTurnMatches = turnText === normalize(expected.prompt);
+  }
+  let responses = [];
+  for (const selector of selectors?.response || []) {
+    try { responses = [...document.querySelectorAll(selector)].filter(visible); } catch (_) { responses = []; }
+    if (responses.length) break;
+  }
+  const response = responses.at(-1);
+  const markdown = response ? [...response.querySelectorAll('message-content .markdown, [data-message-author-role="assistant"] .markdown')] : [];
+  const responseText = normalize(markdown.length ? markdown.map((part) => part.textContent || '').join('\n') : response?.textContent);
+  const responseAfterTurn = Boolean(turn && response && typeof turn.compareDocumentPosition === 'function'
+    && (turn.compareDocumentPosition(response) & 4));
+  const responseActionsReady = Boolean(response && [...response.querySelectorAll('button')].some((button) => visible(button)
+    && /copy|kopieren/i.test(`${button.getAttribute('data-testid') || ''} ${button.getAttribute('aria-label') || ''}`)));
+  const imageLoading = [...document.querySelectorAll('[data-testid="image-gen-loading-state"], [data-testid="image-gen-loading-state-frame"], [data-testid="image-gen-loading-progress"]')].some(visible);
+  const fingerprint = await digest(`${responses.length}|${response?.getAttribute?.('data-turn-id') || response?.id || ''}|${responseText}`);
+  return {
+    stop_visible: Boolean(stop),
+    stop_disabled: Boolean(stop && (stop.disabled || stop.getAttribute?.('aria-disabled') === 'true')),
+    stop_spinner: Boolean(stop?.querySelector?.('[class*="spin" i], [role="progressbar"], svg[aria-label*="loading" i]')),
+    input_ready: Boolean(input),
+    draft_empty: !draft.trim(),
+    attachments_empty: !hasAttachments,
+    edit_closed: !editOpen,
+    owned_turn_matches: ownedTurnMatches,
+    response_ready: Boolean(responseText && responseAfterTurn && responseActionsReady),
+    image_idle: !imageLoading,
+    fingerprint
+  };
+}
+
+function unsafeReloadReason(state, requireFinishedAnswer) {
+  if (!state?.input_ready) return 'the prompt editor is unavailable';
+  if (!state.owned_turn_matches) return 'the latest user message is not the expected ContextBridge turn';
+  if (!state.draft_empty) return 'an unsent draft is present';
+  if (!state.attachments_empty) return 'an unsent attachment is present';
+  if (!state.edit_closed) return 'a message editor or dialog is open';
+  if (!state.image_idle) return 'image generation is still visible';
+  if (requireFinishedAnswer && !state.response_ready) return 'the previous answer has no visible completion controls';
+  return '';
+}
+
+async function requireSafeReloadState(tabId, profile, expected, requireFinishedAnswer) {
+  const result = await api.scripting.executeScript({ target: { tabId }, func: inspectRecoveryState,
+    args: [profile.selectors, profile.name, expected] });
+  const state = result?.[0]?.result;
+  const reason = unsafeReloadReason(state, requireFinishedAnswer);
+  if (reason) throw new Error(`Automatic reload skipped: ${reason}; the tab was left untouched`);
+  return state;
+}
+
+async function recoverPriorStall(work, tabId, profile, ownedTurn) {
+  const probe = async () => {
+    const result = await api.scripting.executeScript({ target: { tabId }, func: inspectRecoveryState,
+      args: [profile.selectors, profile.name, { ownedTurn }] });
+    return result?.[0]?.result;
+  };
+  let state = await probe();
+  if (!state?.stop_visible) return false;
+  if (work.job.metadata?.contextbridge_auto_reload === false) {
+    throw new Error('ChatGPT still shows Stop; automatic reload is disabled for this job');
+  }
+  const reason = unsafeReloadReason(state, true);
+  if (reason || !state.stop_disabled) {
+    throw new Error(`ChatGPT still shows Stop; automatic reload is unsafe (${reason || 'Stop is still clickable'})`);
+  }
+  let fingerprint = state.fingerprint;
+  let stableSince = Date.now();
+  const waitUntil = Math.min(Date.now() + 60000, (Date.parse(work.deadline || '') || Date.now() + 60000) - 45000);
+  while (Date.now() < waitUntil) {
+    await delay(2500);
+    state = await probe();
+    if (!state?.stop_visible) return false;
+    const changedReason = unsafeReloadReason(state, true);
+    if (changedReason || !state.stop_disabled) {
+      throw new Error(`ChatGPT still shows Stop; automatic reload is unsafe (${changedReason || 'Stop became clickable'})`);
+    }
+    if (state.fingerprint !== fingerprint) {
+      fingerprint = state.fingerprint;
+      stableSince = Date.now();
+    }
+    if (Date.now() - stableSince < 30000) continue;
+    await assertSessionTab(workSessionKey(work), tabId);
+    const finalState = await requireSafeReloadState(tabId, profile, { ownedTurn }, true);
+    if (!finalState.stop_visible || !finalState.stop_disabled || finalState.fingerprint !== fingerprint) continue;
+    await api.tabs.reload(tabId);
+    await waitForTabReady(tabId, profile.selectors, 30000);
+    await assertSessionTab(workSessionKey(work), tabId);
+    const after = await probe();
+    if (after?.stop_visible || unsafeReloadReason(after, false)) {
+      throw new Error('ChatGPT remained busy or changed after the guarded reload; no prompt was sent');
+    }
+    return true;
+  }
+  throw new Error('ChatGPT still shows Stop; there was not enough stable idle evidence before the job deadline');
+}
+
 async function assertSessionTab(key, tabId) {
   const cfg = await settings();
   const binding = cfg.sessionBindings?.[key];
@@ -839,6 +990,17 @@ async function assertSessionTab(key, tabId) {
   }
   if (isFreshChatURL(binding.url) && !await checkFreshTab(tabId)) {
     throw new Error('The session chat was no longer empty before Send; no prompt was sent');
+  }
+}
+
+async function assertRecoveryTab(key, tabId) {
+  const cfg = await settings();
+  const binding = cfg.sessionBindings?.[key];
+  const tab = await api.tabs.get(tabId);
+  if (!binding || Number(binding.tabId) !== tabId || !tab?.url
+    || (binding.url !== tab.url && (!isFreshChatURL(binding.url)
+      || new URL(binding.url).origin !== new URL(tab.url).origin))) {
+    throw new Error('The session tab changed or was released during recovery; no reload was performed');
   }
 }
 
@@ -1166,9 +1328,11 @@ function automate(job, profile, jobDeadline, editTarget = null) {
         if (!busyReasons.includes(reason) && [...document.querySelectorAll(selector)].some(isVisible)) busyReasons.push(reason);
       } catch (_) {}
     }
+    const visibleStops = [...document.querySelectorAll('button[data-testid*="stop" i], button[aria-label*="stop" i], button[aria-label*="beenden" i], button[aria-label*="abbrechen" i]')].filter(isVisible);
     return {
       busy: busyReasons.length > 0,
       busyReasons,
+      stopDisabled: Boolean(visibleStops.length && visibleStops.every((button) => button.disabled || button.getAttribute?.('aria-disabled') === 'true')),
       percent,
       detail: busyReasons.length ? (detail || 'Generating') : '',
       composerReady: Boolean(sendControl()),
@@ -1738,6 +1902,7 @@ function automate(job, profile, jobDeadline, editTarget = null) {
       let progressChangedAt = Date.now();
       let lastReadyImages = 0;
       let readyImagesSince = 0;
+      const submittedAt = Date.now();
       while (Date.now() < deadline) {
         await wait(650);
         const responses = all(selectors.response);
@@ -1779,7 +1944,7 @@ function automate(job, profile, jobDeadline, editTarget = null) {
         sawBusy = sawBusy || busy;
 		if (busy) lastBusyAt = Date.now();
 		if (sawBusy && !busy && !changedResponse && !resumeOnly && Date.now() - lastBusyAt > 10000) {
-			resolve({ ok: false, error: 'Generation ended without a new assistant turn; reloading once to recover the conversation', code: 'missing_response_after_generation', recoverable: true });
+			resolve({ ok: false, error: 'Generation ended without a new assistant turn; reloading once when enabled to recover the conversation', code: 'missing_response_after_generation', recoverable: job.metadata?.contextbridge_auto_reload !== false });
 			return;
 		}
 		if (state.percent !== lastPercent) {
@@ -1801,6 +1966,13 @@ function automate(job, profile, jobDeadline, editTarget = null) {
 		const staleStop = state.busyReasons.includes('stop_button')
 			&& state.busyReasons.every((reason) => reason === 'stop_button' || reason === 'aria_busy');
 		const staleStopWait = profile.name === 'gemini' ? 120000 : 90000;
+		if (profile.name === 'chatgpt' && plainTextJob && !resumeOnly && !editTarget
+			&& job.metadata?.contextbridge_auto_reload !== false && staleStop && state.stopDisabled
+			&& !changedResponse && state.inputReady && document.querySelectorAll('[data-turn="user"]').length > beforeUserTurns
+			&& Date.now() - submittedAt >= 105000) {
+			resolve({ ok: false, error: 'ChatGPT accepted the prompt but kept a disabled Stop without a new answer; reloading once to check the turn', code: 'stalled_response', recoverable: true });
+			return;
+		}
 		if ((profile.name === 'chatgpt' || profile.name === 'gemini') && plainTextJob && !resumeOnly
 			&& job.metadata?.contextbridge_auto_reload !== false && staleStop
 			&& changedResponse && stableText && stableSince > 0 && state.inputReady
@@ -2254,6 +2426,7 @@ function inspectPageDOM(selectors) {
   const busyIndicators = busySelectors.flatMap(([name, selector]) => {
     try { return [...document.querySelectorAll(selector)].some(visible) ? [name] : []; } catch (_) { return []; }
   });
+  const stopControls = [...document.querySelectorAll('button[data-testid*="stop" i], button[aria-label*="stop" i], button[aria-label*="beenden" i], button[aria-label*="abbrechen" i]')].filter(visible);
   const latestMarkdown = latest?.querySelector?.('message-content .markdown, [data-message-author-role="assistant"] .markdown');
   const latestText = String(latestMarkdown?.innerText || latestMarkdown?.textContent || latest?.innerText || '').trim();
   const latestImages = latest ? [...latest.querySelectorAll('img')] : [];
@@ -2281,6 +2454,8 @@ function inspectPageDOM(selectors) {
     last_response_characters: Math.min(latestText.length, 100000),
     last_response_busy: latestResponseBusy,
     busy_indicators: busyIndicators,
+    stop_button_disabled: Boolean(stopControls.length && stopControls.every((button) => button.disabled || button.getAttribute('aria-disabled') === 'true')),
+    stop_button_spinning: stopControls.some((button) => Boolean(button.querySelector('[class*="spin" i], [role="progressbar"], svg[aria-label*="loading" i]'))),
     last_response_images: latestImages.length,
     last_response_loaded_images: latestImages.filter((image) => image.complete && image.naturalWidth >= 128 && image.naturalHeight >= 128).length,
     image_progress: Math.max(0, Math.min(100, imageProgress))

@@ -525,7 +525,7 @@ func (s *Server) handleBrowserHeartbeat(w http.ResponseWriter, r *http.Request) 
 				status.Tabs[index].LastFailure = nil
 			} else {
 				switch failure.Reason {
-				case "prompt_not_retained", "send_disabled", "send_missing", "composer_draft", "incompatible_tool", "other":
+				case "prompt_not_retained", "send_disabled", "send_missing", "composer_draft", "incompatible_tool", "provider_busy", "other":
 				default:
 					failure.Reason = "other"
 				}

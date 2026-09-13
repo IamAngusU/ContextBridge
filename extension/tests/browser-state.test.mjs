@@ -601,6 +601,23 @@ const element = (text = '', attributes = {}) => ({
 }
 
 {
+  const stop = { ...element(), tagName: 'BUTTON', disabled: true, querySelector: () => ({}), getAttribute(name) {
+    return name === 'data-testid' ? 'stop-button' : null;
+  } };
+  context.document = {
+    querySelectorAll(selector) {
+      if (selector.includes('button[data-testid*="stop" i]')) return [stop];
+      return [];
+    },
+    querySelector: () => null
+  };
+  const snapshot = context.inspectPageDOM({ input: [], submit: [], response: [] });
+  assert.equal(snapshot.stop_button_disabled, true);
+  assert.equal(snapshot.stop_button_spinning, true);
+  assert.equal(snapshot.busy_indicators.includes('stop_button'), true);
+}
+
+{
   const input = { ...element(), tagName: 'DIV', closest: () => ({ querySelectorAll: () => [] }) };
   const music = { ...element('Musik erstellen', { 'aria-checked': 'false' }), tagName: 'BUTTON', getAttribute(name) {
     return name === 'role' ? 'menuitemcheckbox' : name === 'aria-checked' ? 'false' : null;
@@ -740,6 +757,46 @@ const element = (text = '', attributes = {}) => ({
   );
   assert.equal(result.code, 'stalled_response');
   assert.equal(result.recoverable, true);
+}
+
+for (const disabled of [true, false]) {
+  let sent = false;
+  let now = Date.now();
+  class FastDate extends Date {
+    static now() { now += 5000; return now; }
+    static parse(value) { return Date.parse(value); }
+  }
+  class TextArea {
+    constructor() { this.value = ''; this.offsetWidth = 1; }
+    getClientRects() { return [1]; }
+    focus() {}
+    dispatchEvent() {}
+  }
+  const input = new TextArea();
+  const send = { ...element(), click() { sent = true; } };
+  const stop = { ...element('', { 'data-testid': 'stop-button' }), disabled };
+  const previous = element('Older answer');
+  const document = {
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === '#send') return [send];
+      if (selector === '#response') return [previous];
+      if (selector === '[data-turn="user"]') return sent ? [element('Submitted prompt')] : [];
+      if (sent && selector.includes('stop')) return [stop];
+      return [];
+    }
+  };
+  const isolated = vm.createContext({ document, window: {}, HTMLTextAreaElement: TextArea,
+    HTMLInputElement: class {}, InputEvent: class {}, Event: class {},
+    setTimeout: (callback) => callback(), clearTimeout() {}, Date: FastDate, Promise });
+  const injectedAutomate = vm.runInContext(`(${context.automate.toString()})`, isolated);
+  const result = await injectedAutomate(
+    { prompt: 'Submitted prompt', output: { mode: 'text' } },
+    { name: 'chatgpt', selectors: { input: ['#input'], submit: ['#send'], response: ['#response'] } },
+    new Date(Date.now() + 3600000).toISOString()
+  );
+  assert.equal(result.code, disabled ? 'stalled_response' : 'browser_timeout');
+  assert.equal(result.recoverable, disabled);
 }
 
 {
