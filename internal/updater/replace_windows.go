@@ -38,6 +38,18 @@ $maxProbes = [int]$args[8]
 try { Wait-Process -Id $parentPid -Timeout 60 -ErrorAction SilentlyContinue } catch {}
 $managedTask = Get-ScheduledTask -TaskName "ContextBridge" -ErrorAction SilentlyContinue
 if ($managedTask -and ($managedTask.State -ne 'Running' -or $managedTask.Actions[0].Execute -ne $current)) { $managedTask = $null }
+$manualProcessRunning = $false
+if (-not $managedTask -and -not $restartLine -and $healthUrl) {
+  try {
+    $existing = Invoke-RestMethod -Uri $healthUrl -TimeoutSec 2
+    $manualProcessRunning = $existing.ok -eq $true -and $existing.version -ne $expected
+  } catch {}
+}
+if ($manualProcessRunning) {
+  $failure = @{ version = $expected; error = "Manual update needs the running ContextBridge terminal to exit first. Close it with Ctrl+C, then run update apply again; the previous version is still running."; at = [DateTime]::UtcNow.ToString('o') }
+  [IO.File]::WriteAllText($failurePath, ($failure | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding($false)))
+  exit 1
+}
 if ($managedTask) {
   Stop-ScheduledTask -TaskName "ContextBridge" -ErrorAction SilentlyContinue
   Start-Sleep -Seconds 1
@@ -48,6 +60,9 @@ function Start-Managed {
   elseif ($restartLine) { $script:startedProcess = Start-Process -FilePath $current -ArgumentList $restartLine -WindowStyle Hidden -PassThru }
 }
 function Test-Healthy {
+  # A manual CLI update with no managed task has no service to restart here.
+  # The staged executable was validated above; the user starts it explicitly.
+  if (-not $managedTask -and -not $restartLine) { return $true }
   if (-not $healthUrl) {
     Start-Sleep -Seconds 10
     if ($managedTask) { return (Get-ScheduledTask -TaskName "ContextBridge").State -eq 'Running' }
@@ -63,6 +78,7 @@ function Test-Healthy {
   return $false
 }
 $installed = $false
+$failureReason = "Update $expected failed validation or health check; previous version restored."
 if (Test-Path $backup) { Remove-Item $backup -Force }
 for ($attempt = 0; $attempt -lt 30; $attempt++) {
   try {
@@ -86,6 +102,7 @@ if ($installed) {
     exit 0
   } catch {}
 }
+if (-not $installed) { $failureReason = "Could not replace the ContextBridge executable after 30 attempts; it may still be in use or access may be denied. Close the running terminal and retry." }
 if ($managedTask) { Stop-ScheduledTask -TaskName "ContextBridge" -ErrorAction SilentlyContinue }
 if ($startedProcess -and -not $startedProcess.HasExited) { Stop-Process -Id $startedProcess.Id -Force -ErrorAction SilentlyContinue }
 if (Test-Path $backup) {
@@ -96,7 +113,7 @@ if (Test-Path $backup) {
   }
   if (-not (Test-Path $current)) { Move-Item $backup $current -Force -ErrorAction SilentlyContinue }
 }
-$failure = @{ version = $expected; error = "Update $expected failed validation or health check; previous version restored."; at = [DateTime]::UtcNow.ToString('o') }
+$failure = @{ version = $expected; error = $failureReason; at = [DateTime]::UtcNow.ToString('o') }
 [IO.File]::WriteAllText($failurePath, ($failure | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding($false)))
 if (Test-Path $current) { Start-Managed }
 exit 1

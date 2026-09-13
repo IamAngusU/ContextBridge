@@ -47,8 +47,20 @@ func main() { if len(os.Args) > 1 && os.Args[1] == "version" { fmt.Println(versi
 		t.Fatal(err)
 	}
 	failure := filepath.Join(temporary, "update-failed.json")
+	service := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"version":"v0.5.4"}`))
+	}))
 	command := exec.Command("powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script,
-		current, next, backup, "v0.5.5", "0", base64.StdEncoding.EncodeToString([]byte("")), "http://127.0.0.1:1/health", failure, "2")
+		current, next, backup, "v0.5.5", "0", base64.StdEncoding.EncodeToString([]byte("")), service.URL, failure, "2")
+	if output, err := command.CombinedOutput(); err == nil {
+		t.Fatalf("running manual terminal should block update: %s", output)
+	}
+	if output, err := exec.Command(current, "version").CombinedOutput(); err != nil || strings.TrimSpace(string(output)) != "v0.5.4" {
+		t.Fatalf("blocked manual update changed the executable: %q %v", output, err)
+	}
+	service.Close()
+	command = exec.Command("powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script,
+		current, next, backup, "v0.5.5", "0", base64.StdEncoding.EncodeToString([]byte("run")), "http://127.0.0.1:1/health", failure, "2")
 	if output, err := command.CombinedOutput(); err == nil {
 		t.Fatalf("health failure should exit nonzero: %s", output)
 	}
@@ -66,14 +78,10 @@ func main() { if len(os.Args) > 1 && os.Args[1] == "version" { fmt.Println(versi
 	if err := copyFile(current+".failed.exe", next, 0700); err != nil {
 		t.Fatal(err)
 	}
-	service := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"ok":true,"version":"v0.5.5"}`))
-	}))
-	defer service.Close()
 	command = exec.Command("powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script,
-		current, next, backup, "v0.5.5", "0", base64.StdEncoding.EncodeToString([]byte("")), service.URL, failure, "2")
+		current, next, backup, "v0.5.5", "0", base64.StdEncoding.EncodeToString([]byte("")), "http://127.0.0.1:1/health", failure, "2")
 	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("healthy update should succeed: %v: %s", err, output)
+		t.Fatalf("stopped manual terminal should allow verified update: %v: %s", err, output)
 	}
 	output, err = exec.Command(current, "version").CombinedOutput()
 	if err != nil || strings.TrimSpace(string(output)) != "v0.5.5" {

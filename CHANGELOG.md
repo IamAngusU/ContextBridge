@@ -2,6 +2,25 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.21 - 2026-09-13
+
+### Fixed
+
+- explain when a manual Windows update cannot replace a ContextBridge terminal that is still running, without stopping it or claiming the new version succeeded
+- allow a manual update performed after closing that terminal to verify the new executable without waiting for a service that only the user can restart
+
+## 0.5.20 - 2026-09-13
+
+### Changed
+
+- start with automatic updates disabled; users can opt in from the local dashboard, extension, or CLI, while an explicit config `false` remains a lock
+- reserve separate ChatGPT/Gemini conversations per producer, session, and provider; allow manual return to an exact known chat URL, opt-in automatic new-chat tabs, or a per-job new-chat trigger
+
+### Fixed
+
+- preserve worker-derived session scope through the local browser queue, so equal public session IDs from different producers do not collide
+- attempt one bounded resume-only reload when a new Gemini plain-text response stops changing but its Stop control remains active
+
 ## 0.5.19 - 2026-09-13
 
 ### Fixed
