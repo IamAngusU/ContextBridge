@@ -26,6 +26,8 @@ ChatGPT and Gemini are detected automatically from stable DOM and accessibility 
 - **Visual browser teaching:** point at page controls instead of reverse engineering selectors.
 - **Progressive browser output:** follow a web-chat answer while it is generated, through the worker and relay, with `cluster submit --stream`.
 - **Stateful browser conversations:** pin related turns to one browser worker with `session_id`, or use the streaming `cluster chat` terminal.
+- **Parallel web-chat pool:** select several ChatGPT and Gemini tabs in one extension; each becomes an independent slot and sessions never cross conversations.
+- **Provider-aware recovery:** progress percentages, stop/send controls, rate limits, errors, accidental reloads, and stalled image generation are separate states rather than answer text.
 - **Images and files back:** opt in to bounded response artifacts, verify their SHA-256, and save them with `--artifacts`.
 - **1:1, 1:N, and N:N compute:** connect one app to one worker, distribute one queue across many workers, or share a capability-aware node pool between producers.
 - **Outbound worker connections:** workers join through WebSockets without router port forwarding or fixed public worker ports.
@@ -134,20 +136,29 @@ Use the same non-secret `requirements.session_id` for follow-up turns. The relay
 
 This release uses one durable BoltDB file per relay process. It supports many producers and workers through one relay. Active-active relay replication is a separate deployment tier and requires a shared database and message broker rather than copying the BoltDB file.
 
+Choose a web provider and its UI options for the whole terminal session:
+
+```bash
+contextbridge cluster chat --provider browser --profile chatgpt --model gpt-6-astra --reasoning high
+contextbridge cluster chat --provider browser --profile gemini --model pro --reasoning high
+```
+
+Inside interactive chat, `/model …`, `/reasoning …`, and `/profile …` change subsequent turns; `/settings` shows the active choices. The same `model`, `reasoning`, `browser_profile`, and `session_id` fields can be placed in an individual browser job payload. Choices are matched against the provider's visible localized menu. An unavailable choice fails clearly instead of silently running a different model.
+
 ## Connect A Browser Tab
 
 ![ContextBridge visual teaching overlay](docs/assets/visual-teaching.png)
 
 1. Load `extension/chromium` in Chrome, Edge, Opera, Brave, or Vivaldi. Use `extension/firefox` for Firefox.
-2. Open ChatGPT or Gemini and select the tab in the ContextBridge extension. Both are detected automatically.
-3. Choose **Test profile**, then **Start browser bridge**.
+2. Open one or more ChatGPT/Gemini conversations and select all desired tabs in the ContextBridge extension. Each selected tab becomes a parallel slot.
+3. Choose **Test profile**. Optionally choose **Scan available models and reasoning levels**, then **Start browser bridge**.
 4. For another provider, choose **Customize detection** and click the requested controls directly in the page.
 
 Add `--stream` to `contextbridge cluster submit` to print progressive browser text while the final normalized result remains on stdout. Plaintext progress is deliberately disabled for E2EE jobs.
 
-Set `output.artifacts: true` on a browser text/JSON job to collect up to four generated images, download links, or code files from the final response. Embedded files are capped by `max_artifact_bytes` (6 MiB maximum), normalized, and SHA-256 verified. Save them with `contextbridge cluster submit --artifacts ./downloads ...`; provider-hosted resources that the page cannot read remain HTTPS references in the JSON result. The interactive `cluster chat` command saves artifacts automatically under the local ContextBridge storage directory unless `--artifacts off` is used. See [`examples/browser-image-job.json`](examples/browser-image-job.json).
+Set `output.artifacts: true` on a browser text/JSON job to collect up to twelve generated images, download links, or code files from the newly completed response. Embedded files share a bounded `max_artifact_bytes` budget (12 MiB maximum), are normalized, and SHA-256 verified. Save them with `contextbridge cluster submit --artifacts ./downloads ...`; provider-hosted resources that the page cannot read remain HTTPS references in the JSON result. The interactive `cluster chat` command saves artifacts automatically under the local ContextBridge storage directory unless `--artifacts off` is used. See [`examples/browser-image-job.json`](examples/browser-image-job.json).
 
-Each browser extension instance is one serial UI slot. For parallel browser jobs, pair multiple workers with independently selected tabs (for example separate browser profiles) and let the relay distribute sessions between them. Local Ollama/llama.cpp jobs can use higher worker concurrency and continue to participate without a GPU; GPU headroom only influences placement unless a job explicitly requires VRAM.
+Each selected tab is one serial UI slot; one extension can run several independent tabs concurrently, including a mix of ChatGPT and Gemini. Add PCs to grow the same pool. Rate-limited tabs enter a five-minute cooldown and their error text is logged but never returned as successful model output. Local Ollama/llama.cpp jobs can use higher worker concurrency and continue to participate without a GPU; GPU headroom only influences placement unless a job explicitly requires VRAM.
 
 The Chromium package works with Manifest V3 browsers. The Firefox package has its own background manifest and localhost policy. Local Firefox development installs use `about:debugging`; a permanent consumer install requires a Mozilla-signed package.
 
@@ -162,6 +173,16 @@ contextbridge run
 ```
 
 With `model: auto`, ContextBridge selects the smallest compatible local model. Image jobs prefer a vision-capable model and embedding jobs require an embedding-capable model. An explicit model name always wins. The default route tries Ollama first and uses the paired browser only when Ollama is unavailable.
+
+Inventory an existing local setup without moving or loading anything:
+
+```bash
+contextbridge models
+contextbridge models --path D:\AI\models --path E:\shared-models
+contextbridge models --json
+```
+
+The inventory merges reachable Ollama models with GGUF, ONNX, and SafeTensors files and reports ready/loaded state, likely text/vision/embedding support, parameters, quantization, size, VRAM, and estimated RAM. Declared-only catalog entries remain available with `contextbridge models --discover=false`.
 
 ## Use Managed GGUF Models
 

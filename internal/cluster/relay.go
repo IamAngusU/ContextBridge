@@ -447,7 +447,7 @@ func (r *Relay) handleWorker(w http.ResponseWriter, req *http.Request) {
 	if err != nil {
 		return
 	}
-	conn.SetReadLimit(r.cfg.MaxJobBytes + (4 << 20))
+	conn.SetReadLimit(r.cfg.MaxJobBytes + (12 << 20))
 	defer conn.Close(websocket.StatusNormalClosure, "worker disconnected")
 	ctx := req.Context()
 	_, raw, err := conn.Read(ctx)

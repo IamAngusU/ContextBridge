@@ -471,13 +471,14 @@ func (s *Store) UpdateJobProgress(id, nodeID string, progress JobProgress) (Job,
 		if job.SealedPayload != nil {
 			return errors.New("plaintext progress is disabled for encrypted jobs")
 		}
-		if progress.Sequence == 0 || len(progress.Text) > 1<<20 {
+		if progress.Sequence == 0 || len(progress.Text) > 1<<20 || len(progress.Detail) > 500 || progress.Percent < 0 || progress.Percent > 100 {
 			return errors.New("invalid job progress")
 		}
 		if job.Progress != nil && progress.Sequence <= job.Progress.Sequence {
 			return nil
 		}
 		progress.Phase = cleanLabel(progress.Phase, 30)
+		progress.Detail = cleanLabel(progress.Detail, 500)
 		progress.UpdatedAt = time.Now().UTC()
 		copy := progress
 		job.Progress = &copy

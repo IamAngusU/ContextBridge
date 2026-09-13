@@ -8,12 +8,12 @@
   "payload": {
     "source": "creative-terminal",
     "task": "generation",
-    "prompt": "Create a polished editorial illustration of a bridge connecting local devices to a private AI compute cloud. Do not add text.",
+    "prompt": "Create a coherent series of three polished editorial illustrations showing a bridge connecting local devices to a private AI compute cloud. Keep the visual language consistent across all three images and do not add text.",
     "output": {
       "mode": "text",
       "max_bytes": 1048576,
       "artifacts": true,
-      "max_artifact_bytes": 6291456
+      "max_artifact_bytes": 12582912
     }
   },
   "priority": 10,

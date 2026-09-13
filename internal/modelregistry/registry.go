@@ -30,6 +30,24 @@ type Entry struct {
 	ProjectorFile string `json:"projector_file,omitempty"`
 }
 
+// DiscoveryEntry describes a model that can be used without requiring it to
+// have been declared in ContextBridge's managed model catalog first.
+type DiscoveryEntry struct {
+	Name           string   `json:"name"`
+	Provider       string   `json:"provider"`
+	Path           string   `json:"path,omitempty"`
+	Format         string   `json:"format,omitempty"`
+	Size           int64    `json:"size_bytes,omitempty"`
+	MemoryEstimate int64    `json:"memory_estimate_bytes,omitempty"`
+	VRAM           int64    `json:"vram_bytes,omitempty"`
+	Quantization   string   `json:"quantization,omitempty"`
+	Parameters     string   `json:"parameters,omitempty"`
+	Capabilities   []string `json:"capabilities"`
+	Installed      bool     `json:"installed"`
+	Ready          bool     `json:"ready"`
+	Loaded         bool     `json:"loaded"`
+}
+
 type Progress func(message string, received, total int64)
 
 func Builtin(name string) (config.Model, bool) {
@@ -56,6 +74,284 @@ func List(cfg config.Config) []Entry {
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
 	return entries
+}
+
+// Discover inventories Ollama plus user-selected model directories. It never
+// modifies or loads models; "ready" means the files/API are currently usable.
+func Discover(ctx context.Context, cfg config.Config, roots []string) ([]DiscoveryEntry, error) {
+	result := discoverOllamaManifests()
+	index := map[string]int{}
+	for position, entry := range result {
+		index[discoveryKey(entry)] = position
+	}
+	ollama, _ := cfg.Engine("ollama")
+	for _, live := range discoverOllama(ctx, ollama.URL) {
+		if position, ok := index[discoveryKey(live)]; ok {
+			live.Path = result[position].Path
+			result[position] = live
+		} else {
+			index[discoveryKey(live)] = len(result)
+			result = append(result, live)
+		}
+	}
+	explicitRoots := len(roots) > 0
+	if len(roots) == 0 {
+		roots = []string{cfg.Storage.Models}
+	}
+	seen := map[string]bool{}
+	for _, entry := range result {
+		seen[discoveryKey(entry)] = true
+	}
+	for _, root := range roots {
+		root = strings.TrimSpace(root)
+		if root == "" {
+			continue
+		}
+		absolute, err := filepath.Abs(root)
+		if err != nil {
+			return nil, err
+		}
+		stat, err := os.Stat(absolute)
+		if err != nil {
+			if !explicitRoots && os.IsNotExist(err) {
+				continue
+			}
+			return nil, fmt.Errorf("scan model path %s: %w", absolute, err)
+		}
+		paths := []string{absolute}
+		if stat.IsDir() {
+			paths = nil
+			count := 0
+			err = filepath.WalkDir(absolute, func(path string, item os.DirEntry, walkErr error) error {
+				if walkErr != nil {
+					return walkErr
+				}
+				count++
+				if count > 50000 {
+					return errors.New("model scan exceeds 50000 filesystem entries")
+				}
+				if item.Type().IsRegular() && supportedModelFile(path) {
+					paths = append(paths, path)
+				}
+				return nil
+			})
+			if err != nil {
+				return nil, fmt.Errorf("scan model path %s: %w", absolute, err)
+			}
+		}
+		for _, path := range paths {
+			if !supportedModelFile(path) {
+				continue
+			}
+			info, err := os.Stat(path)
+			if err != nil || !info.Mode().IsRegular() {
+				continue
+			}
+			entry := localDiscovery(path, info.Size())
+			key := discoveryKey(entry)
+			if !seen[key] {
+				seen[key] = true
+				result = append(result, entry)
+			}
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Provider != result[j].Provider {
+			return result[i].Provider < result[j].Provider
+		}
+		return strings.ToLower(result[i].Name) < strings.ToLower(result[j].Name)
+	})
+	return result, nil
+}
+
+func discoverOllama(ctx context.Context, base string) []DiscoveryEntry {
+	if strings.TrimSpace(base) == "" {
+		return nil
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(base, "/")+"/api/tags", nil)
+	response, err := client.Do(request)
+	if err != nil {
+		return nil
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil
+	}
+	var payload struct {
+		Models []struct {
+			Name    string `json:"name"`
+			Size    int64  `json:"size"`
+			Details struct {
+				ParameterSize string   `json:"parameter_size"`
+				Quantization  string   `json:"quantization_level"`
+				Family        string   `json:"family"`
+				Families      []string `json:"families"`
+			} `json:"details"`
+		} `json:"models"`
+	}
+	if json.NewDecoder(io.LimitReader(response.Body, 8<<20)).Decode(&payload) != nil {
+		return nil
+	}
+	loaded := map[string]int64{}
+	request, _ = http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(base, "/")+"/api/ps", nil)
+	if response, err := client.Do(request); err == nil {
+		var running struct {
+			Models []struct {
+				Name     string `json:"name"`
+				SizeVRAM int64  `json:"size_vram"`
+			} `json:"models"`
+		}
+		if response.StatusCode == http.StatusOK {
+			_ = json.NewDecoder(io.LimitReader(response.Body, 4<<20)).Decode(&running)
+		}
+		response.Body.Close()
+		for _, model := range running.Models {
+			loaded[strings.ToLower(model.Name)] = model.SizeVRAM
+		}
+	}
+	result := make([]DiscoveryEntry, 0, len(payload.Models))
+	for _, model := range payload.Models {
+		vram, isLoaded := loaded[strings.ToLower(model.Name)]
+		result = append(result, DiscoveryEntry{Name: model.Name, Provider: "ollama", Format: "ollama", Size: model.Size, MemoryEstimate: memoryEstimate(model.Size), VRAM: vram, Quantization: model.Details.Quantization, Parameters: model.Details.ParameterSize, Capabilities: modelCapabilities(model.Name + " " + model.Details.Family + " " + strings.Join(model.Details.Families, " ")), Installed: true, Ready: true, Loaded: isLoaded})
+	}
+	return result
+}
+
+func discoverOllamaManifests() []DiscoveryEntry {
+	root := strings.TrimSpace(os.Getenv("OLLAMA_MODELS"))
+	if root == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			root = filepath.Join(home, ".ollama", "models")
+		}
+	}
+	manifestRoot := filepath.Join(root, "manifests")
+	var result []DiscoveryEntry
+	count := 0
+	_ = filepath.WalkDir(manifestRoot, func(path string, item os.DirEntry, walkErr error) error {
+		if walkErr != nil || item.IsDir() {
+			return nil
+		}
+		count++
+		if count > 10000 {
+			return filepath.SkipAll
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		var manifest struct {
+			Config struct {
+				Digest string `json:"digest"`
+			} `json:"config"`
+			Layers []struct {
+				MediaType string `json:"mediaType"`
+				Size      int64  `json:"size"`
+			} `json:"layers"`
+		}
+		if json.Unmarshal(raw, &manifest) != nil {
+			return nil
+		}
+		relative, err := filepath.Rel(manifestRoot, path)
+		if err != nil {
+			return nil
+		}
+		parts := strings.Split(filepath.ToSlash(relative), "/")
+		if len(parts) < 4 {
+			return nil
+		}
+		tag, model, namespace := parts[len(parts)-1], parts[len(parts)-2], parts[len(parts)-3]
+		name := model + ":" + tag
+		if namespace != "library" {
+			name = namespace + "/" + name
+		}
+		size := int64(0)
+		for _, layer := range manifest.Layers {
+			if strings.Contains(layer.MediaType, ".model") || strings.Contains(layer.MediaType, ".tensor") {
+				size += layer.Size
+			}
+		}
+		var metadata struct {
+			Format       string   `json:"model_format"`
+			Family       string   `json:"model_family"`
+			Families     []string `json:"model_families"`
+			Parameters   string   `json:"model_type"`
+			Quantization string   `json:"file_type"`
+		}
+		if digest := strings.TrimPrefix(manifest.Config.Digest, "sha256:"); len(digest) == 64 {
+			configRaw, _ := os.ReadFile(filepath.Join(root, "blobs", "sha256-"+digest))
+			_ = json.Unmarshal(configRaw, &metadata)
+		}
+		hints := name + " " + metadata.Family + " " + strings.Join(metadata.Families, " ")
+		result = append(result, DiscoveryEntry{Name: name, Provider: "ollama", Path: path, Format: metadata.Format, Size: size, MemoryEstimate: memoryEstimate(size), Quantization: metadata.Quantization, Parameters: metadata.Parameters, Capabilities: modelCapabilities(hints), Installed: true})
+		return nil
+	})
+	return result
+}
+
+func discoveryKey(entry DiscoveryEntry) string {
+	if entry.Provider == "ollama" {
+		return strings.ToLower(entry.Provider + "\x00" + entry.Name)
+	}
+	return strings.ToLower(entry.Provider + "\x00" + entry.Name + "\x00" + entry.Path)
+}
+
+func supportedModelFile(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".gguf", ".onnx", ".safetensors":
+		return true
+	default:
+		return false
+	}
+}
+
+func localDiscovery(path string, size int64) DiscoveryEntry {
+	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	format := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
+	hints := name + " " + filepath.Dir(path)
+	return DiscoveryEntry{Name: name, Provider: "local-file", Path: path, Format: format, Size: size, MemoryEstimate: memoryEstimate(size), Quantization: quantization(hints), Parameters: parameterSize(hints), Capabilities: modelCapabilities(hints), Installed: true, Ready: true}
+}
+
+func memoryEstimate(size int64) int64 {
+	if size <= 0 {
+		return 0
+	}
+	return size + size/5
+}
+
+func quantization(name string) string {
+	upper := strings.ToUpper(name)
+	for _, marker := range []string{"Q2_K", "Q3_K_S", "Q3_K_M", "Q3_K_L", "Q4_0", "Q4_1", "Q4_K_S", "Q4_K_M", "Q5_0", "Q5_1", "Q5_K_S", "Q5_K_M", "Q6_K", "Q8_0", "IQ2", "IQ3", "IQ4", "FP16", "BF16", "F16"} {
+		if strings.Contains(upper, marker) {
+			return marker
+		}
+	}
+	return ""
+}
+
+func parameterSize(name string) string {
+	lower := strings.ToLower(name)
+	for _, suffix := range []string{"0.5b", "1b", "1.5b", "2b", "3b", "4b", "7b", "8b", "9b", "12b", "13b", "14b", "27b", "30b", "32b", "70b", "72b", "110b", "405b"} {
+		if strings.Contains(lower, suffix) {
+			return strings.ToUpper(suffix)
+		}
+	}
+	return ""
+}
+
+func modelCapabilities(name string) []string {
+	lower := strings.ToLower(name)
+	result := []string{"text"}
+	if strings.Contains(lower, "nuextract") {
+		return []string{"text", "extraction", "vision"}
+	}
+	if strings.Contains(lower, "embed") || strings.Contains(lower, "jina") || strings.Contains(lower, "nomic") || strings.Contains(lower, "bge") {
+		return []string{"embedding"}
+	}
+	if strings.Contains(lower, "vision") || strings.Contains(lower, "llava") || strings.Contains(lower, "moondream") || strings.Contains(lower, "gemma3") || strings.Contains(lower, "-vl") || strings.Contains(lower, "_vl") || strings.Contains(lower, "qwen25vl") || strings.Contains(lower, "qwen3vl") {
+		result = append(result, "vision")
+	}
+	return result
 }
 
 func Path(cfg config.Config, alias string) (string, error) {

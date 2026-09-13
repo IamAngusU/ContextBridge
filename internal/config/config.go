@@ -340,7 +340,14 @@ func (c Config) Engine(name string) (Engine, bool) {
 		return engine, true
 	}
 	if name == "ollama" {
-		return Engine{Type: "ollama", URL: c.Providers.Ollama.URL, Model: c.Providers.Ollama.Model, TimeoutSeconds: c.Providers.Ollama.Timeout}, true
+		url := c.Providers.Ollama.URL
+		if (url == "" || url == "http://127.0.0.1:11434" || url == "http://localhost:11434") && strings.TrimSpace(os.Getenv("OLLAMA_HOST")) != "" {
+			url = strings.TrimSpace(os.Getenv("OLLAMA_HOST"))
+			if !strings.Contains(url, "://") {
+				url = "http://" + url
+			}
+		}
+		return Engine{Type: "ollama", URL: url, Model: c.Providers.Ollama.Model, TimeoutSeconds: c.Providers.Ollama.Timeout}, true
 	}
 	if name == "browser" {
 		return Engine{Type: "browser"}, true
@@ -690,7 +697,7 @@ browser_profiles:
       input: ['#prompt-textarea', '[contenteditable="true"]']
       file_input: ['input[type="file"]']
       submit: ['button[data-testid="send-button"]', 'button[aria-label*="Send"]']
-      response: ['[data-message-author-role="assistant"]']
+      response: ['[data-message-author-role="assistant"]', 'section[data-turn="assistant"][data-testid^="conversation-turn-"]']
   gemini:
     label: Gemini
     match_url: https://gemini.google.com/*

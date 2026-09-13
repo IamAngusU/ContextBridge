@@ -39,7 +39,11 @@ func RankWithEstimate(nodes []Node, requirements Requirements, estimatedVRAM uin
 			memoryPressure = 1 - float64(node.Capabilities.MemoryFree)/float64(node.Capabilities.MemoryTotal)
 		}
 		vramHeadroom := bestVRAMHeadroom(node, requirements.MinFreeVRAM)
-		score := busy*60 + queue*20 + memoryPressure*10 - vramHeadroom*12
+		gpuPressure := 0.0
+		if len(node.Capabilities.GPUs) > 0 {
+			gpuPressure = float64(node.Capabilities.GPUs[0].Utilization) / 100
+		}
+		score := busy*60 + queue*20 + memoryPressure*10 + gpuPressure*15 - vramHeadroom*12
 		if requirements.MinFreeVRAM == 0 && estimatedVRAM > 0 {
 			if hasVRAM(node, estimatedVRAM) {
 				score -= 10

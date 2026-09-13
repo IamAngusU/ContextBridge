@@ -27,6 +27,7 @@ func (p *Processor) Process(ctx context.Context, job Job) Output {
 	route := p.cfg.Route(job.Route)
 	applyTaskOutput(&job, route.Task)
 	providers := append([]string{route.Provider}, route.Fallback...)
+	lastProviderError := ""
 	if requested := strings.TrimSpace(job.Provider); requested != "" {
 		selected := ""
 		for _, provider := range providers {
@@ -65,12 +66,17 @@ func (p *Processor) Process(ctx context.Context, job Job) Output {
 		if err == nil {
 			return output
 		}
+		lastProviderError = strings.TrimSpace(err.Error())
+	}
+	failure := "providers_unavailable"
+	if strings.TrimSpace(job.Provider) != "" && strings.HasPrefix(lastProviderError, "browser_") {
+		failure = lastProviderError
 	}
 	if outputMode(job.Output) == "decision" {
-		decision := ReviewDecision("contextbridge", "fallback", "providers_unavailable", 0)
+		decision := ReviewDecision("contextbridge", "fallback", failure, 0)
 		return Output{Mode: "decision", Decision: &decision, Provider: decision.Provider, Model: decision.Model}
 	}
-	return OutputError(outputMode(job.Output), "contextbridge", "fallback", "providers_unavailable", 0)
+	return OutputError(outputMode(job.Output), "contextbridge", "fallback", failure, 0)
 }
 
 func (p *Processor) ollama(parent context.Context, job Job, route config.Route, engine config.Engine) (Output, error) {
@@ -79,6 +85,9 @@ func (p *Processor) ollama(parent context.Context, job Job, route config.Route, 
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	model := route.Model
+	if strings.TrimSpace(job.Model) != "" {
+		model = strings.TrimSpace(job.Model)
+	}
 	if model == "" {
 		model = engine.Model
 	}
@@ -222,6 +231,9 @@ func (p *Processor) llamaCPP(parent context.Context, job Job, route config.Route
 	defer cancel()
 	base := strings.TrimRight(engineURL(engine), "/")
 	model := route.Model
+	if strings.TrimSpace(job.Model) != "" {
+		model = strings.TrimSpace(job.Model)
+	}
 	if model == "" {
 		model = engine.Model
 	}
@@ -354,6 +366,9 @@ func embeddingOutput(embeddings [][]float32, tenant, provider, model string, lat
 func (p *Processor) browser(parent context.Context, job Job, route config.Route) (Output, error) {
 	started := time.Now()
 	profileName := route.BrowserProfile
+	if strings.TrimSpace(job.BrowserProfile) != "" {
+		profileName = strings.TrimSpace(job.BrowserProfile)
+	}
 	profile := config.BrowserProfile{Label: "Visually taught browser tab"}
 	if profileName != "" {
 		configured, ok := p.cfg.BrowserProfiles[profileName]

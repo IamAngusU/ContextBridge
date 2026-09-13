@@ -189,6 +189,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"task": route.Task, "model": route.Model,
 		}
 	}
+	ollama, _ := s.cfg.Engine("ollama")
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"ok":        true,
 		"service":   "contextbridge",
@@ -208,7 +209,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"routes": routes,
 		"providers": map[string]interface{}{
 			"ollama": map[string]interface{}{
-				"url": s.cfg.Providers.Ollama.URL, "model": s.cfg.Providers.Ollama.Model,
+				"url": ollama.URL, "model": s.cfg.Providers.Ollama.Model,
 				"images": s.cfg.Providers.Ollama.Images,
 			},
 			"browser": map[string]interface{}{"lease_seconds": s.cfg.Providers.Browser.LeaseSeconds},
@@ -387,12 +388,12 @@ func (s *Server) handleBrowserJobAction(w http.ResponseWriter, r *http.Request) 
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		if progress.Sequence == 0 || len(progress.Text) > 1<<20 || !utf8.ValidString(progress.Text) {
+		if progress.Sequence == 0 || len(progress.Text) > 1<<20 || !utf8.ValidString(progress.Text) || len(progress.Detail) > 500 || !utf8.ValidString(progress.Detail) || progress.Percent < 0 || progress.Percent > 100 {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "progress requires a sequence and at most 1 MB of UTF-8 text"})
 			return
 		}
 		progress.Phase = strings.ToLower(strings.TrimSpace(progress.Phase))
-		if progress.Phase != "generating" && progress.Phase != "stabilizing" && progress.Phase != "final" {
+		if progress.Phase != "generating" && progress.Phase != "stabilizing" && progress.Phase != "final" && progress.Phase != "submitting" && progress.Phase != "recovering" && progress.Phase != "rate_limited" {
 			progress.Phase = "generating"
 		}
 		if !s.store.UpdateBrowserProgress(parts[0], progress) {
@@ -421,7 +422,7 @@ func (s *Server) handleBrowserJobAction(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var raw json.RawMessage
-	if err := decodeJSON(r.Body, &raw, 12<<20); err != nil {
+	if err := decodeJSON(r.Body, &raw, 20<<20); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -452,7 +453,7 @@ func (s *Server) handleBrowserHeartbeat(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var status BrowserClientStatus
-	if err := decodeJSON(r.Body, &status, 32<<10); err != nil {
+	if err := decodeJSON(r.Body, &status, 128<<10); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -462,6 +463,31 @@ func (s *Server) handleBrowserHeartbeat(w http.ResponseWriter, r *http.Request) 
 	status.ProfileLabel = limitedValue(status.ProfileLabel, 100)
 	status.ExtensionVersion = limitedValue(status.ExtensionVersion, 30)
 	status.Browser = limitedValue(status.Browser, 30)
+	if status.ActiveTabs < 0 {
+		status.ActiveTabs = 0
+	}
+	if status.ActiveTabs > 16 {
+		status.ActiveTabs = 16
+	}
+	if status.BusyTabs < 0 {
+		status.BusyTabs = 0
+	}
+	if status.BusyTabs > status.ActiveTabs {
+		status.BusyTabs = status.ActiveTabs
+	}
+	if len(status.Tabs) > 16 {
+		status.Tabs = status.Tabs[:16]
+	}
+	for index := range status.Tabs {
+		status.Tabs[index].Origin = limitedValue(status.Tabs[index].Origin, 300)
+		status.Tabs[index].Title = limitedValue(status.Tabs[index].Title, 300)
+		status.Tabs[index].Profile = limitedValue(status.Tabs[index].Profile, 100)
+		status.Tabs[index].State = limitedValue(status.Tabs[index].State, 30)
+		status.Tabs[index].CurrentModel = limitedValue(status.Tabs[index].CurrentModel, 100)
+		status.Tabs[index].CurrentReasoning = limitedValue(status.Tabs[index].CurrentReasoning, 100)
+		status.Tabs[index].Models = limitedStrings(status.Tabs[index].Models, 50, 100)
+		status.Tabs[index].ReasoningLevels = limitedStrings(status.Tabs[index].ReasoningLevels, 20, 100)
+	}
 	if status.State == "" {
 		status.State = "waiting"
 	}
@@ -514,6 +540,24 @@ func (s *Server) cors(next http.Handler) http.Handler {
 func limitedValue(value string, limit int) string {
 	value = strings.TrimSpace(value)
 	return truncateUTF8(value, limit)
+}
+
+func limitedStrings(values []string, count, width int) []string {
+	result := make([]string, 0, min(len(values), count))
+	seen := map[string]bool{}
+	for _, value := range values {
+		value = limitedValue(value, width)
+		key := strings.ToLower(value)
+		if value == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		result = append(result, value)
+		if len(result) == count {
+			break
+		}
+	}
+	return result
 }
 
 func (s *Server) watchInbox(ctx context.Context) {
@@ -593,7 +637,7 @@ func validateJob(job Job) error {
 	if job.ID != "" && (!jobIDPattern.MatchString(job.ID) || strings.Contains(job.ID, "..")) {
 		return errors.New("id must use 1 to 128 letters, numbers, dots, underscores, or hyphens")
 	}
-	for name, value := range map[string]string{"source": job.Source, "route": job.Route, "provider": job.Provider, "kind": job.Kind} {
+	for name, value := range map[string]string{"source": job.Source, "route": job.Route, "provider": job.Provider, "kind": job.Kind, "session_id": job.SessionID, "browser_profile": job.BrowserProfile, "model": job.Model, "reasoning": job.Reasoning} {
 		if len(value) > 100 || strings.IndexFunc(value, unicode.IsControl) >= 0 {
 			return fmt.Errorf("%s must be at most 100 bytes without control characters", name)
 		}
@@ -660,8 +704,8 @@ func validateJob(job Job) error {
 	if job.Output.MaxBytes != 0 && (job.Output.MaxBytes < 256 || job.Output.MaxBytes > 1<<20) {
 		return errors.New("output.max_bytes must be between 256 and 1048576")
 	}
-	if job.Output.MaxArtifactBytes != 0 && (job.Output.MaxArtifactBytes < 1024 || job.Output.MaxArtifactBytes > 6<<20) {
-		return errors.New("output.max_artifact_bytes must be between 1024 and 6291456")
+	if job.Output.MaxArtifactBytes != 0 && (job.Output.MaxArtifactBytes < 1024 || job.Output.MaxArtifactBytes > 12<<20) {
+		return errors.New("output.max_artifact_bytes must be between 1024 and 12582912")
 	}
 	if len(job.Output.RequiredKeys) > 50 {
 		return errors.New("output.required_keys accepts at most 50 keys")

@@ -68,6 +68,33 @@ func TestTrustedPromptAllowsExplicitArtifactCreation(t *testing.T) {
 	}
 }
 
+func TestExplicitBrowserErrorIsNotAcceptedAsAnAnswer(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{Routes: map[string]config.Route{"default": {Provider: "browser", TimeoutSeconds: 2}}, Providers: config.Providers{Browser: config.BrowserProvider{LeaseSeconds: 30}}}
+	processor := NewProcessor(cfg, store)
+	result := make(chan Output, 1)
+	go func() {
+		result <- processor.Process(context.Background(), Job{ID: "rate-limit-test", Provider: "browser", Prompt: "test", Output: OutputSpec{Mode: "text"}})
+	}()
+	deadline := time.Now().Add(time.Second)
+	var work *browserJob
+	for work == nil && time.Now().Before(deadline) {
+		work = store.NextBrowserJob("", time.Minute)
+		if work == nil {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	if work == nil || !store.Complete(work.Job.ID, Output{Mode: "text", Error: "browser_rate_limited"}) {
+		t.Fatal("browser job was not queued")
+	}
+	if output := <-result; output.Error != "browser_rate_limited" || output.Text != "" {
+		t.Fatalf("browser error became output: %#v", output)
+	}
+}
+
 func TestSelectOllamaModelUsesSmallestCompatibleModel(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{

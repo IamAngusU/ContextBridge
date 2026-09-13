@@ -4,9 +4,10 @@ if (!globalThis.ContextBridgeProfiles && typeof importScripts === 'function') {
 
 const api = globalThis.browser || globalThis.chrome;
 
-let polling = false;
 let stopRequested = false;
 let heartbeatTimer = 0;
+const pollers = new Map();
+const busyTabs = new Set();
 
 api.runtime.onInstalled.addListener(() => resume());
 api.runtime.onStartup.addListener(() => resume());
@@ -38,6 +39,8 @@ async function handleMessage(message, sender) {
       return { ok: true };
     case 'verify-profile':
       return verifyTaughtProfile(Number(message.tabId));
+    case 'scan-capabilities':
+      return scanPageCapabilities(Number(message.tabId));
     case 'remove-profile':
       return removeTaughtProfile(String(message.origin || ''));
     default:
@@ -48,10 +51,13 @@ async function handleMessage(message, sender) {
 async function startPairing() {
   const cfg = await settings();
   if (!cfg.token) throw new Error('Enter the local pairing token first');
-  if (!cfg.tabId) throw new Error('Select an AI tab first');
-  const tab = await api.tabs.get(cfg.tabId);
-  if (!tab?.url || !/^https?:/i.test(tab.url)) throw new Error('The selected tab is not a supported web page');
-  if (cfg.useVisualProfile && !profileForTab(cfg, tab)) throw new Error('Detect or customize this page before starting the bridge');
+  const tabIds = configuredTabIDs(cfg);
+  if (!tabIds.length) throw new Error('Select at least one AI tab first');
+  for (const tabId of tabIds) {
+    const tab = await api.tabs.get(tabId);
+    if (!tab?.url || !/^https?:/i.test(tab.url)) throw new Error('One selected tab is not a supported web page');
+    if (cfg.useVisualProfile && !profileForTab(cfg, tab)) throw new Error(`Detect or customize ${tab.title || 'the selected page'} before starting the bridge`);
+  }
 
   stopRequested = false;
   await api.storage.local.set({ running: true, teachingTabId: 0, lastError: '' });
@@ -90,17 +96,20 @@ async function testBridge() {
 
 async function currentStatus() {
   const cfg = await settings();
-  let tab = null;
-  if (cfg.tabId) {
+  const tabs = [];
+  for (const tabId of configuredTabIDs(cfg)) {
     try {
-      tab = await api.tabs.get(cfg.tabId);
+      const tab = await api.tabs.get(tabId);
+      tabs.push({ ...tabSummary(tab), busy: busyTabs.has(tabId), profile: profileForTab(cfg, tab)?.name || '' });
     } catch (_) {}
   }
+  const tab = tabs[0] || null;
   const profile = tab ? profileForTab(cfg, tab) : null;
   return {
     ok: true,
     running: cfg.running,
-    tab: tab ? tabSummary(tab) : null,
+    tab,
+    tabs,
     taught: Boolean(profile),
     profile,
     lastError: cfg.lastError || ''
@@ -124,7 +133,7 @@ async function startTeaching(tabId) {
     existing,
     extensionName: api.i18n.getMessage('extensionName') || 'ContextBridge'
   });
-  await api.storage.local.set({ tabId, teachingTabId: tabId, running: false });
+  await api.storage.local.set({ tabId, tabIds: [tabId], teachingTabId: tabId, running: false });
   stopRequested = true;
   stopHeartbeat();
   await sendHeartbeat('teaching');
@@ -141,6 +150,7 @@ async function saveTaughtProfile(rawProfile, sender) {
   await api.storage.local.set({
     taughtProfiles,
     tabId: tab.id,
+    tabIds: [tab.id],
     teachingTabId: 0,
     activeOrigin: origin,
     useVisualProfile: true,
@@ -178,6 +188,17 @@ async function removeTaughtProfile(origin) {
   return { ok: true };
 }
 
+async function scanPageCapabilities(tabId) {
+  if (!tabId) throw new Error('Select an AI tab first');
+  if (busyTabs.has(tabId)) throw new Error('Wait until this tab finishes its current job');
+  const results = await api.scripting.executeScript({ target: { tabId }, func: discoverPageCapabilities });
+  const capabilities = results?.[0]?.result || {};
+  const cfg = await settings();
+  const tabCapabilities = { ...(cfg.tabCapabilities || {}), [tabId]: capabilities };
+  await api.storage.local.set({ tabCapabilities });
+  return { ok: true, capabilities };
+}
+
 function normalizeTaughtProfile(raw, origin, fallbackLabel) {
   const selectors = raw?.selectors || {};
   const normalized = {
@@ -213,18 +234,33 @@ function profileForTab(cfg, tab) {
 }
 
 async function poll() {
-  if (polling) return;
-  polling = true;
-  try {
-    while (!stopRequested) {
+  const cfg = await settings();
+  if (!cfg.running || !cfg.token) return;
+  for (const tabId of configuredTabIDs(cfg)) {
+    if (pollers.has(tabId)) continue;
+    const running = pollTab(tabId).finally(() => pollers.delete(tabId));
+    pollers.set(tabId, running);
+  }
+}
+
+async function pollTab(tabId) {
+  while (!stopRequested) {
       const cfg = await settings();
-      if (!cfg.running || !cfg.token || !cfg.tabId) break;
+      if (!cfg.running || !cfg.token || !configuredTabIDs(cfg).includes(tabId)) break;
+      if (Number(cfg.tabCooldowns?.[tabId] || 0) > Date.now()) {
+        await delay(2000);
+        continue;
+      }
+      if (busyTabs.has(tabId)) {
+        await delay(250);
+        continue;
+      }
       await flushPendingCompletions(cfg);
       try {
         let requestedProfile = cfg.profile || '';
         if (cfg.useVisualProfile) {
           try {
-            const selectedTab = await api.tabs.get(cfg.tabId);
+            const selectedTab = await api.tabs.get(tabId);
             requestedProfile = profileForTab(cfg, selectedTab)?.name || requestedProfile;
           } catch (_) {}
         }
@@ -239,18 +275,15 @@ async function poll() {
           await completeWork(cfg, work.job.id, cfg.pendingCompletions[work.job.id]);
           continue;
         }
-        await processWork(cfg, work);
+        await processWork(cfg, work, tabId);
       } catch (error) {
         await api.storage.local.set({ lastError: error.message || String(error) });
         await delay(2000);
       }
-    }
-  } finally {
-    polling = false;
   }
 }
 
-async function processWork(cfg, work) {
+async function processWork(cfg, work, claimedTabId) {
   let decision;
   let tab;
   let effectiveProfile = work.profile || {};
@@ -260,31 +293,44 @@ async function processWork(cfg, work) {
   let progressSequence = 0;
   let baselineText = '';
   let latestProgressText = '';
+  let latestProgressState = '';
+  let tabId = claimedTabId;
+  let tabSlotHeld = false;
+  let failureCode = 'browser_automation_error';
   await api.storage.local.set({ lastError: '' });
   try {
-    tab = await api.tabs.get(cfg.tabId);
+    tabId = await resolveWorkTab(cfg, work, claimedTabId);
+    await waitForTabSlot(tabId, work.deadline);
+    tabSlotHeld = true;
+    tab = await api.tabs.get(tabId);
     const taught = cfg.useVisualProfile ? profileForTab(cfg, tab) : null;
     if (taught) effectiveProfile = taught;
     if (!effectiveProfile?.selectors) throw new Error('No usable page profile is available');
     if (!matches(tab.url || '', effectiveProfile.match_url || '')) throw new Error('The selected tab no longer matches its taught page');
     await sendHeartbeat('working');
     leaseTimer = setInterval(() => renewLease(cfg, work.job.id), 25000);
-    const initial = await captureTabProgress(cfg.tabId, effectiveProfile.selectors);
+    const initial = await captureTabProgress(tabId, effectiveProfile.selectors);
     baselineText = initial.text || '';
     latestProgressText = baselineText;
+    latestProgressState = `${Boolean(initial.busy)}|${Number(initial.percent) || 0}|${initial.detail || ''}`;
     const sample = async () => {
       if (progressBusy) return;
       progressBusy = true;
       try {
-        const snapshot = await captureTabProgress(cfg.tabId, effectiveProfile.selectors);
+        const snapshot = await captureTabProgress(tabId, effectiveProfile.selectors);
         const text = String(snapshot.text || '').trim();
-        if (text && text !== baselineText && text !== latestProgressText) {
-          latestProgressText = text;
+        const textChanged = Boolean(text && text !== baselineText && text !== latestProgressText);
+        const progressState = `${Boolean(snapshot.busy)}|${Number(snapshot.percent) || 0}|${snapshot.detail || ''}`;
+        if (textChanged || progressState !== latestProgressState) {
+          if (textChanged) latestProgressText = text;
+          latestProgressState = progressState;
           progressSequence += 1;
           await reportProgress(cfg, work.job.id, {
             sequence: progressSequence,
-            text: text.slice(0, 1024 * 1024),
+            text: textChanged ? text.slice(0, 1024 * 1024) : '',
             phase: snapshot.busy ? 'generating' : 'stabilizing',
+            detail: snapshot.detail || '',
+            percent: Number(snapshot.percent) || 0,
             busy: Boolean(snapshot.busy)
           });
         }
@@ -294,13 +340,37 @@ async function processWork(cfg, work) {
       }
     };
     progressTimer = setInterval(sample, 800);
-    const results = await api.scripting.executeScript({
-      target: { tabId: cfg.tabId },
-      func: automate,
-      args: [work.job, effectiveProfile, work.deadline]
-    });
-    const answer = results?.[0]?.result;
-    if (!answer?.ok) throw new Error(answer?.error || 'No browser response was captured');
+    let answer;
+    try {
+      const results = await api.scripting.executeScript({ target: { tabId }, func: automate, args: [work.job, effectiveProfile, work.deadline] });
+      answer = results?.[0]?.result;
+    } catch (error) {
+      failureCode = 'browser_navigation_interrupted';
+      progressSequence += 1;
+      await reportProgress(cfg, work.job.id, { sequence: progressSequence, text: '', phase: 'recovering', detail: 'The tab navigated; reattaching to the conversation', busy: true });
+      await waitForTabReady(tabId, 30000);
+      const resumeJob = { ...work.job, metadata: { ...(work.job.metadata || {}), contextbridge_resume_only: true, contextbridge_baseline_text: baselineText } };
+      const resumed = await api.scripting.executeScript({ target: { tabId }, func: automate, args: [resumeJob, effectiveProfile, work.deadline] });
+      answer = resumed?.[0]?.result;
+    }
+    if (!answer?.ok && answer?.recoverable) {
+      progressSequence += 1;
+      await reportProgress(cfg, work.job.id, { sequence: progressSequence, text: '', phase: 'recovering', detail: answer.error || 'Recovering browser tab', percent: Number(answer.percent) || 0, busy: true });
+      await api.tabs.reload(tabId);
+      await waitForTabReady(tabId, 30000);
+      const resumeJob = { ...work.job, metadata: { ...(work.job.metadata || {}), contextbridge_resume_only: true, contextbridge_baseline_text: baselineText } };
+      const resumed = await api.scripting.executeScript({ target: { tabId }, func: automate, args: [resumeJob, effectiveProfile, work.deadline] });
+      answer = resumed?.[0]?.result;
+    }
+    if (!answer?.ok) {
+      failureCode = /^browser_[a-z_]+$/.test(String(answer?.code || '')) ? answer.code : failureCode;
+      if (failureCode === 'browser_rate_limited') {
+		await coolDownTab(tabId, 5 * 60 * 1000);
+        progressSequence += 1;
+        await reportProgress(cfg, work.job.id, { sequence: progressSequence, text: '', phase: 'rate_limited', detail: answer?.error || 'Provider rate limit', busy: false });
+      }
+      throw new Error(answer?.error || 'No browser response was captured');
+    }
     if (answer.text && answer.text !== latestProgressText) {
       progressSequence += 1;
       await reportProgress(cfg, work.job.id, {
@@ -310,22 +380,70 @@ async function processWork(cfg, work) {
         busy: false
       });
     }
-    decision = parseOutput(answer.text, work.job.output || {}, effectiveProfile.label || 'browser', answer.artifacts || []);
+    decision = parseOutput(answer.text, work.job.output || {}, answer.selected_model || work.job.model || effectiveProfile.label || 'browser', answer.artifacts || []);
   } catch (error) {
     const mode = outputMode(work.job.output || {});
     decision = mode === 'decision'
-      ? { verdict: 'review', flags: ['browser_automation_error'], confidence: 0.4, model: effectiveProfile?.label || 'browser' }
-      : { mode, error: 'browser_automation_error', model: effectiveProfile?.label || 'browser' };
+      ? { verdict: 'review', flags: [failureCode], confidence: 0.4, model: effectiveProfile?.label || 'browser' }
+      : { mode, error: failureCode, model: effectiveProfile?.label || 'browser' };
     await api.storage.local.set({ lastError: error.message || String(error) });
   } finally {
     if (leaseTimer) clearInterval(leaseTimer);
     if (progressTimer) clearInterval(progressTimer);
+    if (tabSlotHeld) busyTabs.delete(tabId);
   }
 
   const pendingCompletions = { ...cfg.pendingCompletions, [work.job.id]: decision };
   await api.storage.local.set({ pendingCompletions });
   await completeWork(await settings(), work.job.id, decision);
   await sendHeartbeat('waiting');
+}
+
+async function coolDownTab(tabId, duration) {
+  const cfg = await settings();
+  const tabCooldowns = { ...(cfg.tabCooldowns || {}), [tabId]: Date.now() + duration };
+  await api.storage.local.set({ tabCooldowns });
+}
+
+async function resolveWorkTab(cfg, work, claimedTabId) {
+  const session = String(work?.job?.session_id || '').trim();
+  if (!session) return claimedTabId;
+  const sessionTabs = { ...(cfg.sessionTabs || {}) };
+  const mapped = Number(sessionTabs[session] || 0);
+  if (mapped && configuredTabIDs(cfg).includes(mapped)) {
+    try {
+      const tab = await api.tabs.get(mapped);
+      const requested = String(work?.profile?.name || '');
+      const actual = profileForTab(cfg, tab)?.name || '';
+      if (!requested || requested === actual) return mapped;
+    } catch (_) {}
+  }
+  sessionTabs[session] = claimedTabId;
+  const entries = Object.entries(sessionTabs).slice(-200);
+  await api.storage.local.set({ sessionTabs: Object.fromEntries(entries) });
+  return claimedTabId;
+}
+
+async function waitForTabSlot(tabId, deadlineValue) {
+  const deadline = Math.min(Date.now() + 300000, Date.parse(deadlineValue || '') || Date.now() + 300000);
+  while (busyTabs.has(tabId) && Date.now() < deadline) await delay(250);
+  if (busyTabs.has(tabId)) throw new Error('The session tab stayed busy until the job deadline');
+  busyTabs.add(tabId);
+}
+
+async function waitForTabReady(tabId, timeout) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    try {
+      const tab = await api.tabs.get(tabId);
+      if (tab.status === 'complete') {
+        await delay(600);
+        return;
+      }
+    } catch (_) {}
+    await delay(250);
+  }
+  throw new Error('The browser tab did not finish reloading');
 }
 
 async function captureTabProgress(tabId, selectors) {
@@ -403,17 +521,48 @@ function automate(job, profile, jobDeadline) {
     return [];
   };
   const visibleText = (element) => (element?.innerText || element?.textContent || '').trim();
-  const pageBusy = () => {
+  const pageState = () => {
+    let percent = 0;
+    let detail = '';
+    for (const indicator of document.querySelectorAll('[data-testid="image-gen-loading-progress"], [role="progressbar"][aria-valuenow]')) {
+      if (!isVisible(indicator)) continue;
+      percent = Math.max(percent, Math.max(0, Math.min(100, Number(indicator.getAttribute('aria-valuenow')) || 0)));
+      detail = 'Image generation';
+    }
     for (const selector of [
       '[aria-busy="true"]', '[data-is-streaming="true"]', '.result-streaming',
+      '[data-testid="image-gen-loading-state"]', '[data-testid="image-gen-loading-state-frame"]',
       'button[data-testid*="stop" i]', 'button[aria-label*="stop" i]',
       'button[aria-label*="beenden" i]', 'button[aria-label*="abbrechen" i]'
     ]) {
       try {
-        if ([...document.querySelectorAll(selector)].some(isVisible)) return true;
+        if ([...document.querySelectorAll(selector)].some(isVisible)) return { busy: true, percent, detail: detail || 'Generating' };
       } catch (_) {}
     }
-    return false;
+    return { busy: false, percent, detail: '', composerReady: Boolean(first(selectors.submit)) };
+  };
+  const pageBusy = () => pageState().busy;
+  const providerError = (responseElement) => {
+    const containers = [];
+    for (const selector of ['[role="alert"]', '[aria-live="assertive"]', '[data-testid*="error" i]', '.toast-error', '.error-message']) {
+      try { containers.push(...[...document.querySelectorAll(selector)].filter(isVisible)); } catch (_) {}
+    }
+	if (responseElement) {
+		try { containers.push(...[...responseElement.querySelectorAll('[data-testid*="error" i], [data-testid*="rate" i], [class*="error" i]')].filter(isVisible)); } catch (_) {}
+	}
+    const text = containers.map(visibleText).filter(Boolean).join('\n').slice(0, 4000);
+	const retryVisible = [...document.querySelectorAll('button')].filter(isVisible).some((button) => /retry|try again|regenerate|erneut|noch einmal|wiederholen/.test(`${visibleText(button)} ${button.getAttribute('aria-label') || ''}`.toLowerCase()));
+	const responseText = responseElement ? visibleText(responseElement).slice(0, 1500) : '';
+	const semanticText = text || (retryVisible ? responseText : '');
+    if (!semanticText) return null;
+    const lower = semanticText.toLowerCase();
+    if (/rate.?limit|usage.?limit|too many requests|quota|capacity|limit erreicht|nutzungslimit|zu viele anfragen|später erneut|try again later|temporarily unavailable/.test(lower)) {
+      return { code: 'browser_rate_limited', message: semanticText.slice(0, 300), retryable: true };
+    }
+    if (/something went wrong|etwas ist schief|network error|verbindungsfehler|failed to (?:generate|respond)|antwort konnte nicht|generation failed/.test(lower)) {
+      return { code: 'browser_provider_error', message: semanticText.slice(0, 300), retryable: true };
+    }
+    return null;
   };
   const setInput = (element, value) => {
     element.focus();
@@ -444,6 +593,51 @@ function automate(job, profile, jobDeadline) {
     element.dispatchEvent(new Event('change', { bubbles: true }));
   };
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+	const normalizedWords = (value) => String(value || '').toLowerCase().normalize('NFKD').replace(/[^a-z0-9äöüß]+/g, ' ').trim().split(/\s+/).filter(Boolean);
+	const preferenceTerms = (kind, value) => {
+		const normalized = String(value || '').trim().toLowerCase();
+		if (kind === 'reasoning') {
+			const aliases = {
+				instant: ['instant', 'sofort', 'fast', 'schnell'], low: ['low', 'niedrig'], medium: ['medium', 'mittel'],
+				high: ['high', 'hoch'], xhigh: ['xhigh', 'very high', 'sehr hoch'], max: ['max', 'maximum'], pro: ['pro']
+			};
+			return aliases[normalized] || normalizedWords(normalized);
+		}
+		return normalizedWords(normalized).filter((word) => word !== 'gpt' && word !== 'model' && word !== 'modell');
+	};
+	const choosePreference = async (kind, requested) => {
+		if (!requested || ['auto', 'default'].includes(String(requested).toLowerCase())) return '';
+		const triggerSelectors = kind === 'model'
+			? ['button[data-testid*="model" i]', 'button[aria-label*="model" i]', 'button[aria-haspopup="menu"]']
+			: ['button[data-testid*="reason" i]', 'button[data-testid*="effort" i]', 'button[aria-label*="reason" i]', 'button[aria-label*="denk" i]', 'button[aria-haspopup="menu"]'];
+		const requestedTerms = preferenceTerms(kind, requested);
+		const preferenceMatches = (element) => {
+			const label = `${visibleText(element)} ${element.getAttribute('aria-label') || ''}`;
+			const normalized = normalizedWords(label).join(' ');
+			return kind === 'reasoning'
+				? requestedTerms.some((term) => normalized.includes(normalizedWords(term).join(' ')))
+				: requestedTerms.every((term) => normalizedWords(label).includes(term));
+		};
+		const triggers = triggerSelectors.flatMap((selector) => { try { return [...document.querySelectorAll(selector)].filter(isVisible); } catch (_) { return []; } });
+		const current = triggers.find(preferenceMatches);
+		if (current) return visibleText(current) || requested;
+		const trigger = triggers.find((element) => {
+			const label = `${visibleText(element)} ${element.getAttribute('aria-label') || ''}`.toLowerCase();
+			return kind === 'model' ? /gpt|gemini|model|modell|astra|sol|terra|luna/.test(label) : /reason|denk|effort|thinking|sofort|instant|hoch|high|pro|max/.test(label);
+		});
+		if (!trigger) throw new Error(`The ${kind} selector is not visible in this provider UI`);
+		trigger.click();
+		await wait(350);
+		const options = [...document.querySelectorAll('[role="menuitem"], [role="option"], [data-radix-collection-item], [aria-checked], [aria-selected]')].filter(isVisible);
+		const match = options.find(preferenceMatches);
+		if (!match) {
+			document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+			throw new Error(`Requested ${kind} "${requested}" is not available in this chat`);
+		}
+		match.click();
+		await wait(350);
+		return visibleText(match) || requested;
+	};
 	const cleanFileName = (value, fallback) => {
 		const clean = String(value || '').split(/[\\/]/).pop().replace(/[\u0000-\u001f<>:"|?*]/g, '-').trim().slice(0, 180);
 		return clean && clean !== '.' ? clean : fallback;
@@ -480,7 +674,7 @@ function automate(job, profile, jobDeadline) {
 	};
 	const collectArtifacts = async (responseElement, spec) => {
 		if (!spec?.artifacts || !responseElement) return [];
-		const maxBytes = Math.max(1024, Math.min(Number(spec.max_artifact_bytes) || 6 * 1024 * 1024, 6 * 1024 * 1024));
+		const maxBytes = Math.max(1024, Math.min(Number(spec.max_artifact_bytes) || 12 * 1024 * 1024, 12 * 1024 * 1024));
 		const candidates = [];
 		const seen = new Set();
 		const add = (url, name, mediaType) => {
@@ -495,6 +689,7 @@ function automate(job, profile, jobDeadline) {
 			const mediaType = mediaTypeFor(source, 'image/png');
 			let name = '';
 			try { name = new URL(source, location.href).pathname.split('/').pop(); } catch (_) {}
+			if (!/\.[a-z0-9]{2,5}$/i.test(name)) name = `image-${candidates.length + 1}.${extensionFor(mediaType)}`;
 			add(source, cleanFileName(name, `image-${candidates.length + 1}.${extensionFor(mediaType)}`), mediaType);
 		}
 		for (const anchor of responseElement.querySelectorAll('a[href]')) {
@@ -514,7 +709,7 @@ function automate(job, profile, jobDeadline) {
 		}
 		const artifacts = [];
 		let total = 0;
-		for (const candidate of candidates.slice(0, 4)) {
+		for (const candidate of candidates.slice(0, 12)) {
 			const artifact = { name: candidate.name, media_type: candidate.mediaType };
 			try {
 				const response = await fetch(candidate.url, { credentials: 'include' });
@@ -532,7 +727,7 @@ function automate(job, profile, jobDeadline) {
 			}
 			if (artifact.data_base64 || artifact.url) artifacts.push(artifact);
 		}
-		for (const code of [...responseElement.querySelectorAll('pre code')].slice(0, Math.max(0, 4 - artifacts.length))) {
+		for (const code of [...responseElement.querySelectorAll('pre code')].slice(0, Math.max(0, 12 - artifacts.length))) {
 			const content = String(code.textContent || '');
 			if (!content.trim()) continue;
 			const bytes = new TextEncoder().encode(content);
@@ -554,25 +749,30 @@ function automate(job, profile, jobDeadline) {
       if (!input) throw new Error('Prompt input was not found');
       const before = all(selectors.response);
       const previousElement = before.length ? before[before.length - 1] : null;
-      const previousText = before.length ? visibleText(before[before.length - 1]) : '';
-      if (job.image_base64) {
+      const previousText = String(job.metadata?.contextbridge_baseline_text || (before.length ? visibleText(before[before.length - 1]) : ''));
+      const resumeOnly = Boolean(job.metadata?.contextbridge_resume_only);
+      const selectedModel = !resumeOnly && job.model ? await choosePreference('model', job.model) : String(job.model || '');
+      const selectedReasoning = !resumeOnly && job.reasoning ? await choosePreference('reasoning', job.reasoning) : String(job.reasoning || '');
+      if (!resumeOnly && job.image_base64) {
         const fileInput = first(selectors.file_input);
         if (!fileInput) throw new Error('This job has an image, but no image input was taught');
         addImage(fileInput, job.image_base64, job.image_media_type);
         await wait(1000);
       }
-      setInput(input, job.prompt);
-      await wait(300);
-      let submit = first(selectors.submit);
-      for (let attempt = 0; !submit && attempt < 8; attempt += 1) {
-        await wait(150);
-        submit = first(selectors.submit);
-      }
-      if (submit) {
-        submit.click();
-      } else {
-        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
-        input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
+      if (!resumeOnly) {
+        setInput(input, job.prompt);
+        await wait(300);
+        let submit = first(selectors.submit);
+        for (let attempt = 0; !submit && attempt < 8; attempt += 1) {
+          await wait(150);
+          submit = first(selectors.submit);
+        }
+        if (submit) {
+          submit.click();
+        } else {
+          input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
+          input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
+        }
       }
 
 		const suppliedDeadline = Date.parse(jobDeadline || '');
@@ -583,14 +783,30 @@ function automate(job, profile, jobDeadline) {
       let stableText = '';
       let stableSince = 0;
       let sawBusy = false;
+      let lastPercent = 0;
+      let progressChangedAt = Date.now();
       while (Date.now() < deadline) {
         await wait(650);
         const responses = all(selectors.response);
         const latestElement = responses.length ? responses[responses.length - 1] : null;
         const latest = visibleText(latestElement);
         const changedResponse = latestElement !== previousElement || responses.length > before.length || latest !== previousText;
-        const busy = pageBusy();
+        const state = pageState();
+        const busy = state.busy;
         sawBusy = sawBusy || busy;
+		if (state.percent !== lastPercent) {
+			lastPercent = state.percent;
+			progressChangedAt = Date.now();
+		}
+		if (busy && lastPercent >= 95 && Date.now() - progressChangedAt > 45000) {
+			resolve({ ok: false, error: `Image generation stalled at ${lastPercent}%`, code: 'stalled_generation', percent: lastPercent, recoverable: !resumeOnly && job.metadata?.contextbridge_auto_reload !== false });
+			return;
+		}
+		const providerFailure = providerError(latestElement);
+		if (providerFailure && !busy) {
+			resolve({ ok: false, error: providerFailure.message, code: providerFailure.code, retryable: providerFailure.retryable });
+			return;
+		}
 		const artifactCount = job.output?.artifacts && latestElement
 			? [...latestElement.querySelectorAll('img')].filter((image) => (!image.naturalWidth || image.naturalWidth >= 128) && (!image.naturalHeight || image.naturalHeight >= 128)).length
 				+ latestElement.querySelectorAll('a[download], pre code, [data-file-citation-primary-file-id]').length
@@ -605,15 +821,21 @@ function automate(job, profile, jobDeadline) {
         const mode = String(job.output?.mode || 'decision').toLowerCase();
         const structured = mode === 'text' || ((latest.includes('{') && latest.includes('}')) || (latest.includes('[') && latest.includes(']')));
         const stableFor = sawBusy ? 1300 : 2600;
-        if (Date.now() - stableSince >= stableFor && structured && !busy) {
+		const composerFinished = !(selectors.submit || []).length || state.composerReady;
+        if (Date.now() - stableSince >= stableFor && structured && !busy && composerFinished) {
 		  const artifacts = await collectArtifacts(latestElement, job.output || {});
-		  resolve({ ok: true, text: latest || `Generated ${artifacts.length} artifact(s).`, artifacts });
+		  resolve({ ok: true, text: latest || `Generated ${artifacts.length} artifact(s).`, artifacts, selected_model: selectedModel, selected_reasoning: selectedReasoning });
           return;
         }
       }
-      throw new Error('Timed out while waiting for a stable response');
+      resolve({ ok: false, error: 'Timed out while waiting for a stable response', code: 'browser_timeout', recoverable: false, percent: lastPercent });
+      return;
     } catch (error) {
-      resolve({ ok: false, error: error.message || String(error) });
+      const message = error.message || String(error);
+      const code = /requested model|model selector/i.test(message)
+		? 'browser_model_unavailable'
+		: (/requested reasoning|reasoning selector/i.test(message) ? 'browser_reasoning_unavailable' : 'browser_automation_error');
+      resolve({ ok: false, error: message, code });
     }
   });
 }
@@ -629,8 +851,16 @@ function captureProgress(selectors) {
     } catch (_) {}
   }
   let busy = false;
+  let percent = 0;
+  let detail = '';
+  for (const indicator of document.querySelectorAll('[data-testid="image-gen-loading-progress"], [role="progressbar"][aria-valuenow]')) {
+    if (!isVisible(indicator)) continue;
+    percent = Math.max(percent, Math.max(0, Math.min(100, Number(indicator.getAttribute('aria-valuenow')) || 0)));
+    detail = 'Image generation';
+  }
   for (const selector of [
     '[aria-busy="true"]', '[data-is-streaming="true"]', '.result-streaming',
+    '[data-testid="image-gen-loading-state"]', '[data-testid="image-gen-loading-state-frame"]',
     'button[data-testid*="stop" i]', 'button[aria-label*="stop" i]',
     'button[aria-label*="beenden" i]', 'button[aria-label*="abbrechen" i]'
   ]) {
@@ -641,7 +871,7 @@ function captureProgress(selectors) {
       }
     } catch (_) {}
   }
-  return { text: responses.length ? visibleText(responses[responses.length - 1]) : '', busy };
+  return { text: responses.length ? visibleText(responses[responses.length - 1]) : '', busy, percent, detail: detail || (busy ? 'Generating' : '') };
 }
 
 function inspectSelectors(selectors) {
@@ -725,23 +955,51 @@ function stopHeartbeat() {
 async function sendHeartbeat(state) {
   const cfg = await settings();
   if (!cfg.token) return;
-  let tab = null;
-  try {
-    if (cfg.tabId) tab = await api.tabs.get(cfg.tabId);
-  } catch (_) {}
-  const profile = tab ? profileForTab(cfg, tab) : null;
+  const tabs = [];
+  for (const tabId of configuredTabIDs(cfg)) {
+    try {
+      const tab = await api.tabs.get(tabId);
+      const profile = profileForTab(cfg, tab);
+      let capabilities = cfg.tabCapabilities?.[tabId] || {};
+      try {
+        const report = await api.scripting.executeScript({ target: { tabId }, func: inspectPageCapabilities });
+        const live = report?.[0]?.result || {};
+        capabilities = {
+          ...capabilities,
+          currentModel: live.currentModel || capabilities.currentModel || '',
+          currentReasoning: live.currentReasoning || capabilities.currentReasoning || '',
+          models: [...new Set([...(capabilities.models || []), ...(live.models || [])])],
+          reasoningLevels: [...new Set([...(capabilities.reasoningLevels || []), ...(live.reasoningLevels || [])])]
+        };
+      } catch (_) {}
+      tabs.push({
+        id: tabId,
+        origin: tab?.url && /^https?:/i.test(tab.url) ? new URL(tab.url).origin : '',
+        title: tab?.title || '', profile: profile?.name || '',
+        state: busyTabs.has(tabId) ? 'working' : (Number(cfg.tabCooldowns?.[tabId] || 0) > Date.now() ? 'rate_limited' : 'waiting'),
+        current_model: capabilities.currentModel || '', current_reasoning: capabilities.currentReasoning || '',
+        models: capabilities.models || [], reasoning_levels: capabilities.reasoningLevels || []
+      });
+    } catch (_) {}
+  }
+  const tab = tabs[0] || null;
+  const profile = tab ? (cfg.taughtProfiles[tab.origin] || globalThis.ContextBridgeProfiles?.forURL(tab.origin)) : null;
+  const effectiveState = busyTabs.size ? 'working' : state;
   try {
     await fetch(`${cfg.bridgeUrl}/v1/browser/heartbeat`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${cfg.token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        state,
-        origin: tab?.url && /^https?:/i.test(tab.url) ? new URL(tab.url).origin : '',
+        state: effectiveState,
+        origin: tab?.origin || '',
         tab_title: tab?.title || '',
         profile_label: profile?.label || cfg.profile || '',
-        selectors_ready: cfg.useVisualProfile ? Boolean(profile) : Boolean(cfg.profile),
+        selectors_ready: tabs.some((item) => cfg.useVisualProfile ? Boolean(item.profile) : Boolean(cfg.profile)),
         extension_version: api.runtime.getManifest().version,
-        browser: navigator.userAgent.includes('Firefox/') ? 'firefox' : 'chromium'
+        browser: navigator.userAgent.includes('Firefox/') ? 'firefox' : 'chromium',
+        active_tabs: tabs.length,
+        busy_tabs: busyTabs.size,
+        tabs
       })
     });
   } catch (_) {}
@@ -753,12 +1011,70 @@ async function settings() {
     token: '',
     profile: 'chatgpt',
     tabId: 0,
+    tabIds: [],
     running: false,
     useVisualProfile: true,
     taughtProfiles: {},
+    sessionTabs: {},
+    tabCapabilities: {},
+    tabCooldowns: {},
     pendingCompletions: {},
     lastError: ''
   });
+}
+
+function configuredTabIDs(cfg) {
+  const values = Array.isArray(cfg?.tabIds) && cfg.tabIds.length ? cfg.tabIds : [cfg?.tabId];
+  return [...new Set(values.map(Number).filter((value) => Number.isInteger(value) && value > 0))].slice(0, 16);
+}
+
+function inspectPageCapabilities() {
+  const visible = (element) => Boolean(element && (element.offsetWidth || element.offsetHeight || element.getClientRects().length));
+  const text = (element) => String(element?.innerText || element?.textContent || element?.getAttribute?.('aria-label') || '').replace(/\s+/g, ' ').trim().slice(0, 100);
+  const unique = (values, limit) => [...new Set(values.filter(Boolean))].slice(0, limit);
+  const controls = [...document.querySelectorAll('button, [role="button"]')].filter(visible);
+  const options = [...document.querySelectorAll('[role="menuitem"], [role="option"], [aria-checked], [aria-selected]')].filter(visible);
+  const modelPattern = /(?:gpt|gemini|astra|sol|terra|luna|flash|thinking|pro)(?:[\s._-]*\d)?/i;
+  const reasoningPattern = /(?:reason|denk|effort|thinking|instant|sofort|low|niedrig|medium|mittel|high|hoch|pro|max)/i;
+  const currentModel = text(controls.find((element) => {
+    const label = `${text(element)} ${element.getAttribute('aria-label') || ''}`;
+    return modelPattern.test(label) && !/modelle ergänzen|add models/i.test(label);
+  }));
+  const currentReasoning = text(controls.find((element) => reasoningPattern.test(`${text(element)} ${element.getAttribute('aria-label') || ''}`)));
+  return {
+    currentModel,
+    currentReasoning,
+    models: unique(options.map(text).filter((value) => modelPattern.test(value)), 50),
+    reasoningLevels: unique(options.map(text).filter((value) => reasoningPattern.test(value)), 20)
+  };
+}
+
+async function discoverPageCapabilities() {
+  const visible = (element) => Boolean(element && (element.offsetWidth || element.offsetHeight || element.getClientRects().length));
+  const text = (element) => String(element?.innerText || element?.textContent || element?.getAttribute?.('aria-label') || '').replace(/\s+/g, ' ').trim().slice(0, 100);
+  const unique = (values, limit) => [...new Set(values.filter(Boolean))].slice(0, limit);
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const modelPattern = /(?:gpt|gemini|astra|sol|terra|luna|flash|thinking|pro)(?:[\s._-]*\d)?/i;
+  const reasoningPattern = /(?:reason|denk|effort|thinking|instant|sofort|low|niedrig|medium|mittel|high|hoch|pro|max)/i;
+  const scan = async (kind) => {
+    const pattern = kind === 'model' ? modelPattern : reasoningPattern;
+    const triggers = [...document.querySelectorAll('button, [role="button"]')].filter(visible).filter((element) => {
+      const label = `${text(element)} ${element.getAttribute('aria-label') || ''}`;
+      if (!pattern.test(label) || /modelle ergänzen|add models/i.test(label)) return false;
+      return kind === 'model' || !/(?:gpt|gemini|astra|sol|terra|luna|flash)[\s._-]*\d?/i.test(label);
+    });
+    if (!triggers.length) return { current: '', values: [] };
+    const current = text(triggers[0]);
+    triggers[0].click();
+    await wait(350);
+    const values = unique([...document.querySelectorAll('[role="menuitem"], [role="option"], [data-radix-collection-item], [aria-checked], [aria-selected]')].filter(visible).map(text).filter((value) => pattern.test(value)), kind === 'model' ? 50 : 20);
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+    await wait(150);
+    return { current, values };
+  };
+  const models = await scan('model');
+  const reasoning = await scan('reasoning');
+  return { currentModel: models.current, currentReasoning: reasoning.current, models: models.values, reasoningLevels: reasoning.values };
 }
 
 function tabSummary(tab) {

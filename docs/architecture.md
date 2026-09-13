@@ -10,7 +10,7 @@ One relay protocol supports three useful shapes:
 - 1:N: one producer distributes work over a capability group.
 - N:N: scoped producer tokens share one pool of grouped workers.
 
-Workers initiate an outbound WebSocket connection to the relay. This avoids inbound ports on private computers. Each heartbeat contains current CPU, RAM, GPU, free VRAM, model, task, group, tag, concurrency, and queue information. The scheduler filters incompatible nodes first, then ranks compatible nodes by load and available memory.
+Workers initiate an outbound WebSocket connection to the relay. This avoids inbound ports on private computers. Each heartbeat contains current CPU, RAM generation/speed, GPU utilization/temperature/free VRAM, ready models, task, group, tag, concurrency, queue, and browser-tab slot information. The scheduler filters incompatible nodes first, then ranks compatible nodes by active load, GPU pressure, and available memory.
 
 The relay stores tokens as SHA256 hashes, jobs and history in BoltDB, and queue order in a dedicated priority index. A disconnected normal job is requeued until its retry budget is exhausted. A sealed job is tied to the public key chosen during reservation and cannot move to another node without the producer encrypting a new submission.
 
@@ -30,13 +30,13 @@ The Go service listens on localhost, validates job size and shape, selects a rou
 
 The runtime samples hardware capabilities, inspects Ollama, supervises configured `llama.cpp` processes, and publishes one status snapshot to the CLI and dashboard. Engines bind to localhost. Ordered route fallbacks determine which engine is tried next.
 
-The Ollama provider sends a trusted task wrapper and optional image to a configured local model. The `llama_cpp` provider uses the local OpenAI-compatible chat and embedding endpoints. The browser provider leases work to one paired extension worker. Hosted web-chat inference still runs at that provider; the extension replaces a separate API integration, not the provider's compute. A cluster can route parallel browser jobs across multiple explicitly paired browser workers.
+The Ollama provider sends a trusted task wrapper and optional image to a configured local model. The `llama_cpp` provider uses the local OpenAI-compatible chat and embedding endpoints. The browser provider leases work to selected extension tabs. Hosted web-chat inference still runs at that provider; the extension replaces a separate API integration, not the provider's compute. A cluster can route parallel browser jobs across several tabs on one PC and across multiple paired PCs.
 
 GPU policy is explicit. `prefer` attempts full offload and records a visible CPU fallback warning. `require` fails the engine when GPU startup fails. `off` starts on CPU. ContextBridge does not report an engine as GPU-backed merely because a GPU exists.
 
 ### Browser worker
 
-The extension holds the selected tab ID, origin grant, and visual profile in local extension storage. It receives one leased job, writes the trusted prompt into the taught field, waits for a stable response, parses JSON, and returns the normalized decision.
+The extension holds selected tab IDs, origin grants, visual profiles, provider cooldowns, and private session-to-tab affinity in local extension storage. Every tab is a serial slot, while tabs operate concurrently. It receives leased jobs, applies an explicit model/reasoning choice when requested, writes the trusted prompt, and observes response DOM plus send/stop controls. Image loaders and percentages remain progress; visible rate limits/errors become failures; a stable response with an idle composer becomes the final answer. Navigation reattaches to the in-flight conversation without resubmitting, and a generation stuck at 95% or above receives one controlled reload/recovery attempt.
 
 ### Storage
 
@@ -52,7 +52,7 @@ Pipelines are fixed YAML declarations. A step can reference the original JSON in
 
 ### Model registry
 
-Model manifests identify a Hugging Face repository, exact GGUF filename, optional projector, task, and embedding prefixes. Downloads use partial files, resume when supported, verify LFS SHA256 metadata, and become visible only after an atomic rename.
+Model manifests identify a Hugging Face repository, exact GGUF filename, optional projector, task, and embedding prefixes. Downloads use partial files, resume when supported, verify LFS SHA256 metadata, and become visible only after an atomic rename. Read-only discovery also inventories reachable Ollama runtimes and user-selected GGUF, ONNX, or SafeTensors paths, inferring likely capabilities, parameters, quantization, and memory demand without moving or loading files.
 
 The managed `llama.cpp` installer selects an official release asset for the operating system and detected backend. It verifies the SHA256 digest supplied by the GitHub release API and rejects archive path traversal before extraction.
 
@@ -74,6 +74,8 @@ The managed `llama.cpp` installer selects an official release asset for the oper
 - Provider unavailable: try the next configured fallback.
 - Browser profile mismatch: return a browser automation error as `review`.
 - Browser result delivery interrupted: retain and retry the completion payload.
+- Browser tab reload/navigation during work: reattach to the same conversation and observe the existing in-flight response without submitting the prompt twice.
+- Provider rate limit or visible error: record an explicit failed state, cool down that tab, and never treat its error card as model output.
 - All providers unavailable: return `review` with `providers_unavailable`.
 - Service restart during a folder job: the processing file remains visible for operator recovery.
 - Worker disconnect during a normal cluster job: requeue on another compatible node within the retry budget.

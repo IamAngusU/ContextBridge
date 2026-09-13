@@ -19,6 +19,7 @@
         ],
         response: [
           '[data-message-author-role="assistant"]',
+          'section[data-turn="assistant"][data-testid^="conversation-turn-"]',
           'article[data-testid^="conversation-turn-"] .markdown'
         ],
         file_input: ['input[type="file"]']

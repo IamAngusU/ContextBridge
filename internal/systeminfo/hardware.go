@@ -20,6 +20,7 @@ type Snapshot struct {
 	CPUCores        int       `json:"cpu_cores"`
 	MemoryTotal     uint64    `json:"memory_total_bytes"`
 	MemoryAvailable uint64    `json:"memory_available_bytes"`
+	MemoryType      string    `json:"memory_type,omitempty"`
 	GPUs            []GPU     `json:"gpus"`
 	Backends        []Backend `json:"backends"`
 	UpdatedAt       time.Time `json:"updated_at"`
@@ -33,6 +34,8 @@ type GPU struct {
 	MemoryUsed  uint64 `json:"memory_used_bytes,omitempty"`
 	MemoryFree  uint64 `json:"memory_free_bytes,omitempty"`
 	Driver      string `json:"driver,omitempty"`
+	Temperature int    `json:"temperature_c,omitempty"`
+	Utilization int    `json:"utilization_percent,omitempty"`
 }
 
 type Backend struct {
@@ -45,6 +48,7 @@ func Detect(ctx context.Context) Snapshot {
 	s := Snapshot{OS: runtime.GOOS, Architecture: runtime.GOARCH, CPUCores: runtime.NumCPU(), UpdatedAt: time.Now().UTC()}
 	s.CPU = cpuName(ctx)
 	s.MemoryTotal, s.MemoryAvailable = memory(ctx)
+	s.MemoryType = memoryType(ctx)
 	s.GPUs = append(s.GPUs, nvidiaGPUs(ctx)...)
 	if len(s.GPUs) == 0 {
 		s.GPUs = append(s.GPUs, rocmGPUs(ctx)...)
@@ -143,22 +147,49 @@ func memory(ctx context.Context) (uint64, uint64) {
 	return 0, 0
 }
 
+func memoryType(ctx context.Context) string {
+	if runtime.GOOS != "windows" {
+		return ""
+	}
+	raw, err := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", "$m=Get-CimInstance Win32_PhysicalMemory | Select-Object -First 1 SMBIOSMemoryType,ConfiguredClockSpeed; @{type=[int]$m.SMBIOSMemoryType;speed=[int]$m.ConfiguredClockSpeed}|ConvertTo-Json -Compress").Output()
+	if err != nil {
+		return ""
+	}
+	var value struct {
+		Type  int `json:"type"`
+		Speed int `json:"speed"`
+	}
+	if json.Unmarshal(raw, &value) != nil {
+		return ""
+	}
+	name := map[int]string{20: "DDR", 21: "DDR2", 24: "DDR3", 26: "DDR4", 30: "LPDDR4", 34: "DDR5", 35: "LPDDR5"}[value.Type]
+	if name == "" {
+		return ""
+	}
+	if value.Speed > 0 {
+		return fmt.Sprintf("%s @ %d MT/s", name, value.Speed)
+	}
+	return name
+}
+
 func nvidiaGPUs(ctx context.Context) []GPU {
 	path, err := exec.LookPath("nvidia-smi")
 	if err != nil {
 		return nil
 	}
-	raw, err := exec.CommandContext(ctx, path, "--query-gpu=name,memory.total,memory.used,memory.free,driver_version", "--format=csv,noheader,nounits").Output()
+	raw, err := exec.CommandContext(ctx, path, "--query-gpu=name,memory.total,memory.used,memory.free,driver_version,temperature.gpu,utilization.gpu", "--format=csv,noheader,nounits").Output()
 	if err != nil {
 		return nil
 	}
 	var result []GPU
 	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
 		parts := strings.Split(line, ",")
-		if len(parts) < 5 {
+		if len(parts) < 7 {
 			continue
 		}
-		result = append(result, GPU{Name: strings.TrimSpace(parts[0]), Vendor: "NVIDIA", Backend: "CUDA", MemoryTotal: mib(parts[1]), MemoryUsed: mib(parts[2]), MemoryFree: mib(parts[3]), Driver: strings.TrimSpace(parts[4])})
+		temperature, _ := strconv.Atoi(strings.TrimSpace(parts[5]))
+		utilization, _ := strconv.Atoi(strings.TrimSpace(parts[6]))
+		result = append(result, GPU{Name: strings.TrimSpace(parts[0]), Vendor: "NVIDIA", Backend: "CUDA", MemoryTotal: mib(parts[1]), MemoryUsed: mib(parts[2]), MemoryFree: mib(parts[3]), Driver: strings.TrimSpace(parts[4]), Temperature: temperature, Utilization: utilization})
 	}
 	return result
 }

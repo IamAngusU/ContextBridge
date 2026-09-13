@@ -67,16 +67,19 @@ const (
 )
 
 type WorkerEvent struct {
-	Kind      string
-	NodeName  string
-	Slots     int
-	Attempt   int
-	RetryIn   time.Duration
-	Error     string
-	JobID     string
-	Task      string
-	Phase     string
-	ComputeMS uint64
+	Kind         string
+	NodeName     string
+	Slots        int
+	Attempt      int
+	RetryIn      time.Duration
+	Error        string
+	JobID        string
+	Task         string
+	Phase        string
+	ComputeMS    uint64
+	Percent      int
+	Detail       string
+	Capabilities Capabilities
 }
 
 type WorkerReporter func(WorkerEvent)
@@ -256,7 +259,7 @@ func (w *Worker) connect(ctx context.Context, report WorkerReporter) error {
 	if err := write(WireMessage{Type: "hello", Node: &node}); err != nil {
 		return err
 	}
-	report(WorkerEvent{Kind: WorkerConnected, NodeName: node.Name, Slots: capabilities.MaxConcurrent})
+	report(WorkerEvent{Kind: WorkerConnected, NodeName: node.Name, Slots: capabilities.MaxConcurrent, Capabilities: capabilities})
 	heartbeatCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go func() {
@@ -290,7 +293,7 @@ func (w *Worker) connect(ctx context.Context, report WorkerReporter) error {
 			report(WorkerEvent{Kind: WorkerJobStarted, NodeName: node.Name, JobID: job.ID, Task: job.Requirements.Task})
 			result, sealed, usage, runErr := w.execute(ctx, job, func(progress JobProgress) {
 				_ = write(WireMessage{Type: "progress", JobID: job.ID, Progress: &progress})
-				report(WorkerEvent{Kind: WorkerJobProgress, NodeName: node.Name, JobID: job.ID, Task: job.Requirements.Task, Phase: progress.Phase})
+				report(WorkerEvent{Kind: WorkerJobProgress, NodeName: node.Name, JobID: job.ID, Task: job.Requirements.Task, Phase: progress.Phase, Percent: progress.Percent, Detail: progress.Detail})
 			})
 			errorText := ""
 			if runErr != nil {
@@ -304,7 +307,7 @@ func (w *Worker) connect(ctx context.Context, report WorkerReporter) error {
 	}
 }
 
-func (w *Worker) execute(ctx context.Context, job Job, emitProgress func(JobProgress)) (json.RawMessage, *SealedEnvelope, Usage, error) {
+func (w *Worker) execute(ctx context.Context, job Job, emitProgress func(JobProgress)) (result json.RawMessage, sealedResult *SealedEnvelope, usage Usage, resultErr error) {
 	started := time.Now()
 	payload := []byte(job.Payload)
 	shared := ""
@@ -319,10 +322,23 @@ func (w *Worker) execute(ctx context.Context, job Job, emitProgress func(JobProg
 		return nil, nil, Usage{}, errors.New("job payload must be valid JSON")
 	}
 	localJobID := localExecutionID(job)
-	payload, err := prepareLocalPayload(payload, job.Requirements.Provider, localJobID)
+	payload, err := prepareLocalPayload(payload, job.Requirements, localJobID)
 	if err != nil {
 		return nil, nil, Usage{}, err
 	}
+	stopResourceMonitor := w.monitorResources(ctx)
+	defer func() {
+		peaks := stopResourceMonitor()
+		if peaks.PeakVRAMBytes > usage.PeakVRAMBytes {
+			usage.PeakVRAMBytes = peaks.PeakVRAMBytes
+		}
+		if peaks.PeakRAMBytes > usage.PeakRAMBytes {
+			usage.PeakRAMBytes = peaks.PeakRAMBytes
+		}
+		if peaks.PeakGPUUtilization > usage.PeakGPUUtilization {
+			usage.PeakGPUUtilization = peaks.PeakGPUUtilization
+		}
+	}()
 	progressCtx, stopProgress := context.WithCancel(ctx)
 	var progressWG sync.WaitGroup
 	if emitProgress != nil && job.SealedPayload == nil && strings.EqualFold(job.Requirements.Provider, "browser") {
@@ -345,14 +361,14 @@ func (w *Worker) execute(ctx context.Context, job Job, emitProgress func(JobProg
 		return nil, nil, Usage{}, err
 	}
 	defer response.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(response.Body, 16<<20))
+	raw, err := io.ReadAll(io.LimitReader(response.Body, 24<<20))
 	if err != nil {
 		return nil, nil, Usage{}, err
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return nil, nil, Usage{}, fmt.Errorf("local bridge returned %s: %s", response.Status, truncate(string(raw), 500))
 	}
-	usage := extractUsage(raw)
+	usage = extractUsage(raw)
 	usage.ComputeMS = uint64(time.Since(started).Milliseconds())
 	if outputErr := localOutputError(raw); outputErr != "" {
 		return nil, nil, usage, errors.New(outputErr)
@@ -373,8 +389,58 @@ func (w *Worker) execute(ctx context.Context, job Job, emitProgress func(JobProg
 	return json.RawMessage(raw), nil, usage, nil
 }
 
-func prepareLocalPayload(payload []byte, provider, localJobID string) ([]byte, error) {
-	provider = strings.TrimSpace(provider)
+func (w *Worker) monitorResources(parent context.Context) func() Usage {
+	ctx, cancel := context.WithCancel(parent)
+	done := make(chan Usage, 1)
+	go func() {
+		peaks := Usage{}
+		sample := func() {
+			hardware := w.hardwareSnapshot(ctx, 1500*time.Millisecond)
+			if hardware.MemoryTotal >= hardware.MemoryAvailable {
+				used := hardware.MemoryTotal - hardware.MemoryAvailable
+				if used > peaks.PeakRAMBytes {
+					peaks.PeakRAMBytes = used
+				}
+			}
+			for _, gpu := range hardware.GPUs {
+				used := uint64(0)
+				if gpu.MemoryTotal >= gpu.MemoryFree {
+					used = gpu.MemoryTotal - gpu.MemoryFree
+				}
+				if used > peaks.PeakVRAMBytes {
+					peaks.PeakVRAMBytes = used
+				}
+				if gpu.Utilization > peaks.PeakGPUUtilization {
+					peaks.PeakGPUUtilization = gpu.Utilization
+				}
+			}
+		}
+		sample()
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				done <- peaks
+				return
+			case <-ticker.C:
+				sample()
+			}
+		}
+	}()
+	var once sync.Once
+	peaks := Usage{}
+	return func() Usage {
+		once.Do(func() {
+			cancel()
+			peaks = <-done
+		})
+		return peaks
+	}
+}
+
+func prepareLocalPayload(payload []byte, requirements Requirements, localJobID string) ([]byte, error) {
+	provider := strings.TrimSpace(requirements.Provider)
 	var job map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &job); err != nil || job == nil {
 		return nil, errors.New("job payload must be a JSON object")
@@ -385,6 +451,10 @@ func prepareLocalPayload(payload []byte, provider, localJobID string) ([]byte, e
 	}
 	rawID, _ := json.Marshal(localJobID)
 	job["id"] = rawID
+	if session := strings.TrimSpace(requirements.SessionID); session != "" {
+		rawSession, _ := json.Marshal(session)
+		job["session_id"] = rawSession
+	}
 	return json.Marshal(job)
 }
 
@@ -425,13 +495,15 @@ func (w *Worker) watchLocalBrowserProgress(ctx context.Context, jobID string, em
 }
 
 func (w *Worker) capabilities(ctx context.Context) Capabilities {
-	hardware := w.hardwareSnapshot(ctx, 2*time.Second)
+	// Hardware probes such as nvidia-smi and CIM are intentionally cached so an
+	// idle worker remains effectively asleep between relay heartbeats.
+	hardware := w.hardwareSnapshot(ctx, 10*time.Second)
 	w.mu.Lock()
 	running := w.running
 	w.mu.Unlock()
-	capability := Capabilities{OS: hardware.OS, Architecture: hardware.Architecture, CPU: hardware.CPU, CPUCores: hardware.CPUCores, MemoryTotal: hardware.MemoryTotal, MemoryFree: hardware.MemoryAvailable, Groups: cleanList(w.cfg.Groups, 16, 80), Tags: cleanList(w.cfg.Tags, 32, 80), MaxConcurrent: w.cfg.MaxConcurrent, Running: running}
+	capability := Capabilities{OS: hardware.OS, Architecture: hardware.Architecture, CPU: hardware.CPU, CPUCores: hardware.CPUCores, MemoryTotal: hardware.MemoryTotal, MemoryFree: hardware.MemoryAvailable, MemoryType: hardware.MemoryType, Groups: cleanList(w.cfg.Groups, 16, 80), Tags: cleanList(w.cfg.Tags, 32, 80), MaxConcurrent: w.cfg.MaxConcurrent, Running: running}
 	for _, gpu := range hardware.GPUs {
-		capability.GPUs = append(capability.GPUs, GPUCapability{Name: gpu.Name, Backend: gpu.Backend, MemoryTotal: gpu.MemoryTotal, MemoryFree: gpu.MemoryFree})
+		capability.GPUs = append(capability.GPUs, GPUCapability{Name: gpu.Name, Backend: gpu.Backend, MemoryTotal: gpu.MemoryTotal, MemoryFree: gpu.MemoryFree, Temperature: gpu.Temperature, Utilization: gpu.Utilization})
 	}
 	statusCtx, statusCancel := context.WithTimeout(ctx, 4*time.Second)
 	defer statusCancel()
@@ -444,6 +516,13 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 			Browser struct {
 				Connected      bool `json:"connected"`
 				SelectorsReady bool `json:"selectors_ready"`
+				ActiveTabs     int  `json:"active_tabs"`
+				BusyTabs       int  `json:"busy_tabs"`
+				Tabs           []struct {
+					Profile      string   `json:"profile"`
+					CurrentModel string   `json:"current_model"`
+					Models       []string `json:"models"`
+				} `json:"tabs"`
 			} `json:"browser"`
 			Routes map[string]struct {
 				Task     string   `json:"task"`
@@ -465,6 +544,9 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 		}
 		if response.StatusCode == http.StatusOK && json.NewDecoder(io.LimitReader(response.Body, 4<<20)).Decode(&status) == nil {
 			capability.QueueDepth = status.Queued
+			if status.Browser.ActiveTabs > 0 && status.Browser.ActiveTabs < capability.MaxConcurrent {
+				capability.MaxConcurrent = status.Browser.ActiveTabs
+			}
 			seenTasks := map[string]bool{}
 			seenProviders := map[string]bool{}
 			providerOnline := func(provider string) bool {
@@ -510,6 +592,21 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 				for _, model := range engine.Models {
 					vision, embedding := modelFeatures(model.Name, "generation")
 					capability.Models = append(capability.Models, ModelCapability{Name: model.Name, Provider: provider, Size: model.Size, VRAM: model.VRAM, Loaded: model.Loaded, Vision: vision, Embedding: embedding, Tasks: modelTasks("generation", vision, embedding)})
+				}
+			}
+			seenBrowserModels := map[string]bool{}
+			for _, tab := range status.Browser.Tabs {
+				models := append([]string{}, tab.Models...)
+				if tab.CurrentModel != "" {
+					models = append(models, tab.CurrentModel)
+				}
+				for _, model := range models {
+					key := strings.ToLower(strings.TrimSpace(tab.Profile + ":" + model))
+					if model == "" || seenBrowserModels[key] {
+						continue
+					}
+					seenBrowserModels[key] = true
+					capability.Models = append(capability.Models, ModelCapability{Name: model, Provider: "browser", Vision: true, Tasks: []string{"generation", "vision"}})
 				}
 			}
 		}

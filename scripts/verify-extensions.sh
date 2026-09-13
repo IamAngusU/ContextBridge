@@ -8,6 +8,7 @@ node --check "$root/extension/src/picker.js"
 node --check "$root/extension/src/popup.js"
 node --check "$root/extension/src/profiles.js"
 node "$root/extension/tests/profiles.test.mjs"
+node "$root/extension/tests/browser-state.test.mjs"
 
 for browser in chromium firefox; do
   package="$root/extension/$browser"

@@ -36,6 +36,7 @@ type GPUCapability struct {
 	MemoryTotal uint64 `json:"memory_total_bytes"`
 	MemoryFree  uint64 `json:"memory_free_bytes"`
 	Temperature int    `json:"temperature_c,omitempty"`
+	Utilization int    `json:"utilization_percent,omitempty"`
 }
 
 type ModelCapability struct {
@@ -56,6 +57,7 @@ type Capabilities struct {
 	CPUCores      int               `json:"cpu_cores"`
 	MemoryTotal   uint64            `json:"memory_total_bytes"`
 	MemoryFree    uint64            `json:"memory_free_bytes"`
+	MemoryType    string            `json:"memory_type,omitempty"`
 	GPUs          []GPUCapability   `json:"gpus,omitempty"`
 	Models        []ModelCapability `json:"models,omitempty"`
 	Providers     []string          `json:"providers,omitempty"`
@@ -83,21 +85,25 @@ type Node struct {
 }
 
 type Usage struct {
-	InputTokens       uint64  `json:"input_tokens,omitempty"`
-	OutputTokens      uint64  `json:"output_tokens,omitempty"`
-	TotalTokens       uint64  `json:"total_tokens,omitempty"`
-	ComputeMS         uint64  `json:"compute_ms,omitempty"`
-	QueueMS           uint64  `json:"queue_ms,omitempty"`
-	EstimatedCostUSD  float64 `json:"estimated_cost_usd,omitempty"`
-	EquivalentCostUSD float64 `json:"equivalent_cloud_cost_usd,omitempty"`
-	SavedCostUSD      float64 `json:"saved_cost_usd,omitempty"`
-	PeakVRAMBytes     uint64  `json:"peak_vram_bytes,omitempty"`
+	InputTokens        uint64  `json:"input_tokens,omitempty"`
+	OutputTokens       uint64  `json:"output_tokens,omitempty"`
+	TotalTokens        uint64  `json:"total_tokens,omitempty"`
+	ComputeMS          uint64  `json:"compute_ms,omitempty"`
+	QueueMS            uint64  `json:"queue_ms,omitempty"`
+	EstimatedCostUSD   float64 `json:"estimated_cost_usd,omitempty"`
+	EquivalentCostUSD  float64 `json:"equivalent_cloud_cost_usd,omitempty"`
+	SavedCostUSD       float64 `json:"saved_cost_usd,omitempty"`
+	PeakVRAMBytes      uint64  `json:"peak_vram_bytes,omitempty"`
+	PeakRAMBytes       uint64  `json:"peak_ram_bytes,omitempty"`
+	PeakGPUUtilization int     `json:"peak_gpu_utilization_percent,omitempty"`
 }
 
 type JobProgress struct {
 	Sequence  uint64    `json:"sequence"`
 	Text      string    `json:"text"`
 	Phase     string    `json:"phase,omitempty"`
+	Detail    string    `json:"detail,omitempty"`
+	Percent   int       `json:"percent,omitempty"`
 	Busy      bool      `json:"busy"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

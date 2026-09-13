@@ -137,9 +137,9 @@ function renderRuntime(runtime) {
   const memoryAvailable = formatBytes(hardware.memory_available_bytes);
   const memoryTotal = formatBytes(hardware.memory_total_bytes);
   $('cpu-name').textContent = hardware.cpu || `${hardware.os || ''} ${hardware.architecture || ''}`.trim() || 'Unknown CPU';
-  $('memory-detail').textContent = `${memoryAvailable} available of ${memoryTotal}`;
+  $('memory-detail').textContent = `${memoryAvailable} available of ${memoryTotal}${hardware.memory_type ? ` · ${hardware.memory_type}` : ''}`;
   $('gpu-detail').textContent = gpus.length
-    ? gpus.map((gpu) => `${gpu.name} (${gpu.backend}, ${formatBytes(gpu.memory_free_bytes)} free)`).join(', ')
+    ? gpus.map((gpu) => `${gpu.name} (${gpu.backend}, ${formatBytes(gpu.memory_free_bytes)} free, ${gpu.utilization_percent || 0}%, ${gpu.temperature_c || 0}°C)`).join(', ')
     : 'No supported GPU telemetry detected';
   const backends = hardware.backends || [];
   $('backend-detail').textContent = backends.filter((item) => item.available).map((item) => item.name).join(', ') || 'CPU only';
@@ -286,13 +286,13 @@ function renderBreakdown(id, values) {
 
 function renderBrowser(browser) {
   const connected = Boolean(browser.connected);
-  $('browser-metric').textContent = connected ? (browser.state || 'Connected') : 'Not connected';
+  $('browser-metric').textContent = connected ? `${browser.active_tabs || 1} tab${(browser.active_tabs || 1) === 1 ? '' : 's'} · ${browser.busy_tabs || 0} busy` : 'Not connected';
   $('browser-detail').textContent = connected
     ? `${browser.browser || 'browser'} ${browser.extension_version || ''}`.trim()
     : 'Open the extension to pair a tab';
-  $('tab-title').textContent = browser.tab_title || 'No tab connected';
+  $('tab-title').textContent = (browser.tabs || []).map((tab) => tab.title).filter(Boolean).join(' · ') || browser.tab_title || 'No tab connected';
   $('tab-origin').textContent = browser.origin || 'None';
-  $('tab-profile').textContent = browser.profile_label || 'None';
+  $('tab-profile').textContent = (browser.tabs || []).map((tab) => `${tab.profile || 'browser'}${tab.current_model ? `: ${tab.current_model}` : ''}`).join(' · ') || browser.profile_label || 'None';
   $('tab-state').textContent = connected ? (browser.state || 'waiting') : 'paused';
   $('tab-seen').textContent = meaningfulTimestamp(browser.last_seen) ? relativeTime(browser.last_seen) : 'Never';
 }

@@ -467,7 +467,7 @@ func statusCommand(args []string) error {
 		return fmt.Errorf("service is not reachable: %w", err)
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 24<<20))
 	if err != nil {
 		return err
 	}
@@ -479,13 +479,14 @@ func statusCommand(args []string) error {
 		return err
 	}
 	var status struct {
-		Version   string               `json:"version"`
-		Listen    string               `json:"listen"`
-		Queued    int                  `json:"queued"`
-		Completed int                  `json:"completed"`
-		Tunnel    bridge.TunnelStatus  `json:"tunnel"`
-		Runtime   bridge.RuntimeStatus `json:"runtime"`
-		Metrics   bridge.Metrics       `json:"metrics"`
+		Version   string                     `json:"version"`
+		Listen    string                     `json:"listen"`
+		Queued    int                        `json:"queued"`
+		Completed int                        `json:"completed"`
+		Tunnel    bridge.TunnelStatus        `json:"tunnel"`
+		Browser   bridge.BrowserClientStatus `json:"browser"`
+		Runtime   bridge.RuntimeStatus       `json:"runtime"`
+		Metrics   bridge.Metrics             `json:"metrics"`
 	}
 	if err := json.Unmarshal(raw, &status); err != nil {
 		return err
@@ -498,6 +499,22 @@ func statusCommand(args []string) error {
 		fmt.Printf("Tunnel: %s\n", status.Tunnel.State)
 	}
 	fmt.Printf("Queue: %d waiting, %d completed this session\n", status.Queued, status.Completed)
+	if status.Browser.Connected {
+		fmt.Printf("Browser: %d tab(s), %d busy, extension %s\n", max(1, status.Browser.ActiveTabs), status.Browser.BusyTabs, status.Browser.ExtensionVersion)
+		for _, tab := range status.Browser.Tabs {
+			choice := tab.CurrentModel
+			if tab.CurrentReasoning != "" {
+				choice += " · " + tab.CurrentReasoning
+			}
+			fmt.Printf("  [%s] %s", tab.State, tab.Title)
+			if choice != "" {
+				fmt.Printf("  [%s]", choice)
+			}
+			fmt.Println()
+		}
+	} else {
+		fmt.Println("Browser: not connected")
+	}
 	fmt.Printf("Jobs: %d total, %d failed\n", status.Metrics.JobsTotal, status.Metrics.JobsFailed)
 	providers := make([]string, 0, len(status.Metrics.ByProvider))
 	for provider := range status.Metrics.ByProvider {
@@ -544,7 +561,7 @@ func statusCommand(args []string) error {
 		}
 	}
 	for _, gpu := range status.Runtime.Hardware.GPUs {
-		fmt.Printf("GPU: %s, %s, %s free of %s\n", gpu.Name, gpu.Backend, formatBytes(gpu.MemoryFree), formatBytes(gpu.MemoryTotal))
+		fmt.Printf("GPU: %s, %s, %s free of %s, %d%%, %d°C\n", gpu.Name, gpu.Backend, formatBytes(gpu.MemoryFree), formatBytes(gpu.MemoryTotal), gpu.Utilization, gpu.Temperature)
 	}
 	return nil
 }
@@ -563,12 +580,16 @@ func hardwareCommand(args []string) error {
 	}
 	fmt.Printf("%s/%s, %d CPU cores\n", snapshot.OS, snapshot.Architecture, snapshot.CPUCores)
 	fmt.Printf("CPU: %s\n", snapshot.CPU)
-	fmt.Printf("Memory: %s available of %s\n", formatBytes(snapshot.MemoryAvailable), formatBytes(snapshot.MemoryTotal))
+	fmt.Printf("Memory: %s available of %s", formatBytes(snapshot.MemoryAvailable), formatBytes(snapshot.MemoryTotal))
+	if snapshot.MemoryType != "" {
+		fmt.Printf(" (%s)", snapshot.MemoryType)
+	}
+	fmt.Println()
 	if len(snapshot.GPUs) == 0 {
 		fmt.Println("GPU: no supported telemetry tool detected")
 	}
 	for _, gpu := range snapshot.GPUs {
-		fmt.Printf("GPU: %s, %s, %s free of %s\n", gpu.Name, gpu.Backend, formatBytes(gpu.MemoryFree), formatBytes(gpu.MemoryTotal))
+		fmt.Printf("GPU: %s, %s, %s free of %s, %d%%, %d°C\n", gpu.Name, gpu.Backend, formatBytes(gpu.MemoryFree), formatBytes(gpu.MemoryTotal), gpu.Utilization, gpu.Temperature)
 	}
 	for _, backend := range snapshot.Backends {
 		state := "not detected"
@@ -584,12 +605,52 @@ func modelsCommand(args []string) error {
 	flags := flag.NewFlagSet("models", flag.ContinueOnError)
 	path := flags.String("config", defaultConfigPath(), "config path")
 	asJSON := flags.Bool("json", false, "print machine-readable JSON")
+	discover := flags.Bool("discover", true, "discover Ollama and model files automatically")
+	var scanPaths stringListFlag
+	flags.Var(&scanPaths, "path", "model file or directory to scan; repeat for multiple paths")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	cfg, err := config.Load(*path)
 	if err != nil {
 		return err
+	}
+	if *discover {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		models, err := modelregistry.Discover(ctx, cfg, scanPaths)
+		if err != nil {
+			return err
+		}
+		if *asJSON {
+			return json.NewEncoder(os.Stdout).Encode(models)
+		}
+		if len(models) == 0 {
+			fmt.Println("No ready models found. Start Ollama or add --path to a GGUF, ONNX, or SafeTensors directory.")
+			return nil
+		}
+		for _, model := range models {
+			state := "installed"
+			if model.Ready {
+				state = "ready"
+			}
+			if model.Loaded {
+				state = "loaded"
+			}
+			detail := strings.Join(model.Capabilities, "+")
+			if model.Parameters != "" {
+				detail += " · " + model.Parameters
+			}
+			if model.Quantization != "" {
+				detail += " · " + model.Quantization
+			}
+			location := model.Path
+			if location == "" {
+				location = model.Provider
+			}
+			fmt.Printf("%-28s  [%-6s]  [%-16s]  [%s RAM est.]  %s\n", model.Name, state, detail, formatBytes(uint64(model.MemoryEstimate)), location)
+		}
+		return nil
 	}
 	models := modelregistry.List(cfg)
 	if *asJSON {
@@ -606,6 +667,20 @@ func modelsCommand(args []string) error {
 		}
 		fmt.Printf("%-24s %-14s %s\n", model.Name, state, model.Repository+"/"+model.File)
 	}
+	return nil
+}
+
+type stringListFlag []string
+
+func (values *stringListFlag) String() string {
+	return strings.Join(*values, string(os.PathListSeparator))
+}
+func (values *stringListFlag) Set(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return errors.New("model path cannot be empty")
+	}
+	*values = append(*values, value)
 	return nil
 }
 
@@ -961,6 +1036,7 @@ func clusterPipelineCommand(args []string) error {
 func clusterStatusCommand(args []string) error {
 	flags := flag.NewFlagSet("cluster status", flag.ContinueOnError)
 	path := flags.String("config", defaultConfigPath(), "config path")
+	asJSON := flags.Bool("json", false, "print machine-readable pool status")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -968,13 +1044,51 @@ func clusterStatusCommand(args []string) error {
 	if err != nil {
 		return err
 	}
+	token := clusterClientToken(cfg, "")
 	var overview cluster.Overview
-	if err := clusterGET(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/overview", cfg.Cluster.Relay.AdminToken, &overview); err != nil {
+	if err := clusterGET(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/overview", token, &overview); err != nil {
 		return err
 	}
-	fmt.Printf("Nodes: %d online of %d\n", overview.NodesOnline, overview.NodesTotal)
-	fmt.Printf("Jobs: %d queued, %d running, %d completed, %d failed\n", overview.JobsByState[cluster.JobQueued], overview.JobsByState[cluster.JobRunning]+overview.JobsByState[cluster.JobAssigned], overview.JobsByState[cluster.JobCompleted], overview.JobsByState[cluster.JobFailed])
-	fmt.Printf("Usage: %d tokens, %.2f compute hours, $%.4f estimated savings\n", overview.Usage.TotalTokens, float64(overview.Usage.ComputeMS)/3600000, overview.Usage.SavedCostUSD)
+	var nodes []cluster.Node
+	if err := clusterGET(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/nodes", token, &nodes); err != nil {
+		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(map[string]interface{}{"overview": overview, "nodes": nodes})
+	}
+	totalSlots, running := 0, 0
+	for _, node := range nodes {
+		if node.Connected {
+			totalSlots += node.Capabilities.MaxConcurrent
+			running += node.Capabilities.Running
+		}
+	}
+	fmt.Printf("Pool  [%d/%d PCs online]  [%d/%d slots busy]  [%d queued]\n", overview.NodesOnline, overview.NodesTotal, running, totalSlots, overview.JobsByState[cluster.JobQueued])
+	for _, node := range nodes {
+		state := "offline"
+		if node.Connected {
+			state = "online"
+		}
+		memory := fmt.Sprintf("%s/%s RAM free", formatBytes(node.Capabilities.MemoryFree), formatBytes(node.Capabilities.MemoryTotal))
+		if node.Capabilities.MemoryType != "" {
+			memory += " · " + node.Capabilities.MemoryType
+		}
+		fmt.Printf("  %s  [%s]  [%d/%d jobs]  [%d CPU cores]  [%s]\n", node.Name, state, node.Capabilities.Running, max(1, node.Capabilities.MaxConcurrent), node.Capabilities.CPUCores, memory)
+		for _, gpu := range node.Capabilities.GPUs {
+			fmt.Printf("      GPU  [%s · %s/%s free · %d%% · %d°C]\n", gpu.Name, formatBytes(gpu.MemoryFree), formatBytes(gpu.MemoryTotal), gpu.Utilization, gpu.Temperature)
+		}
+		if len(node.Capabilities.Models) > 0 {
+			names := make([]string, 0, min(6, len(node.Capabilities.Models)))
+			for _, model := range node.Capabilities.Models {
+				names = append(names, model.Name)
+				if len(names) == 6 {
+					break
+				}
+			}
+			fmt.Printf("      Models  [%s]\n", strings.Join(names, " · "))
+		}
+	}
+	fmt.Printf("Jobs  [%d completed]  [%d failed]  [%.2f compute hours]\n", overview.JobsByState[cluster.JobCompleted], overview.JobsByState[cluster.JobFailed], float64(overview.Usage.ComputeMS)/3600000)
 	return nil
 }
 
@@ -1201,7 +1315,7 @@ func clusterGET(ctx context.Context, target, token string, output interface{}) e
 		return err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 24<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("relay returned %s: %s", resp.Status, strings.TrimSpace(string(raw)))
 	}
@@ -1218,7 +1332,7 @@ func clusterPOST(ctx context.Context, target, token string, input, output interf
 		return err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 24<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("relay returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}

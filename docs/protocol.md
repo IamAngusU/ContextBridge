@@ -7,6 +7,10 @@ ContextBridge accepts jobs at `POST /v1/jobs` and from JSON files placed in the 
   "source": "my-app",
   "route": "default",
   "provider": "browser",
+  "session_id": "campaign-42",
+  "browser_profile": "chatgpt",
+  "model": "gpt-6-astra",
+  "reasoning": "high",
   "kind": "moderation",
   "prompt": "Trusted instructions written by the operator",
   "text": "Untrusted content supplied by a user",
@@ -27,6 +31,8 @@ the taught web-chat tab even while a local model is also online. Cluster workers
 automatically enforce `requirements.provider` on the forwarded local job.
 
 The synchronous HTTP response contains the normalized decision. Folder jobs are renamed while processing and produce a neighboring `.result.json` file.
+
+For browser jobs, `session_id` pins follow-ups to one selected conversation. `browser_profile` selects a provider tab such as `chatgpt` or `gemini`; `model` and `reasoning` are matched against that provider's localized visible menus. These fields are bounded preferences: an unavailable explicit choice is an error, never a silent substitution.
 
 ```json
 {
@@ -94,8 +100,9 @@ The extension stores an undelivered completion locally and retries it. It does n
 
 Unsealed cluster jobs expose the latest browser snapshot in the job's `progress`
 field. `sequence` is monotonic, `text` contains at most 1 MB of UTF-8, and
-`phase` is `generating`, `stabilizing`, or `final`. Plaintext progress is
-disabled for sealed jobs.
+`phase` is `submitting`, `generating`, `stabilizing`, `recovering`, `rate_limited`, or `final`. `detail` carries a short status and `percent` carries a determinate 0–100 value when the page exposes one, such as ChatGPT image generation. These fields are telemetry and are never normalized as answer text. Plaintext progress is disabled for sealed jobs.
+
+A browser result can opt in with `output.artifacts: true`. Up to twelve images, download links, or code blocks from the newly completed turn are accepted. Embedded bytes share a maximum 12 MiB budget and are re-hashed by the local service; protected HTTPS assets may remain authenticated browser references.
 
 ## Tunnel Status Endpoint
 

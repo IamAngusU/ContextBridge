@@ -14,6 +14,8 @@ import (
 type jobState struct {
 	task    string
 	phase   string
+	detail  string
+	percent int
 	started time.Time
 }
 
@@ -29,6 +31,9 @@ type Session struct {
 	frame       int
 	retries     int
 	jobs        map[string]jobState
+	node        string
+	slots       int
+	hardware    string
 	done        chan struct{}
 	closed      chan struct{}
 }
@@ -96,6 +101,8 @@ func (s *Session) HandleWorker(event cluster.WorkerEvent) {
 			s.writeEventLocked("↻", fmt.Sprintf("Relay unavailable; retrying automatically (%s)", compactError(event.Error)))
 		}
 	case cluster.WorkerConnected:
+		s.node, s.slots = event.NodeName, event.Slots
+		s.hardware = capabilityLabel(event.Capabilities)
 		message := fmt.Sprintf("Relay connected · %s · %d slot", event.NodeName, event.Slots)
 		if event.Slots != 1 {
 			message += "s"
@@ -105,7 +112,7 @@ func (s *Session) HandleWorker(event cluster.WorkerEvent) {
 		}
 		s.writeEventLocked("✓", message)
 		s.retries = 0
-		s.setStatusLocked("Online · waiting for work", time.Now())
+		s.setStatusLocked("Idle", time.Now())
 	case cluster.WorkerJobStarted:
 		s.jobs[event.JobID] = jobState{task: event.Task, phase: "starting", started: time.Now()}
 		s.writeEventLocked("→", fmt.Sprintf("Job %s · %s", shortID(event.JobID), empty(event.Task, "generation")))
@@ -113,6 +120,8 @@ func (s *Session) HandleWorker(event cluster.WorkerEvent) {
 	case cluster.WorkerJobProgress:
 		job := s.jobs[event.JobID]
 		job.phase = empty(event.Phase, "working")
+		job.detail = event.Detail
+		job.percent = event.Percent
 		s.jobs[event.JobID] = job
 		s.refreshJobStatusLocked()
 	case cluster.WorkerJobCompleted:
@@ -159,11 +168,15 @@ func (s *Session) animate() {
 
 func (s *Session) refreshJobStatusLocked() {
 	if len(s.jobs) == 0 {
-		s.setStatusLocked("Online · waiting for work", time.Now())
+		s.setStatusLocked("Idle", time.Now())
 		return
 	}
 	for _, job := range s.jobs {
-		label := fmt.Sprintf("%s · %s", empty(job.task, "generation"), empty(job.phase, "working"))
+		phase := empty(job.detail, empty(job.phase, "working"))
+		if job.percent > 0 {
+			phase += fmt.Sprintf(" · %d%%", job.percent)
+		}
+		label := fmt.Sprintf("%s · %s", empty(job.task, "generation"), phase)
 		if len(s.jobs) > 1 {
 			label += fmt.Sprintf(" · %d parallel jobs", len(s.jobs))
 		}
@@ -195,9 +208,14 @@ func (s *Session) drawStatusLocked() {
 		return
 	}
 	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-	bar := pulseBar(s.frame, 14)
 	elapsed := compactDuration(time.Since(s.statusSince))
-	fmt.Fprintf(s.out, "\r\x1b[2K  %s  [%s]  %s  %s", frames[s.frame%len(frames)], bar, s.status, elapsed)
+	if s.status == "Idle" {
+		pool := fmt.Sprintf("0/%d jobs", max(1, s.slots))
+		fmt.Fprintf(s.out, "\r\x1b[2K  ◇  [Idle %s]  [%s]  [%s]%s", elapsed, pool, empty(s.node, "local"), optionalBracket(s.hardware))
+		return
+	}
+	bar := pulseBar(s.frame, 14)
+	fmt.Fprintf(s.out, "\r\x1b[2K  %s  [%s]  [%d/%d jobs]  %s  %s", frames[s.frame%len(frames)], bar, len(s.jobs), max(1, s.slots), s.status, elapsed)
 }
 
 func (s *Session) clearStatusLocked() {
@@ -255,4 +273,31 @@ func empty(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func optionalBracket(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	return "  [" + value + "]"
+}
+
+func capabilityLabel(capability cluster.Capabilities) string {
+	parts := []string{}
+	if len(capability.GPUs) > 0 {
+		gpu := capability.GPUs[0]
+		parts = append(parts, gpu.Name+" · "+humanBytes(gpu.MemoryFree)+" VRAM free")
+	}
+	if capability.MemoryTotal > 0 {
+		parts = append(parts, humanBytes(capability.MemoryFree)+" RAM free")
+	}
+	return strings.Join(parts, " · ")
+}
+
+func humanBytes(value uint64) string {
+	const gib = uint64(1 << 30)
+	if value >= gib {
+		return fmt.Sprintf("%.1f GiB", float64(value)/float64(gib))
+	}
+	return fmt.Sprintf("%.0f MiB", float64(value)/float64(1<<20))
 }

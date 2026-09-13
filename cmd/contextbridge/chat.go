@@ -28,6 +28,8 @@ func clusterChatCommand(args []string) error {
 	provider := flags.String("provider", "browser", "browser or another generation provider")
 	group := flags.String("group", "", "worker group")
 	model := flags.String("model", "", "specific model")
+	profile := flags.String("profile", "", "browser profile such as chatgpt or gemini")
+	reasoning := flags.String("reasoning", "", "reasoning level such as instant, medium, high, xhigh, pro, or max")
 	sessionID := flags.String("session", "", "stable conversation ID")
 	prompt := flags.String("prompt", "", "send one turn and exit")
 	artifactDir := flags.String("artifacts", "auto", "artifact directory; auto uses local ContextBridge storage, off disables saving")
@@ -52,12 +54,12 @@ func clusterChatCommand(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	state := &chatState{relayURL: clusterBaseURL(cfg), token: *token, provider: *provider, group: *group, model: *model, sessionID: *sessionID, artifactDir: *artifactDir}
+	state := &chatState{relayURL: clusterBaseURL(cfg), token: *token, provider: *provider, group: *group, model: *model, profile: *profile, reasoning: *reasoning, sessionID: *sessionID, artifactDir: *artifactDir}
 
 	if strings.TrimSpace(*prompt) != "" {
 		return state.turn(ctx, strings.TrimSpace(*prompt))
 	}
-	fmt.Printf("\n  ContextBridge Chat · %s\n  session %s · follow-ups stay in the same browser conversation\n  /exit closes this terminal session\n\n", *provider, *sessionID)
+	fmt.Printf("\n  ContextBridge Chat · %s\n  session %s · follow-ups stay in the same browser conversation\n  /model, /reasoning and /profile change this session · /settings shows it · /exit closes it\n\n", *provider, *sessionID)
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 64<<10), 1<<20)
 	for {
@@ -72,6 +74,10 @@ func clusterChatCommand(args []string) error {
 		if line == "/exit" || line == "/quit" {
 			break
 		}
+		if handled, message := state.command(line); handled {
+			fmt.Println(message)
+			continue
+		}
 		if err := state.turn(ctx, line); err != nil {
 			fmt.Fprintln(os.Stderr, "  !", err)
 			if ctx.Err() != nil {
@@ -82,12 +88,44 @@ func clusterChatCommand(args []string) error {
 	return scanner.Err()
 }
 
+func (s *chatState) command(line string) (bool, string) {
+	parts := strings.Fields(line)
+	if len(parts) == 0 || !strings.HasPrefix(parts[0], "/") {
+		return false, ""
+	}
+	value := strings.TrimSpace(strings.TrimPrefix(line, parts[0]))
+	switch parts[0] {
+	case "/model":
+		s.model = value
+		return true, "  ✓ model: " + emptyChatSetting(s.model)
+	case "/reasoning":
+		s.reasoning = value
+		return true, "  ✓ reasoning: " + emptyChatSetting(s.reasoning)
+	case "/profile":
+		s.profile = value
+		return true, "  ✓ browser profile: " + emptyChatSetting(s.profile)
+	case "/settings":
+		return true, fmt.Sprintf("  session %s · provider %s · profile %s · model %s · reasoning %s", s.sessionID, s.provider, emptyChatSetting(s.profile), emptyChatSetting(s.model), emptyChatSetting(s.reasoning))
+	default:
+		return false, ""
+	}
+}
+
+func emptyChatSetting(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "auto"
+	}
+	return strings.TrimSpace(value)
+}
+
 type chatState struct {
 	relayURL    string
 	token       string
 	provider    string
 	group       string
 	model       string
+	profile     string
+	reasoning   string
 	sessionID   string
 	artifactDir string
 	nodeID      string
@@ -96,14 +134,19 @@ type chatState struct {
 func (s *chatState) turn(ctx context.Context, prompt string) error {
 	payload, err := json.Marshal(bridge.Job{
 		Source: "terminal-chat", Task: "generation", Prompt: prompt,
-		Output: bridge.OutputSpec{Mode: "text", MaxBytes: 1 << 20, Artifacts: true, MaxArtifactBytes: 6 << 20},
+		SessionID: s.sessionID, BrowserProfile: s.profile, Model: s.model, Reasoning: s.reasoning,
+		Output: bridge.OutputSpec{Mode: "text", MaxBytes: 1 << 20, Artifacts: true, MaxArtifactBytes: 12 << 20},
 	})
 	if err != nil {
 		return err
 	}
+	requirements := cluster.Requirements{Task: "generation", Provider: s.provider, Group: s.group, SessionID: s.sessionID}
+	if !strings.EqualFold(s.provider, "browser") {
+		requirements.Model = s.model
+	}
 	input := cluster.SubmitRequest{
 		Source:       "terminal-chat",
-		Requirements: cluster.Requirements{Task: "generation", Provider: s.provider, Group: s.group, Model: s.model, SessionID: s.sessionID},
+		Requirements: requirements,
 		Payload:      payload,
 		MaxAttempts:  1,
 	}
@@ -127,12 +170,17 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 			return err
 		}
 		if job.Progress != nil && job.Progress.Sequence > lastSequence {
+			spinner.update(job.Progress.Phase, job.Progress.Detail, job.Progress.Percent)
 			if !streamed {
-				spinner.stop()
-				fmt.Print("ai  › ")
+				if strings.TrimSpace(job.Progress.Text) != "" {
+					spinner.stop()
+					fmt.Print("ai  › ")
+				}
 			}
 			current := job.Progress.Text
-			if strings.HasPrefix(current, lastProgress) {
+			if strings.TrimSpace(current) == "" {
+				lastSequence = job.Progress.Sequence
+			} else if strings.HasPrefix(current, lastProgress) {
 				fmt.Print(strings.TrimPrefix(current, lastProgress))
 			} else {
 				if streamed {
@@ -140,7 +188,9 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 				}
 				fmt.Print(current)
 			}
-			lastProgress, lastSequence, streamed = current, job.Progress.Sequence, true
+			if strings.TrimSpace(current) != "" {
+				lastProgress, lastSequence, streamed = current, job.Progress.Sequence, true
+			}
 		}
 		switch job.Status {
 		case cluster.JobCompleted:
@@ -200,6 +250,8 @@ type chatSpinner struct {
 	done        chan struct{}
 	stopped     chan struct{}
 	interactive bool
+	label       string
+	percent     int
 	once        sync.Once
 }
 
@@ -208,7 +260,7 @@ func newChatSpinner(label string) *chatSpinner {
 	if info, err := os.Stderr.Stat(); err == nil {
 		interactive = info.Mode()&os.ModeCharDevice != 0
 	}
-	spinner := &chatSpinner{done: make(chan struct{}), stopped: make(chan struct{}), interactive: interactive}
+	spinner := &chatSpinner{done: make(chan struct{}), stopped: make(chan struct{}), interactive: interactive, label: label}
 	if !interactive {
 		fmt.Fprintln(os.Stderr, "  ·", label)
 		close(spinner.stopped)
@@ -229,13 +281,34 @@ func newChatSpinner(label string) *chatSpinner {
 				return
 			case <-ticker.C:
 				spinner.mu.Lock()
-				fmt.Fprintf(os.Stderr, "\r\x1b[2K  %s  [━━━───────────]  %s", frames[frame%len(frames)], label)
+				bar := "━━━───────────"
+				if spinner.percent > 0 {
+					filled := spinner.percent * 14 / 100
+					bar = strings.Repeat("━", filled) + strings.Repeat("─", 14-filled)
+				}
+				fmt.Fprintf(os.Stderr, "\r\x1b[2K  %s  [%s]  %s", frames[frame%len(frames)], bar, spinner.label)
 				spinner.mu.Unlock()
 				frame++
 			}
 		}
 	}()
 	return spinner
+}
+
+func (s *chatSpinner) update(phase, detail string, percent int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	label := strings.TrimSpace(detail)
+	if label == "" {
+		label = strings.ReplaceAll(strings.TrimSpace(phase), "_", " ")
+	}
+	if label != "" {
+		label = strings.ToUpper(label[:1]) + label[1:]
+		s.label = label
+	}
+	if percent >= 0 && percent <= 100 {
+		s.percent = percent
+	}
 }
 
 func (s *chatSpinner) stop() {

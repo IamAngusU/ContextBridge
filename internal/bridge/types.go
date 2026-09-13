@@ -16,10 +16,15 @@ import (
 )
 
 type Job struct {
-	ID             string                 `json:"id,omitempty"`
-	Source         string                 `json:"source,omitempty"`
-	Route          string                 `json:"route,omitempty"`
-	Provider       string                 `json:"provider,omitempty"`
+	ID       string `json:"id,omitempty"`
+	Source   string `json:"source,omitempty"`
+	Route    string `json:"route,omitempty"`
+	Provider string `json:"provider,omitempty"`
+	// SessionID keeps browser follow-ups on the same selected conversation.
+	SessionID      string                 `json:"session_id,omitempty"`
+	BrowserProfile string                 `json:"browser_profile,omitempty"`
+	Model          string                 `json:"model,omitempty"`
+	Reasoning      string                 `json:"reasoning,omitempty"`
 	Kind           string                 `json:"kind,omitempty"`
 	Task           string                 `json:"task,omitempty"`
 	Prompt         string                 `json:"prompt"`
@@ -103,6 +108,8 @@ type BrowserProgress struct {
 	Sequence  uint64    `json:"sequence"`
 	Text      string    `json:"text"`
 	Phase     string    `json:"phase,omitempty"`
+	Detail    string    `json:"detail,omitempty"`
+	Percent   int       `json:"percent,omitempty"`
 	Busy      bool      `json:"busy"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -216,13 +223,13 @@ func NormalizeArtifacts(input []Artifact, spec OutputSpec) []Artifact {
 		return nil
 	}
 	limit := spec.MaxArtifactBytes
-	if limit <= 0 || limit > 6<<20 {
-		limit = 6 << 20
+	if limit <= 0 || limit > 12<<20 {
+		limit = 12 << 20
 	}
-	result := make([]Artifact, 0, min(len(input), 4))
+	result := make([]Artifact, 0, min(len(input), 12))
 	total := 0
 	for _, item := range input {
-		if len(result) == 4 {
+		if len(result) == 12 {
 			break
 		}
 		item.Name = artifactName(item.Name, len(result)+1)

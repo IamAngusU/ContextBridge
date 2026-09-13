@@ -173,7 +173,7 @@ browser_profiles:
       input: ['#prompt-textarea', '[contenteditable="true"]']
       file_input: ['input[type="file"]']
       submit: ['button[data-testid="send-button"]', 'button[aria-label*="Send"]']
-      response: ['[data-message-author-role="assistant"]']
+      response: ['[data-message-author-role="assistant"]', 'section[data-turn="assistant"][data-testid^="conversation-turn-"]']
 
   gemini:
     label: Gemini

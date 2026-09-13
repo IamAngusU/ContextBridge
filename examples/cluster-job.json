@@ -18,7 +18,7 @@
       "mode": "text",
       "max_bytes": 8192,
       "artifacts": true,
-      "max_artifact_bytes": 6291456
+      "max_artifact_bytes": 12582912
     }
   },
   "priority": 10,

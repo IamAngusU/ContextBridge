@@ -49,15 +49,30 @@ type Metrics struct {
 }
 
 type BrowserClientStatus struct {
-	Connected        bool      `json:"connected"`
-	State            string    `json:"state"`
-	Origin           string    `json:"origin,omitempty"`
-	TabTitle         string    `json:"tab_title,omitempty"`
-	ProfileLabel     string    `json:"profile_label,omitempty"`
-	SelectorsReady   bool      `json:"selectors_ready"`
-	ExtensionVersion string    `json:"extension_version,omitempty"`
-	Browser          string    `json:"browser,omitempty"`
-	LastSeen         time.Time `json:"last_seen,omitempty"`
+	Connected        bool               `json:"connected"`
+	State            string             `json:"state"`
+	Origin           string             `json:"origin,omitempty"`
+	TabTitle         string             `json:"tab_title,omitempty"`
+	ProfileLabel     string             `json:"profile_label,omitempty"`
+	SelectorsReady   bool               `json:"selectors_ready"`
+	ExtensionVersion string             `json:"extension_version,omitempty"`
+	Browser          string             `json:"browser,omitempty"`
+	ActiveTabs       int                `json:"active_tabs,omitempty"`
+	BusyTabs         int                `json:"busy_tabs,omitempty"`
+	Tabs             []BrowserTabStatus `json:"tabs,omitempty"`
+	LastSeen         time.Time          `json:"last_seen,omitempty"`
+}
+
+type BrowserTabStatus struct {
+	ID               int      `json:"id,omitempty"`
+	Origin           string   `json:"origin,omitempty"`
+	Title            string   `json:"title,omitempty"`
+	Profile          string   `json:"profile,omitempty"`
+	State            string   `json:"state,omitempty"`
+	CurrentModel     string   `json:"current_model,omitempty"`
+	CurrentReasoning string   `json:"current_reasoning,omitempty"`
+	Models           []string `json:"models,omitempty"`
+	ReasoningLevels  []string `json:"reasoning_levels,omitempty"`
 }
 
 type Activity struct {
@@ -352,8 +367,11 @@ func (s *Store) BrowserCompletionContext(id string) (OutputSpec, string, bool) {
 		return OutputSpec{}, "", false
 	}
 	model := "browser-tab"
+	if requested := strings.TrimSpace(item.job.Model); requested != "" {
+		model = "browser:" + requested
+	}
 	if profile, profileOK := item.profile.(map[string]interface{}); profileOK {
-		if name, _ := profile["name"].(string); name != "" {
+		if name, _ := profile["name"].(string); name != "" && item.job.Model == "" {
 			model = "browser:" + name
 		}
 	}

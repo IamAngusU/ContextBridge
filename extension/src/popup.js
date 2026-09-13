@@ -12,20 +12,21 @@ async function initialize() {
   $('token').value = saved.token;
   $('visual-mode').checked = saved.useVisualProfile;
   toggleProfileMode();
-  await loadTabs(saved.tabId, false);
+  await loadTabs(saved.tabIds?.length ? saved.tabIds : [saved.tabId], false);
   await loadProfiles(saved);
   await refreshState();
 }
 
-$('refresh-tabs').addEventListener('click', () => loadTabs(Number($('tab').value), false));
+$('refresh-tabs').addEventListener('click', () => loadTabs(selectedTabIDs(), false));
 $('all-tabs').addEventListener('click', async () => {
   const granted = await api.permissions.request({ permissions: ['tabs'] });
   if (!granted) return setStatus('error', 'Tab access was not granted');
-  await loadTabs(Number($('tab').value), true);
+  await loadTabs(selectedTabIDs(), true);
   $('all-tabs').hidden = true;
 });
 $('tab').addEventListener('change', async () => {
-  await api.storage.local.set({ tabId: Number($('tab').value) });
+  const tabIds = selectedTabIDs();
+  await api.storage.local.set({ tabId: tabIds[0] || 0, tabIds });
   await refreshState();
 });
 $('visual-mode').addEventListener('change', async () => {
@@ -37,7 +38,7 @@ $('profile').addEventListener('change', saveInputs);
 
 $('teach').addEventListener('click', async () => {
   try {
-    const tabId = Number($('tab').value);
+    const tabId = primaryTabID();
     const tab = await api.tabs.get(tabId);
     const origins = [new URL(tab.url).origin + '/*', new URL($('url').value).origin + '/*'];
     const granted = await api.permissions.request({ origins });
@@ -54,10 +55,10 @@ $('teach').addEventListener('click', async () => {
 
 $('verify').addEventListener('click', async () => {
   try {
-    const tab = await api.tabs.get(Number($('tab').value));
+    const tab = await api.tabs.get(primaryTabID());
     const granted = await api.permissions.request({ origins: [new URL(tab.url).origin + '/*'] });
     if (!granted) return setStatus('error', 'Page access was not granted');
-    const result = await api.runtime.sendMessage({ type: 'verify-profile', tabId: Number($('tab').value) });
+    const result = await api.runtime.sendMessage({ type: 'verify-profile', tabId: primaryTabID() });
     if (!result?.ok) throw new Error(result?.error || 'One or more targets are missing');
     const image = result.report.file_input ? 'image ready' : 'text only';
     const response = result.report.response_pending ? 'response target ready after the first answer' : 'response found';
@@ -69,10 +70,23 @@ $('verify').addEventListener('click', async () => {
   }
 });
 
+$('scan-capabilities').addEventListener('click', async () => {
+  try {
+    const result = await api.runtime.sendMessage({ type: 'scan-capabilities', tabId: primaryTabID() });
+    if (!result?.ok) throw new Error(result?.error || 'Could not inspect model choices');
+    const models = result.capabilities?.models || [];
+    const levels = result.capabilities?.reasoningLevels || [];
+    setStatus('live', `${models.length} model choice${models.length === 1 ? '' : 's'} · ${levels.length} reasoning level${levels.length === 1 ? '' : 's'}`);
+  } catch (error) {
+    setStatus('error', error.message || String(error));
+  }
+});
+
 $('pair').addEventListener('click', async () => {
   try {
-    const tab = await api.tabs.get(Number($('tab').value));
-    const origins = [new URL(tab.url).origin + '/*', new URL($('url').value).origin + '/*'];
+    const tabs = await Promise.all(selectedTabIDs().map((tabId) => api.tabs.get(tabId)));
+    if (!tabs.length) throw new Error('Select at least one AI tab');
+    const origins = [...new Set([...tabs.map((tab) => new URL(tab.url).origin + '/*'), new URL($('url').value).origin + '/*'])];
     const granted = await api.permissions.request({ origins });
     if (!granted) return setStatus('error', 'Connection access was not granted');
     await saveInputs();
@@ -81,7 +95,7 @@ $('pair').addEventListener('click', async () => {
     const result = await api.runtime.sendMessage({ type: 'start' });
     if (!result?.ok) throw new Error(result?.error || 'Connection could not start');
     renderRunning(true);
-    setStatus('live', 'Connected and waiting');
+    setStatus('live', `Connected · ${tabs.length} tab${tabs.length === 1 ? '' : 's'} ready`);
   } catch (error) {
     setStatus('error', error.message || String(error));
   }
@@ -141,11 +155,13 @@ $('export-profile').addEventListener('click', async () => {
 });
 
 async function saveInputs() {
+  const tabIds = selectedTabIDs();
   await api.storage.local.set({
     bridgeUrl: $('url').value.trim().replace(/\/$/, ''),
     token: $('token').value.trim(),
     profile: $('profile').value,
-    tabId: Number($('tab').value),
+    tabId: tabIds[0] || 0,
+    tabIds,
     useVisualProfile: $('visual-mode').checked
   });
 }
@@ -159,6 +175,7 @@ async function loadTabs(selected, allWindows) {
     tabs = await api.tabs.query({ active: true, currentWindow: true });
   }
   const eligible = tabs.filter((tab) => tab.id && /^https?:/i.test(tab.url || ''));
+  const selectedIDs = new Set((Array.isArray(selected) ? selected : [selected]).map(Number));
   $('tab').textContent = '';
   for (const tab of eligible) {
     const option = document.createElement('option');
@@ -166,12 +183,13 @@ async function loadTabs(selected, allWindows) {
     const host = safeHost(tab.url);
     const windowLabel = allWindows ? `W${tab.windowId}  ` : '';
     option.textContent = `${windowLabel}${tab.title || 'Untitled'}  |  ${host}`;
-    option.selected = tab.id === selected;
+    option.selected = selectedIDs.has(tab.id);
     $('tab').append(option);
   }
-  if (!$('tab').value && eligible[0]) $('tab').value = String(eligible[0].id);
+  if (!selectedTabIDs().length && eligible[0]) eligible[0] && ($('tab').options[0].selected = true);
   $('all-tabs').hidden = await hasTabsPermission();
-  await api.storage.local.set({ tabId: Number($('tab').value || 0) });
+  const tabIds = selectedTabIDs();
+  await api.storage.local.set({ tabId: tabIds[0] || 0, tabIds });
 }
 
 async function loadProfiles(saved) {
@@ -199,7 +217,7 @@ async function loadProfiles(saved) {
 
 async function refreshState() {
   const saved = await settings();
-  const tabId = Number($('tab').value || saved.tabId);
+  const tabId = primaryTabID() || saved.tabId;
   currentTab = null;
   try {
     const tab = tabId ? await api.tabs.get(tabId) : null;
@@ -218,7 +236,7 @@ async function refreshState() {
   renderRunning(saved.running);
   updateActions(currentProfile, saved.useVisualProfile);
   if (saved.lastError) setStatus('error', saved.lastError);
-  else if (saved.running) setStatus('live', 'Connected and waiting');
+  else if (saved.running) setStatus('live', `Connected · ${saved.tabIds?.length || 1} tab${(saved.tabIds?.length || 1) === 1 ? '' : 's'} ready`);
   else setStatus('idle', 'Not connected');
 }
 
@@ -238,6 +256,7 @@ function renderRunning(running) {
   $('stop').hidden = !running;
   $('teach').disabled = running;
   $('tab').disabled = running;
+  $('scan-capabilities').disabled = !primaryTabID();
 }
 
 function updateActions(profile, visualMode) {
@@ -246,6 +265,7 @@ function updateActions(profile, visualMode) {
   $('remove-profile').disabled = !hasProfile || profile.source === 'builtin';
   $('export-profile').disabled = !hasProfile;
   $('pair').disabled = visualMode ? !hasProfile : false;
+  $('scan-capabilities').disabled = !primaryTabID();
 }
 
 function toggleProfileMode() {
@@ -288,9 +308,18 @@ async function settings() {
     token: '',
     profile: 'chatgpt',
     tabId: 0,
+    tabIds: [],
     running: false,
     useVisualProfile: true,
     taughtProfiles: {},
     lastError: ''
   });
+}
+
+function selectedTabIDs() {
+  return [...$('tab').selectedOptions].map((option) => Number(option.value)).filter(Boolean);
+}
+
+function primaryTabID() {
+  return selectedTabIDs()[0] || 0;
 }

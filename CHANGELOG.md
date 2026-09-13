@@ -2,6 +2,22 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.0 - 2026-09-13
+
+### Added
+
+- Multi-tab ChatGPT/Gemini pooling in one extension, with private session-to-conversation affinity
+- determinate image-generation progress and controlled recovery after navigation or a demonstrably stalled page
+- per-job and per-session browser profile, model, and reasoning selection with localized menu matching
+- automatic inventory of ready Ollama, GGUF, ONNX, and SafeTensors models with inferred capabilities and resource estimates
+
+### Changed
+
+- Rate limits, provider failures, page busy state, and valid final answers are now separate states; error UI is never accepted as successful model output
+- series responses can return up to twelve images/files within a verified 12 MiB transfer budget
+- workers report RAM generation/speed, GPU utilization/temperature, browser slot load, and richer multi-PC pool metrics
+- idle terminals use compact `[Idle …]`, slot, node, and hardware status groups while retaining bounded long polls and cached probes
+
 ## 0.4.4 - 2026-09-13
 
 ### Added
