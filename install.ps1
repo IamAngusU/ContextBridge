@@ -5,7 +5,8 @@ param(
     [ValidateSet("jina", "nuextract", "both")][string]$ManagedModel = "jina",
     [switch]$NoAutostart,
     [switch]$NoStart,
-    [switch]$NoDashboard
+    [switch]$NoDashboard,
+    [switch]$NoPath
 )
 
 $ErrorActionPreference = "Stop"
@@ -75,6 +76,23 @@ try {
 
 $exe = Join-Path $InstallDir "contextbridge.exe"
 $config = Join-Path $InstallDir "config.yml"
+if (-not $NoPath) {
+    try {
+        $resolvedInstallDir = [IO.Path]::GetFullPath($InstallDir).TrimEnd('\')
+        $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+        $pathEntries = @($userPath -split ';' | Where-Object { $_ })
+        if (-not ($pathEntries | Where-Object { $_.TrimEnd('\') -ieq $resolvedInstallDir })) {
+            $newUserPath = if ($userPath) { "$($userPath.TrimEnd(';'));$resolvedInstallDir" } else { $resolvedInstallDir }
+            [Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")
+            Good "Added ContextBridge to your user PATH."
+        }
+        if (-not (($env:Path -split ';') | Where-Object { $_.TrimEnd('\') -ieq $resolvedInstallDir })) {
+            $env:Path = "$resolvedInstallDir;$env:Path"
+        }
+    } catch {
+        Muted "Could not update the user PATH. Run ContextBridge from $InstallDir or add that folder manually."
+    }
+}
 if (-not (Test-Path $config)) {
     & $exe init --config $config
 }

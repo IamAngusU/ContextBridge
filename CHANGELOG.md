@@ -2,6 +2,13 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.3.1 - 2026-09-13
+
+### Fixed
+
+- Windows installs add ContextBridge to the user and current-session `PATH`
+- Unix installs print an explicit `PATH` instruction when the selected binary directory is not already available
+
 ## 0.3.0 - 2026-09-13
 
 ### Added

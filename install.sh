@@ -229,6 +229,10 @@ fi
 echo "Config: $config"
 echo "Chromium extension: $INSTALL_DIR/extension/chromium"
 echo "Firefox extension: $INSTALL_DIR/extension/firefox"
+case ":$PATH:" in
+  *":$BIN_DIR:"*) ;;
+  *) echo "Add $BIN_DIR to PATH to run contextbridge without its full path." ;;
+esac
 
 if [ "${CONTEXTBRIDGE_NO_DASHBOARD:-0}" != "1" ]; then
   if [ "$os" = "darwin" ] || [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
