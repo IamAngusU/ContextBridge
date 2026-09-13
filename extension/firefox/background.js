@@ -521,6 +521,13 @@ function automate(job, profile, jobDeadline) {
     return [];
   };
   const visibleText = (element) => (element?.innerText || element?.textContent || '').trim();
+  const responseIdentity = (element) => {
+    if (!element) return '';
+    return ['data-message-id', 'data-testid', 'data-turn', 'id']
+      .map((name) => element.getAttribute?.(name) || '')
+      .filter(Boolean)
+      .join('|');
+  };
   const pageState = () => {
     let percent = 0;
     let detail = '';
@@ -756,6 +763,7 @@ function automate(job, profile, jobDeadline) {
       const before = all(selectors.response);
       const previousElement = before.length ? before[before.length - 1] : null;
       const previousText = String(job.metadata?.contextbridge_baseline_text || (before.length ? visibleText(before[before.length - 1]) : ''));
+      const previousIdentity = responseIdentity(previousElement);
       const resumeOnly = Boolean(job.metadata?.contextbridge_resume_only);
       const selectedModel = !resumeOnly && job.model ? await choosePreference('model', job.model) : String(job.model || '');
       const selectedReasoning = !resumeOnly && job.reasoning ? await choosePreference('reasoning', job.reasoning) : String(job.reasoning || '');
@@ -789,6 +797,7 @@ function automate(job, profile, jobDeadline) {
       let stableText = '';
       let stableSince = 0;
       let sawBusy = false;
+      let lastBusyAt = Date.now();
       let lastPercent = 0;
       let progressChangedAt = Date.now();
       while (Date.now() < deadline) {
@@ -796,10 +805,17 @@ function automate(job, profile, jobDeadline) {
         const responses = all(selectors.response);
         const latestElement = responses.length ? responses[responses.length - 1] : null;
         const latest = visibleText(latestElement);
-        const changedResponse = latestElement !== previousElement || responses.length > before.length || latest !== previousText;
+		const latestIdentity = responseIdentity(latestElement);
+		const changedResponse = responses.length > before.length || latest !== previousText
+			|| Boolean(previousIdentity && latestIdentity && latestIdentity !== previousIdentity);
         const state = pageState();
         const busy = state.busy;
         sawBusy = sawBusy || busy;
+		if (busy) lastBusyAt = Date.now();
+		if (sawBusy && !busy && !changedResponse && !resumeOnly && Date.now() - lastBusyAt > 10000) {
+			resolve({ ok: false, error: 'Generation ended without a new assistant turn; reloading once to recover the conversation', code: 'missing_response_after_generation', recoverable: true });
+			return;
+		}
 		if (state.percent !== lastPercent) {
 			lastPercent = state.percent;
 			progressChangedAt = Date.now();
@@ -1040,13 +1056,14 @@ function inspectPageCapabilities() {
   const unique = (values, limit) => [...new Set(values.filter(Boolean))].slice(0, limit);
   const controls = [...document.querySelectorAll('button, [role="button"]')].filter(visible);
   const options = [...document.querySelectorAll('[role="menuitem"], [role="option"], [aria-checked], [aria-selected]')].filter(visible);
-  const modelPattern = /\b(?:gpt|gemini|astra|sol|terra|luna|flash|thinking|pro)\b(?:[\s._-]*\d(?:\.\d+)?)?/i;
-  const reasoningPattern = /\b(?:reason|denk|effort|thinking|instant|sofort|low|niedrig|medium|mittel|high|hoch|pro|max)\b/i;
+  const modelPattern = /\b(?:gpt|gemini|astra|sol|terra|luna|flash)\b(?:[\s._-]*\d(?:\.\d+)?)?|^\d+(?:\.\d+)?\s+(?:pro|flash)$/i;
+  const reasoningPattern = /^(?:instant|sofort|fast|schnell|low|niedrig|medium|mittel|high|hoch|very high|sehr hoch|xhigh|pro|max|maximum)$/i;
+  const semantic = (element, pattern) => pattern.test(`${element.getAttribute('data-testid') || ''} ${element.getAttribute('aria-label') || ''}`);
   const currentModel = text(controls.find((element) => {
     const label = `${text(element)} ${element.getAttribute('aria-label') || ''}`;
-    return modelPattern.test(label) && !/modelle ergänzen|add models/i.test(label);
+    return (semantic(element, /model|modell/i) || modelPattern.test(text(element))) && !/modelle ergänzen|add models/i.test(label);
   }));
-  const currentReasoning = text(controls.find((element) => reasoningPattern.test(`${text(element)} ${element.getAttribute('aria-label') || ''}`)));
+  const currentReasoning = text(controls.find((element) => semantic(element, /reason|denk|effort|thinking/i) || reasoningPattern.test(text(element))));
   return {
     currentModel,
     currentReasoning,
@@ -1060,14 +1077,16 @@ async function discoverPageCapabilities() {
   const text = (element) => String(element?.innerText || element?.textContent || element?.getAttribute?.('aria-label') || '').replace(/\s+/g, ' ').trim().slice(0, 100);
   const unique = (values, limit) => [...new Set(values.filter(Boolean))].slice(0, limit);
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-  const modelPattern = /\b(?:gpt|gemini|astra|sol|terra|luna|flash|thinking|pro)\b(?:[\s._-]*\d(?:\.\d+)?)?/i;
-  const reasoningPattern = /\b(?:reason|denk|effort|thinking|instant|sofort|low|niedrig|medium|mittel|high|hoch|pro|max)\b/i;
+  const modelPattern = /\b(?:gpt|gemini|astra|sol|terra|luna|flash)\b(?:[\s._-]*\d(?:\.\d+)?)?|^\d+(?:\.\d+)?\s+(?:pro|flash)$/i;
+  const reasoningPattern = /^(?:instant|sofort|fast|schnell|low|niedrig|medium|mittel|high|hoch|very high|sehr hoch|xhigh|pro|max|maximum)$/i;
+  const semantic = (element, pattern) => pattern.test(`${element.getAttribute('data-testid') || ''} ${element.getAttribute('aria-label') || ''}`);
   const scan = async (kind) => {
     const pattern = kind === 'model' ? modelPattern : reasoningPattern;
     const triggers = [...document.querySelectorAll('button, [role="button"]')].filter(visible).filter((element) => {
       const label = `${text(element)} ${element.getAttribute('aria-label') || ''}`;
-      if (!pattern.test(label) || /modelle ergänzen|add models/i.test(label)) return false;
-      return kind === 'model' || !/(?:gpt|gemini|astra|sol|terra|luna|flash)[\s._-]*\d?/i.test(label);
+      if (/modelle ergänzen|add models/i.test(label)) return false;
+      if (kind === 'model') return semantic(element, /model|modell/i) || modelPattern.test(text(element));
+      return semantic(element, /reason|denk|effort|thinking/i) || reasoningPattern.test(text(element));
     });
     if (!triggers.length) return { current: '', values: [] };
     const current = text(triggers[0]);

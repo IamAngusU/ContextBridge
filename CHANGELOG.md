@@ -2,6 +2,14 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.2 - 2026-09-13
+
+### Fixed
+
+- remounted React nodes with an old assistant turn can no longer be accepted as a new browser response
+- a generation that ends without a new assistant turn reloads once and resumes without submitting the prompt twice
+- account/profile controls and unrelated labels no longer appear as detected model or reasoning choices
+
 ## 0.5.1 - 2026-09-13
 
 ### Added

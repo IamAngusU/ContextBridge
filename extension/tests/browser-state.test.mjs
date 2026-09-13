@@ -68,15 +68,56 @@ const element = (text = '', attributes = {}) => ({
 
 {
   const profileMenu = element('', { 'aria-label': 'Profil-Menü öffnen' });
+  const accountMenu = element('Angus Uelsmann Pro');
+  const securityControl = element('High Security System');
   context.document = {
     querySelectorAll(selector) {
-      if (selector === 'button, [role="button"]') return [profileMenu];
+      if (selector === 'button, [role="button"]') return [profileMenu, accountMenu, securityControl];
       return [];
     }
   };
   const capabilities = context.inspectPageCapabilities();
   assert.equal(capabilities.currentModel, '');
   assert.equal(capabilities.currentReasoning, '');
+}
+
+{
+  const modelControl = element('5.6 Sol', { 'data-testid': 'model-switcher-dropdown-button' });
+  const reasoningControl = element('High', { 'aria-label': 'Reasoning effort' });
+  context.document = {
+    querySelectorAll(selector) {
+      if (selector === 'button, [role="button"]') return [modelControl, reasoningControl];
+      return [];
+    }
+  };
+  const capabilities = context.inspectPageCapabilities();
+  assert.equal(capabilities.currentModel, '5.6 Sol');
+  assert.equal(capabilities.currentReasoning, 'High');
+}
+
+{
+  const input = element();
+  const previous = element('Previous answer', { 'data-testid': 'conversation-turn-2' });
+  const remounted = element('Previous answer', { 'data-testid': 'conversation-turn-2' });
+  let responseReads = 0;
+  context.document = {
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === '#response') {
+        responseReads += 1;
+        return [responseReads === 1 ? previous : remounted];
+      }
+      return [];
+    },
+    dispatchEvent() {}
+  };
+  const result = await context.automate(
+    { prompt: 'ignored', metadata: { contextbridge_resume_only: true, contextbridge_baseline_text: 'Previous answer' }, output: { mode: 'text' } },
+    { selectors: { input: ['#input'], response: ['#response'], submit: [] } },
+    new Date(Date.now() + 2000).toISOString()
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'browser_timeout');
 }
 
 {
