@@ -282,6 +282,12 @@ func (m *Manager) Auto(ctx context.Context) (Result, error) {
 	if !status.UpdateAvailable || state.BlockedVersion == state.LastAvailable || !m.idle(ctx) {
 		return Result{Status: status}, nil
 	}
+	if !automaticInstallReady(ctx, m.executable) {
+		// A Windows run/serve process cannot replace itself. A short-lived
+		// installer-created Update task may do that when the managed task is
+		// actually running; a hand-opened terminal is left untouched.
+		return Result{Status: status}, nil
+	}
 	return m.applyLocked(ctx, state, false, true)
 }
 
@@ -788,9 +794,20 @@ func (m *Manager) loadState() (State, error) {
 			Error   string `json:"error"`
 		}
 		if json.Unmarshal(failed, &marker) == nil && marker.Version != "" {
-			state.BlockedVersion = marker.Version
-			state.LastError = marker.Error
-			state.LastInstalled = m.currentVersion
+			if newerVersion(marker.Version, m.currentVersion) {
+				// A later healthy release supersedes an older rollback marker.
+				// Keep the marker on disk for diagnosis, but do not show its
+				// failure as the current installation's status.
+				state.BlockedVersion = ""
+				if state.LastError == marker.Error {
+					state.LastError = ""
+				}
+				state.LastInstalled = m.currentVersion
+			} else {
+				state.BlockedVersion = marker.Version
+				state.LastError = marker.Error
+				state.LastInstalled = m.currentVersion
+			}
 		}
 	}
 	return state, nil

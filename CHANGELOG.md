@@ -2,6 +2,18 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.22 - 2026-09-13
+
+### Added
+
+- opt-in, per-tab text prompt replacement for a verified last ContextBridge-owned ChatGPT or Gemini message, with stable message identity and content hash checks; prior/new attachments and intervening edits fail closed
+
+### Fixed
+
+- never mistake ChatGPT's still-visible Stop control for Send or type a new prompt into a page that is still generating
+- defer automatic Windows installation while a manual terminal is open or the managed task is not running; the scheduled updater retries without quarantining a healthy release
+- stop displaying an old rollback marker as the current error after a newer healthy core has been installed
+
 ## 0.5.21 - 2026-09-13
 
 ### Fixed

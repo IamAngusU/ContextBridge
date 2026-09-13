@@ -56,6 +56,8 @@ async function handleMessage(message, sender) {
       return { ok: true, fresh: await checkFreshTab(Number(message.tabId)) };
     case 'release-session-tab':
       return releaseSessionTab(Number(message.tabId));
+    case 'set-tab-edit-mode':
+      return setTabEditMode(Number(message.tabId), message.enabled === true);
     case 'discover-fresh-tabs':
       await discoverFreshTabs();
       return { ok: true };
@@ -201,9 +203,11 @@ async function detachClosedTab(tabId) {
   const tabCapabilities = { ...cfg.tabCapabilities };
   const tabCapabilityScans = { ...cfg.tabCapabilityScans };
   const tabFailures = { ...cfg.tabFailures };
+  const tabEditModes = { ...cfg.tabEditModes };
   delete tabCapabilities[tabId];
   delete tabCapabilityScans[tabId];
   delete tabFailures[tabId];
+  delete tabEditModes[tabId];
   await serializeSessionWrite(async () => {
     const latest = await settings();
     const sessionBindings = { ...latest.sessionBindings };
@@ -215,11 +219,11 @@ async function detachClosedTab(tabId) {
     await api.storage.local.set({ sessionBindings });
   });
   if (!configuredTabIDs(cfg).includes(tabId)) {
-    await api.storage.local.set({ autoAttachBlockedTabIds, tabCapabilities, tabCapabilityScans, tabFailures });
+    await api.storage.local.set({ autoAttachBlockedTabIds, tabCapabilities, tabCapabilityScans, tabFailures, tabEditModes });
     return;
   }
   const tabIds = configuredTabIDs(cfg).filter((id) => id !== tabId);
-  await api.storage.local.set({ tabId: tabIds[0] || 0, tabIds, tabCapabilities, tabCapabilityScans, tabFailures, autoAttachBlockedTabIds });
+  await api.storage.local.set({ tabId: tabIds[0] || 0, tabIds, tabCapabilities, tabCapabilityScans, tabFailures, tabEditModes, autoAttachBlockedTabIds });
   if (cfg.running) await sendHeartbeat('waiting');
 }
 
@@ -457,6 +461,7 @@ async function processWork(cfg, work, claimedTabId) {
   let tabId = claimedTabId;
   let tabSlotHeld = false;
   let jobCompleted = false;
+  let submittedTurn = null;
   let failureCode = 'browser_session_unavailable';
   let failureReason = 'other';
   await api.storage.local.set({ lastError: '' });
@@ -465,6 +470,18 @@ async function processWork(cfg, work, claimedTabId) {
     await waitForTabSlot(tabId, work.deadline);
     tabSlotHeld = true;
     await assertSessionTab(workSessionKey(work), tabId);
+    const liveSettings = await settings();
+    const binding = liveSettings.sessionBindings?.[workSessionKey(work)];
+    const editEnabled = liveSettings.tabEditModes?.[tabId] === true;
+    let editTarget = null;
+    if (editEnabled) {
+      failureCode = 'browser_edit_unavailable';
+      if (work.job.image_base64 || work.job.metadata?.contextbridge_image_tool || work.job.metadata?.contextbridge_music_tool) {
+        throw new Error('Edit mode currently supports text prompts only; file and media-tool jobs need a new message');
+      }
+      if (binding?.ownedTurn) editTarget = binding.ownedTurn;
+      else if (!isFreshChatURL(binding?.url)) throw new Error('Edit mode needs a new empty chat for its first ContextBridge message; no existing user message was changed');
+    }
     failureCode = 'browser_automation_error';
     const previousFailures = (await api.storage.local.get({ tabFailures: {} })).tabFailures;
     if (previousFailures[tabId]) {
@@ -508,7 +525,8 @@ async function processWork(cfg, work, claimedTabId) {
 		    || (Boolean(snapshot.current_model) && modeFamily(snapshot.current_model) !== modeFamily(work.job.model)));
 		// aria-busy can survive on an older Gemini turn. Only a live Stop or
 		// streaming signal may put provisional assistant text on the relay.
-		const newAssistantTurn = isNewAssistantTurn(initial, snapshot);
+		const newAssistantTurn = isNewAssistantTurn(initial, snapshot)
+		  || Boolean(editTarget && snapshot.active_generation && text && text !== baselineText);
 		const textChanged = Boolean(newAssistantTurn && snapshot.active_generation && text && text !== baselineText && text !== latestProgressText && !modeMismatch
 		  && Number(work.job.output?.min_images || 0) === 0);
 		const progressState = `${Boolean(snapshot.busy)}|${Number(snapshot.percent) || 0}|${snapshot.detail || ''}|${modeMismatch}`;
@@ -533,7 +551,7 @@ async function processWork(cfg, work, claimedTabId) {
     progressTimer = setInterval(sample, 800);
     let answer;
     try {
-      const results = await api.scripting.executeScript({ target: { tabId }, func: automate, args: [work.job, effectiveProfile, work.deadline] });
+      const results = await api.scripting.executeScript({ target: { tabId }, func: automate, args: [work.job, effectiveProfile, work.deadline, editTarget] });
       answer = results?.[0]?.result;
     } catch (error) {
       failureCode = 'browser_navigation_interrupted';
@@ -564,6 +582,10 @@ async function processWork(cfg, work, claimedTabId) {
       }
       throw new Error(answer?.error || 'No browser response was captured');
     }
+    try {
+      const owned = await api.scripting.executeScript({ target: { tabId }, func: inspectLatestOwnedTurn, args: [work.job.prompt, effectiveProfile.name] });
+      submittedTurn = owned?.[0]?.result || null;
+    } catch (_) { /* A result can succeed while this optional edit proof is unavailable. */ }
     if (answer.artifacts?.length) {
       progressSequence += 1;
       await reportProgress(cfg, work.job.id, {
@@ -610,6 +632,9 @@ async function processWork(cfg, work, claimedTabId) {
     if (progressTimer) clearInterval(progressTimer);
     if (jobCompleted && tabSlotHeld) {
       try { await rememberSessionURL(workSessionKey(work), tabId); } catch (_) {}
+      if (submittedTurn) {
+        try { await rememberOwnedTurn(workSessionKey(work), tabId, submittedTurn); } catch (_) {}
+      }
     }
     if (tabSlotHeld) busyTabs.delete(tabId);
   }
@@ -769,6 +794,34 @@ async function rememberSessionURL(key, tabId) {
   });
 }
 
+async function rememberOwnedTurn(key, tabId, ownedTurn) {
+  if (!ownedTurn?.id || !ownedTurn?.digest || !['chatgpt', 'gemini'].includes(ownedTurn.provider)) return;
+  await serializeSessionWrite(async () => {
+    const { bindings } = await sessionBindingState();
+    const binding = bindings[key];
+    const tab = await api.tabs.get(tabId);
+    if (!binding || Number(binding.tabId) !== tabId || binding.url !== tab?.url) return;
+    bindings[key] = { ...binding, ownedTurn: { id: ownedTurn.id, digest: ownedTurn.digest, provider: ownedTurn.provider } };
+    await api.storage.local.set({ sessionBindings: bindings });
+  });
+}
+
+async function inspectLatestOwnedTurn(expectedPrompt, provider) {
+  if (!['chatgpt', 'gemini'].includes(provider) || !expectedPrompt) return null;
+  const turns = [...document.querySelectorAll(provider === 'chatgpt' ? 'section[data-turn="user"]' : 'user-query')];
+  const turn = turns.at(-1);
+  const content = provider === 'chatgpt'
+    ? turn?.querySelector('[data-message-author-role="user"]')
+    : turn?.querySelector('[id^="user-query-content-"]');
+  const id = provider === 'chatgpt' ? turn?.getAttribute('data-turn-id') : content?.id;
+  const normalize = (value) => String(value || '').normalize('NFKC').replace(/\s+/g, ' ').trim();
+  const text = normalize(content?.textContent);
+  if (!id || !text || !text.includes(normalize(expectedPrompt))) return null;
+  const bytes = new TextEncoder().encode(text);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return { id, digest: [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join(''), provider };
+}
+
 async function assertSessionTab(key, tabId) {
   const cfg = await settings();
   const binding = cfg.sessionBindings?.[key];
@@ -799,6 +852,20 @@ async function releaseSessionTab(tabId) {
     await api.storage.local.set({ sessionBindings: bindings });
     return { ok: true };
   });
+}
+
+async function setTabEditMode(tabId, enabled) {
+  if (!tabId || busyTabs.has(tabId)) throw new Error('Wait until this tab finishes its job');
+  const cfg = await settings();
+  if (!configuredTabIDs(cfg).includes(tabId)) throw new Error('Attach this AI tab first');
+  const tab = await api.tabs.get(tabId);
+  const profile = profileForTab(cfg, tab);
+  if (!['chatgpt', 'gemini'].includes(profile?.name)) throw new Error('Prompt editing is supported only on recognized ChatGPT or Gemini pages');
+  const tabEditModes = { ...cfg.tabEditModes };
+  if (enabled) tabEditModes[tabId] = true;
+  else delete tabEditModes[tabId];
+  await api.storage.local.set({ tabEditModes });
+  return { ok: true, enabled };
 }
 
 async function waitForTabSlot(tabId, deadlineValue) {
@@ -1023,7 +1090,7 @@ async function flushPendingCompletions(cfg) {
   }
 }
 
-function automate(job, profile, jobDeadline) {
+function automate(job, profile, jobDeadline, editTarget = null) {
   const selectors = profile.selectors || {};
   const isVisible = (element) => Boolean(element && (element.offsetWidth || element.offsetHeight || element.getClientRects().length));
   const first = (items) => (items || []).map((selector) => {
@@ -1038,6 +1105,11 @@ function automate(job, profile, jobDeadline) {
     }
     return [];
   };
+  const isStopControl = (element) => /stop|abbrechen|beenden/i.test(`${element?.getAttribute?.('data-testid') || ''} ${element?.getAttribute?.('aria-label') || ''}`);
+  const chatGPTStopVisible = () => [...document.querySelectorAll('button[data-testid="stop-button"], button[aria-label="Antwort stoppen"], button[aria-label="Stop generating"]')].some(isVisible);
+  const sendControl = () => (selectors.submit || []).map((selector) => {
+    try { return [...document.querySelectorAll(selector)].find((element) => isVisible(element) && !isStopControl(element)) || null; } catch (_) { return null; }
+  }).find(Boolean);
   const visibleText = (element) => (element?.innerText || element?.textContent || '').trim();
   const responseText = (element) => {
     if (!element) return '';
@@ -1085,7 +1157,7 @@ function automate(job, profile, jobDeadline) {
       busyReasons,
       percent,
       detail: busyReasons.length ? (detail || 'Generating') : '',
-      composerReady: Boolean(first(selectors.submit)),
+      composerReady: Boolean(sendControl()),
       inputReady: Boolean(first(selectors.input))
     };
   };
@@ -1156,6 +1228,59 @@ function automate(job, profile, jobDeadline) {
     }
     element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
     element.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+  const editOwnedMessage = async (target) => {
+    if (!target || target.provider !== profile.name || !/^[a-f0-9]{64}$/.test(String(target.digest || ''))) {
+      throw new Error('Edit mode has no verified ContextBridge-owned message on this provider');
+    }
+    if (job.image_base64) throw new Error('Edit mode cannot safely replace file attachments');
+    const turns = [...document.querySelectorAll(profile.name === 'chatgpt' ? 'section[data-turn="user"]' : 'user-query')];
+    const turn = turns.at(-1);
+    const content = profile.name === 'chatgpt'
+      ? turn?.querySelector('[data-message-author-role="user"]')
+      : turn?.querySelector('[id^="user-query-content-"]');
+    const id = profile.name === 'chatgpt' ? turn?.getAttribute('data-turn-id') : content?.id;
+    if (!turn || !content || id !== target.id) throw new Error('The previous ContextBridge message is no longer the last user turn; nothing was edited');
+    if (content.querySelector(profile.name === 'chatgpt'
+      ? 'img, [role="group"][aria-label], [data-testid*="attachment" i], [data-file-citation-primary-file-id]'
+      : 'user-query-file-carousel, [data-test-id="uploaded-file"]')) {
+      throw new Error('The previous message has files that cannot be safely removed in this editor; nothing was edited');
+    }
+    const normalize = (value) => String(value || '').normalize('NFKC').replace(/\s+/g, ' ').trim();
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(normalize(content.textContent)));
+    const hex = [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join('');
+    if (hex !== target.digest) throw new Error('The previous ContextBridge message changed since it was sent; nothing was edited');
+    if ([...document.querySelectorAll('textarea[aria-label="Nachricht bearbeiten"], textarea[aria-label="Edit message"], textarea[aria-label="Prompt bearbeiten"], textarea[aria-label="Edit prompt"]')].some(isVisible)) {
+      throw new Error('A message is already being edited by the user; nothing was changed');
+    }
+    if ([...document.querySelectorAll('button[data-testid*="stop" i], button[aria-label*="stop" i], button[aria-label*="beenden" i], button[aria-label="Antwort stoppen"]')].some(isVisible)) {
+      throw new Error('The provider still shows Stop; wait for it to finish before editing');
+    }
+    const editButton = profile.name === 'chatgpt'
+      ? turn.querySelector('button[aria-label="Nachricht bearbeiten"], button[aria-label="Edit message"]')
+      : turn.querySelector('[data-test-id="prompt-edit-button"] button, button[aria-label="Bearbeiten"], button[aria-label="Edit"]');
+    if (!editButton || !isVisible(editButton)) throw new Error('The previous message has no available Edit control');
+    editButton.click();
+    const editorSelector = profile.name === 'chatgpt'
+      ? 'textarea[aria-label="Nachricht bearbeiten"], textarea[aria-label="Edit message"]'
+      : 'textarea[aria-label="Prompt bearbeiten"], textarea[aria-label="Edit prompt"]';
+    let editor = null;
+    for (let attempt = 0; attempt < 20 && !editor; attempt += 1) {
+      await wait(150);
+      editor = turn.querySelector(editorSelector);
+    }
+    if (!editor || !isVisible(editor)) throw new Error('The Edit dialog did not open; no update was sent');
+    setInput(editor, job.prompt);
+    let update = null;
+    const label = profile.name === 'chatgpt' ? /^(?:Senden|Send|Save)$/i : /^(?:Aktualisieren|Update)$/i;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (String(editor.value || '').trim() !== String(job.prompt || '').trim()) throw new Error('The Edit dialog did not retain the new prompt; no update was sent');
+      update = [...turn.querySelectorAll('button')].find((button) => label.test(visibleText(button)) && isVisible(button));
+      if (update && !update.disabled && update.getAttribute('aria-disabled') !== 'true') break;
+      await wait(150);
+    }
+    if (!update || update.disabled || update.getAttribute('aria-disabled') === 'true') throw new Error('The Edit update button stayed disabled; no update was sent');
+    update.click();
   };
   const clearIncompatibleGeminiTools = async (job) => {
     if (profile.name !== 'gemini') return false;
@@ -1492,14 +1617,18 @@ function automate(job, profile, jobDeadline) {
       let input = first(selectors.input);
       if (!input) throw new Error('Prompt input was not found');
       const before = all(selectors.response);
+      const beforeIdentities = new Set(before.map(responseIdentity).filter(Boolean));
       const beforeUserTurns = document.querySelectorAll('[data-turn="user"]').length;
       const previousElement = before.length ? before[before.length - 1] : null;
       const previousText = String(job.metadata?.contextbridge_baseline_text || (before.length ? responseText(before[before.length - 1]) : ''));
       const previousIdentity = responseIdentity(previousElement);
       const resumeOnly = Boolean(job.metadata?.contextbridge_resume_only);
+	  if (!resumeOnly && profile.name === 'chatgpt' && chatGPTStopVisible()) {
+	    throw new Error('ChatGPT still shows Stop; the previous generation may be active and no new prompt was typed');
+	  }
 	  const selectedModel = !resumeOnly && job.model ? await choosePreference('model', job.model) : '';
 	  const selectedReasoning = !resumeOnly && job.reasoning ? await choosePreference('reasoning', job.reasoning) : '';
-	  const clearedGeminiTool = !resumeOnly && await clearIncompatibleGeminiTools(job);
+	  const clearedGeminiTool = !resumeOnly && !editTarget && await clearIncompatibleGeminiTools(job);
 	  if (!resumeOnly && (job.model || job.reasoning || clearedGeminiTool)) {
 		// Switching a provider mode may replace the entire composer. Never
 		// type into the detached element captured before the menu was opened.
@@ -1510,17 +1639,17 @@ function automate(job, profile, jobDeadline) {
 		}
 		if (!input) throw new Error('Prompt input disappeared after selecting the model');
 	  }
-	  if (!resumeOnly && job.metadata?.contextbridge_image_tool) {
+	  if (!resumeOnly && !editTarget && job.metadata?.contextbridge_image_tool) {
 		await chooseImageTool(input);
 		input = first(selectors.input);
 		if (!input) throw new Error('Prompt input disappeared after selecting the image tool');
 	  }
-	  if (!resumeOnly && job.metadata?.contextbridge_music_tool) {
+	  if (!resumeOnly && !editTarget && job.metadata?.contextbridge_music_tool) {
 		await chooseMusicTool(input);
 		input = first(selectors.input);
 		if (!input) throw new Error('Prompt input disappeared after selecting the music tool');
 	  }
-      if (!resumeOnly && job.image_base64) {
+      if (!resumeOnly && !editTarget && job.image_base64) {
         const fileInput = (selectors.file_input || []).flatMap((selector) => {
           try { return [...document.querySelectorAll(selector)]; } catch (_) { return []; }
         }).find((element) => element.type === 'file' && (!element.accept || /image|\*/i.test(element.accept)));
@@ -1529,38 +1658,45 @@ function automate(job, profile, jobDeadline) {
         await wait(1000);
       }
       if (!resumeOnly) {
-        const editorText = (element) => String(element?.value || element?.innerText || element?.textContent || '');
-        const normalized = (value) => String(value || '').replace(/[\u200b-\u200d\ufeff]/g, '').replace(/\s+/g, ' ').trim();
-        const expected = normalized(job.prompt);
-        const draft = normalized(editorText(input));
-        if (draft && draft !== expected) throw new Error('Prompt editor contains another draft');
-        if (!draft) setInput(input, job.prompt);
-        let retained = false;
-        for (let attempt = 0; attempt < 6; attempt += 1) {
-          const liveInput = first(selectors.input);
-          const liveText = normalized(editorText(liveInput));
-          if (liveInput && liveText === expected) {
-            input = liveInput;
-            retained = true;
-            break;
-          }
-          if (liveText) throw new Error('Prompt editor changed the submitted text');
-          await wait(150);
-        }
-        if (!retained) throw new Error('Prompt editor did not retain the submitted text');
-        let submit = first(selectors.submit);
-        for (let attempt = 0; (!submit || submit.disabled || submit.getAttribute('aria-disabled') === 'true') && attempt < 20; attempt += 1) {
-          await wait(150);
-          submit = first(selectors.submit);
-        }
-        if (submit && !submit.disabled && submit.getAttribute('aria-disabled') !== 'true') {
-          submit.click();
-        } else if (submit) {
-			throw new Error('Send button stayed disabled after filling the prompt');
+        if (editTarget) {
+          await editOwnedMessage(editTarget);
         } else {
-          if (profile.name === 'gemini') throw new Error('Send button is not visible after filling the prompt');
-          input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
-          input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
+          const editorText = (element) => String(element?.value || element?.innerText || element?.textContent || '');
+          const normalized = (value) => String(value || '').replace(/[\u200b-\u200d\ufeff]/g, '').replace(/\s+/g, ' ').trim();
+          const expected = normalized(job.prompt);
+          const draft = normalized(editorText(input));
+          if (draft && draft !== expected) throw new Error('Prompt editor contains another draft');
+          if (!draft) setInput(input, job.prompt);
+          let retained = false;
+          for (let attempt = 0; attempt < 6; attempt += 1) {
+            const liveInput = first(selectors.input);
+            const liveText = normalized(editorText(liveInput));
+            if (liveInput && liveText === expected) {
+              input = liveInput;
+              retained = true;
+              break;
+            }
+            if (liveText) throw new Error('Prompt editor changed the submitted text');
+            await wait(150);
+          }
+          if (!retained) throw new Error('Prompt editor did not retain the submitted text');
+          let submit = sendControl();
+          for (let attempt = 0; (!submit || submit.disabled || submit.getAttribute('aria-disabled') === 'true') && attempt < 20; attempt += 1) {
+            await wait(150);
+            submit = sendControl();
+          }
+          if (submit && !submit.disabled && submit.getAttribute('aria-disabled') !== 'true') {
+            submit.click();
+          } else if (submit) {
+            throw new Error('Send button stayed disabled after filling the prompt');
+          } else {
+            if (profile.name === 'chatgpt' && chatGPTStopVisible()) {
+              throw new Error('ChatGPT still shows Stop; the new prompt was not submitted');
+            }
+            if (profile.name === 'gemini') throw new Error('Send button is not visible after filling the prompt');
+            input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
+            input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
+          }
         }
       }
 
@@ -1574,6 +1710,7 @@ function automate(job, profile, jobDeadline) {
       let stableText = '';
       let stableSince = 0;
       let sawBusy = false;
+      let sawActiveGeneration = false;
       let lastBusyAt = Date.now();
       let lastPercent = 0;
       let progressChangedAt = Date.now();
@@ -1599,6 +1736,7 @@ function automate(job, profile, jobDeadline) {
           return;
         }
         const state = pageState();
+        sawActiveGeneration = sawActiveGeneration || state.busyReasons.some((reason) => reason !== 'aria_busy');
         // Gemini can leave aria-busy on the finished response after its Stop
         // control has vanished. Treat that one stale attribute as finished
         // only after a *new* answer has stayed unchanged for 12 seconds.
@@ -1667,7 +1805,9 @@ function automate(job, profile, jobDeadline) {
 		const imageCount = latestElement ? [...latestElement.querySelectorAll('img')].filter((image) => image.getAttribute('aria-hidden') !== 'true' && image.naturalWidth >= 128 && image.naturalHeight >= 128).length + imageCards : 0;
 		const mediaCount = latestElement ? latestElement.querySelectorAll('video[src], audio[src]').length : 0;
 		const stableValue = latest || (artifactCount ? `artifact:${artifactCount}` : '');
-		if (!stableValue || !changedResponse) continue;
+        if (!stableValue || !changedResponse) continue;
+        if (editTarget && !sawActiveGeneration && responses.length <= before.length
+          && (!latestIdentity || beforeIdentities.has(latestIdentity))) continue;
 		if (stableValue !== stableText) {
 			stableText = stableValue;
           stableSince = Date.now();
@@ -1698,12 +1838,14 @@ function automate(job, profile, jobDeadline) {
       const message = error.message || String(error);
       const code = /requested model|model selector/i.test(message)
 		? 'browser_model_unavailable'
+		: (/ChatGPT still shows Stop/i.test(message) ? 'browser_provider_busy'
+		: (/edit mode|previous ContextBridge message|previous message|Edit dialog|Edit update button|message is already being edited|provider still shows Stop/i.test(message) ? 'browser_edit_unavailable'
 		: (/requested reasoning|reasoning selector/i.test(message) ? 'browser_reasoning_unavailable'
 			: (/send button stayed disabled|send button is not visible|prompt editor did not retain|prompt editor changed|gemini editor did not accept|incompatible selected tool/i.test(message) ? 'browser_submit_unavailable'
 			: (/prompt editor contains another draft/i.test(message) ? 'browser_composer_busy'
 			: (/image creation is rate limited/i.test(message) ? 'browser_rate_limited'
 			: (/image creation tool|image tool menu/i.test(message) ? 'browser_image_tool_unavailable'
-				: (/music creation tool/i.test(message) ? 'browser_music_tool_unavailable' : 'browser_automation_error'))))));
+				: (/music creation tool/i.test(message) ? 'browser_music_tool_unavailable' : 'browser_automation_error'))))))));
       resolve({ ok: false, error: message, code });
     }
   });
@@ -1969,6 +2111,7 @@ async function settings() {
     sessionBindings: {},
     sessionBindingsMigrated: false,
     sessionMode: 'manual',
+    tabEditModes: {},
     tabCapabilities: {},
     tabCapabilityScans: {},
     tabFailures: {},

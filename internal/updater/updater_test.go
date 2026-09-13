@@ -178,6 +178,26 @@ func TestFailedVersionIsNotRetriedAutomatically(t *testing.T) {
 	}
 }
 
+func TestHealthyUpgradeSupersedesOlderRollbackMarker(t *testing.T) {
+	manager, err := New(Settings{}, t.TempDir(), "v0.5.21")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.saveState(State{LastInstalled: "v0.5.20", LastError: "old failed install"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manager.failurePath(), []byte(`{"version":"v0.5.20","error":"old failed install"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	status := manager.LocalStatus()
+	if status.BlockedVersion != "" || status.LastError != "" || status.LastInstalled != "v0.5.21" {
+		t.Fatalf("healthy newer release still shows old failure: %+v", status)
+	}
+	if _, err := os.Stat(manager.failurePath()); err != nil {
+		t.Fatalf("historical rollback marker was removed: %v", err)
+	}
+}
+
 func TestAutomaticRetryUsesBoundedBackoff(t *testing.T) {
 	state := State{}
 	for attempt := 0; attempt < 12; attempt++ {

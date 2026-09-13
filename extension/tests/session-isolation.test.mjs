@@ -39,6 +39,9 @@ context.checkFreshTab = async (id) => id === 3 || tabs.get(id)?.url === 'https:/
 const work = (key, metadata = {}) => ({ job: { contextbridge_session_key: key, metadata }, profile: { name: 'chatgpt' } });
 const bindingKey = (key) => context.workSessionKey(work(key));
 assert.notEqual(bindingKey('shared'), context.workSessionKey({ job: { contextbridge_session_key: 'shared' }, profile: { name: 'gemini' } }));
+await context.setTabEditMode(1, true);
+assert.equal(state.tabEditModes[1], true);
+await assert.rejects(context.setTabEditMode(99, true), /Attach this AI tab/);
 
 const [first, second] = await Promise.all([
   context.resolveWorkTab({}, work('producer-a/session-1'), 1),

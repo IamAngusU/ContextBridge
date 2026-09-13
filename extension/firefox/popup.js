@@ -223,6 +223,20 @@ $('release-session-tab').addEventListener('click', async () => {
     setStatus('live', 'Empty chat ready for the next session');
   } catch (error) { setStatus('error', error.message || String(error)); }
 });
+$('edit-last-message').addEventListener('change', async () => {
+  const toggle = $('edit-last-message');
+  const requested = toggle.checked;
+  toggle.disabled = true;
+  try {
+    const tab = await currentPageTab();
+    const result = await api.runtime.sendMessage({ type: 'set-tab-edit-mode', tabId: tab?.id, enabled: requested });
+    if (!result?.ok) throw new Error(result?.error || 'Could not change this tab');
+    setStatus('live', requested ? 'This page will edit its previous ContextBridge text prompt' : 'This page will send new messages');
+  } catch (error) {
+    toggle.checked = !requested;
+    setStatus('error', error.message || String(error));
+  } finally { toggle.disabled = false; }
+});
 $('all-tabs').addEventListener('click', async () => {
   const granted = await api.permissions.request({ permissions: ['tabs'] });
   if (!granted) return setStatus('error', 'Tab access was not granted');
@@ -450,6 +464,11 @@ async function updateCurrentPageAction() {
   $('toggle-current-tab').disabled = !available || (!attached && ((!profile && saved.useVisualProfile) || attachedTabIDs.length >= 16));
   $('toggle-current-tab').textContent = attached ? 'Detach this page' : 'Attach this page';
   $('release-session-tab').hidden = !attached;
+  const canEdit = attached && ['chatgpt', 'gemini'].includes(profile?.name);
+  $('edit-last-message-row').hidden = !canEdit;
+  $('edit-last-message-hint').hidden = !canEdit;
+  $('edit-last-message').checked = canEdit && saved.tabEditModes?.[tab.id] === true;
+  $('edit-last-message').disabled = !canEdit || liveTabState.get(tab?.id)?.busy === true;
   $('current-tab-state').textContent = !available
     ? 'Open ChatGPT or Gemini to connect it.'
     : `${tab.title || safeHost(tab.url)} · ${attached ? (binding?.legacy ? 'old chat; open a new empty chat' : binding ? `session ${binding.label || 'reserved'}` : (saved.running ? 'connected' : 'attached, connection stopped')) : (profile ? 'ready' : 'teach this page in Advanced setup')}`;
@@ -474,7 +493,7 @@ async function setAttachedTabIDs(values) {
   const updates = { tabId: attachedTabIDs[0] || 0, tabIds: attachedTabIDs };
   if (removed.length) {
     const saved = await settings();
-    for (const key of ['tabCapabilities', 'tabCapabilityScans', 'tabFailures']) {
+    for (const key of ['tabCapabilities', 'tabCapabilityScans', 'tabFailures', 'tabEditModes']) {
       const entries = { ...(saved[key] || {}) };
       for (const id of removed) delete entries[id];
       updates[key] = entries;
@@ -651,6 +670,7 @@ async function settings() {
     autoAttachFreshTabs: false,
     preserveDrafts: false,
     sessionMode: 'manual',
+    tabEditModes: {},
     autoAttachBlockedTabIds: [],
     useVisualProfile: true,
     taughtProfiles: {},
