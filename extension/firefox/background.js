@@ -1146,20 +1146,31 @@ function automate(job, profile, jobDeadline) {
 	};
 	const chooseMusicTool = async (input) => {
 		if (profile.name !== 'gemini') throw new Error('Music creation requires a Gemini tab');
-		const composer = input.closest?.('[data-node-type="input-area"]');
-		if (composer?.querySelector?.('button[aria-label*="Musik\u201c aufheben" i], button[aria-label*="Music selection" i]')) return;
+		const selectedMusic = () => first(selectors.input)?.closest?.('[data-node-type="input-area"]')?.querySelector?.(
+			'button[aria-label*="Musik\u201c aufheben" i], button[aria-label*="Music selection" i]');
+		if (selectedMusic()) return;
 		const trigger = first(['button[aria-label*="Uploads & Tools" i]', 'button[aria-label*="Tools" i]', 'button[aria-label*="Werkzeuge" i]']);
 		if (!trigger) throw new Error('Music creation tool menu is not available in this chat');
-		trigger.click();
-		await wait(400);
-		const choices = [...document.querySelectorAll('button[role="menuitemcheckbox"], [role="menuitem"], [role="option"]')].filter(isVisible);
-		const choice = choices.find((element) => /(?:musik erstellen|create music|generate music)/i.test(visibleText(element)));
+		const musicChoice = () => [...document.querySelectorAll('button[role="menuitemcheckbox"], [role="menuitem"], [role="option"]')]
+			.filter(isVisible).find((element) => /(?:musik erstellen|create music|generate music)/i.test(visibleText(element)));
+		// Gemini creates an animated CDK overlay. A fixed 400 ms sleep can miss
+		// its entries; clicking the trigger again when already open closes it.
+		let choice = musicChoice();
+		if (!choice && trigger.getAttribute('aria-expanded') !== 'true') trigger.click();
+		for (let attempt = 0; !choice && attempt < 14; attempt += 1) {
+			await wait(250);
+			choice = musicChoice();
+		}
 		if (!choice || choice.disabled || choice.getAttribute('aria-disabled') === 'true') {
 			document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
 			throw new Error('Music creation tool is not available in this chat');
 		}
 		if (choice.getAttribute('aria-checked') !== 'true') choice.click();
-		await wait(450);
+		for (let attempt = 0; attempt < 10; attempt += 1) {
+			if (selectedMusic()) return;
+			await wait(200);
+		}
+		throw new Error('Music creation tool did not remain selected in this chat');
 	};
 	const cleanFileName = (value, fallback) => {
 		const clean = String(value || '').split(/[\\/]/).pop().replace(/[\u0000-\u001f<>:"|?*]/g, '-').trim().slice(0, 180);
@@ -1880,7 +1891,7 @@ function inspectPageDOM(selectors) {
   const composer = inputs[0]?.closest('[data-node-type="input-area"], form') || document.querySelector('form[data-type="unified-composer"]') || document.querySelector('form');
   const tools = [...(composer?.querySelectorAll('button, [role="button"]') || [])].filter(visible);
   const seenTools = new Set(tools);
-  for (const element of document.querySelectorAll('[role="menuitem"], [role="option"]')) {
+  for (const element of document.querySelectorAll('[role="menuitem"], [role="option"], toolbox-drawer-item [role="menuitemcheckbox"]')) {
     if (visible(element) && !seenTools.has(element)) {
       tools.push(element);
       seenTools.add(element);
@@ -1908,7 +1919,7 @@ function inspectPageDOM(selectors) {
   for (const element of document.querySelectorAll('[data-testid="image-gen-loading-progress"], [role="progressbar"][aria-valuenow]')) {
     if (visible(element)) imageProgress = Math.max(imageProgress, Number(element.getAttribute('aria-valuenow')) || 0);
   }
-  const relevant = /bild|image|file|datei|ordner|folder|upload|attach|tool|werkzeug|auswahl von|selection of|deselect/i;
+  const relevant = /bild|image|musik|music|file|datei|ordner|folder|upload|attach|tool|werkzeug|auswahl von|selection of|deselect/i;
   const inputCharacters = String(inputs[0]?.value || inputs[0]?.innerText || inputs[0]?.textContent || '').trim().length;
   return {
     captured_at: new Date().toISOString(),

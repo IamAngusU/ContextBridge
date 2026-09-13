@@ -38,6 +38,16 @@ func TestWorkerPolicyRestrictsRelayProvidersAndModels(t *testing.T) {
 	}
 }
 
+func TestBrowserModelPolicyAcceptsOrdinarySpacesForNBSPLabel(t *testing.T) {
+	worker := &Worker{cfg: WorkerConfig{AllowedModels: []string{"3.1 Pro"}}}
+	if _, err := worker.applyPolicy(Requirements{Task: "generation", Provider: "browser", Model: "3.1\u00a0Pro"}); err != nil {
+		t.Fatalf("browser model policy rejected equivalent whitespace: %v", err)
+	}
+	if _, err := worker.applyPolicy(Requirements{Task: "generation", Provider: "ollama", Model: "3.1\u00a0Pro"}); err == nil {
+		t.Fatal("local model policy accepted a different exact identifier")
+	}
+}
+
 func TestWorkerConsoleLabelsDoNotExposePromptOrAssumeSelectedModel(t *testing.T) {
 	job := Job{Requirements: Requirements{Provider: "browser"}, Payload: json.RawMessage(`{"prompt":"private prompt","browser_profile":"gemini","model":"3.1 Pro","reasoning":"high"}`)}
 	provider, profile, model, reasoning := jobRequestLabels(job)

@@ -139,7 +139,30 @@ func modelSupports(models []ModelCapability, requirements Requirements) bool {
 
 func hasModel(models []ModelCapability, name, provider string) bool {
 	for _, model := range models {
-		if modelMatchesProvider(model, provider) && strings.EqualFold(model.Name, name) {
+		if !modelMatchesProvider(model, provider) {
+			continue
+		}
+		if strings.EqualFold(provider, "browser") && browserModelEqual(model.Name, name) {
+			return true
+		}
+		if !strings.EqualFold(provider, "browser") && strings.EqualFold(model.Name, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// Websites may use non-breaking spaces in labels that users naturally type
+// with regular spaces. Keep local-model identifiers exact; only browser labels
+// get whitespace folding, so an allowlist cannot accidentally admit a
+// different Ollama/ComfyUI model name.
+func browserModelEqual(a, b string) bool {
+	return strings.EqualFold(strings.Join(strings.Fields(a), " "), strings.Join(strings.Fields(b), " "))
+}
+
+func containsBrowserModel(values []string, wanted string) bool {
+	for _, value := range values {
+		if browserModelEqual(value, wanted) {
 			return true
 		}
 	}

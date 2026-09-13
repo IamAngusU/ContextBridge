@@ -484,7 +484,11 @@ func (w *Worker) applyPolicy(requirements Requirements) (Requirements, error) {
 		if requirements.Model == "" {
 			requirements.Model = w.cfg.AllowedModels[0]
 		}
-		if !containsFold(w.cfg.AllowedModels, requirements.Model) {
+		allowed := containsFold(w.cfg.AllowedModels, requirements.Model)
+		if strings.EqualFold(requirements.Provider, "browser") {
+			allowed = containsBrowserModel(w.cfg.AllowedModels, requirements.Model)
+		}
+		if !allowed {
 			return Requirements{}, fmt.Errorf("worker policy rejects model %q", requirements.Model)
 		}
 	}
@@ -673,6 +677,9 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 			modelAllowed := func(model string) bool {
 				return len(w.cfg.AllowedModels) == 0 || containsFold(w.cfg.AllowedModels, model)
 			}
+			browserModelAllowed := func(model string) bool {
+				return len(w.cfg.AllowedModels) == 0 || containsBrowserModel(w.cfg.AllowedModels, model)
+			}
 			allowedModelTasks := func(tasks []string) []string {
 				if len(w.cfg.AllowedTasks) == 0 {
 					return tasks
@@ -715,7 +722,11 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 					capability.Tasks = append(capability.Tasks, task)
 					seenTasks[task] = true
 				}
-				if route.Model != "" && providerOnline(route.Provider) && modelAllowed(route.Model) {
+				allowedRouteModel := modelAllowed(route.Model)
+				if strings.EqualFold(route.Provider, "browser") {
+					allowedRouteModel = browserModelAllowed(route.Model)
+				}
+				if route.Model != "" && providerOnline(route.Provider) && allowedRouteModel {
 					vision, embedding := modelFeatures(route.Model, task)
 					if tasks := allowedModelTasks(modelTasks(task, vision, embedding)); len(tasks) > 0 {
 						capability.Models = append(capability.Models, ModelCapability{Name: route.Model, Tasks: tasks, Provider: route.Provider, Vision: vision, Embedding: embedding})
@@ -751,7 +762,7 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 				}
 				for _, model := range models {
 					key := strings.ToLower(strings.TrimSpace(tab.Profile + ":" + model))
-					if model == "" || seenBrowserModels[key] || !modelAllowed(model) {
+					if model == "" || seenBrowserModels[key] || !browserModelAllowed(model) {
 						continue
 					}
 					seenBrowserModels[key] = true

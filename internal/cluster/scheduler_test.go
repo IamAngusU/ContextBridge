@@ -93,6 +93,27 @@ func TestModelCapabilityCannotCrossProviderBoundary(t *testing.T) {
 	}
 }
 
+func TestBrowserModelLabelsFoldUnicodeWhitespaceOnly(t *testing.T) {
+	node := Node{ID: "browser", Connected: true, LastSeen: time.Now().UTC(), Capabilities: Capabilities{
+		Tasks: []string{"generation"}, Providers: []string{"browser", "ollama"}, MaxConcurrent: 2,
+		Models: []ModelCapability{
+			{Name: "3.6\u00a0Flash", Provider: "browser", Tasks: []string{"generation"}},
+			{Name: "local\u00a0model", Provider: "ollama", Tasks: []string{"generation"}},
+		},
+	}}
+	if got := Rank([]Node{node}, Requirements{Task: "generation", Provider: "browser", Model: "3.6 Flash"}); len(got) != 1 {
+		t.Fatalf("browser label with NBSP rejected ordinary user spaces: %#v", got)
+	}
+	for _, request := range []Requirements{
+		{Task: "generation", Provider: "browser", Model: "3.1 Pro"},
+		{Task: "generation", Provider: "ollama", Model: "local model"},
+	} {
+		if got := Rank([]Node{node}, request); len(got) != 0 {
+			t.Fatalf("model whitespace folding crossed a model/provider boundary: %#v", got)
+		}
+	}
+}
+
 func TestFirstPreferredNodeWinsEqualLoad(t *testing.T) {
 	now := time.Now().UTC()
 	nodes := []Node{

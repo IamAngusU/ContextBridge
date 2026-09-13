@@ -510,15 +510,16 @@ const element = (text = '', attributes = {}) => ({
 {
   let menuOpened = false;
   let musicSelected = false;
-  const composer = { querySelectorAll: () => [], querySelector: () => null };
+  let menuChecks = 0;
+  const composer = { querySelectorAll: () => [], querySelector: () => musicSelected ? element('', { 'aria-label': 'Auswahl von „Musik“ aufheben' }) : null };
   const input = { ...element(), closest: () => composer, focus() { throw new Error('Selected music composer was used'); } };
-  const trigger = { ...element('Uploads & Tools'), click() { menuOpened = true; } };
+  const trigger = { ...element('Uploads & Tools', { 'aria-expanded': 'false' }), click() { menuOpened = true; } };
   const choice = { ...element('Musik erstellen', { 'aria-checked': 'false' }), click() { musicSelected = true; } };
   context.document = {
     querySelectorAll(selector) {
       if (selector === '#input') return [input];
       if (selector === 'button[aria-label*="Uploads & Tools" i]') return [trigger];
-      if (selector === 'button[role="menuitemcheckbox"], [role="menuitem"], [role="option"]') return menuOpened ? [choice] : [];
+      if (selector === 'button[role="menuitemcheckbox"], [role="menuitem"], [role="option"]') return menuOpened && ++menuChecks >= 3 ? [choice] : [];
       return [];
     }
   };
@@ -528,8 +529,35 @@ const element = (text = '', attributes = {}) => ({
     new Date(Date.now() + 5000).toISOString()
   );
   assert.equal(menuOpened, true);
+  assert.ok(menuChecks >= 3);
   assert.equal(musicSelected, true);
   assert.equal(result.error, 'Selected music composer was used');
+}
+
+{
+  let triggerClicks = 0;
+  let musicSelected = false;
+  const composer = { querySelector: () => musicSelected ? element('', { 'aria-label': 'Auswahl von „Musik“ aufheben' }) : null,
+    querySelectorAll: () => [] };
+  const input = { ...element(), closest: () => composer, focus() { throw new Error('Open-menu music composer was used'); } };
+  const trigger = { ...element('Uploads & Tools', { 'aria-expanded': 'true' }), click() { triggerClicks++; } };
+  const choice = { ...element('Musik erstellen', { 'aria-checked': 'false' }), click() { musicSelected = true; } };
+  context.document = {
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === 'button[aria-label*="Uploads & Tools" i]') return [trigger];
+      if (selector === 'button[role="menuitemcheckbox"], [role="menuitem"], [role="option"]') return [choice];
+      return [];
+    }
+  };
+  const result = await context.automate(
+    { prompt: 'create music', metadata: { contextbridge_music_tool: true }, output: { mode: 'text', artifacts: true, min_media: 1 } },
+    { name: 'gemini', selectors: { input: ['#input'], response: [], submit: [] } },
+    new Date(Date.now() + 5000).toISOString()
+  );
+  assert.equal(triggerClicks, 0, 'an already-open menu must not be toggled closed');
+  assert.equal(musicSelected, true);
+  assert.equal(result.error, 'Open-menu music composer was used');
 }
 
 {
@@ -543,6 +571,24 @@ const element = (text = '', attributes = {}) => ({
   const snapshot = context.inspectPageDOM({ input: ['#input'], submit: [], response: [] });
   assert.equal(snapshot.tools[0].aria_label, 'Auswahl von „Musik“ aufheben');
   assert.equal(snapshot.input_has_text, false);
+}
+
+{
+  const input = { ...element(), tagName: 'DIV', closest: () => ({ querySelectorAll: () => [] }) };
+  const music = { ...element('Musik erstellen', { 'aria-checked': 'false' }), tagName: 'BUTTON', getAttribute(name) {
+    return name === 'role' ? 'menuitemcheckbox' : name === 'aria-checked' ? 'false' : null;
+  } };
+  context.document = {
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === '[role="menuitem"], [role="option"], toolbox-drawer-item [role="menuitemcheckbox"]') return [music];
+      return [];
+    },
+    querySelector: () => null
+  };
+  const snapshot = context.inspectPageDOM({ input: ['#input'], submit: [], response: [] });
+  assert.equal(snapshot.tools[0].role, 'menuitemcheckbox');
+  assert.equal(snapshot.tools[0].text, 'Musik erstellen');
 }
 
 {

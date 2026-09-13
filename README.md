@@ -26,7 +26,7 @@ ChatGPT and Gemini are detected automatically from stable DOM and accessibility 
 - **Visual browser teaching:** point at page controls instead of reverse engineering selectors.
 - **Progressive browser output:** follow a web-chat answer while it is generated, through the worker and relay, with `cluster submit --stream`.
 - **Stateful browser conversations:** pin related turns to one browser worker with `session_id`, or use the streaming `cluster chat` terminal.
-- **Parallel web-chat pool:** select several ChatGPT and Gemini tabs in one extension; each becomes an independent slot and sessions never cross conversations.
+- **Parallel web-chat pool:** select several ChatGPT and Gemini tabs in one extension; each becomes an independent serial UI slot. A session ID pins follow-up turns to a tab, but separate session IDs are not yet an isolation boundary; do not send unrelated users' private jobs to one attached conversation.
 - **Provider-aware recovery:** progress percentages, stop/send controls, rate limits, errors, accidental reloads, and stalled image generation are separate states rather than answer text.
 - **Images and files back:** opt in to bounded response artifacts, verify their SHA-256, and save them with `--artifacts`.
 - **1:1, 1:N, and N:N compute:** connect one app to one worker, distribute one queue across many workers, or share a capability-aware node pool between producers.
@@ -148,7 +148,7 @@ contextbridge cluster chat --provider browser --profile chatgpt --model gpt-6-as
 contextbridge cluster chat --provider browser --profile gemini
 ```
 
-Inside interactive chat, `/model …`, `/reasoning …`, `/profile …`, `/image on|off`, `/min-images 0…12`, `/music on|off`, `/min-artifacts 0…12`, and `/e2ee on|off` change subsequent turns; `/settings` shows the active choices. E2EE encrypts prompts and final results for one reserved worker; plaintext streaming and transparent failover are intentionally unavailable for that turn. The same `model`, `reasoning`, `browser_profile`, and `session_id` fields can be placed in an individual browser job payload. Choices are matched against the provider's visible localized menu; use the exact scanned label (for example, `3.1 Pro` rather than `Pro`). An unavailable choice fails clearly instead of silently running a different model.
+Inside interactive chat, `/model …`, `/reasoning …`, `/profile …`, `/image on|off`, `/min-images 0…12`, `/music on|off`, `/min-artifacts 0…12`, and `/e2ee on|off` change subsequent turns; `/settings` shows the active choices. E2EE encrypts prompts and final results for one reserved worker; plaintext streaming and transparent failover are intentionally unavailable for that turn. The same `model`, `reasoning`, `browser_profile`, and `session_id` fields can be placed in an individual browser job payload. Choices are matched against the provider's visible localized menu; use the full scanned label (for example, `3.1 Pro` rather than `Pro`). Normal spaces are accepted where a browser label uses non-breaking spaces. An unavailable choice fails clearly instead of silently running a different model.
 
 ## Connect A Browser Tab
 

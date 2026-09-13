@@ -2,6 +2,18 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.19 - 2026-09-13
+
+### Fixed
+
+- match browser model labels with Unicode spaces, including Gemini's non-breaking spaces, against ordinary spaces typed by users; local model identifiers remain exact
+- wait for Gemini's animated Music menu to render and reuse it if already open, then verify that Music remains selected before submitting the prompt
+- include Gemini's visible Music/Image tool checkboxes in the local, content-free browser inspector so a failed tool lookup can be diagnosed without sharing a full DOM dump
+
+### Verified
+
+- parallel ChatGPT and Gemini text jobs, E2EE follow-ups, unknown-model rejection before Send, a local Ollama job, a transferred ChatGPT PNG, and a transferred Gemini Music MP4 with decodable non-silent AAC audio on a live Windows worker
+
 ## 0.5.18 - 2026-09-13
 
 ### Fixed
