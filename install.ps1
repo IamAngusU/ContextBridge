@@ -67,13 +67,26 @@ try {
     Expand-Archive -Path $archive -DestinationPath $temporary -Force
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     Copy-Item (Join-Path $temporary "contextbridge.exe") (Join-Path $InstallDir "contextbridge.exe") -Force
-    if (Test-Path (Join-Path $InstallDir "extension")) {
-        Remove-Item (Join-Path $InstallDir "extension") -Recurse -Force
+    # Keep the unpacked extension's directory stable so a paired browser does
+    # not lose its installation path during an in-place update.
+    $extensionSource = Join-Path $temporary "extension"
+    $extensionTarget = Join-Path $InstallDir "extension"
+    New-Item -ItemType Directory -Path $extensionTarget -Force | Out-Null
+    Get-ChildItem -LiteralPath $extensionSource -File -Recurse | ForEach-Object {
+        $relative = [IO.Path]::GetRelativePath($extensionSource, $_.FullName)
+        $destination = Join-Path $extensionTarget $relative
+        New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
+        Copy-Item -LiteralPath $_.FullName -Destination $destination -Force
     }
-    Copy-Item (Join-Path $temporary "extension") (Join-Path $InstallDir "extension") -Recurse -Force
     Copy-Item (Join-Path $temporary "config.example.yml") (Join-Path $InstallDir "config.example.yml") -Force
 } finally {
-    Remove-Item $temporary -Recurse -Force -ErrorAction SilentlyContinue
+    $resolvedTemporary = [IO.Path]::GetFullPath($temporary)
+    $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    if (-not $resolvedTemporary.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        -not ([IO.Path]::GetFileName($resolvedTemporary) -match '^contextbridge-[0-9a-f]{32}$')) {
+        throw "Refusing to remove an unexpected temporary directory: $resolvedTemporary"
+    }
+    Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 $exe = Join-Path $InstallDir "contextbridge.exe"

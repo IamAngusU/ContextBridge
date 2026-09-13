@@ -2,6 +2,21 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.4 - 2026-09-13
+
+### Fixed
+
+- ChatGPT image-only turns and Gemini response containers are recognized as complete responses, with answer text kept separate from turn controls
+- same-origin image and file references get another bounded download attempt in the extension background worker
+- browser file jobs can require verified transferred files with `output.min_artifacts` or `cluster chat --min-artifacts`; text claims and URLs alone no longer pass this requirement
+- `cluster chat --image` asks for an image in the prompt and checks transferred image bytes rather than accepting text, links, or code files; explicit image-tool selection remains optional
+- image-mode jobs wait for rendered images and report provider limits or missing image tools as failures
+- image-generation percentage widgets stay in the progress state instead of being streamed as repeated answer text
+- required-artifact jobs now fail promptly after a stable text-only answer; hidden ChatGPT file inputs accept an attached local image plus prompt text
+- `browser inspect` reports a bounded, local-only DOM selector snapshot without chat or file contents
+- terminal and bridge logs show collected files separately from provider-hosted references
+- Windows installer updates extension files in place, preserving the directory selected by an unpacked browser extension
+
 ## 0.5.3 - 2026-09-13
 
 ### Added

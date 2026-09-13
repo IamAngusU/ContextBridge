@@ -371,6 +371,22 @@ async function processWork(cfg, work, claimedTabId) {
       }
       throw new Error(answer?.error || 'No browser response was captured');
     }
+    if (answer.artifacts?.length) {
+      progressSequence += 1;
+      await reportProgress(cfg, work.job.id, {
+        sequence: progressSequence,
+        text: '',
+        phase: 'transferring',
+        detail: `Collecting ${answer.artifacts.length} browser file(s)`,
+        busy: true
+      });
+      answer.artifacts = await hydrateArtifactReferences(answer.artifacts, tab.url, work.job.output || {});
+    }
+    if (!String(answer.text || '').trim()) {
+      const files = (answer.artifacts || []).filter((artifact) => Boolean(artifact.data_base64)).length;
+      const references = (answer.artifacts || []).length - files;
+      answer.text = `Captured ${files} file(s) and ${references} reference(s).`;
+    }
     if (answer.text && answer.text !== latestProgressText) {
       progressSequence += 1;
       await reportProgress(cfg, work.job.id, {
@@ -495,6 +511,67 @@ async function completeWork(cfg, jobId, decision) {
   await api.storage.local.set({ pendingCompletions });
 }
 
+async function hydrateArtifactReferences(artifacts, pageURL, spec) {
+  if (!spec?.artifacts || !Array.isArray(artifacts)) return [];
+  const limit = Math.max(1024, Math.min(Number(spec.max_artifact_bytes) || 12 << 20, 12 << 20));
+  const pageOrigin = new URL(pageURL).origin;
+  const result = [];
+  let total = 0;
+  for (const artifact of artifacts.slice(0, 12)) {
+    if (artifact.data_base64) {
+      total += Number(artifact.size) || Math.floor(artifact.data_base64.length * 3 / 4);
+      result.push(artifact);
+      continue;
+    }
+    if (!artifact.url) continue;
+    try {
+      const resource = new URL(artifact.url);
+      if (resource.protocol !== 'https:' || resource.origin !== pageOrigin) throw new Error('Provider-hosted reference');
+      const response = await fetch(resource.href, { credentials: 'include', redirect: 'error' });
+      if (!response.ok || !response.body) throw new Error('Resource could not be read');
+      const contentType = String(response.headers.get('content-type') || '').split(';')[0].toLowerCase();
+      if (artifact.media_type?.startsWith('image/') && !contentType.startsWith('image/')) throw new Error('Image response has the wrong media type');
+      const chunks = [];
+      let size = 0;
+      const reader = response.body.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (total + size + value.byteLength > limit) {
+          await reader.cancel();
+          throw new Error('Artifact exceeds transfer limit');
+        }
+        chunks.push(value);
+        size += value.byteLength;
+      }
+      if (!size) throw new Error('Empty artifact');
+      const bytes = new Uint8Array(size);
+      let offset = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      const digest = await crypto.subtle.digest('SHA-256', bytes);
+      let binary = '';
+      for (let start = 0; start < bytes.length; start += 0x8000) {
+        binary += String.fromCharCode(...bytes.subarray(start, Math.min(start + 0x8000, bytes.length)));
+      }
+      result.push({
+        ...artifact,
+        url: '',
+        media_type: contentType || artifact.media_type,
+        size,
+        sha256: [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join(''),
+        data_base64: btoa(binary)
+      });
+      total += size;
+    } catch (_) {
+      result.push(artifact);
+    }
+  }
+  return result;
+}
+
 async function flushPendingCompletions(cfg) {
   for (const [jobId, decision] of Object.entries(cfg.pendingCompletions)) {
     try {
@@ -521,6 +598,16 @@ function automate(job, profile, jobDeadline) {
     return [];
   };
   const visibleText = (element) => (element?.innerText || element?.textContent || '').trim();
+  const responseText = (element) => {
+    if (!element) return '';
+    if (element.querySelector('[data-testid="image-gen-loading-state"], [data-testid="image-gen-loading-progress"]')) return '';
+    const markdownParts = [...element.querySelectorAll('[data-message-author-role="assistant"] .markdown, message-content .markdown')];
+    if (markdownParts.length) return markdownParts.map(visibleText).filter(Boolean).join('\n');
+    if (element.querySelector('img') && element.matches?.('section[data-turn="assistant"], model-response')) return '';
+    const assistantParts = [...element.querySelectorAll('[data-message-author-role="assistant"]')];
+    if (assistantParts.length) return assistantParts.map(visibleText).filter(Boolean).join('\n');
+    return visibleText(element);
+  };
   const responseIdentity = (element) => {
     if (!element) return '';
     return ['data-message-id', 'data-testid', 'data-turn', 'id']
@@ -651,6 +738,38 @@ function automate(job, profile, jobDeadline) {
 		await wait(350);
 		return visibleText(match) || requested;
 	};
+	const chooseImageTool = async (input) => {
+		if (profile.name !== 'chatgpt') return;
+		const label = (element) => `${visibleText(element)} ${element.getAttribute('aria-label') || ''} ${element.getAttribute('data-testid') || ''}`.trim();
+		const imageChoice = (value) => /(?:ein\s+)?bild(?:er)?\s+(?:erstellen|generieren)|(?:create|generate)\s+(?:an?\s+)?image|create[-_]?image/i.test(value);
+		const composer = input.closest('form');
+		const direct = composer && [...composer.querySelectorAll('button, [role="button"]')].find((element) => imageChoice(label(element)));
+		if (direct) {
+			if (direct.disabled || direct.getAttribute('aria-disabled') === 'true') throw new Error('Image creation is rate limited in this chat');
+			if (direct.getAttribute('aria-pressed') === 'true' || direct.getAttribute('data-state') === 'active') return;
+			direct.click();
+			await wait(450);
+			return;
+		}
+		const trigger = first(['button[data-testid="composer-plus-btn"]', 'button[aria-label*="Dateien und mehr" i]', 'button[aria-label*="Add photos & files" i]']);
+		if (!trigger || trigger.getAttribute('aria-haspopup') !== 'menu') throw new Error('Image creation tool menu is not available in this chat');
+		const choiceSelector = '[role="menuitem"], [role="option"], [data-radix-collection-item], button, a, li';
+		const before = new Set([...document.querySelectorAll(choiceSelector)].filter(isVisible));
+		trigger.click();
+		await wait(450);
+		const choices = [...document.querySelectorAll(choiceSelector)].filter(isVisible).filter((element) => !before.has(element));
+		const choice = choices.find((element) => imageChoice(label(element)))
+			|| choices.find((element) => /^(?:bild|bilder|image|images)$/i.test(label(element)));
+		if (!choice) {
+			document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+			const alerts = [...document.querySelectorAll('[role="alert"]')].filter(isVisible).map(visibleText).join(' ');
+			if (/rate.?limit|limit erreicht|usage.?limit|quota/i.test(alerts)) throw new Error('Image creation is rate limited in this chat');
+			const available = choices.map(label).filter(Boolean).slice(0, 8).map((value) => value.slice(0, 60)).join(' / ');
+			throw new Error(`Image creation tool is not available in this chat${available ? `; visible tools: ${available}` : ''}`);
+		}
+		choice.click();
+		await wait(450);
+	};
 	const cleanFileName = (value, fallback) => {
 		const clean = String(value || '').split(/[\\/]/).pop().replace(/[\u0000-\u001f<>:"|?*]/g, '-').trim().slice(0, 180);
 		return clean && clean !== '.' ? clean : fallback;
@@ -697,6 +816,7 @@ function automate(job, profile, jobDeadline) {
 			candidates.push({ url, name, mediaType });
 		};
 		for (const image of responseElement.querySelectorAll('img')) {
+			if (image.getAttribute('aria-hidden') === 'true') continue;
 			if ((image.naturalWidth && image.naturalWidth < 128) || (image.naturalHeight && image.naturalHeight < 128)) continue;
 			const source = image.currentSrc || image.src;
 			const mediaType = mediaTypeFor(source, 'image/png');
@@ -758,17 +878,24 @@ function automate(job, profile, jobDeadline) {
 
   return new Promise(async (resolve) => {
     try {
-      const input = first(selectors.input);
+      let input = first(selectors.input);
       if (!input) throw new Error('Prompt input was not found');
       const before = all(selectors.response);
       const previousElement = before.length ? before[before.length - 1] : null;
-      const previousText = String(job.metadata?.contextbridge_baseline_text || (before.length ? visibleText(before[before.length - 1]) : ''));
+      const previousText = String(job.metadata?.contextbridge_baseline_text || (before.length ? responseText(before[before.length - 1]) : ''));
       const previousIdentity = responseIdentity(previousElement);
       const resumeOnly = Boolean(job.metadata?.contextbridge_resume_only);
       const selectedModel = !resumeOnly && job.model ? await choosePreference('model', job.model) : String(job.model || '');
       const selectedReasoning = !resumeOnly && job.reasoning ? await choosePreference('reasoning', job.reasoning) : String(job.reasoning || '');
+	  if (!resumeOnly && job.metadata?.contextbridge_image_tool) {
+		await chooseImageTool(input);
+		input = first(selectors.input);
+		if (!input) throw new Error('Prompt input disappeared after selecting the image tool');
+	  }
       if (!resumeOnly && job.image_base64) {
-        const fileInput = first(selectors.file_input);
+        const fileInput = (selectors.file_input || []).flatMap((selector) => {
+          try { return [...document.querySelectorAll(selector)]; } catch (_) { return []; }
+        }).find((element) => element.type === 'file' && (!element.accept || /image|\*/i.test(element.accept)));
         if (!fileInput) throw new Error('This job has an image, but no image input was taught');
         addImage(fileInput, job.image_base64, job.image_media_type);
         await wait(1000);
@@ -804,7 +931,7 @@ function automate(job, profile, jobDeadline) {
         await wait(650);
         const responses = all(selectors.response);
         const latestElement = responses.length ? responses[responses.length - 1] : null;
-        const latest = visibleText(latestElement);
+        const latest = responseText(latestElement);
 		const latestIdentity = responseIdentity(latestElement);
 		const changedResponse = responses.length > before.length || latest !== previousText
 			|| Boolean(previousIdentity && latestIdentity && latestIdentity !== previousIdentity);
@@ -829,10 +956,21 @@ function automate(job, profile, jobDeadline) {
 			resolve({ ok: false, error: providerFailure.message, code: providerFailure.code, retryable: providerFailure.retryable });
 			return;
 		}
+		if (job.output?.min_images > 0 && changedResponse && !busy && latest) {
+			if (/rate.?limit|usage.?limit|too many requests|quota|limit erreicht|nutzungslimit|bild(?:er)?limit|sp[aä]ter erneut/i.test(latest)) {
+				resolve({ ok: false, error: latest.slice(0, 300), code: 'browser_rate_limited', retryable: true });
+				return;
+			}
+			if (/bildgenerator\s+nicht\s+verf[uü]gbar|(?:image|bild)(?:\s+generation|generierung)?\s+(?:is\s+)?(?:not\s+available|unavailable|nicht\s+verf[uü]gbar)|(?:cannot|can't|kann\s+(?:leider\s+)?keine)\s+(?:generate\s+)?(?:images|bilder)/i.test(latest)) {
+				resolve({ ok: false, error: latest.slice(0, 300), code: 'browser_image_tool_unavailable' });
+				return;
+			}
+		}
 		const artifactCount = job.output?.artifacts && latestElement
 			? [...latestElement.querySelectorAll('img')].filter((image) => (!image.naturalWidth || image.naturalWidth >= 128) && (!image.naturalHeight || image.naturalHeight >= 128)).length
 				+ latestElement.querySelectorAll('a[download], pre code, [data-file-citation-primary-file-id]').length
 			: 0;
+		const imageCount = latestElement ? [...latestElement.querySelectorAll('img')].filter((image) => image.getAttribute('aria-hidden') !== 'true' && image.naturalWidth >= 128 && image.naturalHeight >= 128).length : 0;
 		const stableValue = latest || (artifactCount ? `artifact:${artifactCount}` : '');
 		if (!stableValue || !changedResponse) continue;
 		if (stableValue !== stableText) {
@@ -842,11 +980,14 @@ function automate(job, profile, jobDeadline) {
         }
         const mode = String(job.output?.mode || 'decision').toLowerCase();
         const structured = mode === 'text' || ((latest.includes('{') && latest.includes('}')) || (latest.includes('[') && latest.includes(']')));
-        const stableFor = sawBusy ? 1300 : 2600;
+		const stableFor = sawBusy ? 1300 : 2600;
 		const composerFinished = !(selectors.submit || []).length || state.composerReady || (sawBusy && state.inputReady);
         if (Date.now() - stableSince >= stableFor && structured && !busy && composerFinished) {
+		  const filesMissing = job.output?.min_artifacts > artifactCount;
+		  const imagesMissing = job.output?.min_images > imageCount;
+		  if ((filesMissing || imagesMissing) && Date.now() - stableSince < 15000) continue;
 		  const artifacts = await collectArtifacts(latestElement, job.output || {});
-		  resolve({ ok: true, text: latest || `Generated ${artifacts.length} artifact(s).`, artifacts, selected_model: selectedModel, selected_reasoning: selectedReasoning });
+		  resolve({ ok: true, text: latest, artifacts, selected_model: selectedModel, selected_reasoning: selectedReasoning });
           return;
         }
       }
@@ -856,7 +997,9 @@ function automate(job, profile, jobDeadline) {
       const message = error.message || String(error);
       const code = /requested model|model selector/i.test(message)
 		? 'browser_model_unavailable'
-		: (/requested reasoning|reasoning selector/i.test(message) ? 'browser_reasoning_unavailable' : 'browser_automation_error');
+		: (/requested reasoning|reasoning selector/i.test(message) ? 'browser_reasoning_unavailable'
+			: (/image creation is rate limited/i.test(message) ? 'browser_rate_limited'
+				: (/image creation tool|image tool menu/i.test(message) ? 'browser_image_tool_unavailable' : 'browser_automation_error')));
       resolve({ ok: false, error: message, code });
     }
   });
@@ -864,6 +1007,16 @@ function automate(job, profile, jobDeadline) {
 
 function captureProgress(selectors) {
   const visibleText = (element) => (element?.innerText || element?.textContent || '').trim();
+  const responseText = (element) => {
+    if (!element) return '';
+    if (element.querySelector('[data-testid="image-gen-loading-state"], [data-testid="image-gen-loading-progress"]')) return '';
+    const markdownParts = [...element.querySelectorAll('[data-message-author-role="assistant"] .markdown, message-content .markdown')];
+    if (markdownParts.length) return markdownParts.map(visibleText).filter(Boolean).join('\n');
+    if (element.querySelector('img') && element.matches?.('section[data-turn="assistant"], model-response')) return '';
+    const assistantParts = [...element.querySelectorAll('[data-message-author-role="assistant"]')];
+    if (assistantParts.length) return assistantParts.map(visibleText).filter(Boolean).join('\n');
+    return visibleText(element);
+  };
   const isVisible = (element) => Boolean(element && (element.offsetWidth || element.offsetHeight || element.getClientRects().length));
   let responses = [];
   for (const selector of selectors?.response || []) {
@@ -893,7 +1046,7 @@ function captureProgress(selectors) {
       }
     } catch (_) {}
   }
-  return { text: responses.length ? visibleText(responses[responses.length - 1]) : '', busy, percent, detail: detail || (busy ? 'Generating' : '') };
+  return { text: responses.length ? responseText(responses[responses.length - 1]) : '', busy, percent, detail: detail || (busy ? 'Generating' : '') };
 }
 
 function inspectSelectors(selectors) {
@@ -983,6 +1136,7 @@ async function sendHeartbeat(state) {
       const tab = await api.tabs.get(tabId);
       const profile = profileForTab(cfg, tab);
       let capabilities = cfg.tabCapabilities?.[tabId] || {};
+      let dom = null;
       try {
         const report = await api.scripting.executeScript({ target: { tabId }, func: inspectPageCapabilities });
         const live = report?.[0]?.result || {};
@@ -994,13 +1148,19 @@ async function sendHeartbeat(state) {
           reasoningLevels: [...new Set([...(capabilities.reasoningLevels || []), ...(live.reasoningLevels || [])])]
         };
       } catch (_) {}
+      if (!busyTabs.has(tabId)) {
+        try {
+          const snapshot = await api.scripting.executeScript({ target: { tabId }, func: inspectPageDOM, args: [profile?.selectors || {}] });
+          dom = snapshot?.[0]?.result || null;
+        } catch (_) {}
+      }
       tabs.push({
         id: tabId,
         origin: tab?.url && /^https?:/i.test(tab.url) ? new URL(tab.url).origin : '',
         title: tab?.title || '', profile: profile?.name || '',
         state: busyTabs.has(tabId) ? 'working' : (Number(cfg.tabCooldowns?.[tabId] || 0) > Date.now() ? 'rate_limited' : 'waiting'),
         current_model: capabilities.currentModel || '', current_reasoning: capabilities.currentReasoning || '',
-        models: capabilities.models || [], reasoning_levels: capabilities.reasoningLevels || []
+        models: capabilities.models || [], reasoning_levels: capabilities.reasoningLevels || [], dom
       });
     } catch (_) {}
   }
@@ -1070,6 +1230,76 @@ function inspectPageCapabilities() {
     currentReasoning,
     models: unique(options.map(text).filter((value) => modelPattern.test(value)), 50),
     reasoningLevels: unique(options.map(text).filter((value) => reasoningPattern.test(value)), 20)
+  };
+}
+
+function inspectPageDOM(selectors) {
+  const visible = (element) => Boolean(element && (element.offsetWidth || element.offsetHeight || element.getClientRects().length));
+  const short = (value, limit = 120) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, limit);
+  const describe = (element, includeText = false) => ({
+    tag: short(element.tagName?.toLowerCase(), 20),
+    id: short(element.id, 100),
+    test_id: short(element.getAttribute('data-testid'), 100),
+    role: short(element.getAttribute('role'), 40),
+    aria_label: short(element.getAttribute('aria-label')),
+    text: includeText ? short(element.innerText) : '',
+    type: short(element.type, 40),
+    accept: short(element.accept),
+    has_popup: short(element.getAttribute('aria-haspopup'), 20),
+    expanded: short(element.getAttribute('aria-expanded'), 10),
+    visible: visible(element),
+    disabled: Boolean(element.disabled || element.getAttribute('aria-disabled') === 'true'),
+    multiple: Boolean(element.multiple),
+    directory: Boolean(element.webkitdirectory || element.hasAttribute('webkitdirectory'))
+  });
+  const bySelectors = (items, limit) => {
+    const matches = [];
+    const seen = new Set();
+    for (const selector of items || []) {
+      try {
+        for (const element of document.querySelectorAll(selector)) {
+          if (seen.has(element)) continue;
+          seen.add(element);
+          matches.push(element);
+          if (matches.length === limit) return matches;
+        }
+      } catch (_) {}
+    }
+    return matches;
+  };
+  const inputs = bySelectors(selectors.input, 8);
+  const submit = bySelectors(selectors.submit, 8);
+  const fileInputs = [...document.querySelectorAll('input[type="file"]')].slice(0, 12);
+  const composer = inputs[0]?.closest('form') || document.querySelector('form[data-type="unified-composer"]') || document.querySelector('form');
+  const tools = [...(composer?.querySelectorAll('button, [role="button"]') || [])].filter(visible);
+  const seenTools = new Set(tools);
+  for (const element of document.querySelectorAll('[role="menuitem"], [role="option"]')) {
+    if (visible(element) && !seenTools.has(element)) {
+      tools.push(element);
+      seenTools.add(element);
+    }
+    if (tools.length >= 32) break;
+  }
+  const responses = bySelectors(selectors.response, 10000);
+  const latest = responses.at(-1);
+  let imageProgress = 0;
+  for (const element of document.querySelectorAll('[data-testid="image-gen-loading-progress"], [role="progressbar"][aria-valuenow]')) {
+    if (visible(element)) imageProgress = Math.max(imageProgress, Number(element.getAttribute('aria-valuenow')) || 0);
+  }
+  const relevant = /bild|image|file|datei|ordner|folder|upload|attach|tool|werkzeug/i;
+  return {
+    captured_at: new Date().toISOString(),
+    inputs: inputs.map((element) => describe(element)),
+    submit: submit.map((element) => describe(element)),
+    file_inputs: fileInputs.map((element) => describe(element)),
+    tools: tools.slice(0, 32).map((element) => {
+      const item = describe(element, true);
+      if (!relevant.test(`${item.text} ${item.aria_label} ${item.test_id}`)) item.text = '';
+      return item;
+    }),
+    assistant_turns: responses.length,
+    last_response_images: latest ? latest.querySelectorAll('img').length : 0,
+    image_progress: Math.max(0, Math.min(100, imageProgress))
   };
 }
 

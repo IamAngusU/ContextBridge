@@ -64,15 +64,46 @@ type BrowserClientStatus struct {
 }
 
 type BrowserTabStatus struct {
-	ID               int      `json:"id,omitempty"`
-	Origin           string   `json:"origin,omitempty"`
-	Title            string   `json:"title,omitempty"`
-	Profile          string   `json:"profile,omitempty"`
-	State            string   `json:"state,omitempty"`
-	CurrentModel     string   `json:"current_model,omitempty"`
-	CurrentReasoning string   `json:"current_reasoning,omitempty"`
-	Models           []string `json:"models,omitempty"`
-	ReasoningLevels  []string `json:"reasoning_levels,omitempty"`
+	ID               int                 `json:"id,omitempty"`
+	Origin           string              `json:"origin,omitempty"`
+	Title            string              `json:"title,omitempty"`
+	Profile          string              `json:"profile,omitempty"`
+	State            string              `json:"state,omitempty"`
+	CurrentModel     string              `json:"current_model,omitempty"`
+	CurrentReasoning string              `json:"current_reasoning,omitempty"`
+	Models           []string            `json:"models,omitempty"`
+	ReasoningLevels  []string            `json:"reasoning_levels,omitempty"`
+	DOM              *BrowserDOMSnapshot `json:"dom,omitempty"`
+}
+
+// BrowserDOMSnapshot contains selector diagnostics only. It deliberately never
+// carries the prompt value, chat text, file contents, cookies, or full HTML.
+type BrowserDOMSnapshot struct {
+	CapturedAt         time.Time           `json:"captured_at"`
+	Inputs             []BrowserDOMControl `json:"inputs,omitempty"`
+	Submit             []BrowserDOMControl `json:"submit,omitempty"`
+	FileInputs         []BrowserDOMControl `json:"file_inputs,omitempty"`
+	Tools              []BrowserDOMControl `json:"tools,omitempty"`
+	AssistantTurns     int                 `json:"assistant_turns"`
+	LastResponseImages int                 `json:"last_response_images"`
+	ImageProgress      int                 `json:"image_progress,omitempty"`
+}
+
+type BrowserDOMControl struct {
+	Tag       string `json:"tag,omitempty"`
+	ID        string `json:"id,omitempty"`
+	TestID    string `json:"test_id,omitempty"`
+	Role      string `json:"role,omitempty"`
+	AriaLabel string `json:"aria_label,omitempty"`
+	Text      string `json:"text,omitempty"`
+	Type      string `json:"type,omitempty"`
+	Accept    string `json:"accept,omitempty"`
+	HasPopup  string `json:"has_popup,omitempty"`
+	Expanded  string `json:"expanded,omitempty"`
+	Visible   bool   `json:"visible"`
+	Disabled  bool   `json:"disabled,omitempty"`
+	Multiple  bool   `json:"multiple,omitempty"`
+	Directory bool   `json:"directory,omitempty"`
 }
 
 type Activity struct {

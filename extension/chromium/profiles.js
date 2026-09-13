@@ -18,11 +18,11 @@
           'button[aria-label*="senden" i]'
         ],
         response: [
-          '[data-message-author-role="assistant"]',
           'section[data-turn="assistant"][data-testid^="conversation-turn-"]',
+          '[data-message-author-role="assistant"]',
           'article[data-testid^="conversation-turn-"] .markdown'
         ],
-        file_input: ['input[type="file"]']
+        file_input: ['#upload-photos', '#upload-media', '#upload-files', 'input[type="file"]']
       }
     },
     {
@@ -45,6 +45,7 @@
           'button[aria-label="Send"]'
         ],
         response: [
+          'model-response',
           'model-response message-content .markdown[aria-live="polite"]',
           'model-response .model-response-text message-content .markdown',
           'model-response .model-response-text'

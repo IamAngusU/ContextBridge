@@ -10,6 +10,8 @@ const chatgpt = context.ContextBridgeProfiles.forURL('https://chatgpt.com/c/exam
 assert.equal(chatgpt.name, 'chatgpt');
 assert.ok(chatgpt.selectors.input.includes('#prompt-textarea'));
 assert.ok(chatgpt.selectors.response.includes('[data-message-author-role="assistant"]'));
+assert.equal(chatgpt.selectors.response[0], 'section[data-turn="assistant"][data-testid^="conversation-turn-"]');
+assert.equal(chatgpt.selectors.file_input[0], '#upload-photos');
 
 const legacyChatGPT = context.ContextBridgeProfiles.forURL('https://chat.openai.com/c/example');
 assert.equal(legacyChatGPT.name, 'chatgpt');
@@ -19,6 +21,7 @@ const gemini = context.ContextBridgeProfiles.forURL('https://gemini.google.com/a
 assert.equal(gemini.name, 'gemini');
 assert.ok(gemini.selectors.input.some((selector) => selector.includes('rich-textarea')));
 assert.ok(gemini.selectors.response.some((selector) => selector.includes('model-response')));
+assert.equal(gemini.selectors.response[0], 'model-response');
 
 assert.equal(context.ContextBridgeProfiles.forURL('https://chatgpt.com.example.test/'), null);
 assert.equal(context.ContextBridgeProfiles.forURL('https://example.test/'), null);

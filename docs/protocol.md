@@ -102,7 +102,9 @@ Unsealed cluster jobs expose the latest browser snapshot in the job's `progress`
 field. `sequence` is monotonic, `text` contains at most 1 MB of UTF-8, and
 `phase` is `submitting`, `generating`, `stabilizing`, `recovering`, `rate_limited`, or `final`. `detail` carries a short status and `percent` carries a determinate 0–100 value when the page exposes one, such as ChatGPT image generation. These fields are telemetry and are never normalized as answer text. Plaintext progress is disabled for sealed jobs.
 
-A browser result can opt in with `output.artifacts: true`. Up to twelve images, download links, or code blocks from the newly completed turn are accepted. Embedded bytes share a maximum 12 MiB budget and are re-hashed by the local service; protected HTTPS assets may remain authenticated browser references.
+A browser result can opt in with `output.artifacts: true`. Up to twelve images, download links, or code blocks from the newly completed turn are accepted. Embedded bytes share a maximum 12 MiB budget and are re-hashed by the local service; protected HTTPS assets may remain authenticated browser references. `output.min_artifacts` requires 1–12 transferred files of any supported type; `output.min_images` requires 1–12 transferred image files whose decoded bytes match the declared image type. References, generated code blocks, and textual claims do not satisfy an image requirement. An image-generation prompt does not require selecting a special browser tool; `metadata.contextbridge_image_tool: true` is an optional explicit ChatGPT UI selection.
+
+For a visual input, set `image_base64` and `image_media_type` alongside the prompt. The extension uploads the image through the provider's file input even when that input is visually hidden, then submits the prompt text. Local selector diagnostics are available via `contextbridge browser inspect`; the browser heartbeat reports bounded control attributes and counts only, never prompt values, answer text, files, cookies, or full HTML. These diagnostics remain on the local bridge and are not forwarded to the cluster relay.
 
 ## Tunnel Status Endpoint
 

@@ -90,6 +90,12 @@ try {
     $env:GOARCH = $originalGOARCH
     $env:CGO_ENABLED = $originalCGO
     if (Test-Path -LiteralPath $temporary) {
+        $resolvedTemp = [IO.Path]::GetFullPath($temporary)
+        $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+        if (-not $resolvedTemp.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase) -or
+            -not ([IO.Path]::GetFileName($resolvedTemp) -match '^contextbridge-release-[0-9a-f]{32}$')) {
+            throw "Refusing to remove an unexpected temporary directory: $resolvedTemp"
+        }
         Remove-Item -LiteralPath $temporary -Recurse -Force
     }
 }

@@ -3,14 +3,17 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -34,8 +37,32 @@ func clusterChatCommand(args []string) error {
 	sessionID := flags.String("session", "", "stable conversation ID")
 	prompt := flags.String("prompt", "", "send one turn and exit")
 	artifactDir := flags.String("artifacts", "auto", "artifact directory; auto uses local ContextBridge storage, off disables saving")
+	minArtifacts := flags.Int("min-artifacts", 0, "require this many verified files in the browser response (0-12)")
+	requireImage := flags.Bool("image", false, "require a real returned image file; ask for the image in the prompt")
+	attachImage := flags.String("attach-image", "", "attach one local PNG, JPEG, WebP, or GIF image to each turn")
 	if err := flags.Parse(args); err != nil {
 		return err
+	}
+	if *minArtifacts < 0 || *minArtifacts > 12 {
+		return errors.New("--min-artifacts must be between 0 and 12")
+	}
+	if *requireImage && !strings.EqualFold(*provider, "browser") {
+		return errors.New("--image requires --provider browser")
+	}
+	var imageBase64, imageMediaType string
+	if *attachImage != "" {
+		raw, err := os.ReadFile(*attachImage)
+		if err != nil {
+			return fmt.Errorf("read attached image: %w", err)
+		}
+		if len(raw) == 0 || len(raw) > 8<<20 {
+			return errors.New("--attach-image must be a non-empty file no larger than 8 MiB")
+		}
+		imageMediaType = http.DetectContentType(raw)
+		if imageMediaType != "image/png" && imageMediaType != "image/jpeg" && imageMediaType != "image/webp" && imageMediaType != "image/gif" {
+			return errors.New("--attach-image must be a PNG, JPEG, WebP, or GIF file")
+		}
+		imageBase64 = base64.StdEncoding.EncodeToString(raw)
 	}
 	cfg, err := config.Load(*path)
 	if err != nil {
@@ -53,14 +80,17 @@ func clusterChatCommand(args []string) error {
 	} else if *artifactDir == "off" {
 		*artifactDir = ""
 	}
+	if (*minArtifacts > 0 || *requireImage) && *artifactDir == "" {
+		return errors.New("--image and --min-artifacts require artifact saving")
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	state := &chatState{relayURL: clusterBaseURL(cfg), token: *token, provider: *provider, group: *group, model: *model, profile: *profile, reasoning: *reasoning, e2ee: *e2ee, sessionID: *sessionID, artifactDir: *artifactDir}
+	state := &chatState{relayURL: clusterBaseURL(cfg), token: *token, provider: *provider, group: *group, model: *model, profile: *profile, reasoning: *reasoning, e2ee: *e2ee, sessionID: *sessionID, artifactDir: *artifactDir, minArtifacts: *minArtifacts, requireImage: *requireImage, imageBase64: imageBase64, imageMediaType: imageMediaType}
 
 	if strings.TrimSpace(*prompt) != "" {
 		return state.turn(ctx, strings.TrimSpace(*prompt))
 	}
-	fmt.Printf("\n  ContextBridge Chat · %s\n  session %s · follow-ups stay in the same browser conversation\n  /model, /reasoning, /profile and /e2ee change this session · /settings shows it · /exit closes it\n\n", *provider, *sessionID)
+	fmt.Printf("\n  ContextBridge Chat · %s\n  session %s · follow-ups stay in the same browser conversation\n  /model, /reasoning, /profile, /image, /min-artifacts and /e2ee change this session · /settings shows it · /exit closes it\n\n", *provider, *sessionID)
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 64<<10), 1<<20)
 	for {
@@ -105,6 +135,29 @@ func (s *chatState) command(line string) (bool, string) {
 	case "/profile":
 		s.profile = value
 		return true, "  ✓ browser profile: " + emptyChatSetting(s.profile)
+	case "/min-artifacts":
+		count, err := strconv.Atoi(value)
+		if err != nil || count < 0 || count > 12 {
+			return true, "  ! use /min-artifacts 0 through 12"
+		}
+		if count > 0 && s.artifactDir == "" {
+			return true, "  ! file requirements need artifact saving enabled"
+		}
+		s.minArtifacts = count
+		return true, fmt.Sprintf("  ✓ required files: %d", count)
+	case "/image":
+		switch strings.ToLower(value) {
+		case "on", "true", "1", "yes", "an", "ein":
+			if s.artifactDir == "" {
+				return true, "  ! image mode needs artifact saving enabled"
+			}
+			s.requireImage = true
+		case "off", "false", "0", "no", "aus":
+			s.requireImage = false
+		default:
+			return true, "  ! use /image on or /image off"
+		}
+		return true, fmt.Sprintf("  ✓ image file required: %t", s.requireImage)
 	case "/e2ee":
 		switch strings.ToLower(value) {
 		case "on", "true", "1", "yes", "an", "ein":
@@ -117,7 +170,7 @@ func (s *chatState) command(line string) (bool, string) {
 		}
 		return true, fmt.Sprintf("  ✓ E2EE: %t", s.e2ee)
 	case "/settings":
-		return true, fmt.Sprintf("  session %s · provider %s · profile %s · model %s · reasoning %s · E2EE %t", s.sessionID, s.provider, emptyChatSetting(s.profile), emptyChatSetting(s.model), emptyChatSetting(s.reasoning), s.e2ee)
+		return true, fmt.Sprintf("  session %s · provider %s · profile %s · model %s · reasoning %s · image required %t · required files %d · E2EE %t", s.sessionID, s.provider, emptyChatSetting(s.profile), emptyChatSetting(s.model), emptyChatSetting(s.reasoning), s.requireImage, s.minArtifacts, s.e2ee)
 	default:
 		return false, ""
 	}
@@ -131,24 +184,39 @@ func emptyChatSetting(value string) string {
 }
 
 type chatState struct {
-	relayURL    string
-	token       string
-	provider    string
-	group       string
-	model       string
-	profile     string
-	reasoning   string
-	e2ee        bool
-	sessionID   string
-	artifactDir string
-	nodeID      string
+	relayURL       string
+	token          string
+	provider       string
+	group          string
+	model          string
+	profile        string
+	reasoning      string
+	e2ee           bool
+	sessionID      string
+	artifactDir    string
+	minArtifacts   int
+	requireImage   bool
+	imageBase64    string
+	imageMediaType string
+	nodeID         string
 }
 
 func (s *chatState) turn(ctx context.Context, prompt string) error {
+	minimum := s.minArtifacts
+	if s.requireImage {
+		if minimum < 1 {
+			minimum = 1
+		}
+	}
+	minimumImages := 0
+	if s.requireImage {
+		minimumImages = 1
+	}
 	payload, err := json.Marshal(bridge.Job{
 		Source: "terminal-chat", Task: "generation", Prompt: prompt,
 		SessionID: s.sessionID, BrowserProfile: s.profile, Model: s.model, Reasoning: s.reasoning,
-		Output: bridge.OutputSpec{Mode: "text", MaxBytes: 1 << 20, Artifacts: true, MaxArtifactBytes: 12 << 20},
+		ImageBase64: s.imageBase64, ImageMediaType: s.imageMediaType,
+		Output: bridge.OutputSpec{Mode: "text", MaxBytes: 1 << 20, Artifacts: true, MaxArtifactBytes: 12 << 20, MinArtifacts: minimum, MinImages: minimumImages},
 	})
 	if err != nil {
 		return err
@@ -246,7 +314,36 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 				return errors.New("worker returned no text output")
 			}
 			if submission.Output.Error != "" {
+				if streamed {
+					fmt.Println()
+				}
 				return fmt.Errorf("browser job failed: %s", submission.Output.Error)
+			}
+			verifiedFiles := 0
+			for _, artifact := range submission.Output.Artifacts {
+				if artifact.DataBase64 != "" {
+					verifiedFiles++
+				}
+			}
+			if verifiedFiles < minimum {
+				if streamed {
+					fmt.Println()
+				}
+				return fmt.Errorf("artifacts_missing: expected %d file(s), received %d", minimum, verifiedFiles)
+			}
+			if s.requireImage {
+				images := 0
+				for _, artifact := range submission.Output.Artifacts {
+					if artifact.DataBase64 != "" && strings.HasPrefix(artifact.MediaType, "image/") {
+						images++
+					}
+				}
+				if images == 0 {
+					if streamed {
+						fmt.Println()
+					}
+					return errors.New("images_missing: expected 1 image, received 0")
+				}
 			}
 			if !streamed || submission.Output.Text != lastProgress {
 				if streamed {
@@ -274,6 +371,9 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 			fmt.Printf("  ✓ %.1fs · %s\n\n", time.Since(started).Seconds(), shortChatID(job.AssignedNode))
 			return nil
 		case cluster.JobFailed, cluster.JobCancelled:
+			if streamed {
+				fmt.Println()
+			}
 			return fmt.Errorf("job %s: %s", job.Status, job.Error)
 		}
 	}

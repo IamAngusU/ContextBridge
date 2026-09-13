@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import { webcrypto } from 'node:crypto';
 
 const source = fs.readFileSync(new URL('../src/background.js', import.meta.url), 'utf8');
 const listeners = { addListener() {} };
@@ -64,6 +65,22 @@ const element = (text = '', attributes = {}) => ({
   assert.equal(result.ok, false);
   assert.equal(result.code, 'browser_rate_limited');
   assert.equal(result.retryable, true);
+}
+
+{
+  const input = { ...element(), closest: () => null };
+  context.document = {
+    querySelectorAll(selector) {
+      return selector === '#input' ? [input] : [];
+    }
+  };
+  const result = await context.automate(
+    { prompt: 'Create an image', metadata: { contextbridge_image_tool: true }, output: { mode: 'text', artifacts: true, min_images: 1 } },
+    { name: 'chatgpt', selectors: { input: ['#input'], response: [], submit: [] } },
+    new Date(Date.now() + 5000).toISOString()
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'browser_image_tool_unavailable');
 }
 
 {
@@ -145,6 +162,106 @@ const element = (text = '', attributes = {}) => ({
   );
   assert.equal(result.ok, true);
   assert.equal(result.text, 'Finished answer');
+}
+
+{
+  const answer = element('Actual answer');
+  const fullTurn = {
+    ...element('ChatGPT: thought for 10s Actual answer Copy Edit'),
+    querySelectorAll(selector) {
+      return selector === '[data-message-author-role="assistant"]' ? [answer] : [];
+    }
+  };
+  context.document = {
+    querySelectorAll(selector) {
+      return selector === '#turns' ? [fullTurn] : [];
+    }
+  };
+  assert.equal(context.captureProgress({ response: ['#turns'] }).text, 'Actual answer');
+
+  const image = { naturalWidth: 512, naturalHeight: 512 };
+  const imageTurn = {
+    ...element('ChatGPT: Worked for 44s Edit'),
+    matches: () => true,
+    querySelector: (selector) => selector === 'img' ? image : null
+  };
+  context.document = {
+    querySelectorAll(selector) {
+      return selector === '#turns' ? [imageTurn] : [];
+    }
+  };
+  assert.equal(context.captureProgress({ response: ['#turns'] }).text, '');
+
+  const loadingTurn = {
+    ...element('Denkt nach ... Ein Bild wird erstellt 67 %'),
+    matches: () => true,
+    querySelector: (selector) => selector.includes('image-gen-loading-state') ? loading : null,
+    querySelectorAll: (selector) => selector === '[data-message-author-role="assistant"]' ? [element('Denkt nach ... 67 %')] : []
+  };
+  const loading = element();
+  context.document = {
+    querySelectorAll(selector) {
+      return selector === '#turns' ? [loadingTurn] : [];
+    }
+  };
+  assert.equal(context.captureProgress({ response: ['#turns'] }).text, '');
+}
+
+{
+  context.crypto = webcrypto;
+  context.btoa = (value) => Buffer.from(value, 'binary').toString('base64');
+  const bytes = new Uint8Array([137, 80, 78, 71]);
+  let fetches = 0;
+  context.fetch = async (_url, options) => {
+    fetches += 1;
+    assert.equal(options.credentials, 'include');
+    assert.equal(options.redirect, 'error');
+    let sent = false;
+    return {
+      ok: true,
+      headers: { get: () => 'image/png' },
+      body: { getReader: () => ({
+        read: async () => sent ? { done: true } : (sent = true, { done: false, value: bytes }),
+        cancel: async () => {}
+      }) }
+    };
+  };
+  const reference = { name: 'image-1.png', media_type: 'image/png', url: 'https://chatgpt.com/generated.png' };
+  const hydrated = await context.hydrateArtifactReferences([reference], 'https://chatgpt.com/c/test', { artifacts: true });
+  assert.equal(hydrated[0].data_base64, Buffer.from(bytes).toString('base64'));
+  assert.equal(hydrated[0].size, bytes.length);
+  assert.equal(hydrated[0].sha256.length, 64);
+  const external = await context.hydrateArtifactReferences(
+    [{ ...reference, url: 'https://other.example/generated.png' }],
+    'https://chatgpt.com/c/test',
+    { artifacts: true }
+  );
+  assert.equal(external[0].data_base64, undefined);
+  assert.equal(fetches, 1);
+}
+
+{
+  const toolbar = { ...element('Bild erstellen', { 'aria-label': 'Bild erstellen', 'data-testid': 'create-image' }), tagName: 'BUTTON', id: 'image-tool', type: 'button' };
+  const composer = { querySelectorAll: () => [toolbar] };
+  const prompt = { ...element(), tagName: 'DIV', id: 'prompt-textarea', closest: () => composer };
+  const upload = { ...element('', { 'data-testid': 'upload-photos-input' }), offsetWidth: 0, offsetHeight: 0, getClientRects: () => [], tagName: 'INPUT', id: 'upload-photos', type: 'file', accept: 'image/*', multiple: true };
+  const answer = { ...element('private answer'), querySelectorAll: (selector) => selector === 'img' ? [{}, {}] : [] };
+  context.document = {
+    querySelectorAll(selector) {
+      if (selector === '#prompt-textarea') return [prompt];
+      if (selector === '#send') return [toolbar];
+      if (selector === 'input[type="file"]') return [upload];
+      if (selector === '#turns') return [answer];
+      return [];
+    },
+    querySelector: () => null
+  };
+  const snapshot = context.inspectPageDOM({ input: ['#prompt-textarea'], submit: ['#send'], response: ['#turns'] });
+  assert.equal(snapshot.file_inputs[0].id, 'upload-photos');
+  assert.equal(snapshot.file_inputs[0].visible, false);
+  assert.equal(snapshot.file_inputs[0].accept, 'image/*');
+  assert.equal(snapshot.last_response_images, 2);
+  assert.equal(JSON.stringify(snapshot).includes('private answer'), false);
 }
 
 console.log('Browser progress and provider failures verified');

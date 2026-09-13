@@ -13,6 +13,8 @@
       "mode": "text",
       "max_bytes": 1048576,
       "artifacts": true,
+      "min_artifacts": 3,
+      "min_images": 3,
       "max_artifact_bytes": 12582912
     }
   },

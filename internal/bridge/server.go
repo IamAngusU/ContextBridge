@@ -322,7 +322,8 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		if output.Error != "" {
 			status = output.Error
 		}
-		s.logger.Printf("completed job %s: %s via %s", job.ID, status, output.Provider)
+		files, references := artifactCounts(output.Artifacts)
+		s.logger.Printf("completed job %s: %s via %s [%d file(s), %d reference(s)]", job.ID, status, output.Provider, files, references)
 		s.store.AddActivity("output", "Output: "+status+" via "+output.Provider, job.ID)
 	}
 	writeJSON(w, http.StatusOK, submission)
@@ -442,8 +443,20 @@ func (s *Server) handleBrowserJobAction(w http.ResponseWriter, r *http.Request) 
 	} else if output.Error != "" {
 		status = output.Error
 	}
-	s.logger.Printf("browser completed job %s: %s", parts[0], status)
+	files, references := artifactCounts(output.Artifacts)
+	s.logger.Printf("browser completed job %s: %s [%d file(s), %d reference(s)]", parts[0], status, files, references)
 	writeJSON(w, http.StatusOK, output)
+}
+
+func artifactCounts(artifacts []Artifact) (files, references int) {
+	for _, artifact := range artifacts {
+		if artifact.DataBase64 != "" {
+			files++
+		} else if artifact.URL != "" {
+			references++
+		}
+	}
+	return files, references
 }
 
 func (s *Server) handleBrowserHeartbeat(w http.ResponseWriter, r *http.Request) {
@@ -487,6 +500,15 @@ func (s *Server) handleBrowserHeartbeat(w http.ResponseWriter, r *http.Request) 
 		status.Tabs[index].CurrentReasoning = limitedValue(status.Tabs[index].CurrentReasoning, 100)
 		status.Tabs[index].Models = limitedStrings(status.Tabs[index].Models, 50, 100)
 		status.Tabs[index].ReasoningLevels = limitedStrings(status.Tabs[index].ReasoningLevels, 20, 100)
+		if dom := status.Tabs[index].DOM; dom != nil {
+			dom.Inputs = limitedDOMControls(dom.Inputs, 8)
+			dom.Submit = limitedDOMControls(dom.Submit, 8)
+			dom.FileInputs = limitedDOMControls(dom.FileInputs, 12)
+			dom.Tools = limitedDOMControls(dom.Tools, 32)
+			dom.AssistantTurns = max(0, min(dom.AssistantTurns, 10000))
+			dom.LastResponseImages = max(0, min(dom.LastResponseImages, 100))
+			dom.ImageProgress = max(0, min(dom.ImageProgress, 100))
+		}
 	}
 	if status.State == "" {
 		status.State = "waiting"
@@ -558,6 +580,26 @@ func limitedStrings(values []string, count, width int) []string {
 		}
 	}
 	return result
+}
+
+func limitedDOMControls(values []BrowserDOMControl, count int) []BrowserDOMControl {
+	if len(values) > count {
+		values = values[:count]
+	}
+	for index := range values {
+		item := &values[index]
+		item.Tag = limitedValue(item.Tag, 20)
+		item.ID = limitedValue(item.ID, 100)
+		item.TestID = limitedValue(item.TestID, 100)
+		item.Role = limitedValue(item.Role, 40)
+		item.AriaLabel = limitedValue(item.AriaLabel, 120)
+		item.Text = limitedValue(item.Text, 120)
+		item.Type = limitedValue(item.Type, 40)
+		item.Accept = limitedValue(item.Accept, 120)
+		item.HasPopup = limitedValue(item.HasPopup, 20)
+		item.Expanded = limitedValue(item.Expanded, 10)
+	}
+	return values
 }
 
 func (s *Server) watchInbox(ctx context.Context) {
@@ -706,6 +748,24 @@ func validateJob(job Job) error {
 	}
 	if job.Output.MaxArtifactBytes != 0 && (job.Output.MaxArtifactBytes < 1024 || job.Output.MaxArtifactBytes > 12<<20) {
 		return errors.New("output.max_artifact_bytes must be between 1024 and 12582912")
+	}
+	if job.Output.MinArtifacts < 0 || job.Output.MinArtifacts > 12 {
+		return errors.New("output.min_artifacts must be between 0 and 12")
+	}
+	if job.Output.MinArtifacts > 0 && !job.Output.Artifacts {
+		return errors.New("output.min_artifacts requires output.artifacts")
+	}
+	if job.Output.MinArtifacts > 0 && mode != "text" && mode != "json" {
+		return errors.New("output.min_artifacts requires text or json output")
+	}
+	if job.Output.MinImages < 0 || job.Output.MinImages > 12 {
+		return errors.New("output.min_images must be between 0 and 12")
+	}
+	if job.Output.MinImages > 0 && !job.Output.Artifacts {
+		return errors.New("output.min_images requires output.artifacts")
+	}
+	if job.Output.MinImages > 0 && mode != "text" && mode != "json" {
+		return errors.New("output.min_images requires text or json output")
 	}
 	if len(job.Output.RequiredKeys) > 50 {
 		return errors.New("output.required_keys accepts at most 50 keys")

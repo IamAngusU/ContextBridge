@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -47,6 +48,8 @@ type OutputSpec struct {
 	MaxBytes         int      `json:"max_bytes,omitempty"`
 	Artifacts        bool     `json:"artifacts,omitempty"`
 	MaxArtifactBytes int      `json:"max_artifact_bytes,omitempty"`
+	MinArtifacts     int      `json:"min_artifacts,omitempty"`
+	MinImages        int      `json:"min_images,omitempty"`
 }
 
 // Artifact is a file or image found in the final browser response. DataBase64
@@ -174,6 +177,28 @@ func NormalizeOutput(raw []byte, spec OutputSpec, provider, model string, latenc
 			raw = []byte(envelope.Text)
 		}
 	}
+	if spec.MinArtifacts > 0 {
+		verified := 0
+		for _, artifact := range artifacts {
+			if artifact.DataBase64 != "" {
+				verified++
+			}
+		}
+		if verified < spec.MinArtifacts {
+			return OutputError(mode, provider, model, fmt.Sprintf("artifacts_missing: expected %d file(s), received %d", spec.MinArtifacts, verified), latency)
+		}
+	}
+	if spec.MinImages > 0 {
+		verified := 0
+		for _, artifact := range artifacts {
+			if artifact.DataBase64 != "" && strings.HasPrefix(artifact.MediaType, "image/") {
+				verified++
+			}
+		}
+		if verified < spec.MinImages {
+			return OutputError(mode, provider, model, fmt.Sprintf("images_missing: expected %d image(s), received %d", spec.MinImages, verified), latency)
+		}
+	}
 
 	limit := outputLimit(spec)
 	clean := strings.TrimSpace(string(raw))
@@ -245,6 +270,16 @@ func NormalizeArtifacts(input []Artifact, spec OutputSpec) []Artifact {
 				item.Size = 0
 				item.SHA256 = ""
 			} else {
+				if strings.HasPrefix(item.MediaType, "image/") && http.DetectContentType(decoded) != item.MediaType {
+					item.DataBase64 = ""
+					item.Size = 0
+					item.SHA256 = ""
+					if item.URL == "" {
+						continue
+					}
+					result = append(result, item)
+					continue
+				}
 				total += len(decoded)
 				item.Size = len(decoded)
 				digest := sha256.Sum256(decoded)

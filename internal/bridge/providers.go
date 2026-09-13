@@ -69,7 +69,7 @@ func (p *Processor) Process(ctx context.Context, job Job) Output {
 		lastProviderError = strings.TrimSpace(err.Error())
 	}
 	failure := "providers_unavailable"
-	if strings.TrimSpace(job.Provider) != "" && strings.HasPrefix(lastProviderError, "browser_") {
+	if strings.TrimSpace(job.Provider) != "" && (strings.HasPrefix(lastProviderError, "browser_") || strings.HasPrefix(lastProviderError, "artifacts_missing:") || strings.HasPrefix(lastProviderError, "images_missing:")) {
 		failure = lastProviderError
 	}
 	if outputMode(job.Output) == "decision" {

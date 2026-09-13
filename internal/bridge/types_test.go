@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"encoding/base64"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,6 +31,60 @@ func TestNormalizeBrowserArtifactsRecomputesIntegrityAndBounds(t *testing.T) {
 	withoutOptIn := NormalizeOutput(raw, OutputSpec{Mode: "text"}, "browser", "tab", time.Millisecond)
 	if len(withoutOptIn.Artifacts) != 0 {
 		t.Fatal("artifacts must require explicit output.artifacts opt-in")
+	}
+}
+
+func TestRequiredArtifactsCountOnlyTransferredFiles(t *testing.T) {
+	spec := OutputSpec{Mode: "text", Artifacts: true, MinArtifacts: 1}
+	reference := []byte(`{"mode":"text","text":"I made the image","artifacts":[{"name":"picture.png","media_type":"image/png","url":"https://chatgpt.com/picture.png"}]}`)
+	missing := NormalizeOutput(reference, spec, "browser", "tab", time.Millisecond)
+	if !strings.HasPrefix(missing.Error, "artifacts_missing:") {
+		t.Fatalf("a link or a claimed image must not satisfy the file requirement: %#v", missing)
+	}
+	data := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/lu8AAAAASUVORK5CYII="
+	transferred := []byte(`{"mode":"text","text":"done","artifacts":[{"name":"picture.png","media_type":"image/png","data_base64":"` + data + `"}]}`)
+	complete := NormalizeOutput(transferred, spec, "browser", "tab", time.Millisecond)
+	if complete.Error != "" || len(complete.Artifacts) != 1 {
+		t.Fatalf("verified bytes should satisfy the file requirement: %#v", complete)
+	}
+}
+
+func TestRequiredImagesRejectsTextAndReferences(t *testing.T) {
+	spec := OutputSpec{Mode: "text", Artifacts: true, MinImages: 1}
+	text := base64.StdEncoding.EncodeToString([]byte("I created a picture"))
+	for _, artifact := range []string{
+		`{"name":"picture.png","media_type":"image/png","url":"https://chatgpt.com/picture.png"}`,
+		`{"name":"picture.png","media_type":"image/png","data_base64":"` + text + `"}`,
+		`{"name":"answer.txt","media_type":"text/plain","data_base64":"` + text + `"}`,
+	} {
+		output := NormalizeOutput([]byte(`{"mode":"text","text":"done","artifacts":[`+artifact+`]}`), spec, "browser", "tab", time.Millisecond)
+		if !strings.HasPrefix(output.Error, "images_missing:") {
+			t.Fatalf("non-image artifact passed image requirement: %#v", output)
+		}
+	}
+	image := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/lu8AAAAASUVORK5CYII="
+	output := NormalizeOutput([]byte(`{"mode":"text","text":"done","artifacts":[{"name":"picture.png","media_type":"image/png","data_base64":"`+image+`"}]}`), spec, "browser", "tab", time.Millisecond)
+	if output.Error != "" || len(output.Artifacts) != 1 {
+		t.Fatalf("verified PNG was rejected: %#v", output)
+	}
+}
+
+func TestValidateJobRequiresArtifactOptInForMinimum(t *testing.T) {
+	job := Job{Prompt: "Create an image", Output: OutputSpec{Mode: "text", MinArtifacts: 1}}
+	if err := validateJob(job); err == nil {
+		t.Fatal("minimum artifacts without opt-in should be rejected")
+	}
+	job.Output.Artifacts = true
+	if err := validateJob(job); err != nil {
+		t.Fatalf("valid file requirement was rejected: %v", err)
+	}
+	job.Output = OutputSpec{Mode: "text", MinImages: 1}
+	if err := validateJob(job); err == nil {
+		t.Fatal("minimum images without artifact opt-in should be rejected")
+	}
+	job.Output.Artifacts = true
+	if err := validateJob(job); err != nil {
+		t.Fatalf("valid image requirement was rejected: %v", err)
 	}
 }
 
