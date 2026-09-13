@@ -1,0 +1,21 @@
+{
+  "source": "web-chat-offload-demo",
+  "requirements": {
+    "task": "generation",
+    "provider": "browser",
+    "group": "default"
+  },
+  "payload": {
+    "source": "web-chat-offload-demo",
+    "route": "default",
+    "task": "generation",
+    "prompt": "Summarize the submitted content in three concise bullet points.",
+    "text": "ContextBridge sends this job to a deliberately paired browser tab on a ready worker.",
+    "output": {
+      "mode": "text",
+      "max_bytes": 4096
+    }
+  },
+  "priority": 10,
+  "max_attempts": 3
+}

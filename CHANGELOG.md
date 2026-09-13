@@ -2,6 +2,32 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.3.0 - 2026-09-13
+
+### Added
+
+- `contextbridge doctor` with actionable config, service, route, relay, and worker checks
+- Provider-aware cluster requirements, including explicit routing to ready browser workers
+- Cross-platform Go CI on Windows, macOS, and Linux
+- End-to-end relay/worker concurrency coverage with a real WebSocket and local provider boundary
+
+### Changed
+
+- Relay dispatch now reserves worker slots immediately and strictly honors `max_concurrent`
+- Historical VRAM demand is a GPU preference while CPU-only workers remain eligible
+- Workers advertise only live local providers and include local queue depth in scheduling signals
+- Worker hardware discovery is cached briefly to avoid serial GPU/CPU probes after parallel jobs
+- Browser result capture waits for common generation-busy indicators to clear
+- Relay scheduling uses authoritative in-flight slots instead of waiting for the next heartbeat
+- Dependencies and GitHub Actions were updated to their current maintained major versions
+
+### Fixed
+
+- New worker connections can no longer be marked offline by cleanup from the replaced connection
+- Windows runtime extraction now rejects rooted archive paths
+- Empty decision flags remain `[]` across the browser completion boundary
+- YAML-based browser profiles now advertise readiness correctly to cluster relays
+
 ## 0.2.0 - 2026-07-30
 
 ### Added

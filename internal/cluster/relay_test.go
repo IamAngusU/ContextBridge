@@ -109,6 +109,59 @@ func TestRelayDispatchAndEncryptedRoundTrip(t *testing.T) {
 	t.Fatal("job did not complete")
 }
 
+func TestNewWorkerConnectionSurvivesReplacedConnectionCleanup(t *testing.T) {
+	admin := "admin_012345678901234567890123456789012345"
+	relay, err := NewRelay(RelayConfig{Database: filepath.Join(t.TempDir(), "relay.db"), AdminToken: admin, AllowedTasks: []string{"generation"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+	server := httptest.NewServer(relay.Handler())
+	defer server.Close()
+
+	_, publicKey, err := NewIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeID := "reconnecting-worker"
+	token, _, err := relay.store.CreateToken("node", nodeID, nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := Node{ID: nodeID, Name: nodeID, PublicKey: publicKey, Capabilities: Capabilities{Tasks: []string{"generation"}, Providers: []string{"browser"}, MaxConcurrent: 1}}
+	connect := func() *websocket.Conn {
+		wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/cluster/workers/connect"
+		conn, _, dialErr := websocket.Dial(context.Background(), wsURL, &websocket.DialOptions{HTTPHeader: http.Header{"Authorization": []string{"Bearer " + token}}})
+		if dialErr != nil {
+			t.Fatal(dialErr)
+		}
+		if writeErr := conn.Write(context.Background(), websocket.MessageText, mustJSON(WireMessage{Version: ProtocolVersion, Type: "hello", Node: &node})); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+		return conn
+	}
+
+	first := connect()
+	defer first.CloseNow()
+	waitFor(t, 2*time.Second, func() bool {
+		saved, loadErr := relay.store.GetNode(nodeID)
+		return loadErr == nil && saved.Connected
+	}, "first worker did not connect")
+	second := connect()
+	defer second.CloseNow()
+	time.Sleep(200 * time.Millisecond)
+	saved, err := relay.store.GetNode(nodeID)
+	if err != nil || !saved.Connected {
+		t.Fatalf("replacement worker was marked offline by old cleanup: %#v, %v", saved, err)
+	}
+	relay.mu.RLock()
+	current := relay.workers[nodeID]
+	relay.mu.RUnlock()
+	if current == nil {
+		t.Fatal("replacement worker connection was removed")
+	}
+}
+
 func postTest(t *testing.T, target, token string, input, output interface{}) {
 	t.Helper()
 	raw, _ := json.Marshal(input)

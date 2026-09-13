@@ -27,6 +27,23 @@ func (p *Processor) Process(ctx context.Context, job Job) Output {
 	route := p.cfg.Route(job.Route)
 	applyTaskOutput(&job, route.Task)
 	providers := append([]string{route.Provider}, route.Fallback...)
+	if requested := strings.TrimSpace(job.Provider); requested != "" {
+		selected := ""
+		for _, provider := range providers {
+			if strings.EqualFold(provider, requested) {
+				selected = provider
+				break
+			}
+		}
+		if selected == "" {
+			if outputMode(job.Output) == "decision" {
+				decision := ReviewDecision("contextbridge", "fallback", "provider_not_allowed_for_route", 0)
+				return Output{Mode: "decision", Decision: &decision, Provider: decision.Provider, Model: decision.Model}
+			}
+			return OutputError(outputMode(job.Output), "contextbridge", "fallback", "provider_not_allowed_for_route", 0)
+		}
+		providers = []string{selected}
+	}
 	for _, provider := range providers {
 		var output Output
 		var err error

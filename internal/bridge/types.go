@@ -13,6 +13,7 @@ type Job struct {
 	ID             string                 `json:"id,omitempty"`
 	Source         string                 `json:"source,omitempty"`
 	Route          string                 `json:"route,omitempty"`
+	Provider       string                 `json:"provider,omitempty"`
 	Kind           string                 `json:"kind,omitempty"`
 	Task           string                 `json:"task,omitempty"`
 	Prompt         string                 `json:"prompt"`

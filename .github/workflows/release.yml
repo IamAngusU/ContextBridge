@@ -38,10 +38,10 @@ jobs:
             ext: ''
             format: tar
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
-          go-version: '1.22'
+          go-version: '1.25.x'
       - name: Build
         env:
           GOOS: ${{ matrix.os }}
@@ -63,7 +63,7 @@ jobs:
           else
             tar -czf "contextbridge_${{ matrix.os }}_${{ matrix.arch }}.tar.gz" -C dist .
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: contextbridge-${{ matrix.os }}-${{ matrix.arch }}
           path: contextbridge_${{ matrix.os }}_${{ matrix.arch }}.*
@@ -71,14 +71,14 @@ jobs:
   extensions:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Package browser extensions
         run: |
           ./scripts/package-extensions.sh
           ./scripts/verify-extensions.sh
           (cd extension/chromium && zip -qr ../../contextbridge_extension_chromium.zip .)
           (cd extension/firefox && zip -qr ../../contextbridge_extension_firefox.zip .)
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: contextbridge-browser-extensions
           path: contextbridge_extension_*.zip
@@ -87,13 +87,13 @@ jobs:
     needs: [build, extensions]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
       - name: Checksums
         run: cd artifacts && sha256sum contextbridge_* > SHA256SUMS
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
           files: artifacts/*

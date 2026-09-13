@@ -328,6 +328,15 @@ function automate(job, profile) {
     return [];
   };
   const visibleText = (element) => (element?.innerText || element?.textContent || '').trim();
+  const isVisible = (element) => Boolean(element && (element.offsetWidth || element.offsetHeight || element.getClientRects().length));
+  const pageBusy = () => {
+    for (const selector of ['[aria-busy="true"]', 'button[data-testid*="stop" i]', 'button[aria-label*="stop generating" i]', 'button[aria-label*="stop response" i]']) {
+      try {
+        if ([...document.querySelectorAll(selector)].some(isVisible)) return true;
+      } catch (_) {}
+    }
+    return false;
+  };
   const setInput = (element, value) => {
     element.focus();
     if (element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement) {
@@ -395,7 +404,7 @@ function automate(job, profile) {
         }
         const mode = String(job.output?.mode || 'decision').toLowerCase();
         const structured = mode === 'text' || ((latest.includes('{') && latest.includes('}')) || (latest.includes('[') && latest.includes(']')));
-        if (Date.now() - stableSince >= 1800 && structured) {
+        if (Date.now() - stableSince >= 2600 && structured && !pageBusy()) {
           resolve({ ok: true, text: latest });
           return;
         }
@@ -502,7 +511,7 @@ async function sendHeartbeat(state) {
         origin: tab?.url && /^https?:/i.test(tab.url) ? new URL(tab.url).origin : '',
         tab_title: tab?.title || '',
         profile_label: profile?.label || cfg.profile || '',
-        selectors_ready: Boolean(profile),
+        selectors_ready: cfg.useVisualProfile ? Boolean(profile) : Boolean(cfg.profile),
         extension_version: api.runtime.getManifest().version,
         browser: navigator.userAgent.includes('Firefox/') ? 'firefox' : 'chromium'
       })

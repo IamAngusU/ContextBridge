@@ -13,6 +13,13 @@ type Candidate struct {
 }
 
 func Rank(nodes []Node, requirements Requirements) []Candidate {
+	return RankWithEstimate(nodes, requirements, 0)
+}
+
+// RankWithEstimate treats measured VRAM use as a placement hint, never as a
+// hard GPU requirement. This keeps CPU-only (zero-GPU) workers eligible unless
+// the producer explicitly sets min_free_vram_bytes.
+func RankWithEstimate(nodes []Node, requirements Requirements, estimatedVRAM uint64) []Candidate {
 	candidates := make([]Candidate, 0, len(nodes))
 	for _, node := range nodes {
 		if !node.Connected || time.Since(node.LastSeen) > 30*time.Second || !matchesNode(node, requirements) {
@@ -33,6 +40,15 @@ func Rank(nodes []Node, requirements Requirements) []Candidate {
 		}
 		vramHeadroom := bestVRAMHeadroom(node, requirements.MinFreeVRAM)
 		score := busy*60 + queue*20 + memoryPressure*10 - vramHeadroom*12
+		if requirements.MinFreeVRAM == 0 && estimatedVRAM > 0 {
+			if hasVRAM(node, estimatedVRAM) {
+				score -= 10
+			} else {
+				// CPU fallback remains valid but loses to a GPU with enough measured
+				// headroom when the other load signals are similar.
+				score += 8
+			}
+		}
 		if contains(requirements.PreferredNodes, node.ID) || contains(requirements.PreferredNodes, node.Name) {
 			score -= 25
 		}
@@ -47,6 +63,15 @@ func Rank(nodes []Node, requirements Requirements) []Candidate {
 	return candidates
 }
 
+func hasVRAM(node Node, required uint64) bool {
+	for _, gpu := range node.Capabilities.GPUs {
+		if gpu.MemoryFree >= required {
+			return true
+		}
+	}
+	return false
+}
+
 func matchesNode(node Node, requirements Requirements) bool {
 	capability := node.Capabilities
 	if requirements.Group != "" && !containsFold(capability.Groups, requirements.Group) {
@@ -56,6 +81,9 @@ func matchesNode(node Node, requirements Requirements) bool {
 		if !containsFold(capability.Tags, tag) {
 			return false
 		}
+	}
+	if requirements.Provider != "" && !containsFold(capability.Providers, requirements.Provider) {
+		return false
 	}
 	if requirements.Task != "" && !containsFold(capability.Tasks, requirements.Task) && !modelSupports(capability.Models, requirements) {
 		return false

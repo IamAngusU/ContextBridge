@@ -9,19 +9,32 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  core:
+    name: Core (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
-          go-version: '1.22'
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+          go-version: '1.25.x'
+          cache: true
       - run: go test ./...
       - run: go vet ./...
       - run: go build ./cmd/contextbridge
+
+  package:
+    name: Installers, extensions, and docs
+    needs: core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '20'
       - run: bash -n install.sh
       - run: php -l web/index.php
       - run: node --check internal/bridge/dashboard/dashboard.js

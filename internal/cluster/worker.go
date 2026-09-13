@@ -44,12 +44,15 @@ type WorkerIdentity struct {
 }
 
 type Worker struct {
-	cfg      WorkerConfig
-	identity WorkerIdentity
-	client   *http.Client
-	sem      chan struct{}
-	mu       sync.Mutex
-	running  int
+	cfg        WorkerConfig
+	identity   WorkerIdentity
+	client     *http.Client
+	sem        chan struct{}
+	mu         sync.Mutex
+	running    int
+	hardwareMu sync.Mutex
+	hardware   systeminfo.Snapshot
+	hardwareAt time.Time
 }
 
 func LoadWorker(cfg WorkerConfig) (*Worker, error) {
@@ -155,11 +158,15 @@ func (w *Worker) Run(ctx context.Context, logger func(string, ...interface{})) e
 	}
 	backoff := time.Second
 	for ctx.Err() == nil {
+		connectedAt := time.Now()
 		err := w.connect(ctx, logger)
 		if ctx.Err() != nil {
 			return nil
 		}
 		logger("worker connection ended: %v", err)
+		if time.Since(connectedAt) >= 30*time.Second {
+			backoff = time.Second
+		}
 		jitter := time.Duration(rand.Int63n(int64(backoff / 3)))
 		select {
 		case <-ctx.Done():
@@ -257,6 +264,10 @@ func (w *Worker) execute(ctx context.Context, job Job) (json.RawMessage, *Sealed
 	if !json.Valid(payload) {
 		return nil, nil, Usage{}, errors.New("job payload must be valid JSON")
 	}
+	payload, err := requireProvider(payload, job.Requirements.Provider)
+	if err != nil {
+		return nil, nil, Usage{}, err
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(w.cfg.LocalURL, "/")+"/v1/jobs", bytes.NewReader(payload))
 	if err != nil {
 		return nil, nil, Usage{}, err
@@ -277,8 +288,11 @@ func (w *Worker) execute(ctx context.Context, job Job) (json.RawMessage, *Sealed
 	}
 	usage := extractUsage(raw)
 	usage.ComputeMS = uint64(time.Since(started).Milliseconds())
-	for _, gpu := range w.capabilities(ctx).GPUs {
-		used := gpu.MemoryTotal - gpu.MemoryFree
+	for _, gpu := range w.hardwareSnapshot(ctx, 2*time.Second).GPUs {
+		used := uint64(0)
+		if gpu.MemoryTotal >= gpu.MemoryFree {
+			used = gpu.MemoryTotal - gpu.MemoryFree
+		}
 		if used > usage.PeakVRAMBytes {
 			usage.PeakVRAMBytes = used
 		}
@@ -290,10 +304,22 @@ func (w *Worker) execute(ctx context.Context, job Job) (json.RawMessage, *Sealed
 	return json.RawMessage(raw), nil, usage, nil
 }
 
+func requireProvider(payload []byte, provider string) ([]byte, error) {
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		return payload, nil
+	}
+	var job map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &job); err != nil || job == nil {
+		return nil, errors.New("job payload must be a JSON object")
+	}
+	rawProvider, _ := json.Marshal(provider)
+	job["provider"] = rawProvider
+	return json.Marshal(job)
+}
+
 func (w *Worker) capabilities(ctx context.Context) Capabilities {
-	detectCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	hardware := systeminfo.Detect(detectCtx)
+	hardware := w.hardwareSnapshot(ctx, 2*time.Second)
 	w.mu.Lock()
 	running := w.running
 	w.mu.Unlock()
@@ -308,13 +334,20 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 	if response, err := w.client.Do(request); err == nil {
 		defer response.Body.Close()
 		var status struct {
+			Queued  int `json:"queued"`
+			Browser struct {
+				Connected      bool `json:"connected"`
+				SelectorsReady bool `json:"selectors_ready"`
+			} `json:"browser"`
 			Routes map[string]struct {
-				Task     string `json:"task"`
-				Model    string `json:"model"`
-				Provider string `json:"provider"`
+				Task     string   `json:"task"`
+				Model    string   `json:"model"`
+				Provider string   `json:"provider"`
+				Fallback []string `json:"fallback"`
 			} `json:"routes"`
 			Runtime struct {
 				Engines map[string]struct {
+					State  string `json:"state"`
 					Models []struct {
 						Name   string `json:"name"`
 						Size   int64  `json:"size"`
@@ -325,22 +358,49 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 			} `json:"runtime"`
 		}
 		if response.StatusCode == http.StatusOK && json.NewDecoder(io.LimitReader(response.Body, 4<<20)).Decode(&status) == nil {
+			capability.QueueDepth = status.Queued
 			seenTasks := map[string]bool{}
+			seenProviders := map[string]bool{}
+			providerOnline := func(provider string) bool {
+				if provider == "browser" {
+					return status.Browser.Connected && status.Browser.SelectorsReady
+				}
+				engine, ok := status.Runtime.Engines[provider]
+				return ok && engine.State == "online"
+			}
 			for _, route := range status.Routes {
 				task := route.Task
 				if task == "" {
 					task = "generation"
 				}
-				if !seenTasks[task] && (len(w.cfg.AllowedTasks) == 0 || containsFold(w.cfg.AllowedTasks, task)) {
+				providers := append([]string{route.Provider}, route.Fallback...)
+				routeReady := false
+				for _, provider := range providers {
+					if provider != "" && providerOnline(provider) {
+						routeReady = true
+						if !seenProviders[provider] {
+							capability.Providers = append(capability.Providers, provider)
+							seenProviders[provider] = true
+						}
+					}
+				}
+				if routeReady && !seenTasks[task] && (len(w.cfg.AllowedTasks) == 0 || containsFold(w.cfg.AllowedTasks, task)) {
 					capability.Tasks = append(capability.Tasks, task)
 					seenTasks[task] = true
 				}
-				if route.Model != "" {
+				if route.Model != "" && providerOnline(route.Provider) {
 					vision, embedding := modelFeatures(route.Model, task)
 					capability.Models = append(capability.Models, ModelCapability{Name: route.Model, Tasks: modelTasks(task, vision, embedding), Provider: route.Provider, Vision: vision, Embedding: embedding})
 				}
 			}
 			for provider, engine := range status.Runtime.Engines {
+				if engine.State != "online" {
+					continue
+				}
+				if !seenProviders[provider] {
+					capability.Providers = append(capability.Providers, provider)
+					seenProviders[provider] = true
+				}
 				for _, model := range engine.Models {
 					vision, embedding := modelFeatures(model.Name, "generation")
 					capability.Models = append(capability.Models, ModelCapability{Name: model.Name, Provider: provider, Size: model.Size, VRAM: model.VRAM, Loaded: model.Loaded, Vision: vision, Embedding: embedding, Tasks: modelTasks("generation", vision, embedding)})
@@ -348,10 +408,20 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 			}
 		}
 	}
-	if len(capability.Tasks) == 0 {
-		capability.Tasks = append([]string(nil), w.cfg.AllowedTasks...)
-	}
 	return capability
+}
+
+func (w *Worker) hardwareSnapshot(ctx context.Context, maxAge time.Duration) systeminfo.Snapshot {
+	w.hardwareMu.Lock()
+	defer w.hardwareMu.Unlock()
+	if !w.hardwareAt.IsZero() && maxAge > 0 && time.Since(w.hardwareAt) < maxAge {
+		return w.hardware
+	}
+	detectCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	w.hardware = systeminfo.Detect(detectCtx)
+	w.hardwareAt = time.Now()
+	return w.hardware
 }
 
 func (w *Worker) changeRunning(delta int) {

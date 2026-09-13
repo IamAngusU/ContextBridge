@@ -27,3 +27,10 @@ func TestMetricsPersistProviderModelAndFlags(t *testing.T) {
 		t.Fatalf("unexpected provider metrics: %#v", metrics)
 	}
 }
+
+func TestCloneOutputPreservesEmptyFlagsArray(t *testing.T) {
+	output := cloneOutput(Output{Mode: "decision", Decision: &Decision{Verdict: "allow", Flags: []string{}}})
+	if output.Decision == nil || output.Decision.Flags == nil || len(output.Decision.Flags) != 0 {
+		t.Fatalf("empty flags must remain an empty JSON array: %#v", output.Decision)
+	}
+}

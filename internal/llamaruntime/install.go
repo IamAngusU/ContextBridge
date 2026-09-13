@@ -297,7 +297,7 @@ func extractTarGz(path, target string) error {
 
 func safeArchivePath(root, name string) (string, bool) {
 	clean := filepath.Clean(filepath.FromSlash(name))
-	if clean == "." || filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+	if clean == "." || filepath.IsAbs(clean) || filepath.VolumeName(clean) != "" || strings.HasPrefix(clean, string(os.PathSeparator)) || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
 		return "", false
 	}
 	path := filepath.Join(root, clean)

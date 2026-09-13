@@ -59,6 +59,8 @@ func main() {
 		err = dashboardCommand(os.Args[2:])
 	case "status":
 		err = statusCommand(os.Args[2:])
+	case "doctor":
+		err = doctorCommand(os.Args[2:])
 	case "hardware":
 		err = hardwareCommand(os.Args[2:])
 	case "models":
@@ -102,6 +104,7 @@ Usage:
   contextbridge health [--config path]
   contextbridge dashboard [--config path] [--no-open]
   contextbridge status [--config path] [--json]
+  contextbridge doctor [--config path] [--json]
   contextbridge hardware [--json]
   contextbridge models [--config path] [--json]
   contextbridge pull [--config path] MODEL

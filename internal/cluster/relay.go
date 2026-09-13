@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/coder/websocket"
 )
@@ -48,8 +49,58 @@ type Relay struct {
 }
 
 type workerConnection struct {
-	conn *websocket.Conn
-	mu   sync.Mutex
+	conn     *websocket.Conn
+	writeMu  sync.Mutex
+	stateMu  sync.Mutex
+	inFlight map[string]struct{}
+	capacity int
+}
+
+func newWorkerConnection(conn *websocket.Conn, capacity int) *workerConnection {
+	if capacity <= 0 {
+		capacity = 1
+	}
+	return &workerConnection{conn: conn, capacity: capacity, inFlight: map[string]struct{}{}}
+}
+
+func (w *workerConnection) reserve(jobID string) bool {
+	w.stateMu.Lock()
+	defer w.stateMu.Unlock()
+	if _, exists := w.inFlight[jobID]; exists {
+		return true
+	}
+	if len(w.inFlight) >= w.capacity {
+		return false
+	}
+	w.inFlight[jobID] = struct{}{}
+	return true
+}
+
+func (w *workerConnection) release(jobID string) {
+	w.stateMu.Lock()
+	delete(w.inFlight, jobID)
+	w.stateMu.Unlock()
+}
+
+func (w *workerConnection) load() (running, capacity int) {
+	w.stateMu.Lock()
+	defer w.stateMu.Unlock()
+	return len(w.inFlight), w.capacity
+}
+
+func (w *workerConnection) updateCapacity(capacity int) {
+	if capacity <= 0 {
+		capacity = 1
+	}
+	w.stateMu.Lock()
+	w.capacity = capacity
+	w.stateMu.Unlock()
+}
+
+func (w *workerConnection) write(ctx context.Context, message []byte) error {
+	w.writeMu.Lock()
+	defer w.writeMu.Unlock()
+	return w.conn.Write(ctx, websocket.MessageText, message)
 }
 
 type rateWindow struct {
@@ -346,11 +397,7 @@ func (r *Relay) handleReserve(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	nodes, _ := r.store.ListNodes()
-	routingRequirements := requirements
-	if routingRequirements.MinFreeVRAM == 0 {
-		routingRequirements.MinFreeVRAM = r.store.EstimateVRAM(requirements)
-	}
-	candidates := Rank(nodes, routingRequirements)
+	candidates := RankWithEstimate(nodes, requirements, r.store.EstimateVRAM(requirements))
 	if len(candidates) == 0 {
 		writeError(w, http.StatusServiceUnavailable, errors.New("no online node satisfies these requirements"))
 		return
@@ -427,10 +474,12 @@ func (r *Relay) handleWorker(w http.ResponseWriter, req *http.Request) {
 		conn.Close(websocket.StatusInternalError, "node could not be stored")
 		return
 	}
-	worker := &workerConnection{conn: conn}
+	worker := newWorkerConnection(conn, node.Capabilities.MaxConcurrent)
 	r.mu.Lock()
 	if previous := r.workers[node.ID]; previous != nil {
+		delete(r.workers, node.ID)
 		previous.conn.Close(websocket.StatusPolicyViolation, "replaced by a newer connection")
+		_, _ = r.store.RequeueNode(node.ID, "worker connection replaced")
 	}
 	r.workers[node.ID] = worker
 	r.mu.Unlock()
@@ -450,6 +499,12 @@ func (r *Relay) handleWorker(w http.ResponseWriter, req *http.Request) {
 		case "heartbeat":
 			if message.Capabilities != nil {
 				node.Capabilities = *message.Capabilities
+				worker.updateCapacity(node.Capabilities.MaxConcurrent)
+				running, capacity := worker.load()
+				if node.Capabilities.Running < running {
+					node.Capabilities.Running = running
+				}
+				node.Capabilities.MaxConcurrent = capacity
 			}
 			node.Connected = true
 			node.State = "online"
@@ -458,6 +513,7 @@ func (r *Relay) handleWorker(w http.ResponseWriter, req *http.Request) {
 		case "started":
 			_, _ = r.store.MarkRunning(message.JobID, node.ID)
 		case "result":
+			worker.release(message.JobID)
 			usage := priceUsage(message.Usage, r.cfg.Pricing)
 			job, completeErr := r.store.CompleteJob(message.JobID, message.Result, message.SealedResult, usage, message.Error)
 			if completeErr == nil {
@@ -502,12 +558,22 @@ func (r *Relay) dispatch() {
 	if err != nil {
 		return
 	}
+	r.mu.RLock()
+	for index := range nodes {
+		worker := r.workers[nodes[index].ID]
+		if worker == nil {
+			continue
+		}
+		running, capacity := worker.load()
+		nodes[index].Connected = true
+		nodes[index].Capabilities.Running = running
+		nodes[index].Capabilities.MaxConcurrent = capacity
+	}
+	r.mu.RUnlock()
 	for _, queued := range jobs {
 		routingRequirements := queued.Requirements
-		if routingRequirements.MinFreeVRAM == 0 {
-			routingRequirements.MinFreeVRAM = r.store.EstimateVRAM(queued.Requirements)
-		}
-		candidates := Rank(nodes, routingRequirements)
+		estimatedVRAM := r.store.EstimateVRAM(queued.Requirements)
+		candidates := RankWithEstimate(nodes, routingRequirements, estimatedVRAM)
 		for _, candidate := range candidates {
 			if queued.AssignedNode != "" && queued.AssignedNode != candidate.Node.ID {
 				continue
@@ -518,15 +584,20 @@ func (r *Relay) dispatch() {
 			if worker == nil {
 				continue
 			}
+			if !worker.reserve(queued.ID) {
+				continue
+			}
 			job, assignErr := r.store.AssignJob(queued.ID, candidate.Node.ID)
 			if assignErr != nil {
+				worker.release(queued.ID)
 				break
 			}
 			message := WireMessage{Version: ProtocolVersion, Type: "job", Job: &job}
-			worker.mu.Lock()
-			writeErr := worker.conn.Write(context.Background(), websocket.MessageText, mustJSON(message))
-			worker.mu.Unlock()
+			writeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			writeErr := worker.write(writeCtx, mustJSON(message))
+			cancel()
 			if writeErr != nil {
+				worker.release(queued.ID)
 				_, _ = r.store.RequeueNode(candidate.Node.ID, "worker connection failed")
 				r.disconnectNode(candidate.Node.ID, worker)
 			} else {
@@ -544,11 +615,16 @@ func (r *Relay) dispatch() {
 }
 
 func (r *Relay) disconnectNode(id string, worker *workerConnection) {
+	removed := false
 	r.mu.Lock()
 	if r.workers[id] == worker {
 		delete(r.workers, id)
+		removed = true
 	}
 	r.mu.Unlock()
+	if !removed {
+		return
+	}
 	_ = r.store.SetNodeConnected(id, false)
 	requeued, _ := r.store.RequeueNode(id, "worker disconnected")
 	_ = r.store.AddEvent(Event{Kind: "node.offline", Message: "Worker disconnected", NodeID: id, Data: map[string]interface{}{"affected_jobs": len(requeued)}})
@@ -564,6 +640,9 @@ func (r *Relay) validateRequirements(requirements Requirements) error {
 	}
 	if len(requirements.RequiredTags) > 32 || len(requirements.PreferredNodes) > 32 {
 		return errors.New("too many routing selectors")
+	}
+	if len(requirements.Provider) > 80 || strings.TrimSpace(requirements.Provider) != requirements.Provider || strings.Contains(requirements.Provider, "..") || strings.IndexFunc(requirements.Provider, unicode.IsControl) >= 0 {
+		return errors.New("requirements.provider is invalid")
 	}
 	return nil
 }

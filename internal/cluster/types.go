@@ -19,6 +19,7 @@ const (
 
 type Requirements struct {
 	Task           string   `json:"task,omitempty" yaml:"task,omitempty"`
+	Provider       string   `json:"provider,omitempty" yaml:"provider,omitempty"`
 	Model          string   `json:"model,omitempty" yaml:"model,omitempty"`
 	Group          string   `json:"group,omitempty" yaml:"group,omitempty"`
 	RequiredTags   []string `json:"required_tags,omitempty" yaml:"required_tags,omitempty"`
@@ -56,6 +57,7 @@ type Capabilities struct {
 	MemoryFree    uint64            `json:"memory_free_bytes"`
 	GPUs          []GPUCapability   `json:"gpus,omitempty"`
 	Models        []ModelCapability `json:"models,omitempty"`
+	Providers     []string          `json:"providers,omitempty"`
 	Tasks         []string          `json:"tasks,omitempty"`
 	Tags          []string          `json:"tags,omitempty"`
 	Groups        []string          `json:"groups,omitempty"`

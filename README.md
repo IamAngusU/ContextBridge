@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://github.com/IamAngusU/ContextBridge/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/IamAngusU/ContextBridge?display_name=tag&sort=semver&style=flat-square&color=2a9d8f"></a>
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-20231f?style=flat-square"></a>
-  <img alt="Go 1.22" src="https://img.shields.io/badge/Go-1.22-00ADD8?style=flat-square&logo=go&logoColor=white">
+  <img alt="Go 1.25" src="https://img.shields.io/badge/Go-1.25-00ADD8?style=flat-square&logo=go&logoColor=white">
   <img alt="Windows, Linux, and macOS" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-59636e?style=flat-square">
   <img alt="Chrome, Edge, Opera, and Firefox" src="https://img.shields.io/badge/browsers-Chromium%20%7C%20Firefox-d7422f?style=flat-square">
   <a href="https://github.com/IamAngusU/ContextBridge/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/IamAngusU/ContextBridge?style=flat-square&color=d9a62e"></a>
@@ -80,8 +80,13 @@ Manual installation is just as small:
 ```bash
 contextbridge init
 contextbridge run
+contextbridge doctor
 contextbridge dashboard
 ```
+
+`contextbridge doctor` verifies the config, running local service, token, default
+route, relay, and worker identity. It prints a concrete fix for every blocking
+check; use `--json` in installers and monitoring.
 
 ## Build A Compute Cluster
 
@@ -119,7 +124,7 @@ contextbridge cluster submit --file examples/cluster-job.json --token cb_produce
 contextbridge cluster submit --file examples/cluster-job.json --token cb_producer_TOKEN --e2ee
 ```
 
-Set requirements such as `task`, `group`, `model`, `vision`, `embedding`, tags, or minimum free VRAM. The scheduler chooses a compatible online node using live concurrency, queue, RAM, and VRAM data. Normal TLS jobs can move to another node after a disconnect. E2EE jobs are bound to the worker key selected during reservation and fail clearly if that worker disappears.
+Set requirements such as `task`, `provider`, `group`, `model`, `vision`, `embedding`, tags, or minimum free VRAM. Use `provider: browser` to require a live, taught web-chat tab, or `provider: ollama` to require a local Ollama engine. The scheduler chooses a compatible online node using live concurrency, queue, RAM, and VRAM data. Measured VRAM demand is a preference, not a hidden requirement, so CPU-only workers remain useful unless `min_free_vram_bytes` is explicitly set. Normal TLS jobs can move to another node after a disconnect. E2EE jobs are bound to the worker key selected during reservation and fail clearly if that worker disappears.
 
 This release uses one durable BoltDB file per relay process. It supports many producers and workers through one relay. Active-active relay replication is a separate deployment tier and requires a shared database and message broker rather than copying the BoltDB file.
 

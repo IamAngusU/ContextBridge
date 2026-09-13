@@ -13,7 +13,7 @@ Thank you for improving ContextBridge. Small, focused changes are easiest to rev
 
 Requirements:
 
-- Go 1.22 or newer
+- Go 1.25 or newer
 - Node.js 20 or newer for JavaScript syntax checks
 - A Chromium browser or Firefox for extension testing
 - Ollama only when testing the local model provider

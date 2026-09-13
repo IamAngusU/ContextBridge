@@ -6,6 +6,7 @@ ContextBridge accepts jobs at `POST /v1/jobs` and from JSON files placed in the 
 {
   "source": "my-app",
   "route": "default",
+  "provider": "browser",
   "kind": "moderation",
   "prompt": "Trusted instructions written by the operator",
   "text": "Untrusted content supplied by a user",
@@ -19,6 +20,11 @@ ContextBridge accepts jobs at `POST /v1/jobs` and from JSON files placed in the 
   }
 }
 ```
+
+`provider` is optional and must name the primary provider or one of the
+configured fallbacks on the selected route. It is useful when a caller must use
+the taught web-chat tab even while a local model is also online. Cluster workers
+automatically enforce `requirements.provider` on the forwarded local job.
 
 The synchronous HTTP response contains the normalized decision. Folder jobs are renamed while processing and produce a neighboring `.result.json` file.
 
@@ -137,6 +143,7 @@ A cluster job contains routing metadata and one local ContextBridge job as its p
 {
   "requirements": {
     "task": "vision",
+    "provider": "browser",
     "group": "media",
     "required_tags": ["private"],
     "vision": true,
@@ -153,5 +160,12 @@ A cluster job contains routing metadata and one local ContextBridge job as its p
   "max_attempts": 3
 }
 ```
+
+Set `requirements.provider` when a job must use a specific ready provider on
+the worker, for example `browser` for a taught web-chat tab or `ollama` for a
+local Ollama runtime. Workers only advertise providers that are live; a browser
+route is eligible only while its extension heartbeat and taught selectors are
+ready. Omit the field to let the scheduler choose any live provider for the
+requested task.
 
 For E2EE, call `/v1/cluster/assign`, encrypt the payload for the returned node public key, and submit the sealed envelope with the one-time assignment ID and secret. The authenticated additional data is `job:{job_id}:{node_id}`. Results use `result:{job_id}:{node_id}` and a separate derived key.

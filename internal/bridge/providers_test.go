@@ -7,12 +7,49 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/IamAngusU/ContextBridge/internal/config"
 )
 
 func TestDecisionModelComesFromTrustedProviderConfig(t *testing.T) {
 	decision := NormalizeDecision([]byte(`{"verdict":"allow","flags":[],"confidence":0.9,"model":"forged-model"}`), "ollama", "actual-local-model", time.Second)
 	if decision.Model != "actual-local-model" {
 		t.Fatalf("model metadata was not trusted: %#v", decision)
+	}
+}
+
+func TestJobCanSelectConfiguredRouteFallback(t *testing.T) {
+	primaryCalls := 0
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		primaryCalls++
+		http.Error(w, "primary should not be called", http.StatusInternalServerError)
+	}))
+	defer primary.Close()
+	selected := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == "/api/generate" {
+			json.NewEncoder(w).Encode(map[string]interface{}{"response": "chosen fallback"})
+			return
+		}
+		http.NotFound(w, req)
+	}))
+	defer selected.Close()
+
+	cfg := config.Config{
+		Routes: map[string]config.Route{"default": {Provider: "primary", Fallback: []string{"selected"}}},
+		Engines: map[string]config.Engine{
+			"primary":  {Type: "ollama", URL: primary.URL, Model: "test", TimeoutSeconds: 2},
+			"selected": {Type: "ollama", URL: selected.URL, Model: "test", TimeoutSeconds: 2},
+		},
+	}
+	processor := NewProcessor(cfg, nil)
+	output := processor.Process(context.Background(), Job{Provider: "selected", Prompt: "test", Output: OutputSpec{Mode: "text"}})
+	if output.Error != "" || output.Text != "chosen fallback" || primaryCalls != 0 {
+		t.Fatalf("provider override did not select the configured fallback: %#v, primary calls %d", output, primaryCalls)
+	}
+
+	rejected := processor.Process(context.Background(), Job{Provider: "unconfigured", Prompt: "test", Output: OutputSpec{Mode: "text"}})
+	if rejected.Error != "provider_not_allowed_for_route" {
+		t.Fatalf("unconfigured provider was not rejected: %#v", rejected)
 	}
 }
 

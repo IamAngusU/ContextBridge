@@ -281,7 +281,7 @@ func cloneOutput(output Output) Output {
 	clone := output
 	if output.Decision != nil {
 		decision := *output.Decision
-		decision.Flags = append([]string(nil), output.Decision.Flags...)
+		decision.Flags = append([]string{}, output.Decision.Flags...)
 		clone.Decision = &decision
 	}
 	return clone

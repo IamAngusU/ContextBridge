@@ -46,6 +46,18 @@ Firefox removes temporary add-ons when the browser closes. Permanent consumer in
 
 The page overlay intercepts teaching clicks, so it does not submit text or open the file chooser while controls are being selected.
 
+Use a dedicated chat tab and start from a fresh conversation when jobs must not
+share conversational history. ContextBridge waits for a stable answer and for
+common generation-busy indicators to disappear before it returns a result, but
+the page remains a stateful third-party interface. Only automate a provider when
+its account terms and your organization policy allow it.
+
+The browser path avoids a separate inference API integration; it does not move a
+hosted provider's model onto the client. For actual client-side compute, use a
+local Ollama or `llama.cpp` worker. For parallel web-chat jobs, pair multiple
+browser workers and submit with `requirements.provider: browser`; each taught tab
+is deliberately treated as one serial UI slot.
+
 ## Selector Strategy
 
 The picker prefers stable page attributes such as IDs, `data-testid`, semantic roles, names, and accessible labels. It stores several ordered candidates for each control. Generated-looking IDs and classes are rejected. A bounded structural selector is kept as a final fallback.
