@@ -17,11 +17,14 @@
     <section class="step" aria-labelledby="tab-heading">
       <div class="step-heading"><span>01</span><h1 id="tab-heading">Choose one or more AI tabs</h1></div>
       <div class="field-row">
-        <label class="select-field"><span class="sr-only">Browser tabs</span><select id="tab" multiple size="4"></select></label>
+        <label class="select-field"><span class="sr-only">Browser tabs</span><select id="tab" size="5"></select></label>
         <button id="refresh-tabs" class="secondary compact" type="button">Refresh</button>
       </div>
-      <small class="field-hint">Each selected tab is a parallel slot. Start with one ChatGPT and one Gemini tab; Ctrl-click to add more conversations.</small>
-      <button id="select-ai-tabs" class="secondary full" type="button">Select a ChatGPT + Gemini tab</button>
+      <small class="field-hint" id="tab-state">Choosing a tab does not grant access. Attach it explicitly, including any existing conversation.</small>
+      <div class="button-row"><button id="attach-tab" class="primary" type="button">Allow this tab</button><button id="detach-tab" class="secondary" type="button">Detach this tab</button></div>
+      <button id="select-ai-tabs" class="secondary full" type="button">Attach fresh ChatGPT + Gemini chats</button>
+      <label class="mode"><input id="auto-attach-fresh" type="checkbox" checked><span>Auto-attach new, empty AI chats while connected</span></label>
+      <small class="field-hint">Existing conversations and uncertain pages are never auto-attached. A detached tab receives no new jobs; work already submitted to its website may still finish.</small>
       <button id="all-tabs" class="text-button" type="button">Show tabs from every window</button>
     </section>
 
@@ -42,6 +45,7 @@
       <div class="step-heading"><span>03</span><h2 id="pair-heading">Connect</h2></div>
       <button id="pair" class="primary full" type="button" disabled>Start browser bridge</button>
       <button id="stop" class="secondary full" type="button" hidden>Stop browser bridge</button>
+      <button id="detach-all" class="text-button" type="button">Detach all tabs</button>
     </section>
 
     <details class="advanced">

@@ -2,8 +2,14 @@ const api = globalThis.browser || globalThis.chrome;
 const $ = (id) => document.getElementById(id);
 let currentTab = null;
 let currentProfile = null;
+let attachedTabIDs = [];
 
 document.addEventListener('DOMContentLoaded', initialize);
+api.storage.onChanged?.addListener((changes, area) => {
+  if (area !== 'local' || !changes.tabIds) return;
+  attachedTabIDs = [...new Set((changes.tabIds.newValue || []).map(Number).filter(Boolean))];
+  void hasTabsPermission().then((allowed) => loadTabs(primaryTabID(), allowed)).then(refreshState);
+});
 
 async function initialize() {
   $('version').textContent = `v${api.runtime.getManifest().version}`;
@@ -11,47 +17,107 @@ async function initialize() {
   $('url').value = saved.bridgeUrl;
   $('token').value = saved.token;
   $('visual-mode').checked = saved.useVisualProfile;
+  $('auto-attach-fresh').checked = saved.autoAttachFreshTabs;
+  attachedTabIDs = [...new Set((saved.tabIds?.length ? saved.tabIds : [saved.tabId]).map(Number).filter(Boolean))];
   toggleProfileMode();
-  await loadTabs(saved.tabIds?.length ? saved.tabIds : [saved.tabId], false);
+  await loadTabs(attachedTabIDs[0] || 0, false);
   await loadProfiles(saved);
   await refreshState();
 }
 
-$('refresh-tabs').addEventListener('click', () => loadTabs(selectedTabIDs(), false));
+$('refresh-tabs').addEventListener('click', () => loadTabs(primaryTabID(), false));
 $('select-ai-tabs').addEventListener('click', async () => {
   try {
     const granted = await api.permissions.request({ permissions: ['tabs'] });
     if (!granted) throw new Error('Tab access was not granted');
     const allTabs = await api.tabs.query({});
-    const selected = selectStarterTabs(allTabs);
-    if (!selected.length) throw new Error('No open ChatGPT or Gemini tab was found');
-    const origins = [...new Set(selected.map((tab) => new URL(tab.url).origin + '/*'))];
+    const candidates = allTabs.filter((tab) => tab.id && globalThis.ContextBridgeProfiles?.forURL(tab.url || '') && isFreshChatURL(tab.url));
+    if (!candidates.length) throw new Error('No new, empty ChatGPT or Gemini chat was found. Allow an existing tab explicitly if you want to use it.');
+    const origins = [...new Set(candidates.map((tab) => new URL(tab.url).origin + '/*'))];
     if (!await api.permissions.request({ origins })) throw new Error('Page access was not granted');
-    await loadTabs(selected.map((tab) => tab.id), true);
+    const fresh = [];
+    for (const tab of candidates) {
+      const result = await api.runtime.sendMessage({ type: 'check-tab-freshness', tabId: tab.id });
+      if (result?.fresh) fresh.push({ ...tab, fresh: true });
+    }
+    const selected = selectStarterTabs(fresh);
+    if (!selected.length) throw new Error('No confirmed empty chat is ready. Existing conversations require Allow this tab.');
+    await blockAutoAttach(selected.map((tab) => tab.id), false);
+    await setAttachedTabIDs([...attachedTabIDs, ...selected.map((tab) => tab.id)]);
+    await loadTabs(selected[0].id, true);
     await refreshState();
-    setStatus('live', `${selected.length} AI tab${selected.length === 1 ? '' : 's'} selected`);
+    setStatus('live', `${selected.length} fresh AI tab${selected.length === 1 ? '' : 's'} attached`);
   } catch (error) {
     setStatus('error', error.message || String(error));
   }
 });
 
 function selectStarterTabs(tabs) {
-  const supported = tabs.filter((tab) => tab.id && globalThis.ContextBridgeProfiles?.forURL(tab.url || ''));
+  const supported = tabs.filter((tab) => tab.id && tab.fresh === true && globalThis.ContextBridgeProfiles?.forURL(tab.url || ''));
   const choose = (profile) => supported
     .filter((tab) => globalThis.ContextBridgeProfiles.forURL(tab.url).name === profile)
     .sort((a, b) => Number(b.active) - Number(a.active) || Number(b.lastAccessed || 0) - Number(a.lastAccessed || 0) || b.id - a.id)[0];
   return [choose('chatgpt'), choose('gemini')].filter(Boolean);
 }
+
+function isFreshChatURL(value) {
+  try {
+    const url = new URL(value);
+    if (url.search || url.hash) return false;
+    if (['chatgpt.com', 'chat.openai.com'].includes(url.hostname)) return url.pathname === '/';
+    if (url.hostname === 'gemini.google.com') return url.pathname === '/app' || url.pathname === '/app/';
+  } catch (_) {}
+  return false;
+}
+
+$('attach-tab').addEventListener('click', async () => {
+  try {
+    const tabId = primaryTabID();
+    if (!tabId) throw new Error('Choose a tab first');
+    const tab = await api.tabs.get(tabId);
+    if (!/^https?:/i.test(tab.url || '')) throw new Error('Only web pages can be attached');
+    const saved = await settings();
+    if (saved.useVisualProfile && !saved.taughtProfiles[new URL(tab.url).origin] && !globalThis.ContextBridgeProfiles?.forURL(tab.url)) {
+      throw new Error('Teach this page before attaching it');
+    }
+    if (!await api.permissions.request({ origins: [new URL(tab.url).origin + '/*'] })) throw new Error('Page access was not granted');
+    await blockAutoAttach([tabId], false);
+    await setAttachedTabIDs([...attachedTabIDs, tabId]);
+    await loadTabs(tabId, await hasTabsPermission());
+    await refreshState();
+    setStatus('live', 'Tab explicitly attached');
+  } catch (error) { setStatus('error', error.message || String(error)); }
+});
+
+$('detach-tab').addEventListener('click', async () => {
+  const tabId = primaryTabID();
+  if (!tabId || !attachedTabIDs.includes(tabId)) return;
+  await blockAutoAttach([tabId], true);
+  await setAttachedTabIDs(attachedTabIDs.filter((id) => id !== tabId));
+  await loadTabs(tabId, await hasTabsPermission());
+  await refreshState();
+  setStatus('idle', 'Tab detached; no new jobs will be sent to it');
+});
+
+$('detach-all').addEventListener('click', async () => {
+  await blockAutoAttach(attachedTabIDs, true);
+  await setAttachedTabIDs([]);
+  await loadTabs(primaryTabID(), await hasTabsPermission());
+  await refreshState();
+  setStatus('idle', 'All tabs detached');
+});
+
+$('auto-attach-fresh').addEventListener('change', async () => {
+  await api.storage.local.set({ autoAttachFreshTabs: $('auto-attach-fresh').checked });
+  if ($('auto-attach-fresh').checked) await api.runtime.sendMessage({ type: 'discover-fresh-tabs' });
+});
 $('all-tabs').addEventListener('click', async () => {
   const granted = await api.permissions.request({ permissions: ['tabs'] });
   if (!granted) return setStatus('error', 'Tab access was not granted');
-  await loadTabs(selectedTabIDs(), true);
+  await loadTabs(primaryTabID(), true);
   $('all-tabs').hidden = true;
 });
 $('tab').addEventListener('change', async () => {
-  const tabIds = selectedTabIDs();
-  await api.storage.local.set({ tabId: tabIds[0] || 0, tabIds });
-  await api.runtime.sendMessage({ type: 'refresh-tabs' });
   await refreshState();
 });
 $('visual-mode').addEventListener('change', async () => {
@@ -200,22 +266,48 @@ async function loadTabs(selected, allWindows) {
     tabs = await api.tabs.query({ active: true, currentWindow: true });
   }
   const eligible = tabs.filter((tab) => tab.id && /^https?:/i.test(tab.url || ''));
-  const selectedIDs = new Set((Array.isArray(selected) ? selected : [selected]).map(Number));
+  const focusedID = Number(selected) || attachedTabIDs[0] || eligible.find((tab) => tab.active)?.id || 0;
   $('tab').textContent = '';
   for (const tab of eligible) {
     const option = document.createElement('option');
     option.value = String(tab.id);
     const host = safeHost(tab.url);
     const windowLabel = allWindows ? `W${tab.windowId}  ` : '';
-    option.textContent = `${windowLabel}${tab.title || 'Untitled'}  |  ${host}`;
-    option.selected = selectedIDs.has(tab.id);
+    const attached = attachedTabIDs.includes(tab.id);
+    option.textContent = `${attached ? '● Attached' : '○ Available'} · ${windowLabel}${tab.title || 'Untitled'}  |  ${host}`;
+    option.selected = focusedID === tab.id;
     $('tab').append(option);
   }
-  if (!selectedTabIDs().length && eligible[0]) eligible[0] && ($('tab').options[0].selected = true);
+  if (!$('tab').selectedOptions.length && eligible[0]) $('tab').options[0].selected = true;
   $('all-tabs').hidden = await hasTabsPermission();
-  const tabIds = selectedTabIDs();
-  await api.storage.local.set({ tabId: tabIds[0] || 0, tabIds });
+  describeSelectedTab();
+}
+
+async function setAttachedTabIDs(values) {
+  attachedTabIDs = [...new Set(values.map(Number).filter(Boolean))].slice(0, 16);
+  await api.storage.local.set({ tabId: attachedTabIDs[0] || 0, tabIds: attachedTabIDs });
   await api.runtime.sendMessage({ type: 'refresh-tabs' });
+}
+
+async function blockAutoAttach(tabIds, blocked) {
+  const saved = await settings();
+  const values = new Set((saved.autoAttachBlockedTabIds || []).map(Number).filter(Boolean));
+  for (const id of tabIds) {
+    if (blocked) values.add(id);
+    else values.delete(id);
+  }
+  await api.storage.local.set({ autoAttachBlockedTabIds: [...values].slice(-100) });
+}
+
+function describeSelectedTab() {
+  const id = primaryTabID();
+  const attached = attachedTabIDs.includes(id);
+  $('attach-tab').disabled = !id || attached || attachedTabIDs.length >= 16;
+  $('detach-tab').disabled = !attached;
+  $('detach-all').disabled = attachedTabIDs.length === 0;
+  $('tab-state').textContent = !id ? 'Choose a tab to inspect or attach.'
+    : attached ? 'Attached: this tab can receive jobs. Detach it here at any time.'
+      : 'Not attached. Allow this tab explicitly, including its existing conversation if present.';
 }
 
 async function loadProfiles(saved) {
@@ -261,8 +353,9 @@ async function refreshState() {
   renderProfile(currentProfile);
   renderRunning(saved.running);
   updateActions(currentProfile, saved.useVisualProfile);
+  describeSelectedTab();
   if (saved.lastError) setStatus('error', saved.lastError);
-  else if (saved.running) setStatus('live', `Connected · ${saved.tabIds?.length || 1} tab${(saved.tabIds?.length || 1) === 1 ? '' : 's'} ready`);
+  else if (saved.running) setStatus('live', `Connected · ${attachedTabIDs.length} tab${attachedTabIDs.length === 1 ? '' : 's'} attached`);
   else setStatus('idle', 'Not connected');
 }
 
@@ -281,7 +374,6 @@ function renderRunning(running) {
   $('pair').hidden = running;
   $('stop').hidden = !running;
   $('teach').disabled = running;
-  $('tab').disabled = running;
   $('scan-capabilities').disabled = !primaryTabID();
 }
 
@@ -336,6 +428,8 @@ async function settings() {
     tabId: 0,
     tabIds: [],
     running: false,
+    autoAttachFreshTabs: true,
+    autoAttachBlockedTabIds: [],
     useVisualProfile: true,
     taughtProfiles: {},
     lastError: ''
@@ -343,9 +437,9 @@ async function settings() {
 }
 
 function selectedTabIDs() {
-  return [...$('tab').selectedOptions].map((option) => Number(option.value)).filter(Boolean);
+  return [...attachedTabIDs];
 }
 
 function primaryTabID() {
-  return selectedTabIDs()[0] || 0;
+  return Number($('tab').value) || 0;
 }

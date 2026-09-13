@@ -2,6 +2,20 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.8 - 2026-09-13
+
+### Added
+
+- explicit per-tab attachment and detachment, plus a detach-all control; merely viewing a tab no longer authorizes it
+- optional auto-attachment only for new, empty ChatGPT/Gemini chats after two DOM checks and an existing origin grant
+- Gemini model/mode discovery from the live mode picker, including localized choices such as Flash variants
+- a documented list of unreproduced provider pause and safety-check edge cases
+
+### Fixed
+
+- the one-click browser helper no longer attaches existing conversations just because they are recently active
+- tab selection and attachment can be changed while the browser bridge is running
+
 ## 0.5.7 - 2026-09-13
 
 ### Added

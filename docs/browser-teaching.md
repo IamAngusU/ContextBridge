@@ -35,7 +35,7 @@ Firefox removes temporary add-ons when the browser closes. Permanent consumer in
 ## Connect ChatGPT Or Gemini
 
 1. Start ContextBridge and open a dedicated ChatGPT or Gemini tab.
-2. Open the extension and choose that tab.
+2. Open the extension and choose that tab, then click **Allow this tab**. Choosing a row alone does not grant access. Alternatively, **Attach fresh ChatGPT + Gemini chats** finds only confirmed empty chats.
 3. The extension shows the automatically detected profile. Choose **Test profile**.
 4. Choose **Start browser bridge**.
 
@@ -46,7 +46,7 @@ as ready to appear after the first answer.
 ## Teach Another Page Or Override Detection
 
 1. Start ContextBridge and open the target AI page.
-2. Open the extension and choose the current tab. Grant optional all-tabs access only when you need another window.
+2. Open the extension and choose the current tab. Click **Allow this tab** to connect an existing conversation. Grant optional all-tabs access only when you need another window or automatic fresh-tab discovery.
 3. Choose **Customize detection**.
 4. Click the prompt field.
 5. Click the send control, or skip when Enter submits.
@@ -88,7 +88,7 @@ The base extension has storage, active-tab, and script injection permissions. Ho
 - the selected page origin
 - `http://127.0.0.1` or `http://localhost` for the local service
 
-The optional tabs permission is requested only after choosing **Show tabs from every window**.
+The optional tabs permission is requested by **Show tabs from every window** or **Attach fresh ChatGPT + Gemini chats**. Automatic discovery of new empty chats requires this permission and a previously granted page origin. It fails closed if the chat already has turns, the composer contains text, the URL identifies an existing conversation, or the page cannot be inspected. You can disable it in the extension, detach one tab, or detach all tabs at any time. Already-submitted web-chat work cannot be unsent.
 
 ## Retest Or Replace A Profile
 

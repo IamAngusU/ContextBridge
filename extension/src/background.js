@@ -8,10 +8,20 @@ let stopRequested = false;
 let heartbeatTimer = 0;
 const pollers = new Map();
 const busyTabs = new Set();
+const freshTabChecks = new Map();
+let freshTabWrite = Promise.resolve();
 const acceptedModelLabel = /^(?:gpt[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:astra|sol|terra|luna|pro|mini|nano|codex|thinking|instant))?|gemini(?:[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:pro|flash|lite|thinking|preview|experimental))*)?|astra|sol|terra|luna|\d+(?:\.\d+)?\s+(?:pro|flash|astra|sol|terra|luna))$/i;
 
 api.runtime.onInstalled.addListener(() => resume());
 api.runtime.onStartup.addListener(() => resume());
+api.tabs.onUpdated?.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status === 'complete') scheduleFreshTabCheck(tabId, tab?.url || changeInfo.url || '');
+});
+api.tabs.onRemoved?.addListener((tabId) => {
+  if (freshTabChecks.has(tabId)) clearTimeout(freshTabChecks.get(tabId));
+  freshTabChecks.delete(tabId);
+  void detachClosedTab(tabId);
+});
 
 api.runtime.onMessage.addListener((message, sender, sendResponse) => {
   Promise.resolve(handleMessage(message || {}, sender))
@@ -35,6 +45,11 @@ async function handleMessage(message, sender) {
         poll();
         await sendHeartbeat(busyTabs.size ? 'working' : 'waiting');
       }
+      return { ok: true };
+    case 'check-tab-freshness':
+      return { ok: true, fresh: await checkFreshTab(Number(message.tabId)) };
+    case 'discover-fresh-tabs':
+      await discoverFreshTabs();
       return { ok: true };
     case 'start-teaching':
       return startTeaching(Number(message.tabId));
@@ -71,6 +86,7 @@ async function startPairing() {
   startHeartbeat();
   poll();
   await sendHeartbeat('waiting');
+  void discoverFreshTabs();
   return { ok: true };
 }
 
@@ -88,6 +104,94 @@ async function resume() {
   stopRequested = false;
   startHeartbeat();
   poll();
+  void discoverFreshTabs();
+}
+
+function isFreshChatURL(value) {
+  try {
+    const url = new URL(value);
+    if (url.search || url.hash) return false;
+    if (['chatgpt.com', 'chat.openai.com'].includes(url.hostname)) return url.pathname === '/';
+    if (url.hostname === 'gemini.google.com') return url.pathname === '/app' || url.pathname === '/app/';
+  } catch (_) {}
+  return false;
+}
+
+function inspectFreshChat() {
+  const input = document.querySelector('#prompt-textarea, rich-textarea [contenteditable="true"][role="textbox"], div.ql-editor[contenteditable="true"][role="textbox"]');
+  if (!input) return false;
+  if (String(input.value || input.innerText || input.textContent || '').trim()) return false;
+  if (document.querySelector('section[data-turn], [data-message-author-role], user-query, model-response')) return false;
+  if (input.closest?.('form')?.querySelector?.('[data-testid*="attachment" i], [data-test-id*="attachment" i], .attachment-chip, .file-chip')) return false;
+  return true;
+}
+
+async function checkFreshTab(tabId) {
+  if (!tabId) return false;
+  const firstTab = await api.tabs.get(tabId);
+  if (!isFreshChatURL(firstTab?.url)) return false;
+  const first = await api.scripting.executeScript({ target: { tabId }, func: inspectFreshChat });
+  if (!first?.[0]?.result) return false;
+  await delay(1000);
+  const secondTab = await api.tabs.get(tabId);
+  if (secondTab?.url !== firstTab.url || !isFreshChatURL(secondTab.url)) return false;
+  const second = await api.scripting.executeScript({ target: { tabId }, func: inspectFreshChat });
+  return second?.[0]?.result === true;
+}
+
+function scheduleFreshTabCheck(tabId, url) {
+  if (!isFreshChatURL(url)) return;
+  if (freshTabChecks.has(tabId)) clearTimeout(freshTabChecks.get(tabId));
+  freshTabChecks.set(tabId, setTimeout(() => {
+    freshTabChecks.delete(tabId);
+    void maybeAutoAttachFreshTab(tabId);
+  }, 1500));
+}
+
+async function maybeAutoAttachFreshTab(tabId) {
+  try {
+    const cfg = await settings();
+    if (!cfg.running || !cfg.autoAttachFreshTabs || cfg.autoAttachBlockedTabIds.includes(tabId) || configuredTabIDs(cfg).includes(tabId) || configuredTabIDs(cfg).length >= 16) return;
+    if (!await api.permissions.contains({ permissions: ['tabs'] })) return;
+    const tab = await api.tabs.get(tabId);
+    if (!isFreshChatURL(tab?.url) || !await api.permissions.contains({ origins: [new URL(tab.url).origin + '/*'] })) return;
+    if (!await checkFreshTab(tabId)) return;
+    freshTabWrite = freshTabWrite.catch(() => {}).then(async () => {
+      const latest = await settings();
+      if (!latest.running || !latest.autoAttachFreshTabs || latest.autoAttachBlockedTabIds.includes(tabId) || configuredTabIDs(latest).includes(tabId) || configuredTabIDs(latest).length >= 16) return;
+      const current = await api.tabs.get(tabId);
+      if (current.url !== tab.url) return;
+      const tabIds = [...configuredTabIDs(latest), tabId];
+      await api.storage.local.set({ tabId: tabIds[0], tabIds });
+      poll();
+      await sendHeartbeat('waiting');
+    });
+    await freshTabWrite;
+  } catch (_) { /* A missing permission or a changing page must fail closed. */ }
+}
+
+async function discoverFreshTabs() {
+  try {
+    const cfg = await settings();
+    if (!cfg.running || !cfg.autoAttachFreshTabs || !await api.permissions.contains({ permissions: ['tabs'] })) return;
+    for (const tab of await api.tabs.query({})) {
+      if (isFreshChatURL(tab.url)) await maybeAutoAttachFreshTab(tab.id);
+    }
+  } catch (_) {}
+}
+
+async function detachClosedTab(tabId) {
+  const cfg = await settings();
+  const autoAttachBlockedTabIds = cfg.autoAttachBlockedTabIds.filter((id) => id !== tabId);
+  if (!configuredTabIDs(cfg).includes(tabId)) {
+    if (autoAttachBlockedTabIds.length !== cfg.autoAttachBlockedTabIds.length) await api.storage.local.set({ autoAttachBlockedTabIds });
+    return;
+  }
+  const tabIds = configuredTabIDs(cfg).filter((id) => id !== tabId);
+  const tabCapabilities = { ...cfg.tabCapabilities };
+  delete tabCapabilities[tabId];
+  await api.storage.local.set({ tabId: tabIds[0] || 0, tabIds, tabCapabilities, autoAttachBlockedTabIds });
+  if (cfg.running) await sendHeartbeat('waiting');
 }
 
 async function testBridge() {
@@ -280,6 +384,11 @@ async function pollTab(tabId) {
         const work = await response.json();
         if (cfg.pendingCompletions[work?.job?.id]) {
           await completeWork(cfg, work.job.id, cfg.pendingCompletions[work.job.id]);
+          continue;
+        }
+        const latest = await settings();
+        if (!latest.running || !configuredTabIDs(latest).includes(tabId)) {
+          await completeWork(latest, work.job.id, { mode: outputMode(work.job.output || {}), error: 'browser_tab_detached', model: 'browser' });
           continue;
         }
         await processWork(cfg, work, tabId);
@@ -715,7 +824,7 @@ function automate(job, profile, jobDeadline) {
 	const choosePreference = async (kind, requested) => {
 		if (!requested || ['auto', 'default'].includes(String(requested).toLowerCase())) return '';
 		const triggerSelectors = kind === 'model'
-			? ['button[data-testid*="model" i]', 'button[aria-label*="model" i]', 'button[aria-haspopup="menu"]']
+			? ['bard-mode-switcher button[aria-haspopup]', 'button[data-testid*="model" i]', 'button[aria-label*="model" i]', 'button[aria-haspopup="menu"]']
 			: ['button[data-testid*="reason" i]', 'button[data-testid*="effort" i]', 'button[aria-label*="reason" i]', 'button[aria-label*="denk" i]', 'button[aria-haspopup="menu"]'];
 		const requestedTerms = preferenceTerms(kind, requested);
 		const preferenceMatches = (element) => {
@@ -726,24 +835,46 @@ function automate(job, profile, jobDeadline) {
 				: requestedTerms.every((term) => normalizedWords(label).includes(term));
 		};
 		const triggers = triggerSelectors.flatMap((selector) => { try { return [...document.querySelectorAll(selector)].filter(isVisible); } catch (_) { return []; } });
-		const current = triggers.find(preferenceMatches);
-		if (current) return visibleText(current) || requested;
+		const normalizedValue = (value) => normalizedWords(value).join(' ');
+		const geminiModeLabel = (element) => {
+			const primary = visibleText(element.querySelector?.('.picker-primary-text, .mode-name, .model-name'));
+			const secondary = visibleText(element.querySelector?.('.picker-secondary-text'));
+			if (primary) return `${primary} ${secondary}`.trim();
+			return String(element.getAttribute('aria-label') || '').trim() || String(element.innerText || '').split('\n').map((part) => part.trim()).filter(Boolean)[0] || '';
+		};
+		const current = kind === 'model' && profile.name === 'gemini'
+			? triggers.find((element) => Boolean(element.closest?.('bard-mode-switcher')) && normalizedValue(element.getAttribute('aria-label')?.match(/(?:derzeit ausgewählt|currently selected|selected)\s*:\s*(.+)$/i)?.[1] || '') === normalizedValue(requested))
+			: triggers.find((element) => {
+				if (kind !== 'model') return preferenceMatches(element);
+				const semantic = `${element.getAttribute('data-testid') || ''} ${element.getAttribute('aria-label') || ''}`;
+				return (/model[-_ ]?(?:switcher|selector|picker|menu)|modellauswahl|modellmenü/i.test(semantic)
+					|| /^(?:gpt[\s._-]*\d|astra\b|sol\b|terra\b|luna\b)/i.test(visibleText(element))) && preferenceMatches(element);
+			});
+		if (current) return kind === 'model' && profile.name === 'gemini' ? String(requested) : (visibleText(current) || requested);
 		const trigger = triggers.find((element) => {
 			const label = `${visibleText(element)} ${element.getAttribute('aria-label') || ''}`.toLowerCase();
-			return kind === 'model' ? /gpt|gemini|model|modell|astra|sol|terra|luna/.test(label) : /reason|denk|effort|thinking|sofort|instant|hoch|high|pro|max/.test(label);
+			return kind === 'model' ? (profile.name === 'gemini' && Boolean(element.closest?.('bard-mode-switcher'))) || /gpt|gemini|model|modell|astra|sol|terra|luna/.test(label) : /reason|denk|effort|thinking|sofort|instant|hoch|high|pro|max/.test(label);
 		});
 		if (!trigger) throw new Error(`The ${kind} selector is not visible in this provider UI`);
 		trigger.click();
 		await wait(350);
-		const options = [...document.querySelectorAll('[role="menuitem"], [role="option"], [data-radix-collection-item], [aria-checked], [aria-selected]')].filter(isVisible);
-		const match = options.find(preferenceMatches);
-		if (!match) {
+		const menuID = trigger.getAttribute('aria-controls');
+		const menu = kind === 'model' && profile.name === 'gemini'
+			? (menuID && document.getElementById(menuID)) || [...document.querySelectorAll('[role="menu"], .cdk-overlay-pane')].filter(isVisible).at(-1)
+			: null;
+		const options = [...(menu || document).querySelectorAll(menu
+			? 'button, [role="menuitem"], [role="option"], [role="menuitemradio"], mat-option'
+			: '[role="menuitem"], [role="option"], [data-radix-collection-item], [aria-checked], [aria-selected]')].filter(isVisible);
+		const match = kind === 'model' && profile.name === 'gemini'
+			? options.find((element) => normalizedValue(geminiModeLabel(element)) === normalizedValue(requested))
+			: options.find(preferenceMatches);
+		if (!match || match.disabled || match.getAttribute('aria-disabled') === 'true') {
 			document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
 			throw new Error(`Requested ${kind} "${requested}" is not available in this chat`);
 		}
 		match.click();
 		await wait(350);
-		return visibleText(match) || requested;
+		return profile.name === 'gemini' && kind === 'model' ? String(requested) : (visibleText(match) || requested);
 	};
 	const chooseImageTool = async (input) => {
 		if (profile.name !== 'chatgpt') return;
@@ -1147,11 +1278,14 @@ async function sendHeartbeat(state) {
       try {
         const report = await api.scripting.executeScript({ target: { tabId }, func: inspectPageCapabilities });
         const live = report?.[0]?.result || {};
+        const validModel = profile?.name === 'gemini'
+          ? (value) => Boolean(String(value || '').trim() && String(value).length <= 100)
+          : (value) => acceptedModelLabel.test(value);
         capabilities = {
           ...capabilities,
-          currentModel: live.currentModel || (acceptedModelLabel.test(capabilities.currentModel || '') ? capabilities.currentModel : ''),
+          currentModel: live.currentModel || (validModel(capabilities.currentModel || '') ? capabilities.currentModel : ''),
           currentReasoning: live.currentReasoning || capabilities.currentReasoning || '',
-          models: [...new Set([...(capabilities.models || []), ...(live.models || [])])].filter((value) => acceptedModelLabel.test(value)),
+          models: [...new Set([...(capabilities.models || []), ...(live.models || [])])].filter(validModel),
           reasoningLevels: [...new Set([...(capabilities.reasoningLevels || []), ...(live.reasoningLevels || [])])]
         };
       } catch (_) {}
@@ -1202,6 +1336,8 @@ async function settings() {
     tabId: 0,
     tabIds: [],
     running: false,
+    autoAttachFreshTabs: true,
+    autoAttachBlockedTabIds: [],
     useVisualProfile: true,
     taughtProfiles: {},
     sessionTabs: {},
@@ -1232,11 +1368,13 @@ function inspectPageCapabilities() {
     return modelPattern.test(text(element)) && !/modelle ergänzen|add models|preismodell|pricing model/i.test(label);
   }));
   const currentReasoning = text(controls.find((element) => semantic(element, /reason|denk|effort|thinking/i) || reasoningPattern.test(text(element))));
+  const geminiPicker = document.querySelector?.('bard-mode-switcher button[aria-haspopup]');
+  const geminiCurrent = geminiPicker?.getAttribute('aria-label')?.match(/(?:derzeit ausgewählt|currently selected|selected)\s*:\s*(.+)$/i)?.[1]?.trim().slice(0, 100) || '';
   return {
-    currentModel,
-    currentReasoning,
-    models: unique(options.map(text).filter((value) => modelPattern.test(value)), 50),
-    reasoningLevels: unique(options.map(text).filter((value) => reasoningPattern.test(value)), 20)
+    currentModel: geminiCurrent || currentModel,
+    currentReasoning: geminiCurrent ? '' : currentReasoning,
+    models: geminiCurrent ? [] : unique(options.map(text).filter((value) => modelPattern.test(value)), 50),
+    reasoningLevels: geminiCurrent ? [] : unique(options.map(text).filter((value) => reasoningPattern.test(value)), 20)
   };
 }
 
@@ -1319,6 +1457,28 @@ async function discoverPageCapabilities() {
   const reasoningPattern = /^(?:instant|sofort|fast|schnell|low|niedrig|medium|mittel|high|hoch|very high|sehr hoch|xhigh|pro|max|maximum)$/i;
   const semantic = (element, pattern) => pattern.test(`${element.getAttribute('data-testid') || ''} ${element.getAttribute('aria-label') || ''}`);
   const modelControl = (element) => semantic(element, /model[-_ ]?(?:switcher|selector|picker|menu)|(?:choose|select|current)[-_ ]?model|modellauswahl|modellmenü|modellmodus/i);
+  const geminiPicker = document.querySelector?.('bard-mode-switcher button[aria-haspopup]');
+  if (geminiPicker && visible(geminiPicker)) {
+    const currentModel = geminiPicker.getAttribute('aria-label')?.match(/(?:derzeit ausgewählt|currently selected|selected)\s*:\s*(.+)$/i)?.[1]?.trim().slice(0, 100) || text(geminiPicker);
+    geminiPicker.click();
+    await wait(350);
+    const controlled = geminiPicker.getAttribute('aria-controls');
+    const menu = (controlled && document.getElementById(controlled))
+      || [...document.querySelectorAll('[role="menu"], .cdk-overlay-pane')].filter(visible).at(-1);
+    const modelLabel = (element) => {
+      const primary = text(element.querySelector?.('.picker-primary-text, .mode-name, .model-name'));
+      const secondary = text(element.querySelector?.('.picker-secondary-text'));
+      if (primary) return `${primary} ${secondary}`.trim().slice(0, 100);
+      const label = String(element.getAttribute?.('aria-label') || '').trim();
+      return (label || String(element.innerText || '').split('\n').map((part) => part.trim()).filter(Boolean)[0] || '').slice(0, 100);
+    };
+    const choices = menu ? [...menu.querySelectorAll('button, [role="menuitem"], [role="option"], [role="menuitemradio"], mat-option')]
+      .filter((element) => visible(element) && !element.disabled && element.getAttribute('aria-disabled') !== 'true') : [];
+    const models = unique(choices.map(modelLabel).filter((value) => value && value.length <= 100 && !/^(?:close|schließen|back|zurück|help|hilfe|upgrade|upgraden)$/i.test(value)), 50);
+    geminiPicker.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+    await wait(150);
+    return { currentModel, currentReasoning: '', models, reasoningLevels: [] };
+  }
   const scan = async (kind) => {
     const pattern = kind === 'model' ? modelPattern : reasoningPattern;
     const triggers = [...document.querySelectorAll('button, [role="button"]')].filter(visible).filter((element) => {

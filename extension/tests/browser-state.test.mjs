@@ -115,6 +115,76 @@ const element = (text = '', attributes = {}) => ({
 }
 
 {
+  const input = element('');
+  context.document = {
+    querySelector(selector) {
+      if (selector.startsWith('#prompt-textarea')) return input;
+      return null;
+    }
+  };
+  assert.equal(context.inspectFreshChat(), true);
+  context.document.querySelector = (selector) => selector.startsWith('#prompt-textarea') ? input : element('An existing turn');
+  assert.equal(context.inspectFreshChat(), false);
+  assert.equal(context.isFreshChatURL('https://chatgpt.com/c/existing'), false);
+  assert.equal(context.isFreshChatURL('https://gemini.google.com/app/existing'), false);
+}
+
+{
+  const modelOption = (primary, secondary = '') => ({
+    ...element(`${primary}\n${secondary}`),
+    querySelector(selector) {
+      if (selector.includes('picker-primary-text')) return element(primary);
+      if (selector.includes('picker-secondary-text')) return secondary ? element(secondary) : null;
+      return null;
+    }
+  });
+  const picker = {
+    ...element('Flash Erweitert', { 'aria-haspopup': 'true', 'aria-controls': 'gemini-mode-menu', 'aria-label': 'Modusauswahl öffnen, derzeit ausgewählt: Flash Erweitert' }),
+    click() {}, dispatchEvent() {}
+  };
+  const menu = { querySelectorAll: () => [modelOption('Flash', 'Erweitert'), modelOption('Pro'), modelOption('Flash-Lite')] };
+  context.KeyboardEvent = class {};
+  context.document = {
+    querySelector: (selector) => selector.startsWith('bard-mode-switcher') ? picker : null,
+    querySelectorAll: (selector) => selector === 'button, [role="button"]' ? [picker] : [],
+    getElementById: (id) => id === 'gemini-mode-menu' ? menu : null
+  };
+  assert.equal(context.inspectPageCapabilities().currentModel, 'Flash Erweitert');
+  const capabilities = await context.discoverPageCapabilities();
+  assert.deepEqual(Array.from(capabilities.models), ['Flash Erweitert', 'Pro', 'Flash-Lite']);
+}
+
+{
+  let selectedPro = false;
+  const picker = {
+    ...element('Flash Erweitert', { 'aria-haspopup': 'true', 'aria-controls': 'gemini-mode-menu', 'aria-label': 'Modusauswahl öffnen, derzeit ausgewählt: Flash Erweitert' }),
+    closest: () => ({}), click() {}
+  };
+  const account = { ...element('Angus Pro', { 'aria-haspopup': 'menu' }), closest: () => null };
+  const pro = {
+    ...element('Pro\nSuitable for complex tasks'),
+    querySelector(selector) { return selector.includes('picker-primary-text') ? element('Pro') : null; },
+    click() { selectedPro = true; }
+  };
+  const flash = { ...element('Flash\nErweitert'), querySelector: () => element('Flash'), click() {} };
+  const input = { ...element(), focus() { throw new Error('Stop after model choice'); } };
+  context.document = {
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === 'bard-mode-switcher button[aria-haspopup]') return [picker];
+      if (selector === 'button[aria-haspopup="menu"]') return [account];
+      return [];
+    },
+    getElementById: () => ({ querySelectorAll: () => [flash, pro] }),
+    dispatchEvent() {}
+  };
+  await context.automate({ prompt: 'test', model: 'Pro', output: { mode: 'text' } },
+    { name: 'gemini', selectors: { input: ['#input'], response: ['#response'], submit: [] } },
+    new Date(Date.now() + 5000).toISOString());
+  assert.equal(selectedPro, true);
+}
+
+{
   const input = element();
   const previous = element('Previous answer', { 'data-testid': 'conversation-turn-2' });
   const remounted = element('Previous answer', { 'data-testid': 'conversation-turn-2' });

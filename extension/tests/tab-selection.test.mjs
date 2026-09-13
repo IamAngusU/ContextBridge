@@ -3,9 +3,27 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 const source = fs.readFileSync(new URL('../src/popup.js', import.meta.url), 'utf8');
-const element = () => ({ addEventListener() {} });
+const listeners = new Map();
+const elements = new Map();
+const writes = [];
+const stored = {};
+const element = (id) => {
+  if (!elements.has(id)) elements.set(id, {
+    value: id === 'tab' ? '31' : '',
+    addEventListener(type, listener) { listeners.set(`${id}:${type}`, listener); }
+  });
+  return elements.get(id);
+};
 const context = vm.createContext({
-  chrome: { runtime: { onMessage: { addListener() {} } } },
+  chrome: {
+    runtime: { onMessage: { addListener() {} }, sendMessage: async () => ({ ok: true }) },
+    storage: { onChanged: { addListener() {} }, local: {
+      get: async (defaults) => ({ ...defaults, ...stored }),
+      set: async (value) => { Object.assign(stored, value); writes.push(value); }
+    } },
+    tabs: { get: async (id) => ({ id, url: 'https://chatgpt.com/c/existing' }) },
+    permissions: { request: async () => true }
+  },
   document: { addEventListener() {}, getElementById: element },
   URL,
   console,
@@ -19,9 +37,26 @@ const context = vm.createContext({
 });
 vm.runInContext(source, context);
 
-const oldChats = Array.from({ length: 20 }, (_, index) => ({ id: index + 1, url: `https://chatgpt.com/c/${index}`, active: false }));
-const activeChat = { id: 25, url: 'https://chatgpt.com/c/current', active: true };
-const gemini = { id: 26, url: 'https://gemini.google.com/app/current', active: true };
-const picked = context.selectStarterTabs([...oldChats, activeChat, gemini]);
-assert.deepEqual(Array.from(picked, (tab) => tab.id), [25, 26]);
-console.log('Starter tab selection keeps both ChatGPT and Gemini even with many old chats');
+const oldChats = Array.from({ length: 20 }, (_, index) => ({ id: index + 1, url: `https://chatgpt.com/c/${index}`, active: false, fresh: false }));
+const activeChat = { id: 25, url: 'https://chatgpt.com/c/current', active: true, fresh: false };
+const gemini = { id: 26, url: 'https://gemini.google.com/app/current', active: true, fresh: false };
+assert.deepEqual(Array.from(context.selectStarterTabs([...oldChats, activeChat, gemini])), []);
+const freshChatGPT = { id: 27, url: 'https://chatgpt.com/', fresh: true };
+const freshGemini = { id: 28, url: 'https://gemini.google.com/app', fresh: true };
+const picked = context.selectStarterTabs([...oldChats, activeChat, gemini, freshChatGPT, freshGemini]);
+assert.deepEqual(Array.from(picked, (tab) => tab.id), [27, 28]);
+assert.equal(context.isFreshChatURL(activeChat.url), false);
+assert.equal(context.isFreshChatURL(gemini.url), false);
+assert.equal(context.isFreshChatURL(freshChatGPT.url), true);
+assert.equal(context.isFreshChatURL(freshGemini.url), true);
+
+context.loadTabs = async () => {};
+context.refreshState = async () => {};
+context.hasTabsPermission = async () => true;
+context.setStatus = () => {};
+await listeners.get('attach-tab:click')();
+assert.deepEqual(Array.from(writes.at(-1).tabIds), [31]);
+await listeners.get('detach-tab:click')();
+assert.deepEqual(Array.from(writes.at(-1).tabIds), []);
+assert.deepEqual(Array.from(stored.autoAttachBlockedTabIds), [31]);
+console.log('Only confirmed fresh ChatGPT and Gemini chats are auto-selected');
