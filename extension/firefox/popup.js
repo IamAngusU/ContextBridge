@@ -21,7 +21,7 @@ async function initialize() {
   $('auto-attach-fresh').checked = saved.autoAttachFreshTabs;
   attachedTabIDs = [...new Set((saved.tabIds?.length ? saved.tabIds : [saved.tabId]).map(Number).filter(Boolean))];
   toggleProfileMode();
-  await loadTabs(attachedTabIDs[0] || 0, false);
+  await loadTabs(0, false);
   await loadProfiles(saved);
   await refreshState();
   setInterval(() => { if (!document.hidden) void refreshLiveTabs(); }, 2500);
@@ -83,31 +83,62 @@ function isFreshChatURL(value) {
 $('attach-tab').addEventListener('click', async () => {
   try {
     const tabId = primaryTabID();
-    if (!tabId) throw new Error('Choose a tab first');
-    const tab = await api.tabs.get(tabId);
-    if (!/^https?:/i.test(tab.url || '')) throw new Error('Only web pages can be attached');
-    const saved = await settings();
-    if (saved.useVisualProfile && !saved.taughtProfiles[new URL(tab.url).origin] && !globalThis.ContextBridgeProfiles?.forURL(tab.url)) {
-      throw new Error('Teach this page before attaching it');
-    }
-    if (!await api.permissions.request({ origins: [new URL(tab.url).origin + '/*'] })) throw new Error('Page access was not granted');
-    await blockAutoAttach([tabId], false);
-    await setAttachedTabIDs([...attachedTabIDs, tabId]);
+    await attachTab(tabId);
     await loadTabs(tabId, await hasTabsPermission());
     await refreshState();
-    setStatus('live', 'Tab explicitly attached');
+    setStatus((await settings()).running ? 'live' : 'idle', 'Selected tab attached; start the browser bridge below if it is stopped');
   } catch (error) { setStatus('error', error.message || String(error)); }
 });
 
 $('detach-tab').addEventListener('click', async () => {
   const tabId = primaryTabID();
+  await detachTab(tabId);
+  await loadTabs(tabId, await hasTabsPermission());
+  await refreshState();
+  setStatus((await settings()).running ? 'live' : 'idle', 'Tab detached; no new jobs will be sent to it');
+});
+
+$('toggle-current-tab').addEventListener('click', async () => {
+  try {
+    // Resolve the actual page under the popup, not the selected list row.
+    const tab = await currentPageTab();
+    if (!tab?.id || !/^https?:/i.test(tab.url || '')) throw new Error('Open this popup on an AI web page first');
+    const attached = attachedTabIDs.includes(tab.id);
+    if (attached) await detachTab(tab.id);
+    else await attachTab(tab.id);
+    await loadTabs(tab.id, await hasTabsPermission());
+    await refreshState();
+    setStatus((await settings()).running ? 'live' : 'idle', attached
+      ? 'Current page detached; no new jobs will be sent to it'
+      : 'Current page attached; start the browser bridge below if it is stopped');
+  } catch (error) { setStatus('error', error.message || String(error)); }
+});
+
+async function attachTab(tabId) {
+  if (!tabId) throw new Error('Choose a tab first');
+  if (attachedTabIDs.includes(tabId)) return;
+  if (attachedTabIDs.length >= 16) throw new Error('The 16-tab safety limit is reached; detach a tab first');
+  const tab = await api.tabs.get(tabId);
+  if (!/^https?:/i.test(tab.url || '')) throw new Error('Only web pages can be attached');
+  const saved = await settings();
+  if (saved.useVisualProfile && !saved.taughtProfiles[new URL(tab.url).origin] && !globalThis.ContextBridgeProfiles?.forURL(tab.url)) {
+    throw new Error('Teach this page before attaching it');
+  }
+  if (!await api.permissions.request({ origins: [new URL(tab.url).origin + '/*'] })) throw new Error('Page access was not granted');
+  await blockAutoAttach([tabId], false);
+  await setAttachedTabIDs([...attachedTabIDs, tabId]);
+}
+
+async function detachTab(tabId) {
   if (!tabId || !attachedTabIDs.includes(tabId)) return;
   await blockAutoAttach([tabId], true);
   await setAttachedTabIDs(attachedTabIDs.filter((id) => id !== tabId));
-  await loadTabs(tabId, await hasTabsPermission());
-  await refreshState();
-  setStatus('idle', 'Tab detached; no new jobs will be sent to it');
-});
+}
+
+async function currentPageTab() {
+  const tabs = await api.tabs.query({ active: true, currentWindow: true });
+  return tabs.find((tab) => tab.id) || null;
+}
 
 $('detach-all').addEventListener('click', async () => {
   await blockAutoAttach(attachedTabIDs, true);
@@ -283,7 +314,7 @@ async function loadTabs(selected, allWindows) {
     runtimeTabs = new Map((status?.tabs || []).map((tab) => [tab.id, tab]));
   } catch (_) {}
   liveTabState = runtimeTabs;
-  const focusedID = Number(selected) || attachedTabIDs[0] || eligible.find((tab) => tab.active)?.id || 0;
+  const focusedID = Number(selected) || eligible.find((tab) => tab.active)?.id || attachedTabIDs[0] || 0;
   const desired = eligible.map((tab) => {
     const host = safeHost(tab.url);
     const windowLabel = allWindows ? `W${tab.windowId}  ` : '';
@@ -308,6 +339,19 @@ async function loadTabs(selected, allWindows) {
   if (!$('tab').selectedOptions.length && eligible[0]) $('tab').options[0].selected = true;
   $('all-tabs').hidden = await hasTabsPermission();
   describeSelectedTab();
+  await updateCurrentPageAction();
+}
+
+async function updateCurrentPageAction() {
+  let tab = null;
+  try { tab = await currentPageTab(); } catch (_) {}
+  const available = Boolean(tab?.id && /^https?:/i.test(tab.url || ''));
+  const attached = available && attachedTabIDs.includes(tab.id);
+  $('toggle-current-tab').disabled = !available || (!attached && attachedTabIDs.length >= 16);
+  $('toggle-current-tab').textContent = attached ? 'Detach current page' : 'Attach current page';
+  $('current-tab-state').textContent = !available
+    ? 'Open this popup on a ChatGPT, Gemini, or taught AI page to attach it directly.'
+    : `${tab.title || safeHost(tab.url)} · ${attached ? 'attached' : 'not attached'}${attached ? '' : '; existing chats need this explicit click'}.`;
 }
 
 function filterTabList(tabs, filter, attachedIDs) {

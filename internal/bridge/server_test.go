@@ -193,7 +193,7 @@ func TestBrowserHeartbeatAndDashboardStatus(t *testing.T) {
 	httpServer := httptest.NewServer(server.Handler())
 	defer httpServer.Close()
 
-	heartbeat := []byte(`{"state":"waiting","origin":"https://example.test","tab_title":"Test tab","profile_label":"Visual test","selectors_ready":true,"extension_version":"0.2.0","browser":"firefox","tabs":[{"id":42,"title":"Test tab","last_failure":{"code":"browser_submit_unavailable","reason":"raw private page content"},"dom":{"inputs":[{"tag":"div","id":"prompt","visible":true}],"input_has_text":true,"input_characters":999999,"last_response_characters":999999,"busy_indicators":["aria_busy","stop_button","aria_busy","streaming_attribute","image_loading","one too many"],"file_inputs":[{"tag":"input","id":"upload-photos","type":"file","accept":"image/*","visible":false}],"assistant_turns":3,"last_response_images":2}}]}`)
+	heartbeat := []byte(`{"state":"waiting","origin":"https://example.test","tab_title":"Test tab","profile_label":"Visual test","selectors_ready":true,"extension_version":"0.2.0","browser":"firefox","tabs":[{"id":42,"title":"Test tab","last_failure":{"code":"browser_submit_unavailable","reason":"raw private page content"},"dom":{"inputs":[{"tag":"div","id":"prompt","visible":true}],"input_has_text":true,"input_characters":999999,"last_response_characters":999999,"busy_indicators":["aria_busy","stop_button","aria_busy","streaming_attribute","image_loading","one too many"],"file_inputs":[{"tag":"input","id":"upload-photos","type":"file","accept":"image/*","visible":false}],"assistant_turns":3,"last_response_images":2,"last_response_loaded_images":999999}}]}`)
 	req, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/browser/heartbeat", bytes.NewReader(heartbeat))
 	req.Header.Set("Authorization", "Bearer "+cfg.Server.Token)
 	req.Header.Set("Content-Type", "application/json")
@@ -228,7 +228,7 @@ func TestBrowserHeartbeatAndDashboardStatus(t *testing.T) {
 	if status.Browser.Tabs[0].LastFailure.Reason != "other" || status.Browser.Tabs[0].DOM.InputCharacters != 100000 || !status.Browser.Tabs[0].DOM.InputHasText {
 		t.Fatalf("browser diagnostics were not safely bounded: %#v", status.Browser.Tabs[0])
 	}
-	if dom := status.Browser.Tabs[0].DOM; dom.LastResponseCharacters != 100000 || len(dom.BusyIndicators) != 4 || dom.BusyIndicators[0] != "aria_busy" {
+	if dom := status.Browser.Tabs[0].DOM; dom.LastResponseCharacters != 100000 || dom.LastResponseLoadedImages != 100 || len(dom.BusyIndicators) != 4 || dom.BusyIndicators[0] != "aria_busy" {
 		t.Fatalf("busy diagnostics were not safely bounded: %#v", dom)
 	}
 

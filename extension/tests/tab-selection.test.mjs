@@ -7,6 +7,8 @@ const listeners = new Map();
 const elements = new Map();
 const writes = [];
 const stored = {};
+const statuses = [];
+let activePageID = 52;
 const element = (id) => {
   if (!elements.has(id)) elements.set(id, {
     value: id === 'tab' ? '31' : '',
@@ -21,7 +23,10 @@ const context = vm.createContext({
       get: async (defaults) => ({ ...defaults, ...stored }),
       set: async (value) => { Object.assign(stored, value); writes.push(value); }
     } },
-    tabs: { get: async (id) => ({ id, url: 'https://chatgpt.com/c/existing' }) },
+    tabs: {
+      get: async (id) => ({ id, url: id === 52 ? 'https://gemini.google.com/app/existing' : 'https://chatgpt.com/c/existing' }),
+      query: async () => [{ id: activePageID, url: activePageID === 52 ? 'https://gemini.google.com/app/existing' : 'https://chatgpt.com/c/existing', title: 'Active AI page' }]
+    },
     permissions: { request: async () => true }
   },
   document: { addEventListener() {}, getElementById: element },
@@ -55,13 +60,22 @@ assert.equal(context.tabDisplayState(true, 'working'), 'Working');
 assert.equal(context.tabDisplayState(true, 'rate_limited'), 'Cooling down');
 assert.equal(context.tabDisplayState(false, 'working'), 'Available');
 
-context.loadTabs = async () => {};
+context.loadTabs = async () => { await context.updateCurrentPageAction(); };
 context.refreshState = async () => {};
 context.hasTabsPermission = async () => true;
-context.setStatus = () => {};
+context.setStatus = (state, message) => { statuses.push({ state, message }); };
 await listeners.get('attach-tab:click')();
 assert.deepEqual(Array.from(writes.at(-1).tabIds), [31]);
 await listeners.get('detach-tab:click')();
 assert.deepEqual(Array.from(writes.at(-1).tabIds), []);
 assert.deepEqual(Array.from(stored.autoAttachBlockedTabIds), [31]);
+await context.updateCurrentPageAction();
+assert.equal(elements.get('toggle-current-tab').textContent, 'Attach current page');
+await listeners.get('toggle-current-tab:click')();
+assert.deepEqual(Array.from(stored.tabIds), [52]);
+assert.equal(elements.get('toggle-current-tab').textContent, 'Detach current page');
+assert.equal(statuses.at(-1).state, 'idle');
+await listeners.get('toggle-current-tab:click')();
+assert.deepEqual(Array.from(stored.tabIds), []);
+assert.deepEqual(Array.from(stored.autoAttachBlockedTabIds), [31, 52]);
 console.log('Only confirmed fresh ChatGPT and Gemini chats are auto-selected');

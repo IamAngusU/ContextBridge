@@ -86,6 +86,35 @@ const element = (text = '', attributes = {}) => ({
 }
 
 {
+  const input = element();
+  const notice = element('Pro ist derzeit sehr gefragt. Für diese Antwort wurde ein anderes Modell verwendet.');
+  const response = {
+    ...element('Flash answer'),
+    closest: (selector) => selector === '.conversation-container'
+      ? { querySelector: (child) => child === 'peak-hour-fallback-disclaimer' ? notice : null }
+      : null
+  };
+  context.document = {
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === '#response') return [response];
+      return [];
+    },
+    querySelector: () => null
+  };
+  const progress = context.captureProgress({ response: ['#response'] });
+  assert.equal(progress.model_fallback, true);
+  const result = await context.automate(
+    { prompt: 'ignored', model: 'Pro', metadata: { contextbridge_resume_only: true, contextbridge_baseline_text: 'Previous answer' }, output: { mode: 'text' } },
+    { name: 'gemini', selectors: { input: ['#input'], response: ['#response'], submit: [] } },
+    new Date(Date.now() + 5000).toISOString()
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'browser_model_unavailable');
+  assert.match(result.error, /peak demand/);
+}
+
+{
   const input = { ...element(), closest: () => null };
   context.document = {
     querySelectorAll(selector) {
@@ -332,6 +361,51 @@ const element = (text = '', attributes = {}) => ({
 
 {
   let sent = false;
+  class TextArea {
+    constructor() { this.value = ''; this.offsetWidth = 1; this.offsetHeight = 1; }
+    getClientRects() { return [1]; }
+    focus() {}
+    dispatchEvent() {}
+  }
+  context.HTMLTextAreaElement = TextArea;
+  context.HTMLInputElement = class {};
+  context.InputEvent = class {};
+  context.Event = class {};
+  const input = new TextArea();
+  const send = { ...element(''), click() { sent = true; input.value = ''; } };
+  const retry = element('Erneut versuchen');
+  const banner = element('Etwas ist schiefgelaufen. Bitte versuche es erneut.');
+  const failedUserTurn = {
+    ...element(),
+    querySelector(selector) {
+      if (selector === 'button[data-testid="regenerate-thread-error-button"]') return retry;
+      if (selector.includes('text-orange-600')) return banner;
+      return null;
+    }
+  };
+  const oldAssistant = element('An earlier answer about rate limits');
+  context.document = {
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === '#send') return sent ? [] : [send];
+      if (selector === '#response') return [oldAssistant];
+      if (selector === '[data-turn="user"]') return sent ? [element(), failedUserTurn] : [element()];
+      if (selector === 'button') return sent ? [retry] : [];
+      return [];
+    }
+  };
+  const result = await context.automate(
+    { prompt: 'test', output: { mode: 'text' } },
+    { name: 'chatgpt', selectors: { input: ['#input'], response: ['#response'], submit: ['#send'] } },
+    new Date(Date.now() + 9000).toISOString()
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'browser_provider_error');
+  assert.match(result.error, /Etwas ist schiefgelaufen/);
+}
+
+{
+  let sent = false;
   let fakeNow = Date.now();
   const realDate = context.Date;
   const realSetTimeout = context.setTimeout;
@@ -542,6 +616,17 @@ const element = (text = '', attributes = {}) => ({
   };
   assert.equal(context.captureProgress({ response: ['#turns'] }).text, 'Actual answer');
 
+  const thinkingOnly = {
+    ...element('Pro-Denkvorgang 12s'),
+    matches: (selector) => selector === 'section[data-turn="assistant"]'
+  };
+  context.document = {
+    querySelectorAll(selector) {
+      return selector === '#turns' ? [thinkingOnly] : [];
+    }
+  };
+  assert.equal(context.captureProgress({ response: ['#turns'] }).text, '');
+
   const image = { naturalWidth: 512, naturalHeight: 512 };
   const imageTurn = {
     ...element('ChatGPT: Worked for 44s Edit'),
@@ -624,6 +709,7 @@ const element = (text = '', attributes = {}) => ({
   assert.equal(snapshot.file_inputs[0].visible, false);
   assert.equal(snapshot.file_inputs[0].accept, 'image/*');
   assert.equal(snapshot.last_response_images, 2);
+  assert.equal(snapshot.last_response_loaded_images, 0);
   assert.equal(JSON.stringify(snapshot).includes('private answer'), false);
 }
 
@@ -648,6 +734,54 @@ const element = (text = '', attributes = {}) => ({
   assert.deepEqual([...snapshot.busy_indicators], ['aria_busy', 'stop_button']);
   assert.equal(snapshot.last_response_characters, 'private streaming answer'.length);
   assert.equal(JSON.stringify(snapshot).includes('private streaming answer'), false);
+}
+
+{
+  let sent = false;
+  let fakeNow = Date.now();
+  const realDate = context.Date;
+  const realSetTimeout = context.setTimeout;
+  context.Date = class extends Date { static now() { return fakeNow; } };
+  context.setTimeout = (callback, milliseconds) => realSetTimeout(() => { fakeNow += milliseconds; callback(); }, 1);
+  class TextArea {
+    constructor() { this.value = ''; this.offsetWidth = 1; this.offsetHeight = 1; }
+    getClientRects() { return [1]; }
+    focus() {}
+    dispatchEvent() {}
+  }
+  context.HTMLTextAreaElement = TextArea;
+  context.HTMLInputElement = class {};
+  context.InputEvent = class {};
+  context.Event = class {};
+  const input = new TextArea();
+  const send = { ...element(''), click() { sent = true; input.value = ''; } };
+  const image = { complete: true, naturalWidth: 512, naturalHeight: 512, src: '', getAttribute: () => null };
+  const response = {
+    ...element(''), matches: () => true,
+    querySelector: (selector) => selector === 'img' ? image : null,
+    querySelectorAll: (selector) => selector === 'img' ? [image] : []
+  };
+  context.document = {
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === '#send') return sent ? [] : [send];
+      if (selector === '#response') return sent ? [response] : [];
+      if (selector === '[aria-busy="true"]') return sent ? [element()] : [];
+      return [];
+    }
+  };
+  try {
+    const result = await context.automate(
+      { prompt: 'one image', output: { mode: 'text', artifacts: true, min_images: 1 } },
+      { name: 'gemini', selectors: { input: ['#input'], response: ['#response'], submit: ['#send'] } },
+      new Date(Date.now() + 60000).toISOString()
+    );
+    assert.equal(result.ok, true);
+    assert.ok(fakeNow - Date.now() >= 12000);
+  } finally {
+    context.Date = realDate;
+    context.setTimeout = realSetTimeout;
+  }
 }
 
 console.log('Browser progress and provider failures verified');

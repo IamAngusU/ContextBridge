@@ -551,6 +551,7 @@ func (s *Server) handleBrowserHeartbeat(w http.ResponseWriter, r *http.Request) 
 			}
 			dom.BusyIndicators = safeBusy
 			dom.LastResponseImages = max(0, min(dom.LastResponseImages, 100))
+			dom.LastResponseLoadedImages = max(0, min(dom.LastResponseLoadedImages, 100))
 			dom.ImageProgress = max(0, min(dom.ImageProgress, 100))
 		}
 	}

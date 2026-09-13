@@ -466,9 +466,12 @@ async function processWork(cfg, work, claimedTabId) {
 		  return words.includes('thinking') ? 'thinking' : words.includes('pro') ? 'pro'
 		    : words.includes('lite') ? 'flash-lite' : words.includes('flash') ? 'flash' : '';
 		};
-		const modeMismatch = effectiveProfile.name === 'gemini' && Boolean(modeFamily(work.job.model)) && Boolean(snapshot.current_model)
-		  && Boolean(text && text !== baselineText) && modeFamily(snapshot.current_model) !== modeFamily(work.job.model);
-		const textChanged = Boolean(text && text !== baselineText && text !== latestProgressText && !modeMismatch);
+		const modeMismatch = effectiveProfile.name === 'gemini' && Boolean(modeFamily(work.job.model))
+		  && Boolean(text && text !== baselineText)
+		  && (Boolean(snapshot.model_fallback)
+		    || (Boolean(snapshot.current_model) && modeFamily(snapshot.current_model) !== modeFamily(work.job.model)));
+		const textChanged = Boolean(text && text !== baselineText && text !== latestProgressText && !modeMismatch
+		  && Number(work.job.output?.min_images || 0) === 0);
 		const progressState = `${Boolean(snapshot.busy)}|${Number(snapshot.percent) || 0}|${snapshot.detail || ''}|${modeMismatch}`;
         if (textChanged || progressState !== latestProgressState) {
           if (textChanged) latestProgressText = text;
@@ -816,7 +819,22 @@ function automate(job, profile, jobDeadline) {
     };
   };
   const pageBusy = () => pageState().busy;
-  const providerError = (responseElement) => {
+  const providerError = (responseElement, changedResponse, beforeUserTurns) => {
+    // ChatGPT can attach a retryable thread error to the newly sent *user*
+    // turn without creating an assistant turn. Never classify an unrelated
+    // older assistant answer as the error for this job.
+    if (profile.name === 'chatgpt') {
+      const userTurns = [...document.querySelectorAll('[data-turn="user"]')];
+      const latestUser = userTurns.at(-1);
+      if (userTurns.length > beforeUserTurns && latestUser) {
+        const retry = latestUser.querySelector?.('button[data-testid="regenerate-thread-error-button"]');
+        const banner = latestUser.querySelector?.('[class*="text-orange-600"], [data-testid="thread-error"]');
+        if (isVisible(retry) && isVisible(banner)) {
+          const message = visibleText(banner).slice(0, 300);
+          if (message) return { code: 'browser_provider_error', message, retryable: true };
+        }
+      }
+    }
     const containers = [];
     for (const selector of ['[role="alert"]', '[aria-live="assertive"]', '[data-testid*="error" i]', '.toast-error', '.error-message']) {
       try { containers.push(...[...document.querySelectorAll(selector)].filter(isVisible)); } catch (_) {}
@@ -827,7 +845,7 @@ function automate(job, profile, jobDeadline) {
     const text = containers.map(visibleText).filter(Boolean).join('\n').slice(0, 4000);
 	const retryVisible = [...document.querySelectorAll('button')].filter(isVisible).some((button) => /retry|try again|regenerate|erneut|noch einmal|wiederholen/.test(`${visibleText(button)} ${button.getAttribute('aria-label') || ''}`.toLowerCase()));
 	const responseText = responseElement ? visibleText(responseElement).slice(0, 1500) : '';
-	const semanticText = text || (retryVisible ? responseText : '');
+	const semanticText = text || (retryVisible && changedResponse ? responseText : '');
     if (!semanticText) return null;
     const lower = semanticText.toLowerCase();
     if (/rate.?limit|usage.?limit|too many requests|quota|capacity|limit erreicht|nutzungslimit|zu viele anfragen|später erneut|try again later|temporarily unavailable/.test(lower)) {
@@ -1124,6 +1142,7 @@ function automate(job, profile, jobDeadline) {
       let input = first(selectors.input);
       if (!input) throw new Error('Prompt input was not found');
       const before = all(selectors.response);
+      const beforeUserTurns = document.querySelectorAll('[data-turn="user"]').length;
       const previousElement = before.length ? before[before.length - 1] : null;
       const previousText = String(job.metadata?.contextbridge_baseline_text || (before.length ? responseText(before[before.length - 1]) : ''));
       const previousIdentity = responseIdentity(previousElement);
@@ -1203,24 +1222,44 @@ function automate(job, profile, jobDeadline) {
       let lastBusyAt = Date.now();
       let lastPercent = 0;
       let progressChangedAt = Date.now();
+      let lastReadyImages = 0;
+      let readyImagesSince = 0;
       while (Date.now() < deadline) {
         await wait(650);
         const responses = all(selectors.response);
         const latestElement = responses.length ? responses[responses.length - 1] : null;
         const latest = responseText(latestElement);
+		const readyImages = latestElement
+			? [...latestElement.querySelectorAll('img')].filter((image) => image.complete && image.naturalWidth >= 128 && image.naturalHeight >= 128).length : 0;
+		if (readyImages !== lastReadyImages) {
+			lastReadyImages = readyImages;
+			readyImagesSince = Date.now();
+		}
 		const latestIdentity = responseIdentity(latestElement);
 		const changedResponse = responses.length > before.length || latest !== previousText
 			|| Boolean(previousIdentity && latestIdentity && latestIdentity !== previousIdentity);
+        const fallbackNotice = latestElement?.closest?.('.conversation-container')?.querySelector?.('peak-hour-fallback-disclaimer');
+        if (profile.name === 'gemini' && geminiModeFamily(job.model) === 'pro' && changedResponse && isVisible(fallbackNotice)) {
+          resolve({ ok: false, error: 'Gemini used another model during peak demand; requested Pro output was not accepted', code: 'browser_model_unavailable', retryable: true });
+          return;
+        }
         const state = pageState();
         // Gemini can leave aria-busy on the finished response after its Stop
         // control has vanished. Treat that one stale attribute as finished
         // only after a *new* answer has stayed unchanged for 12 seconds.
         // Any streaming, Stop, or image indicator still blocks completion.
+        const requiredImages = Number(job.output?.min_images || 0);
+        const imagesReady = requiredImages > 0 && readyImages >= requiredImages
+          && readyImagesSince > 0 && Date.now() - readyImagesSince >= 3000;
+        const stableAnswer = Boolean(latest) && latest === stableText && (requiredImages === 0 || imagesReady);
+        const stableImages = imagesReady
+          && stableText.startsWith('artifact:')
+          && Boolean(job.output?.artifacts);
         const staleGeminiBusy = profile.name === 'gemini'
           && state.busyReasons.length === 1 && state.busyReasons[0] === 'aria_busy'
-          && changedResponse && Boolean(latest) && latest === stableText
+          && changedResponse && (stableAnswer || stableImages)
           && stableSince > 0 && Date.now() - stableSince >= 12000
-          && state.inputReady && !job.output?.min_images;
+          && state.inputReady;
         const busy = state.busy && !staleGeminiBusy;
         sawBusy = sawBusy || busy;
 		if (busy) lastBusyAt = Date.now();
@@ -1236,7 +1275,7 @@ function automate(job, profile, jobDeadline) {
 			resolve({ ok: false, error: `Image generation stalled at ${lastPercent}%`, code: 'stalled_generation', percent: lastPercent, recoverable: !resumeOnly && job.metadata?.contextbridge_auto_reload !== false });
 			return;
 		}
-		const providerFailure = providerError(latestElement);
+		const providerFailure = providerError(latestElement, changedResponse, beforeUserTurns);
 		if (providerFailure && !busy) {
 			resolve({ ok: false, error: providerFailure.message, code: providerFailure.code, retryable: providerFailure.retryable });
 			return;
@@ -1304,6 +1343,9 @@ function captureProgress(selectors) {
     if (element.querySelector('[data-testid="image-gen-loading-state"], [data-testid="image-gen-loading-progress"]')) return '';
     const markdownParts = [...element.querySelectorAll('[data-message-author-role="assistant"] .markdown, message-content .markdown')];
     if (markdownParts.length) return markdownParts.map(visibleText).filter(Boolean).join('\n');
+    // A ChatGPT assistant turn without answer markup can contain only thinking
+    // chrome (such as "Pro-Denkvorgang"); it is not user-facing answer text.
+    if (element.matches?.('section[data-turn="assistant"]')) return '';
     if (element.querySelector('img') && element.matches?.('section[data-turn="assistant"], model-response')) return '';
     const assistantParts = [...element.querySelectorAll('[data-message-author-role="assistant"]')];
     if (assistantParts.length) return assistantParts.map(visibleText).filter(Boolean).join('\n');
@@ -1339,6 +1381,8 @@ function captureProgress(selectors) {
     } catch (_) {}
   }
   const latestText = responses.length ? responseText(responses[responses.length - 1]) : '';
+	const fallbackNotice = responses.at(-1)?.closest?.('.conversation-container')?.querySelector?.('peak-hour-fallback-disclaimer');
+	const modelFallback = isVisible(fallbackNotice);
 	const currentModel = String(document.querySelector?.('bard-mode-switcher button[aria-haspopup]')
 		?.getAttribute('aria-label')?.match(/(?:derzeit ausgewählt|currently selected|selected)\s*:\s*(.+)$/i)?.[1] || '').trim();
   const alerts = ['[role="alert"]', '[aria-live="assertive"]', '[data-testid*="error" i]', '.toast-error', '.error-message']
@@ -1350,7 +1394,7 @@ function captureProgress(selectors) {
   if (/rate.?limit|usage.?limit|quota|capacity|limit erreicht|höchstgrenze erreicht|zu viele anfragen|too many requests|try again later|später erneut|temporarily unavailable|something went wrong|etwas ist schief/i.test(failureText)) {
     return { text: '', busy: false, percent: 0, detail: 'Provider error', current_model: currentModel };
   }
-  return { text: latestText, busy, percent, detail: detail || (busy ? 'Generating' : ''), current_model: currentModel };
+  return { text: latestText, busy, percent, detail: detail || (busy ? 'Generating' : ''), current_model: currentModel, model_fallback: modelFallback };
 }
 
 function inspectSelectors(selectors) {
@@ -1645,6 +1689,7 @@ function inspectPageDOM(selectors) {
   });
   const latestMarkdown = latest?.querySelector?.('message-content .markdown, [data-message-author-role="assistant"] .markdown');
   const latestText = String(latestMarkdown?.innerText || latestMarkdown?.textContent || latest?.innerText || '').trim();
+  const latestImages = latest ? [...latest.querySelectorAll('img')] : [];
   let latestResponseBusy = false;
   try { latestResponseBusy = Boolean(latest?.querySelectorAll?.('[aria-busy="true"], [data-is-streaming="true"], .result-streaming')?.length); } catch (_) {}
   let imageProgress = 0;
@@ -1669,7 +1714,8 @@ function inspectPageDOM(selectors) {
     last_response_characters: Math.min(latestText.length, 100000),
     last_response_busy: latestResponseBusy,
     busy_indicators: busyIndicators,
-    last_response_images: latest ? latest.querySelectorAll('img').length : 0,
+    last_response_images: latestImages.length,
+    last_response_loaded_images: latestImages.filter((image) => image.complete && image.naturalWidth >= 128 && image.naturalHeight >= 128).length,
     image_progress: Math.max(0, Math.min(100, imageProgress))
   };
 }

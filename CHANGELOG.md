@@ -2,6 +2,21 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.14 - 2026-09-13
+
+### Fixed
+
+- classify ChatGPT's retry banner on the newly failed user turn as `browser_provider_error`, without mistaking older answer text for an account rate limit
+- let Gemini image-only turns finish when the requested number of real images has loaded, the response is stable, and only a stale `aria-busy` flag remains
+- keep image-generation placeholder text out of progressive assistant text; file transfer and verified image counts remain separate progress states
+- reject Gemini's explicit peak-hour fallback notice for a Pro-requested turn without labeling it an account rate limit; suppress that turn from progressive assistant text
+- keep ChatGPT's thinking-only chrome out of progressive answer text
+
+### Added
+
+- report the number of fully loaded images in the content-free per-tab DOM heartbeat
+- offer a one-click attach/detach action for the page beneath the extension popup, independent of the selected tab-list row
+
 ## 0.5.13 - 2026-09-13
 
 ### Added
