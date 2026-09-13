@@ -498,7 +498,8 @@ async function processWork(cfg, work, claimedTabId) {
       try {
         await preserveAndClearDraft(cfg, tabId, tab, effectiveProfile, work.job);
       } catch (error) {
-        failureCode = 'browser_draft_preservation_failed';
+        failureCode = /ChatGPT still shows Stop/i.test(error.message || '')
+          ? 'browser_provider_busy' : 'browser_draft_preservation_failed';
         throw error;
       }
     }
@@ -526,7 +527,7 @@ async function processWork(cfg, work, claimedTabId) {
 		// aria-busy can survive on an older Gemini turn. Only a live Stop or
 		// streaming signal may put provisional assistant text on the relay.
 		const newAssistantTurn = isNewAssistantTurn(initial, snapshot)
-		  || Boolean(editTarget && snapshot.active_generation && text && text !== baselineText);
+		  || Boolean(editTarget && isEditAssistantTurn(initial, snapshot, text, baselineText));
 		const textChanged = Boolean(newAssistantTurn && snapshot.active_generation && text && text !== baselineText && text !== latestProgressText && !modeMismatch
 		  && Number(work.job.output?.min_images || 0) === 0);
 		const progressState = `${Boolean(snapshot.busy)}|${Number(snapshot.percent) || 0}|${snapshot.detail || ''}|${modeMismatch}`;
@@ -647,6 +648,7 @@ async function processWork(cfg, work, claimedTabId) {
 
 function classifyFailureReason(message) {
   const text = String(message || '');
+  if (/ChatGPT still shows Stop/i.test(text)) return 'provider_busy';
   if (/requested model.+not retained/i.test(text)) return 'model_not_retained';
   if (/prompt editor did not retain|prompt editor changed|gemini editor did not accept/i.test(text)) return 'prompt_not_retained';
   if (/send button stayed disabled/i.test(text)) return 'send_disabled';
@@ -954,8 +956,9 @@ async function completeWork(cfg, jobId, decision) {
 
 async function preserveAndClearDraft(cfg, tabId, tab, profile, job) {
   const selectors = profile.selectors || {};
-  const captured = await api.scripting.executeScript({ target: { tabId }, func: captureCurrentDraft, args: [selectors] });
+  const captured = await api.scripting.executeScript({ target: { tabId }, func: captureCurrentDraft, args: [selectors, profile.name] });
   const draft = captured?.[0]?.result;
+  if (draft?.provider_busy) throw new Error('ChatGPT still shows Stop; the previous generation may be active and the existing draft was left untouched');
   if (draft?.has_attachments) throw new Error('An existing file attachment cannot be preserved as text history; editor was left untouched');
   if (!draft?.text && !draft?.too_large) return;
   if (draft.too_large) throw new Error('Existing draft exceeds the 16 KiB local history limit; editor was left untouched');
@@ -967,11 +970,13 @@ async function preserveAndClearDraft(cfg, tabId, tab, profile, job) {
       session_id: String(job.session_id || '').slice(0, 100), text: draft.text })
   });
   if (!response.ok) throw new Error('Could not save the existing draft locally; editor was left untouched');
-  const cleared = await api.scripting.executeScript({ target: { tabId }, func: clearCurrentDraft, args: [selectors, draft.text] });
+  const cleared = await api.scripting.executeScript({ target: { tabId }, func: clearCurrentDraft, args: [selectors, draft.text, profile.name] });
   if (!cleared?.[0]?.result) throw new Error('The draft changed while being saved or the editor rejected clearing; job was not sent');
 }
 
-function captureCurrentDraft(selectors) {
+function captureCurrentDraft(selectors, profileName = '') {
+  if (profileName === 'chatgpt' && [...document.querySelectorAll('button[data-testid="stop-button"], button[aria-label="Antwort stoppen"], button[aria-label="Stop generating"]')]
+    .some((element) => element.offsetWidth || element.offsetHeight || element.getClientRects().length)) return { provider_busy: true };
   const input = (selectors?.input || []).flatMap((selector) => {
     try { return [...document.querySelectorAll(selector)]; } catch (_) { return []; }
   }).find((element) => element && (element.offsetWidth || element.offsetHeight || element.getClientRects().length));
@@ -987,7 +992,10 @@ function captureCurrentDraft(selectors) {
   return { text };
 }
 
-async function clearCurrentDraft(selectors, expected) {
+async function clearCurrentDraft(selectors, expected, profileName = '') {
+  // A generation can start after capture but before the saved draft is cleared.
+  if (profileName === 'chatgpt' && [...document.querySelectorAll('button[data-testid="stop-button"], button[aria-label="Antwort stoppen"], button[aria-label="Stop generating"]')]
+    .some((element) => element.offsetWidth || element.offsetHeight || element.getClientRects().length)) return false;
   const input = (selectors?.input || []).flatMap((selector) => {
     try { return [...document.querySelectorAll(selector)]; } catch (_) { return []; }
   }).find((element) => element && (element.offsetWidth || element.offsetHeight || element.getClientRects().length));
@@ -1866,9 +1874,16 @@ function automate(job, profile, jobDeadline, editTarget = null) {
 }
 
 function isNewAssistantTurn(before, after) {
+  if (Number(after?.response_count) < Number(before?.response_count)) return false;
   if (Number(after?.response_count) > Number(before?.response_count)) return true;
   const priorID = String(before?.response_identity || '');
   return Boolean(priorID && after?.response_identity && String(after.response_identity) !== priorID);
+}
+
+function isEditAssistantTurn(before, after, text, baselineText) {
+  const initialCount = Number(before?.response_count);
+  return Boolean(initialCount > 0 && Number(after?.response_count) >= initialCount
+    && after?.active_generation && text && text !== baselineText);
 }
 
 function captureProgress(selectors) {

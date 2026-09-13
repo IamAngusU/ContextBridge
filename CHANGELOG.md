@@ -2,6 +2,13 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.24 - 2026-09-13
+
+### Fixed
+
+- leave existing ChatGPT drafts untouched when a stale Stop control indicates the provider is still busy, including if that state appears between draft capture and clearing
+- do not stream an older Gemini answer while editing temporarily removes the last answer from the conversation
+
 ## 0.5.23 - 2026-09-13
 
 ### Fixed

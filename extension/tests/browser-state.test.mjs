@@ -15,10 +15,14 @@ const context = vm.createContext({ chrome, console, URL, TextEncoder, setTimeout
 vm.runInContext(source, context);
 assert.equal(context.classifyFailureReason('Prompt editor did not retain the submitted text'), 'prompt_not_retained');
 assert.equal(context.classifyFailureReason('Send button stayed disabled after filling the prompt'), 'send_disabled');
+assert.equal(context.classifyFailureReason('ChatGPT still shows Stop; the draft was left untouched'), 'provider_busy');
 assert.equal(context.classifyFailureReason('A provider error containing private text'), 'other');
 assert.equal(context.isNewAssistantTurn({ response_count: 2 }, { response_count: 2, text: 'Old music player clock changed', active_generation: true }), false);
 assert.equal(context.isNewAssistantTurn({ response_count: 2 }, { response_count: 3, text: 'Fresh answer', active_generation: true }), true);
 assert.equal(context.isNewAssistantTurn({ response_count: 2, response_identity: 'old' }, { response_count: 2, response_identity: 'new' }), true);
+assert.equal(context.isNewAssistantTurn({ response_count: 9, response_identity: 'latest' }, { response_count: 8, response_identity: 'older' }), false);
+assert.equal(context.isEditAssistantTurn({ response_count: 9 }, { response_count: 8, active_generation: true }, 'Older answer', 'Prior answer'), false);
+assert.equal(context.isEditAssistantTurn({ response_count: 9 }, { response_count: 9, active_generation: true }, 'Fresh edited answer', 'Prior answer'), true);
 
 {
   const input = { value: 'A private unsent draft', offsetWidth: 1, offsetHeight: 1, getClientRects: () => [1], focus() {}, dispatchEvent() {} };
@@ -37,6 +41,29 @@ assert.equal(context.isNewAssistantTurn({ response_count: 2, response_identity: 
   assert.equal(context.captureCurrentDraft(selectors).has_attachments, true);
   assert.equal(await context.clearCurrentDraft(selectors, input.value), false);
   assert.equal(input.value, 'Draft with an unsent attachment');
+}
+
+{
+  const input = { value: 'A private unsent ChatGPT draft', offsetWidth: 1, getClientRects: () => [1], focus() {}, dispatchEvent() {} };
+  const stop = { offsetWidth: 1, getClientRects: () => [1] };
+  let stopVisible = true;
+  context.document = { querySelectorAll(selector) {
+    if (selector === '#draft') return [input];
+    if (selector.includes('stop-button')) return stopVisible ? [stop] : [];
+    return [];
+  } };
+  const selectors = { input: ['#draft'] };
+  assert.equal(context.captureCurrentDraft(selectors, 'chatgpt').provider_busy, true);
+  assert.equal(context.captureCurrentDraft(selectors, 'gemini').text, input.value);
+  chrome.scripting.executeScript = async ({ func, args }) => [{ result: await func(...args) }];
+  await assert.rejects(context.preserveAndClearDraft({}, 42, { title: 'Busy', url: 'https://chatgpt.com/' },
+    { name: 'chatgpt', selectors }, { session_id: 'test' }), /ChatGPT still shows Stop/);
+  assert.equal(input.value, 'A private unsent ChatGPT draft');
+  stopVisible = false;
+  assert.equal(context.captureCurrentDraft(selectors, 'chatgpt').text, input.value);
+  stopVisible = true;
+  assert.equal(await context.clearCurrentDraft(selectors, input.value, 'chatgpt'), false);
+  assert.equal(input.value, 'A private unsent ChatGPT draft');
 }
 
 const element = (text = '', attributes = {}) => ({
