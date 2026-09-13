@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "ContextBridge",
   "short_name": "ContextBridge",
-  "version": "0.5.15",
+  "version": "0.5.16",
   "description": "Connect auto-detected or visually taught AI tabs to your local ContextBridge service.",
   "permissions": ["storage", "activeTab", "scripting"],
   "optional_permissions": ["tabs"],
@@ -25,6 +25,6 @@
     "128": "icons/icon-128.png"
   },
   "content_security_policy": {
-    "extension_pages": "default-src 'self'; script-src 'self'; object-src 'self'; connect-src http://127.0.0.1:* http://localhost:*"
+    "extension_pages": "default-src 'self'; script-src 'self'; object-src 'self'; connect-src 'self' http://127.0.0.1:* http://localhost:* https:"
   }
 }

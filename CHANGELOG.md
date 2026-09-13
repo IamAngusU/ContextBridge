@@ -2,6 +2,23 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.16 - 2026-09-13
+
+### Fixed
+
+- permit explicitly attached provider pages' HTTPS artifacts to be fetched by the extension background; the extension CSP previously blocked these reads even when page access had been granted
+- inspect ChatGPT image file-card previews when a new assistant turn contains no inline image or downloadable link; keep the image job failed unless actual image bytes transfer
+- distinguish Gemini's visible Music selection from an incompatible leftover tool, and recognize its generated media player as a file rather than plain answer text
+
+### Added
+
+- `cluster chat --music` selects Gemini's visible music tool and requires a transferred audio or video file; `output.min_media` provides the same verified-file requirement for JSON jobs
+- allowlisted, permission-gated retrieval of Gemini media from `contribution.usercontent.google.com`; the local service checks the declared media type against decoded file bytes before accepting it
+
+### Known limit
+
+- third-party pages may expose a file card without a readable preview URL, or media larger than the bounded 12 MiB transfer budget; those jobs remain failed with a clear artifact error rather than returning a text claim as a file
+
 ## 0.5.15 - 2026-09-13
 
 ### Fixed

@@ -69,6 +69,25 @@ func TestRequiredImagesRejectsTextAndReferences(t *testing.T) {
 	}
 }
 
+func TestRequiredMediaRejectsClaimsAndVerifiesMP4Bytes(t *testing.T) {
+	spec := OutputSpec{Mode: "text", Artifacts: true, MinMedia: 1}
+	for _, artifact := range []string{
+		`{"name":"song.mp4","media_type":"video/mp4","url":"https://gemini.google.com/song.mp4"}`,
+		`{"name":"song.mp4","media_type":"video/mp4","data_base64":"` + base64.StdEncoding.EncodeToString([]byte("not an mp4")) + `"}`,
+		`{"name":"answer.txt","media_type":"text/plain","data_base64":"` + base64.StdEncoding.EncodeToString([]byte("music ready")) + `"}`,
+	} {
+		output := NormalizeOutput([]byte(`{"mode":"text","text":"done","artifacts":[`+artifact+`]}`), spec, "browser", "tab", time.Millisecond)
+		if !strings.HasPrefix(output.Error, "media_missing:") {
+			t.Fatalf("non-media artifact passed music requirement: %#v", output)
+		}
+	}
+	media := base64.StdEncoding.EncodeToString([]byte{0, 0, 0, 24, 'f', 't', 'y', 'p', 'm', 'p', '4', '2', 0, 0, 0, 0, 'm', 'p', '4', '2', 0, 0, 0, 0})
+	output := NormalizeOutput([]byte(`{"mode":"text","text":"done","artifacts":[{"name":"song.mp4","media_type":"video/mp4","data_base64":"`+media+`"}]}`), spec, "browser", "tab", time.Millisecond)
+	if output.Error != "" || len(output.Artifacts) != 1 {
+		t.Fatalf("verified MP4 was rejected: %#v", output)
+	}
+}
+
 func TestValidateJobRequiresArtifactOptInForMinimum(t *testing.T) {
 	job := Job{Prompt: "Create an image", Output: OutputSpec{Mode: "text", MinArtifacts: 1}}
 	if err := validateJob(job); err == nil {
@@ -85,6 +104,14 @@ func TestValidateJobRequiresArtifactOptInForMinimum(t *testing.T) {
 	job.Output.Artifacts = true
 	if err := validateJob(job); err != nil {
 		t.Fatalf("valid image requirement was rejected: %v", err)
+	}
+	job.Output = OutputSpec{Mode: "text", MinMedia: 1}
+	if err := validateJob(job); err == nil {
+		t.Fatal("minimum media without artifact opt-in should be rejected")
+	}
+	job.Output.Artifacts = true
+	if err := validateJob(job); err != nil {
+		t.Fatalf("valid media requirement was rejected: %v", err)
 	}
 }
 

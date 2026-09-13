@@ -720,11 +720,14 @@ async function hydrateArtifactReferences(artifacts, pageURL, spec) {
     if (!artifact.url) continue;
     try {
       const resource = new URL(artifact.url);
-      if (resource.protocol !== 'https:' || resource.origin !== pageOrigin) throw new Error('Provider-hosted reference');
+      const geminiMediaHost = new URL(pageURL).hostname === 'gemini.google.com'
+        && resource.hostname === 'contribution.usercontent.google.com';
+      if (resource.protocol !== 'https:' || (resource.origin !== pageOrigin && !geminiMediaHost)) throw new Error('Provider-hosted reference');
       const response = await fetch(resource.href, { credentials: 'include', redirect: 'error' });
       if (!response.ok || !response.body) throw new Error('Resource could not be read');
       const contentType = String(response.headers.get('content-type') || '').split(';')[0].toLowerCase();
-      if (artifact.media_type?.startsWith('image/') && !contentType.startsWith('image/')) throw new Error('Image response has the wrong media type');
+      if (artifact.media_type?.startsWith('image/') && !contentType.startsWith('image/') && contentType !== 'application/octet-stream') throw new Error('Image response has the wrong media type');
+      if (/^(audio|video)\//.test(artifact.media_type || '') && !/^(audio|video)\//.test(contentType) && contentType !== 'application/octet-stream') throw new Error('Media response has the wrong media type');
       const chunks = [];
       let size = 0;
       const reader = response.body.getReader();
@@ -753,7 +756,7 @@ async function hydrateArtifactReferences(artifacts, pageURL, spec) {
       result.push({
         ...artifact,
         url: '',
-        media_type: contentType || artifact.media_type,
+        media_type: contentType && contentType !== 'application/octet-stream' ? contentType : artifact.media_type,
         size,
         sha256: [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join(''),
         data_base64: btoa(binary)
@@ -907,6 +910,7 @@ function automate(job, profile, jobDeadline) {
   const clearIncompatibleGeminiTools = async (job) => {
     if (profile.name !== 'gemini') return false;
     const wantsImage = Number(job.output?.min_images || 0) > 0 || Boolean(job.metadata?.contextbridge_image_tool);
+    const wantsMusic = Number(job.output?.min_media || 0) > 0 || Boolean(job.metadata?.contextbridge_music_tool);
     let cleared = false;
     for (let attempt = 0; attempt < 4; attempt += 1) {
       const composer = first(selectors.input)?.closest?.('[data-node-type="input-area"]');
@@ -914,7 +918,7 @@ function automate(job, profile, jobDeadline) {
       const selected = [...composer.querySelectorAll('button[aria-label]')].find((button) => {
         const label = String(button.getAttribute('aria-label') || '');
         if (!/(?:auswahl von .+ aufheben|remove .+ selection|deselect .+|clear .+ tool)/i.test(label)) return false;
-        return !wantsImage || !/(?:bild|image)/i.test(label);
+        return !((wantsImage && /(?:bild|image)/i.test(label)) || (wantsMusic && /(?:musik|music)/i.test(label)));
       });
       if (!selected) return cleared;
       selected.click();
@@ -1055,22 +1059,47 @@ function automate(job, profile, jobDeadline) {
 		choice.click();
 		await wait(450);
 	};
+	const chooseMusicTool = async (input) => {
+		if (profile.name !== 'gemini') throw new Error('Music creation requires a Gemini tab');
+		const composer = input.closest?.('[data-node-type="input-area"]');
+		if (composer?.querySelector?.('button[aria-label*="Musik\u201c aufheben" i], button[aria-label*="Music selection" i]')) return;
+		const trigger = first(['button[aria-label*="Uploads & Tools" i]', 'button[aria-label*="Tools" i]', 'button[aria-label*="Werkzeuge" i]']);
+		if (!trigger) throw new Error('Music creation tool menu is not available in this chat');
+		trigger.click();
+		await wait(400);
+		const choices = [...document.querySelectorAll('button[role="menuitemcheckbox"], [role="menuitem"], [role="option"]')].filter(isVisible);
+		const choice = choices.find((element) => /(?:musik erstellen|create music|generate music)/i.test(visibleText(element)));
+		if (!choice || choice.disabled || choice.getAttribute('aria-disabled') === 'true') {
+			document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+			throw new Error('Music creation tool is not available in this chat');
+		}
+		if (choice.getAttribute('aria-checked') !== 'true') choice.click();
+		await wait(450);
+	};
 	const cleanFileName = (value, fallback) => {
 		const clean = String(value || '').split(/[\\/]/).pop().replace(/[\u0000-\u001f<>:"|?*]/g, '-').trim().slice(0, 180);
 		return clean && clean !== '.' ? clean : fallback;
 	};
 	const extensionFor = (mediaType) => ({
 		'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif',
+		'video/mp4': 'mp4', 'video/webm': 'webm', 'audio/mpeg': 'mp3', 'audio/wave': 'wav',
+		'audio/wav': 'wav', 'audio/ogg': 'ogg', 'audio/webm': 'webm',
 		'image/svg+xml': 'svg', 'application/pdf': 'pdf', 'application/zip': 'zip',
 		'application/json': 'json', 'text/csv': 'csv', 'text/plain': 'txt'
 	}[String(mediaType || '').toLowerCase()] || 'bin');
 	const mediaTypeFor = (url, fallback) => {
-		const value = String(url || '').split(/[?#]/)[0].toLowerCase();
+		let value = String(url || '').split(/[?#]/)[0].toLowerCase();
+		try { value = new URL(url, location.href).searchParams.get('filename')?.toLowerCase() || value; } catch (_) {}
 		if (value.endsWith('.png')) return 'image/png';
 		if (/\.jpe?g$/.test(value)) return 'image/jpeg';
 		if (value.endsWith('.webp')) return 'image/webp';
 		if (value.endsWith('.gif')) return 'image/gif';
 		if (value.endsWith('.svg')) return 'image/svg+xml';
+		if (value.endsWith('.mp4')) return 'video/mp4';
+		if (value.endsWith('.webm')) return 'video/webm';
+		if (value.endsWith('.mp3')) return 'audio/mpeg';
+		if (value.endsWith('.wav')) return 'audio/wave';
+		if (value.endsWith('.ogg')) return 'audio/ogg';
 		if (value.endsWith('.pdf')) return 'application/pdf';
 		if (value.endsWith('.zip')) return 'application/zip';
 		if (value.endsWith('.json')) return 'application/json';
@@ -1110,11 +1139,47 @@ function automate(job, profile, jobDeadline) {
 			if (!/\.[a-z0-9]{2,5}$/i.test(name)) name = `image-${candidates.length + 1}.${extensionFor(mediaType)}`;
 			add(source, cleanFileName(name, `image-${candidates.length + 1}.${extensionFor(mediaType)}`), mediaType);
 		}
+		for (const media of responseElement.querySelectorAll('video[src], audio[src], video source[src], audio source[src]')) {
+			const source = media.currentSrc || media.src || media.getAttribute('src');
+			if (!source) continue;
+			const mediaType = mediaTypeFor(source, media.getAttribute('type') || (media.closest('audio') ? 'audio/mpeg' : 'video/mp4'));
+			let name = '';
+			try { const parsed = new URL(source, location.href); name = parsed.searchParams.get('filename') || parsed.pathname.split('/').pop(); } catch (_) {}
+			if (!/\.[a-z0-9]{2,5}$/i.test(name)) name = `media-${candidates.length + 1}.${extensionFor(mediaType)}`;
+			add(source, cleanFileName(name, `media-${candidates.length + 1}.${extensionFor(mediaType)}`), mediaType);
+		}
+		// ChatGPT may render a generated image as a file card with only a
+		// button, not an img or href. Opening that card can expose a preview
+		// image; only inspect the new preview, never unrelated page images.
+		if (profile.name === 'chatgpt' && Number(spec.min_images || 0) > 0 && !candidates.some((item) => item.mediaType.startsWith('image/'))) {
+			const cards = [...responseElement.querySelectorAll('button[aria-label]')]
+				.filter((button) => button.closest('[class*="artifact-row"]') && /\.(?:png|jpe?g|webp|gif)$/i.test(button.getAttribute('aria-label') || ''))
+				.slice(0, Math.min(12, Number(spec.min_images) || 1));
+			for (const card of cards) {
+				const before = new Map([...document.querySelectorAll('img')].map((image) => [image, image.currentSrc || image.src]));
+				const name = cleanFileName(card.getAttribute('aria-label'), `image-${candidates.length + 1}.png`);
+				card.click();
+				let previews = [];
+				for (let attempt = 0; attempt < 16 && !previews.length; attempt += 1) {
+					await wait(250);
+					previews = [...document.querySelectorAll('dialog img, [role="dialog"] img, [data-testid*="preview" i] img')]
+						.filter((image) => isVisible(image) && image.naturalWidth >= 128 && image.naturalHeight >= 128
+							&& (!before.has(image) || before.get(image) !== (image.currentSrc || image.src)));
+				}
+				for (const preview of previews) add(preview.currentSrc || preview.src, name, mediaTypeFor(name, 'image/png'));
+				if (previews.length) {
+					const dialog = previews[0].closest('dialog, [role="dialog"]');
+					const close = dialog?.querySelector('button[aria-label*="close" i], button[aria-label*="schlie" i]');
+					if (close) close.click();
+					else document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+				}
+			}
+		}
 		for (const anchor of responseElement.querySelectorAll('a[href]')) {
 			const href = anchor.href;
 			const label = `${anchor.download || ''} ${anchor.getAttribute('aria-label') || ''} ${visibleText(anchor)}`.toLowerCase();
 			const path = (() => { try { return new URL(href, location.href).pathname; } catch (_) { return ''; } })();
-			if (!anchor.hasAttribute('download') && !/download|herunterladen|save|speichern/.test(label) && !/\.(pdf|zip|json|csv|txt|md|docx|xlsx|pptx|png|jpe?g|webp|gif)(?:$|[?#])/i.test(href)) continue;
+			if (!anchor.hasAttribute('download') && !/download|herunterladen|save|speichern/.test(label) && !/\.(pdf|zip|json|csv|txt|md|docx|xlsx|pptx|png|jpe?g|webp|gif|mp4|webm|mp3|wav|ogg)(?:$|[?#])/i.test(href)) continue;
 			const mediaType = mediaTypeFor(href);
 			add(href, cleanFileName(anchor.download || path.split('/').pop(), `file-${candidates.length + 1}.${extensionFor(mediaType)}`), mediaType);
 		}
@@ -1188,6 +1253,11 @@ function automate(job, profile, jobDeadline) {
 		await chooseImageTool(input);
 		input = first(selectors.input);
 		if (!input) throw new Error('Prompt input disappeared after selecting the image tool');
+	  }
+	  if (!resumeOnly && job.metadata?.contextbridge_music_tool) {
+		await chooseMusicTool(input);
+		input = first(selectors.input);
+		if (!input) throw new Error('Prompt input disappeared after selecting the music tool');
 	  }
       if (!resumeOnly && job.image_base64) {
         const fileInput = (selectors.file_input || []).flatMap((selector) => {
@@ -1314,11 +1384,14 @@ function automate(job, profile, jobDeadline) {
 				return;
 			}
 		}
+		const imageCards = latestElement && profile.name === 'chatgpt' ? [...latestElement.querySelectorAll('button[aria-label]')]
+			.filter((button) => button.closest('[class*="artifact-row"]') && /\.(?:png|jpe?g|webp|gif)$/i.test(button.getAttribute('aria-label') || '')).length : 0;
 		const artifactCount = job.output?.artifacts && latestElement
 			? [...latestElement.querySelectorAll('img')].filter((image) => (!image.naturalWidth || image.naturalWidth >= 128) && (!image.naturalHeight || image.naturalHeight >= 128)).length
-				+ latestElement.querySelectorAll('a[download], pre code, [data-file-citation-primary-file-id]').length
+				+ latestElement.querySelectorAll('a[download], pre code, [data-file-citation-primary-file-id], video[src], audio[src]').length + imageCards
 			: 0;
-		const imageCount = latestElement ? [...latestElement.querySelectorAll('img')].filter((image) => image.getAttribute('aria-hidden') !== 'true' && image.naturalWidth >= 128 && image.naturalHeight >= 128).length : 0;
+		const imageCount = latestElement ? [...latestElement.querySelectorAll('img')].filter((image) => image.getAttribute('aria-hidden') !== 'true' && image.naturalWidth >= 128 && image.naturalHeight >= 128).length + imageCards : 0;
+		const mediaCount = latestElement ? latestElement.querySelectorAll('video[src], audio[src]').length : 0;
 		const stableValue = latest || (artifactCount ? `artifact:${artifactCount}` : '');
 		if (!stableValue || !changedResponse) continue;
 		if (stableValue !== stableText) {
@@ -1336,7 +1409,8 @@ function automate(job, profile, jobDeadline) {
         if (Date.now() - stableSince >= stableFor && structured && !busy && composerFinished) {
 		  const filesMissing = job.output?.min_artifacts > artifactCount;
 		  const imagesMissing = job.output?.min_images > imageCount;
-		  if ((filesMissing || imagesMissing) && Date.now() - stableSince < 15000) continue;
+		  const mediaMissing = job.output?.min_media > mediaCount;
+		  if ((filesMissing || imagesMissing || mediaMissing) && Date.now() - stableSince < 15000) continue;
 		  const artifacts = await collectArtifacts(latestElement, job.output || {});
 		  const confirmedModel = profile.name === 'gemini' && job.model && !['auto', 'default'].includes(String(job.model).toLowerCase()) && !resumeOnly
 			? confirmGeminiMode(job.model) : selectedModel;
@@ -1354,7 +1428,8 @@ function automate(job, profile, jobDeadline) {
 			: (/send button stayed disabled|send button is not visible|prompt editor did not retain|prompt editor changed|gemini editor did not accept|incompatible selected tool/i.test(message) ? 'browser_submit_unavailable'
 			: (/prompt editor contains another draft/i.test(message) ? 'browser_composer_busy'
 			: (/image creation is rate limited/i.test(message) ? 'browser_rate_limited'
-				: (/image creation tool|image tool menu/i.test(message) ? 'browser_image_tool_unavailable' : 'browser_automation_error')))));
+			: (/image creation tool|image tool menu/i.test(message) ? 'browser_image_tool_unavailable'
+				: (/music creation tool/i.test(message) ? 'browser_music_tool_unavailable' : 'browser_automation_error'))))));
       resolve({ ok: false, error: message, code });
     }
   });

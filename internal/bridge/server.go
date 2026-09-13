@@ -812,6 +812,15 @@ func validateJob(job Job) error {
 	if job.Output.MinImages > 0 && mode != "text" && mode != "json" {
 		return errors.New("output.min_images requires text or json output")
 	}
+	if job.Output.MinMedia < 0 || job.Output.MinMedia > 12 {
+		return errors.New("output.min_media must be between 0 and 12")
+	}
+	if job.Output.MinMedia > 0 && !job.Output.Artifacts {
+		return errors.New("output.min_media requires output.artifacts")
+	}
+	if job.Output.MinMedia > 0 && mode != "text" && mode != "json" {
+		return errors.New("output.min_media requires text or json output")
+	}
 	if len(job.Output.RequiredKeys) > 50 {
 		return errors.New("output.required_keys accepts at most 50 keys")
 	}

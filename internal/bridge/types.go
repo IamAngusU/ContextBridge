@@ -50,6 +50,7 @@ type OutputSpec struct {
 	MaxArtifactBytes int      `json:"max_artifact_bytes,omitempty"`
 	MinArtifacts     int      `json:"min_artifacts,omitempty"`
 	MinImages        int      `json:"min_images,omitempty"`
+	MinMedia         int      `json:"min_media,omitempty"`
 }
 
 // Artifact is a file or image found in the final browser response. DataBase64
@@ -206,6 +207,17 @@ func NormalizeOutput(raw []byte, spec OutputSpec, provider, model string, latenc
 			return OutputError(mode, provider, model, fmt.Sprintf("images_missing: expected %d image(s), received %d", spec.MinImages, verified), latency)
 		}
 	}
+	if spec.MinMedia > 0 {
+		verified := 0
+		for _, artifact := range artifacts {
+			if artifact.DataBase64 != "" && (strings.HasPrefix(artifact.MediaType, "audio/") || strings.HasPrefix(artifact.MediaType, "video/")) {
+				verified++
+			}
+		}
+		if verified < spec.MinMedia {
+			return OutputError(mode, provider, model, fmt.Sprintf("media_missing: expected %d audio/video file(s), received %d", spec.MinMedia, verified), latency)
+		}
+	}
 
 	limit := outputLimit(spec)
 	clean := strings.TrimSpace(string(raw))
@@ -277,7 +289,7 @@ func NormalizeArtifacts(input []Artifact, spec OutputSpec) []Artifact {
 				item.Size = 0
 				item.SHA256 = ""
 			} else {
-				if strings.HasPrefix(item.MediaType, "image/") && http.DetectContentType(decoded) != item.MediaType {
+				if !artifactBytesMatchMediaType(decoded, item.MediaType) {
 					item.DataBase64 = ""
 					item.Size = 0
 					item.SHA256 = ""
@@ -334,6 +346,8 @@ func allowedArtifactMediaType(value string) bool {
 		return true
 	}
 	switch value {
+	case "video/mp4", "video/webm", "audio/mpeg", "audio/wave", "audio/wav", "audio/ogg", "audio/webm":
+		return true
 	case "application/pdf", "application/zip", "application/json", "application/octet-stream",
 		"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 		"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -341,6 +355,27 @@ func allowedArtifactMediaType(value string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func artifactBytesMatchMediaType(data []byte, mediaType string) bool {
+	actual := http.DetectContentType(data)
+	if strings.HasPrefix(mediaType, "image/") {
+		return actual == mediaType
+	}
+	switch mediaType {
+	case "video/mp4":
+		return actual == "video/mp4"
+	case "video/webm", "audio/webm":
+		return actual == "video/webm"
+	case "audio/mpeg":
+		return actual == "audio/mpeg"
+	case "audio/wave", "audio/wav":
+		return actual == "audio/wave"
+	case "audio/ogg":
+		return actual == "application/ogg"
+	default:
+		return true
 	}
 }
 

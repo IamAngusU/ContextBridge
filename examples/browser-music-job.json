@@ -1,0 +1,27 @@
+{
+  "source": "creative-terminal",
+  "requirements": {
+    "task": "generation",
+    "provider": "browser",
+    "session_id": "campaign-music-1"
+  },
+  "payload": {
+    "source": "creative-terminal",
+    "task": "generation",
+    "browser_profile": "gemini",
+    "prompt": "Create a short instrumental music cue with a calm opening and a hopeful ending. No vocals.",
+    "metadata": {
+      "contextbridge_music_tool": true
+    },
+    "output": {
+      "mode": "text",
+      "max_bytes": 1048576,
+      "artifacts": true,
+      "min_artifacts": 1,
+      "min_media": 1,
+      "max_artifact_bytes": 12582912
+    }
+  },
+  "priority": 10,
+  "max_attempts": 1
+}

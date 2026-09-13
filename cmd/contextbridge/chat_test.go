@@ -35,3 +35,20 @@ func TestChatImageModeRequiresArtifactSaving(t *testing.T) {
 		t.Fatal("image mode was not enabled")
 	}
 }
+
+func TestChatMusicModeNeedsGeminiAndDoesNotMixWithImages(t *testing.T) {
+	state := &chatState{provider: "browser", profile: "chatgpt", artifactDir: "test"}
+	if _, message := state.command("/music on"); message == "" || state.requireMusic {
+		t.Fatal("music mode was allowed on a non-Gemini tab")
+	}
+	state.profile = ""
+	if _, message := state.command("/music on"); message == "" || !state.requireMusic || state.profile != "gemini" {
+		t.Fatal("music mode did not select Gemini")
+	}
+	if _, message := state.command("/profile chatgpt"); message == "" || state.profile != "gemini" {
+		t.Fatal("music mode allowed an incompatible profile switch")
+	}
+	if _, message := state.command("/image on"); message == "" || !state.requireImage || state.requireMusic {
+		t.Fatal("image mode did not replace music mode")
+	}
+}

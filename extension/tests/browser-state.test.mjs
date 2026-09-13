@@ -485,6 +485,31 @@ const element = (text = '', attributes = {}) => ({
 }
 
 {
+  let menuOpened = false;
+  let musicSelected = false;
+  const composer = { querySelectorAll: () => [], querySelector: () => null };
+  const input = { ...element(), closest: () => composer, focus() { throw new Error('Selected music composer was used'); } };
+  const trigger = { ...element('Uploads & Tools'), click() { menuOpened = true; } };
+  const choice = { ...element('Musik erstellen', { 'aria-checked': 'false' }), click() { musicSelected = true; } };
+  context.document = {
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === 'button[aria-label*="Uploads & Tools" i]') return [trigger];
+      if (selector === 'button[role="menuitemcheckbox"], [role="menuitem"], [role="option"]') return menuOpened ? [choice] : [];
+      return [];
+    }
+  };
+  const result = await context.automate(
+    { prompt: 'create music', metadata: { contextbridge_music_tool: true }, output: { mode: 'text', artifacts: true, min_media: 1 } },
+    { name: 'gemini', selectors: { input: ['#input'], response: [], submit: [] } },
+    new Date(Date.now() + 5000).toISOString()
+  );
+  assert.equal(menuOpened, true);
+  assert.equal(musicSelected, true);
+  assert.equal(result.error, 'Selected music composer was used');
+}
+
+{
   const removeMusic = element('', { 'aria-label': 'Auswahl von „Musik“ aufheben' });
   const composer = { querySelectorAll: () => [removeMusic] };
   const input = { ...element(), tagName: 'DIV', closest: () => composer };
@@ -704,6 +729,37 @@ const element = (text = '', attributes = {}) => ({
   );
   assert.equal(external[0].data_base64, undefined);
   assert.equal(fetches, 1);
+}
+
+{
+  const bytes = new Uint8Array([0, 0, 0, 24, 102, 116, 121, 112, 109, 112, 52, 50, 0, 0, 0, 0, 109, 112, 52, 50, 0, 0, 0, 0]);
+  let fetches = 0;
+  let contentType = 'video/mp4';
+  context.fetch = async (_url, options) => {
+    fetches += 1;
+    assert.equal(options.credentials, 'include');
+    let sent = false;
+    return {
+      ok: true,
+      headers: { get: () => contentType },
+      body: { getReader: () => ({
+        read: async () => sent ? { done: true } : (sent = true, { done: false, value: bytes }),
+        cancel: async () => {}
+      }) }
+    };
+  };
+  const media = { name: 'song.mp4', media_type: 'video/mp4', url: 'https://contribution.usercontent.google.com/download?filename=song.mp4' };
+  const hydrated = await context.hydrateArtifactReferences([media], 'https://gemini.google.com/app', { artifacts: true });
+  assert.equal(hydrated[0].data_base64, Buffer.from(bytes).toString('base64'));
+  contentType = 'application/octet-stream';
+  const binaryDownload = await context.hydrateArtifactReferences([media], 'https://gemini.google.com/app', { artifacts: true });
+  assert.equal(binaryDownload[0].media_type, 'video/mp4');
+  contentType = 'text/html';
+  const badDownload = await context.hydrateArtifactReferences([media], 'https://gemini.google.com/app', { artifacts: true });
+  assert.equal(badDownload[0].data_base64, undefined);
+  const hostile = await context.hydrateArtifactReferences([{ ...media, url: 'https://other.example/song.mp4' }], 'https://gemini.google.com/app', { artifacts: true });
+  assert.equal(hostile[0].data_base64, undefined);
+  assert.equal(fetches, 3);
 }
 
 {

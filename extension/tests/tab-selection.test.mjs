@@ -2,6 +2,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 
+for (const browser of ['chromium', 'firefox']) {
+  const manifest = JSON.parse(fs.readFileSync(new URL(`../manifests/${browser}.json`, import.meta.url), 'utf8'));
+  assert.match(manifest.content_security_policy.extension_pages, /connect-src[^;]*https:/);
+}
+
 const source = fs.readFileSync(new URL('../src/popup.js', import.meta.url), 'utf8');
 const markup = fs.readFileSync(new URL('../src/popup.html', import.meta.url), 'utf8');
 for (const [, id] of source.matchAll(/\$\('([^']+)'\)/g)) {
@@ -71,6 +76,7 @@ assert.equal(context.tabDisplayState(true, 'working'), 'Working');
 assert.equal(context.tabDisplayState(true, 'rate_limited'), 'Cooling down');
 assert.equal(context.tabDisplayState(false, 'working'), 'Available');
 assert.equal(context.permissionPattern('http://127.0.0.1:32145'), 'http://127.0.0.1/*');
+assert.deepEqual(Array.from(context.mediaOriginsFor([{ url: 'https://gemini.google.com/app' }])), ['https://contribution.usercontent.google.com/*']);
 context.updateActions(null, true);
 assert.equal(element('pair').disabled, false);
 
@@ -101,7 +107,7 @@ await listeners.get('pair:click')();
 assert.deepEqual(Array.from(stored.tabIds), [52]);
 assert.equal(stored.token, 'test-token');
 assert.equal(permissionRequests.length - requestsBeforeConnect, 1);
-assert.deepEqual(Array.from(permissionRequests.at(-1).origins), ['https://gemini.google.com/*', 'http://127.0.0.1/*']);
+assert.deepEqual(Array.from(permissionRequests.at(-1).origins), ['https://gemini.google.com/*', 'https://contribution.usercontent.google.com/*', 'http://127.0.0.1/*']);
 assert.ok(runtimeMessages.includes('start'));
 assert.ok(!runtimeMessages.includes('test'));
 stored.lastError = 'The browser tab did not finish reloading';

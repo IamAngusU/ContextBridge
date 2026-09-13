@@ -229,7 +229,7 @@ $('pair').addEventListener('click', async () => {
       tabs = [tab];
       attachCurrentID = tab.id;
     }
-    const origins = [...new Set([...tabs.map((tab) => permissionPattern(tab.url)), permissionPattern($('url').value)])];
+    const origins = [...new Set([...tabs.map((tab) => permissionPattern(tab.url)), ...mediaOriginsFor(tabs), permissionPattern($('url').value)])];
     const granted = await api.permissions.request({ origins });
     if (!granted) throw new Error('Connection access was not granted');
     if (attachCurrentID) {
@@ -540,6 +540,12 @@ function permissionPattern(value) {
   // Browser host permissions never include a port; this pattern also covers
   // the loopback service on its configured port.
   return `${url.protocol}//${url.hostname}/*`;
+}
+
+function mediaOriginsFor(tabs) {
+  return tabs.some((tab) => {
+    try { return new URL(tab.url).hostname === 'gemini.google.com'; } catch (_) { return false; }
+  }) ? ['https://contribution.usercontent.google.com/*'] : [];
 }
 
 function profileYAML(profile) {
