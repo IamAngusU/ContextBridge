@@ -461,6 +461,14 @@ async function processWork(cfg, work, claimedTabId) {
     if (taught) effectiveProfile = taught;
     if (!effectiveProfile?.selectors) throw new Error('No usable page profile is available');
     if (!matches(tab.url || '', effectiveProfile.match_url || '')) throw new Error('The selected tab no longer matches its taught page');
+    if (cfg.preserveDrafts) {
+      try {
+        await preserveAndClearDraft(cfg, tabId, tab, effectiveProfile, work.job);
+      } catch (error) {
+        failureCode = 'browser_draft_preservation_failed';
+        throw error;
+      }
+    }
     await sendHeartbeat('working');
     leaseTimer = setInterval(() => renewLease(cfg, work.job.id), 25000);
     const initial = await captureTabProgress(tabId, effectiveProfile.selectors);
@@ -484,7 +492,8 @@ async function processWork(cfg, work, claimedTabId) {
 		    || (Boolean(snapshot.current_model) && modeFamily(snapshot.current_model) !== modeFamily(work.job.model)));
 		// aria-busy can survive on an older Gemini turn. Only a live Stop or
 		// streaming signal may put provisional assistant text on the relay.
-		const textChanged = Boolean(snapshot.active_generation && text && text !== baselineText && text !== latestProgressText && !modeMismatch
+		const newAssistantTurn = isNewAssistantTurn(initial, snapshot);
+		const textChanged = Boolean(newAssistantTurn && snapshot.active_generation && text && text !== baselineText && text !== latestProgressText && !modeMismatch
 		  && Number(work.job.output?.min_images || 0) === 0);
 		const progressState = `${Boolean(snapshot.busy)}|${Number(snapshot.percent) || 0}|${snapshot.detail || ''}|${modeMismatch}`;
         if (textChanged || progressState !== latestProgressState) {
@@ -703,6 +712,76 @@ async function completeWork(cfg, jobId, decision) {
   const pendingCompletions = { ...latest.pendingCompletions };
   delete pendingCompletions[jobId];
   await api.storage.local.set({ pendingCompletions });
+}
+
+async function preserveAndClearDraft(cfg, tabId, tab, profile, job) {
+  const selectors = profile.selectors || {};
+  const captured = await api.scripting.executeScript({ target: { tabId }, func: captureCurrentDraft, args: [selectors] });
+  const draft = captured?.[0]?.result;
+  if (draft?.has_attachments) throw new Error('An existing file attachment cannot be preserved as text history; editor was left untouched');
+  if (!draft?.text && !draft?.too_large) return;
+  if (draft.too_large) throw new Error('Existing draft exceeds the 16 KiB local history limit; editor was left untouched');
+  const response = await fetch(`${cfg.bridgeUrl}/v1/browser/drafts`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${cfg.token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ profile: profile.name || 'visual', tab_id: tabId,
+      tab_title: String(tab.title || '').slice(0, 200), origin: new URL(tab.url).origin,
+      session_id: String(job.session_id || '').slice(0, 100), text: draft.text })
+  });
+  if (!response.ok) throw new Error('Could not save the existing draft locally; editor was left untouched');
+  const cleared = await api.scripting.executeScript({ target: { tabId }, func: clearCurrentDraft, args: [selectors, draft.text] });
+  if (!cleared?.[0]?.result) throw new Error('The draft changed while being saved or the editor rejected clearing; job was not sent');
+}
+
+function captureCurrentDraft(selectors) {
+  const input = (selectors?.input || []).flatMap((selector) => {
+    try { return [...document.querySelectorAll(selector)]; } catch (_) { return []; }
+  }).find((element) => element && (element.offsetWidth || element.offsetHeight || element.getClientRects().length));
+  if (!input) return { text: '' };
+  const scope = input.closest?.('form, [data-node-type="input-area"]');
+  if (scope && ([...scope.querySelectorAll('input[type="file"]')].some((field) => field.files?.length)
+    || scope.querySelector('[data-testid*="attachment-chip" i], [data-testid*="attached-file" i], [data-testid*="file-thumbnail" i], [data-test-id*="attachment" i]'))) {
+    return { has_attachments: true };
+  }
+  const text = String(typeof input.value === 'string' ? input.value : (input.innerText || input.textContent || ''));
+  if (!text.trim()) return { text: '' };
+  if (new TextEncoder().encode(text).length > 16 * 1024) return { too_large: true };
+  return { text };
+}
+
+async function clearCurrentDraft(selectors, expected) {
+  const input = (selectors?.input || []).flatMap((selector) => {
+    try { return [...document.querySelectorAll(selector)]; } catch (_) { return []; }
+  }).find((element) => element && (element.offsetWidth || element.offsetHeight || element.getClientRects().length));
+  if (!input) return false;
+  const scope = input.closest?.('form, [data-node-type="input-area"]');
+  if (scope && ([...scope.querySelectorAll('input[type="file"]')].some((field) => field.files?.length)
+    || scope.querySelector('[data-testid*="attachment-chip" i], [data-testid*="attached-file" i], [data-testid*="file-thumbnail" i], [data-test-id*="attachment" i]'))) return false;
+  const current = () => String(typeof input.value === 'string' ? input.value : (input.innerText || input.textContent || ''));
+  if (!current().trim()) return true;
+  if (current() !== expected) return false;
+  input.focus();
+  if (input.isConnected === false || current() !== expected) return false;
+  if (typeof input.value === 'string') {
+    const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value')?.set;
+    if (setter) setter.call(input, '');
+    else input.value = '';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  } else {
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(input);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    document.execCommand('delete');
+    selection.removeAllRanges();
+    input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward' }));
+  }
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  const latest = (selectors?.input || []).flatMap((selector) => {
+    try { return [...document.querySelectorAll(selector)]; } catch (_) { return []; }
+  }).find((element) => element && (element.offsetWidth || element.offsetHeight || element.getClientRects().length));
+  return Boolean(latest && !String(typeof latest.value === 'string' ? latest.value : (latest.innerText || latest.textContent || '')).trim());
 }
 
 async function hydrateArtifactReferences(artifacts, pageURL, spec) {
@@ -1435,6 +1514,12 @@ function automate(job, profile, jobDeadline) {
   });
 }
 
+function isNewAssistantTurn(before, after) {
+  if (Number(after?.response_count) > Number(before?.response_count)) return true;
+  const priorID = String(before?.response_identity || '');
+  return Boolean(priorID && after?.response_identity && String(after.response_identity) !== priorID);
+}
+
 function captureProgress(selectors) {
   const visibleText = (element) => (element?.innerText || element?.textContent || '').trim();
   const responseText = (element) => {
@@ -1487,6 +1572,9 @@ function captureProgress(selectors) {
     try { return [...document.querySelectorAll(selector)].some(isVisible); } catch (_) { return false; }
   });
   const latestText = responses.length ? responseText(responses[responses.length - 1]) : '';
+	const latestResponse = responses[responses.length - 1];
+	const responseIdentity = latestResponse ? ['data-message-id', 'data-testid', 'data-turn', 'id']
+		.map((name) => latestResponse.getAttribute?.(name) || '').filter(Boolean).join('|') : '';
 	const fallbackNotice = responses.at(-1)?.closest?.('.conversation-container')?.querySelector?.('peak-hour-fallback-disclaimer');
 	const modelFallback = isVisible(fallbackNotice);
 	const currentModel = String(document.querySelector?.('bard-mode-switcher button[aria-haspopup]')
@@ -1500,7 +1588,8 @@ function captureProgress(selectors) {
   if (/rate.?limit|usage.?limit|quota|capacity|limit erreicht|höchstgrenze erreicht|zu viele anfragen|too many requests|try again later|später erneut|temporarily unavailable|something went wrong|etwas ist schief/i.test(failureText)) {
     return { text: '', busy: false, percent: 0, detail: 'Provider error', current_model: currentModel };
   }
-  return { text: latestText, busy, active_generation: activeGeneration, percent, detail: detail || (busy ? 'Generating' : ''), current_model: currentModel, model_fallback: modelFallback };
+  return { text: latestText, response_count: responses.length, response_identity: responseIdentity,
+    busy, active_generation: activeGeneration, percent, detail: detail || (busy ? 'Generating' : ''), current_model: currentModel, model_fallback: modelFallback };
 }
 
 function inspectSelectors(selectors) {
@@ -1677,6 +1766,7 @@ async function settings() {
     tabIds: [],
     running: false,
     autoAttachFreshTabs: false,
+    preserveDrafts: false,
     autoAttachBlockedTabIds: [],
     useVisualProfile: true,
     taughtProfiles: {},

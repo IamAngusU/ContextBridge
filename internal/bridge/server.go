@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode"
@@ -27,14 +28,16 @@ import (
 )
 
 type Server struct {
-	cfg        config.Config
-	store      *Store
-	processor  *Processor
-	runtime    *RuntimeManager
-	updates    *updater.Manager
-	rag        vectorstore.Store
-	logger     *log.Logger
-	activeJobs atomic.Int64
+	cfg             config.Config
+	store           *Store
+	processor       *Processor
+	runtime         *RuntimeManager
+	updates         *updater.Manager
+	rag             vectorstore.Store
+	logger          *log.Logger
+	draftHistoryMu  sync.Mutex
+	draftHistoryDir string
+	activeJobs      atomic.Int64
 }
 
 // Idle reports whether replacing this process would interrupt local work.
@@ -59,6 +62,9 @@ func NewServer(cfg config.Config, logger *log.Logger) (*Server, error) {
 		logger = log.New(os.Stderr, "", log.LstdFlags)
 	}
 	server := &Server{cfg: cfg, store: store, processor: NewProcessor(cfg, store), runtime: NewRuntimeManager(cfg, logger), logger: logger}
+	if home, homeErr := os.UserHomeDir(); homeErr == nil {
+		server.draftHistoryDir = filepath.Join(home, ".contextbridge")
+	}
 	if cfg.RAG.Enabled {
 		ragStore, ragErr := vectorstore.NewLocal(cfg.RAG.Directory, cfg.RAG.MaxDocuments)
 		if ragErr != nil {
@@ -76,6 +82,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/jobs", s.auth(s.handleJobs))
 	mux.HandleFunc("/v1/browser/jobs/next", s.auth(s.handleBrowserNext))
 	mux.HandleFunc("/v1/browser/heartbeat", s.auth(s.handleBrowserHeartbeat))
+	mux.HandleFunc("/v1/browser/drafts", s.auth(s.handleBrowserDrafts))
 	mux.HandleFunc("/v1/tunnel/heartbeat", s.auth(s.handleTunnelHeartbeat))
 	mux.HandleFunc("/v1/settings/updates", s.auth(s.handleUpdateSettings))
 	mux.HandleFunc("/v1/browser/jobs/", s.auth(s.handleBrowserJobAction))

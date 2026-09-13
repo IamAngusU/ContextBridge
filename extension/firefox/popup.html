@@ -40,6 +40,8 @@
         <button id="toggle-selected-tab" class="secondary full" type="button">Attach selected tab</button>
         <button id="select-ai-tabs" class="secondary full" type="button">Attach fresh ChatGPT + Gemini chats</button>
         <label class="mode"><input id="auto-attach-fresh" type="checkbox"><span>Auto-attach new, empty AI chats while connected</span></label>
+        <label class="mode"><input id="preserve-drafts" type="checkbox"><span>Before a job, save my unsent draft locally, then clear it</span></label>
+        <small class="field-hint">Optional. Plain-text drafts stay on this PC in ~/.contextbridge/draft-history.jsonl (1 MiB, oldest first). If saving fails, the draft stays in the editor and the job does not send.</small>
         <small class="field-hint">Existing conversations need an explicit click. Detaching prevents new jobs but cannot unsend work already on a website.</small>
         <button id="all-tabs" class="text-button" type="button">Show tabs from every window</button>
         <button id="detach-all" class="text-button" type="button">Detach all tabs</button>

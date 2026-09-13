@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import { webcrypto } from 'node:crypto';
+import { TextEncoder } from 'node:util';
 
 const source = fs.readFileSync(new URL('../src/background.js', import.meta.url), 'utf8');
 const listeners = { addListener() {} };
@@ -10,11 +11,33 @@ const chrome = {
   storage: { local: { get: async (defaults) => defaults, set: async () => {} } },
   tabs: {}, scripting: {}, i18n: { getMessage: () => '' }
 };
-const context = vm.createContext({ chrome, console, URL, setTimeout, clearTimeout, setInterval, clearInterval, Date, Promise });
+const context = vm.createContext({ chrome, console, URL, TextEncoder, setTimeout, clearTimeout, setInterval, clearInterval, Date, Promise });
 vm.runInContext(source, context);
 assert.equal(context.classifyFailureReason('Prompt editor did not retain the submitted text'), 'prompt_not_retained');
 assert.equal(context.classifyFailureReason('Send button stayed disabled after filling the prompt'), 'send_disabled');
 assert.equal(context.classifyFailureReason('A provider error containing private text'), 'other');
+assert.equal(context.isNewAssistantTurn({ response_count: 2 }, { response_count: 2, text: 'Old music player clock changed', active_generation: true }), false);
+assert.equal(context.isNewAssistantTurn({ response_count: 2 }, { response_count: 3, text: 'Fresh answer', active_generation: true }), true);
+assert.equal(context.isNewAssistantTurn({ response_count: 2, response_identity: 'old' }, { response_count: 2, response_identity: 'new' }), true);
+
+{
+  const input = { value: 'A private unsent draft', offsetWidth: 1, offsetHeight: 1, getClientRects: () => [1], focus() {}, dispatchEvent() {} };
+  context.document = { querySelectorAll: (selector) => selector === '#draft' ? [input] : [] };
+  context.Event = class {};
+  const selectors = { input: ['#draft'] };
+  assert.equal(context.captureCurrentDraft(selectors).text, 'A private unsent draft');
+  assert.equal(await context.clearCurrentDraft(selectors, 'An older version'), false);
+  assert.equal(input.value, 'A private unsent draft');
+  assert.equal(await context.clearCurrentDraft(selectors, 'A private unsent draft'), true);
+  assert.equal(input.value, '');
+  input.value = 'x'.repeat(16 * 1024 + 1);
+  assert.equal(context.captureCurrentDraft(selectors).too_large, true);
+  input.value = 'Draft with an unsent attachment';
+  input.closest = () => ({ querySelectorAll: () => [], querySelector: () => ({}) });
+  assert.equal(context.captureCurrentDraft(selectors).has_attachments, true);
+  assert.equal(await context.clearCurrentDraft(selectors, input.value), false);
+  assert.equal(input.value, 'Draft with an unsent attachment');
+}
 
 const element = (text = '', attributes = {}) => ({
   offsetWidth: 1,

@@ -39,6 +39,7 @@ func clusterChatCommand(args []string) error {
 	artifactDir := flags.String("artifacts", "auto", "artifact directory; auto uses local ContextBridge storage, off disables saving")
 	minArtifacts := flags.Int("min-artifacts", 0, "require this many verified files in the browser response (0-12)")
 	requireImage := flags.Bool("image", false, "require a real returned image file; ask for the image in the prompt")
+	minImages := flags.Int("min-images", 0, "require this many verified image files in one browser response (0-12)")
 	requireMusic := flags.Bool("music", false, "select Gemini's music tool and require a verified audio/video file")
 	attachImage := flags.String("attach-image", "", "attach one local PNG, JPEG, WebP, or GIF image to each turn")
 	if err := flags.Parse(args); err != nil {
@@ -47,14 +48,20 @@ func clusterChatCommand(args []string) error {
 	if *minArtifacts < 0 || *minArtifacts > 12 {
 		return errors.New("--min-artifacts must be between 0 and 12")
 	}
-	if *requireImage && !strings.EqualFold(*provider, "browser") {
-		return errors.New("--image requires --provider browser")
+	if *minImages < 0 || *minImages > 12 {
+		return errors.New("--min-images must be between 0 and 12")
+	}
+	if (*requireImage || *minImages > 0) && !strings.EqualFold(*provider, "browser") {
+		return errors.New("--image and --min-images require --provider browser")
 	}
 	if *requireMusic && (!strings.EqualFold(*provider, "browser") || (*profile != "" && !strings.EqualFold(*profile, "gemini"))) {
 		return errors.New("--music requires --provider browser and --profile gemini")
 	}
-	if *requireMusic && *requireImage {
-		return errors.New("--music and --image cannot be combined in one turn")
+	if *requireMusic && (*requireImage || *minImages > 0) {
+		return errors.New("--music cannot be combined with --image or --min-images")
+	}
+	if *requireImage && *minImages < 1 {
+		*minImages = 1
 	}
 	if *requireMusic && *profile == "" {
 		*profile = "gemini"
@@ -90,17 +97,17 @@ func clusterChatCommand(args []string) error {
 	} else if *artifactDir == "off" {
 		*artifactDir = ""
 	}
-	if (*minArtifacts > 0 || *requireImage || *requireMusic) && *artifactDir == "" {
-		return errors.New("--image, --music and --min-artifacts require artifact saving")
+	if (*minArtifacts > 0 || *minImages > 0 || *requireMusic) && *artifactDir == "" {
+		return errors.New("--image, --min-images, --music and --min-artifacts require artifact saving")
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	state := &chatState{relayURL: clusterBaseURL(cfg), token: *token, provider: *provider, group: *group, model: *model, profile: *profile, reasoning: *reasoning, e2ee: *e2ee, sessionID: *sessionID, artifactDir: *artifactDir, minArtifacts: *minArtifacts, requireImage: *requireImage, requireMusic: *requireMusic, imageBase64: imageBase64, imageMediaType: imageMediaType}
+	state := &chatState{relayURL: clusterBaseURL(cfg), token: *token, provider: *provider, group: *group, model: *model, profile: *profile, reasoning: *reasoning, e2ee: *e2ee, sessionID: *sessionID, artifactDir: *artifactDir, minArtifacts: *minArtifacts, minImages: *minImages, requireImage: *minImages > 0, requireMusic: *requireMusic, imageBase64: imageBase64, imageMediaType: imageMediaType}
 
 	if strings.TrimSpace(*prompt) != "" {
 		return state.turn(ctx, strings.TrimSpace(*prompt))
 	}
-	fmt.Printf("\n  ContextBridge Chat · %s\n  session %s · follow-ups stay in the same browser conversation\n  /model, /reasoning, /profile, /image, /music, /min-artifacts and /e2ee change this session · /settings shows it · /exit closes it\n\n", *provider, *sessionID)
+	fmt.Printf("\n  ContextBridge Chat · %s\n  session %s · follow-ups stay in the same browser conversation\n  /model, /reasoning, /profile, /image, /min-images, /music, /min-artifacts and /e2ee change this session · /settings shows it · /exit closes it\n\n", *provider, *sessionID)
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 64<<10), 1<<20)
 	for {
@@ -165,13 +172,31 @@ func (s *chatState) command(line string) (bool, string) {
 				return true, "  ! image mode needs artifact saving enabled"
 			}
 			s.requireImage = true
+			if s.minImages < 1 {
+				s.minImages = 1
+			}
 			s.requireMusic = false
 		case "off", "false", "0", "no", "aus":
 			s.requireImage = false
+			s.minImages = 0
 		default:
 			return true, "  ! use /image on or /image off"
 		}
 		return true, fmt.Sprintf("  ✓ image file required: %t", s.requireImage)
+	case "/min-images":
+		count, err := strconv.Atoi(value)
+		if err != nil || count < 0 || count > 12 {
+			return true, "  ! use /min-images 0 through 12"
+		}
+		if count > 0 && (s.artifactDir == "" || !strings.EqualFold(s.provider, "browser")) {
+			return true, "  ! image series need browser artifact saving enabled"
+		}
+		s.minImages = count
+		s.requireImage = count > 0
+		if count > 0 {
+			s.requireMusic = false
+		}
+		return true, fmt.Sprintf("  ✓ required images: %d", count)
 	case "/music":
 		switch strings.ToLower(value) {
 		case "on", "true", "1", "yes", "an", "ein":
@@ -184,6 +209,7 @@ func (s *chatState) command(line string) (bool, string) {
 			s.profile = "gemini"
 			s.requireMusic = true
 			s.requireImage = false
+			s.minImages = 0
 		case "off", "false", "0", "no", "aus":
 			s.requireMusic = false
 		default:
@@ -202,7 +228,7 @@ func (s *chatState) command(line string) (bool, string) {
 		}
 		return true, fmt.Sprintf("  ✓ E2EE: %t", s.e2ee)
 	case "/settings":
-		return true, fmt.Sprintf("  session %s · provider %s · profile %s · model %s · reasoning %s · image required %t · music required %t · required files %d · E2EE %t", s.sessionID, s.provider, emptyChatSetting(s.profile), emptyChatSetting(s.model), emptyChatSetting(s.reasoning), s.requireImage, s.requireMusic, s.minArtifacts, s.e2ee)
+		return true, fmt.Sprintf("  session %s · provider %s · profile %s · model %s · reasoning %s · required images %d · music required %t · required files %d · E2EE %t", s.sessionID, s.provider, emptyChatSetting(s.profile), emptyChatSetting(s.model), emptyChatSetting(s.reasoning), s.minImages, s.requireMusic, s.minArtifacts, s.e2ee)
 	default:
 		return false, ""
 	}
@@ -227,6 +253,7 @@ type chatState struct {
 	sessionID      string
 	artifactDir    string
 	minArtifacts   int
+	minImages      int
 	requireImage   bool
 	requireMusic   bool
 	imageBase64    string
@@ -238,7 +265,7 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 	if s.requireMusic && (!strings.EqualFold(s.provider, "browser") || !strings.EqualFold(s.profile, "gemini")) {
 		return errors.New("music mode needs the Gemini browser profile")
 	}
-	if s.requireMusic && s.requireImage {
+	if s.requireMusic && (s.requireImage || s.minImages > 0) {
 		return errors.New("image and music modes cannot be combined in one turn")
 	}
 	fmt.Printf("  → angefragt: %s", s.provider)
@@ -253,14 +280,15 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 	}
 	fmt.Println()
 	minimum := s.minArtifacts
-	if s.requireImage || s.requireMusic {
-		if minimum < 1 {
-			minimum = 1
-		}
+	if s.requireImage || s.minImages > 0 {
+		minimum = max(minimum, max(1, s.minImages))
+	}
+	if s.requireMusic {
+		minimum = max(minimum, 1)
 	}
 	minimumImages := 0
 	if s.requireImage {
-		minimumImages = 1
+		minimumImages = max(1, s.minImages)
 	}
 	minimumMedia := 0
 	var metadata map[string]interface{}
@@ -388,18 +416,18 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 				}
 				return fmt.Errorf("artifacts_missing: expected %d file(s), received %d", minimum, verifiedFiles)
 			}
-			if s.requireImage {
+			if minimumImages > 0 {
 				images := 0
 				for _, artifact := range submission.Output.Artifacts {
 					if artifact.DataBase64 != "" && strings.HasPrefix(artifact.MediaType, "image/") {
 						images++
 					}
 				}
-				if images == 0 {
+				if images < minimumImages {
 					if streamed {
 						fmt.Println()
 					}
-					return errors.New("images_missing: expected 1 image, received 0")
+					return fmt.Errorf("images_missing: expected %d image(s), received %d", minimumImages, images)
 				}
 			}
 			if s.requireMusic {

@@ -52,3 +52,16 @@ func TestChatMusicModeNeedsGeminiAndDoesNotMixWithImages(t *testing.T) {
 		t.Fatal("image mode did not replace music mode")
 	}
 }
+
+func TestChatImageSeriesRequirement(t *testing.T) {
+	state := &chatState{provider: "browser", profile: "chatgpt", artifactDir: "test"}
+	if _, message := state.command("/min-images 3"); message == "" || !state.requireImage || state.minImages != 3 {
+		t.Fatal("image series requirement was not enabled")
+	}
+	if _, message := state.command("/min-images 13"); message == "" || state.minImages != 3 {
+		t.Fatal("invalid image series count changed state")
+	}
+	if _, message := state.command("/image off"); message == "" || state.requireImage || state.minImages != 0 {
+		t.Fatal("image off did not clear series requirement")
+	}
+}

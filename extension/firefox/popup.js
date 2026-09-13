@@ -19,6 +19,7 @@ async function initialize() {
   $('token').value = saved.token;
   $('visual-mode').checked = saved.useVisualProfile;
   $('auto-attach-fresh').checked = saved.autoAttachFreshTabs;
+  $('preserve-drafts').checked = saved.preserveDrafts;
   attachedTabIDs = [...new Set((saved.tabIds?.length ? saved.tabIds : [saved.tabId]).map(Number).filter(Boolean))];
   toggleProfileMode();
   await loadTabs(0, false);
@@ -154,6 +155,9 @@ $('detach-all').addEventListener('click', async () => {
 $('auto-attach-fresh').addEventListener('change', async () => {
   await api.storage.local.set({ autoAttachFreshTabs: $('auto-attach-fresh').checked });
   if ($('auto-attach-fresh').checked) await api.runtime.sendMessage({ type: 'discover-fresh-tabs' });
+});
+$('preserve-drafts').addEventListener('change', async () => {
+  await api.storage.local.set({ preserveDrafts: $('preserve-drafts').checked });
 });
 $('all-tabs').addEventListener('click', async () => {
   const granted = await api.permissions.request({ permissions: ['tabs'] });
@@ -574,6 +578,7 @@ async function settings() {
     tabIds: [],
     running: false,
     autoAttachFreshTabs: false,
+    preserveDrafts: false,
     autoAttachBlockedTabIds: [],
     useVisualProfile: true,
     taughtProfiles: {},

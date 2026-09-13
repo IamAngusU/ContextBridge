@@ -12,6 +12,8 @@ Terminal chat supports E2EE per session with `--e2ee` or interactively with `/e2
 
 The browser extension does not receive permanent access to every page. The operator explicitly attaches a tab and approves that tab's origin; highlighting a tab is not authorization. Existing conversations require explicit attachment. Optional auto-attachment applies only to confirmed empty new ChatGPT/Gemini chats on previously permitted origins and can be disabled. A tab can be detached without stopping the whole bridge; already-submitted website work may finish, but no new job is sent there. The visual profile contains CSS selectors, not executable JavaScript. The extension sends only the configured prompt and optional image, then reads the configured response elements. Optional all-tabs access is requested when the operator browses every window or enables the fresh-tab helper.
 
+Optional draft preservation is disabled by default. When enabled, the extension saves an unsent text draft to `~/.contextbridge/draft-history.jsonl` through the authenticated localhost service before clearing that unchanged editor. The file is bounded to 1 MiB and inherits the user-home directory's access controls; it is plaintext local history, **not** E2EE-protected and never sent to the relay. A shared OS account should keep the option off for sensitive drafts. Missing private-home storage or an editor change aborts the job without clearing the draft.
+
 Submitted text and image text are treated as untrusted data. ContextBridge wraps them in trusted instructions that explicitly forbid following embedded commands. Model output is parsed as JSON and reduced to the configured decision vocabulary. Invalid, missing, or timed-out output becomes `review`.
 
 Prompt injection cannot be solved by one instruction. ContextBridge therefore uses multiple boundaries: producer authentication, task and group allowlists, bounded input and output sizes, fixed provider routes, no shell evaluation, JSON validation, tenant separation, bounded pipeline loops, and explicit human approval where a workflow requires it. Applications must still choose conservative output contracts for high-impact actions.
@@ -28,7 +30,7 @@ Do not expose the local port directly to a network. Use an authenticated tunnel 
 
 Browser interfaces change. A selector profile can stop working after a site update. This fails to `review`; it must never silently become `allow`.
 
-Extension packages contain no remotely hosted code. Chromium and Firefox builds share reviewed source but use browser-specific manifests. The Firefox content security policy explicitly allows the configured localhost connection without granting additional remote script sources.
+Extension packages contain no remotely hosted code. Chromium and Firefox builds share reviewed source but use browser-specific manifests. Their content security policies allow the configured localhost connection and HTTPS resource reads after the relevant page permission is granted, without granting remote script sources.
 
 The dashboard receives its token through manual entry or a URL fragment opened by the CLI. URL fragments are not sent in HTTP requests. The dashboard removes the fragment and keeps the token in session storage, so closing the tab ends that dashboard session.
 

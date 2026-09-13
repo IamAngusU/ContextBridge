@@ -2,6 +2,17 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.17 - 2026-09-13
+
+### Fixed
+
+- emit provisional Gemini text only from a newly created assistant turn, not from a prior Music player's changing timer while the next job is generating
+
+### Added
+
+- `cluster chat --min-images N` and `/min-images N` require exactly the requested minimum of verified image files, including multi-image follow-ups with `--attach-image` as a visual reference
+- optional, bounded local draft preservation before browser jobs: save the exact unsent text with tab/provider/time to a private user-home JSONL history, then clear only an unchanged editor; saving or clearing failures leave the job unsent
+
 ## 0.5.16 - 2026-09-13
 
 ### Fixed

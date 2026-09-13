@@ -94,9 +94,12 @@ The extension uses authenticated endpoints under `/v1/browser`:
 | `POST` | `/jobs/{id}/progress` | Publish a progressive answer snapshot |
 | `POST` | `/jobs/{id}/complete` | Return a normalized decision |
 | `POST` | `/heartbeat` | Publish non-sensitive tab and worker status |
+| `POST` | `/drafts` | Save an opted-in unsent editor draft locally before clearing it |
 | `GET` | `/profiles` | Read configured YAML browser profiles |
 
 The extension stores an undelivered completion locally and retries it. It does not resubmit the same prompt just because the completion response was interrupted.
+
+Draft preservation is off by default and can be enabled under **Manage other tabs**. Before a job starts, the extension saves a non-empty text draft through the authenticated local `/v1/browser/drafts` endpoint and clears the editor only if the text still matches. A failed save, changed draft, or editor that refuses clearing aborts the job without sending its prompt. The server stores JSONL with timestamp, provider, tab ID/title, origin (not the full chat URL), session ID, and draft text in `~/.contextbridge/draft-history.jsonl`; it retains at most 1 MiB, dropping oldest records. The file is local plaintext, not part of E2EE or the relay. Do not enable this on a shared operating-system account if those drafts are sensitive.
 
 Unsealed cluster jobs expose the latest browser snapshot in the job's `progress`
 field. `sequence` is monotonic, `text` contains at most 1 MB of UTF-8, and
