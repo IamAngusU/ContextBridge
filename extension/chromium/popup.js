@@ -425,7 +425,8 @@ async function loadTabs(selected, allWindows) {
     const reservation = bindings.find((entry) => Number(entry?.tabId) === tab.id);
     const session = reservation ? (reservation.legacy ? ' · old chat: open a new one' : ` · session: ${reservation.label || 'reserved'}`) : '';
     const model = attached && live?.currentModel ? ` · ${live.currentModel}` : '';
-    return { id: tab.id, label: `${attached ? '●' : '○'} ${state}${session}${model} · ${windowLabel}${tab.title || 'Untitled'}  |  ${host}` };
+    const edit = attached && saved.tabEditModes?.[tab.id] ? ' · edits last' : '';
+    return { id: tab.id, label: `${attached ? '●' : '○'} ${state}${session}${model}${edit} · ${windowLabel}${tab.title || 'Untitled'}  |  ${host}` };
   });
   const existing = [...$('tab').options];
   if (existing.length !== desired.length || desired.some((item, index) => existing[index]?.value !== String(item.id) || existing[index]?.textContent !== item.label)) {

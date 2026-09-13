@@ -2,6 +2,13 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.23 - 2026-09-13
+
+### Fixed
+
+- reject media and artifact jobs in the text-only edit mode before opening a provider's Edit dialog; an older generated file must never be mistaken for this job's output
+- preserve an unsent personal draft or attachment when editing a previous message, and show which attached tabs have edit mode enabled
+
 ## 0.5.22 - 2026-09-13
 
 ### Added

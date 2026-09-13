@@ -81,7 +81,22 @@ function fixture(provider) {
   const profile = { name: provider, selectors: { input: ['#input'], response: ['#response'], submit: [] } };
   const deadline = () => new Date(Date.now() + 20000).toISOString();
   return { context, content, oldPrompt, newPrompt, profile, deadline,
-    setStop: (value) => { stopVisible = value; }, editClicks: () => editClicks, updateClicks: () => updateClicks };
+    setStop: (value) => { stopVisible = value; }, setDraft: (value) => { input.value = value; },
+    editClicks: () => editClicks, updateClicks: () => updateClicks };
+}
+
+{
+  const { context } = fixture('chatgpt');
+  assert.equal(context.supportsTabEditJob({ output: { mode: 'text' } }), true);
+  for (const job of [
+    { image_base64: 'aGVsbG8=' },
+    { metadata: { contextbridge_image_tool: true } },
+    { metadata: { contextbridge_music_tool: true } },
+    { output: { artifacts: true } },
+    { output: { min_artifacts: 1 } },
+    { output: { min_images: 1 } },
+    { output: { min_media: 1 } }
+  ]) assert.equal(context.supportsTabEditJob(job), false);
 }
 
 for (const provider of ['chatgpt', 'gemini']) {
@@ -103,6 +118,12 @@ for (const provider of ['chatgpt', 'gemini']) {
   assert.equal(blocked.code, 'browser_edit_unavailable');
   assert.equal(site.editClicks(), 1);
   assert.equal(site.updateClicks(), 1);
+  site.content.hasAttachment = false;
+  site.setDraft('A personal unsent draft');
+  const draftBlocked = await site.context.automate({ prompt: 'DO-NOT-REPLACE-DRAFT', output: { mode: 'text' } }, site.profile, site.deadline(), updated);
+  assert.equal(draftBlocked.ok, false);
+  assert.equal(draftBlocked.code, 'browser_composer_busy');
+  assert.equal(site.editClicks(), 1);
 }
 
 {

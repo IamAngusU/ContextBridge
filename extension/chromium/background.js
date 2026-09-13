@@ -476,8 +476,8 @@ async function processWork(cfg, work, claimedTabId) {
     let editTarget = null;
     if (editEnabled) {
       failureCode = 'browser_edit_unavailable';
-      if (work.job.image_base64 || work.job.metadata?.contextbridge_image_tool || work.job.metadata?.contextbridge_music_tool) {
-        throw new Error('Edit mode currently supports text prompts only; file and media-tool jobs need a new message');
+      if (!supportsTabEditJob(work.job)) {
+        throw new Error('Edit mode currently supports text-only jobs; files and media need a new message');
       }
       if (binding?.ownedTurn) editTarget = binding.ownedTurn;
       else if (!isFreshChatURL(binding?.url)) throw new Error('Edit mode needs a new empty chat for its first ContextBridge message; no existing user message was changed');
@@ -654,6 +654,12 @@ function classifyFailureReason(message) {
   if (/prompt editor contains another draft/i.test(text)) return 'composer_draft';
   if (/incompatible selected tool/i.test(text)) return 'incompatible_tool';
   return 'other';
+}
+
+function supportsTabEditJob(job) {
+  return !job?.image_base64 && !job?.metadata?.contextbridge_image_tool && !job?.metadata?.contextbridge_music_tool
+    && !job?.output?.artifacts && Number(job?.output?.min_artifacts || 0) === 0
+    && Number(job?.output?.min_images || 0) === 0 && Number(job?.output?.min_media || 0) === 0;
 }
 
 async function coolDownTab(tabId, duration) {
@@ -1659,6 +1665,14 @@ function automate(job, profile, jobDeadline, editTarget = null) {
       }
       if (!resumeOnly) {
         if (editTarget) {
+          if (String(input.value || input.innerText || input.textContent || '').trim()) {
+            throw new Error('Prompt editor contains another draft; the prior message was not edited');
+          }
+          const scope = input.closest?.('form, [data-node-type="input-area"]');
+          if (scope && ([...scope.querySelectorAll('input[type="file"]')].some((field) => field.files?.length)
+            || scope.querySelector('[data-testid*="attachment" i], [data-test-id*="attachment" i], .attachment-chip, .file-chip'))) {
+            throw new Error('Prompt editor contains an unsent attachment; the prior message was not edited');
+          }
           await editOwnedMessage(editTarget);
         } else {
           const editorText = (element) => String(element?.value || element?.innerText || element?.textContent || '');
@@ -1839,7 +1853,7 @@ function automate(job, profile, jobDeadline, editTarget = null) {
       const code = /requested model|model selector/i.test(message)
 		? 'browser_model_unavailable'
 		: (/ChatGPT still shows Stop/i.test(message) ? 'browser_provider_busy'
-		: (/edit mode|previous ContextBridge message|previous message|Edit dialog|Edit update button|message is already being edited|provider still shows Stop/i.test(message) ? 'browser_edit_unavailable'
+		: (/edit mode|previous ContextBridge message|previous message|Edit dialog|Edit update button|message is already being edited|provider still shows Stop|unsent attachment/i.test(message) ? 'browser_edit_unavailable'
 		: (/requested reasoning|reasoning selector/i.test(message) ? 'browser_reasoning_unavailable'
 			: (/send button stayed disabled|send button is not visible|prompt editor did not retain|prompt editor changed|gemini editor did not accept|incompatible selected tool/i.test(message) ? 'browser_submit_unavailable'
 			: (/prompt editor contains another draft/i.test(message) ? 'browser_composer_busy'
