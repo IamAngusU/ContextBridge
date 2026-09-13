@@ -960,6 +960,7 @@ func clusterSubmitCommand(args []string) error {
 	file := flags.String("file", "", "cluster job JSON file")
 	token := flags.String("token", "", "producer token; defaults to local admin token")
 	wait := flags.Bool("wait", true, "wait for a final result")
+	stream := flags.Bool("stream", false, "print progressive browser text to stderr while waiting")
 	sealed := flags.Bool("e2ee", false, "encrypt payload for the selected worker")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -1009,6 +1010,12 @@ func clusterSubmitCommand(args []string) error {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	lastProgress := ""
+	lastSequence := uint64(0)
+	streamed := false
+	if *stream && *sealed {
+		fmt.Fprintln(os.Stderr, "Progress streaming is disabled for E2EE jobs; waiting for the encrypted final result.")
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -1018,8 +1025,25 @@ func clusterSubmitCommand(args []string) error {
 		if err := clusterGET(ctx, clusterBaseURL(cfg)+"/v1/cluster/jobs/"+url.PathEscape(job.ID), *token, &job); err != nil {
 			return err
 		}
+		if *stream && !*sealed && job.Progress != nil && job.Progress.Sequence > lastSequence {
+			current := job.Progress.Text
+			if strings.HasPrefix(current, lastProgress) {
+				fmt.Fprint(os.Stderr, strings.TrimPrefix(current, lastProgress))
+			} else {
+				if streamed {
+					fmt.Fprintln(os.Stderr)
+				}
+				fmt.Fprint(os.Stderr, current)
+			}
+			lastProgress = current
+			lastSequence = job.Progress.Sequence
+			streamed = true
+		}
 		switch job.Status {
 		case cluster.JobCompleted:
+			if streamed {
+				fmt.Fprintln(os.Stderr)
+			}
 			if job.SealedResult != nil {
 				raw, err := cluster.OpenResponse(shared, job.SealedResult, []byte("result:"+job.ID+":"+job.AssignedNode))
 				if err != nil {

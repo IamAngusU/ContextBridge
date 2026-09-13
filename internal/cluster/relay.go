@@ -512,6 +512,10 @@ func (r *Relay) handleWorker(w http.ResponseWriter, req *http.Request) {
 			_ = r.store.UpsertNode(node)
 		case "started":
 			_, _ = r.store.MarkRunning(message.JobID, node.ID)
+		case "progress":
+			if message.Progress != nil {
+				_, _ = r.store.UpdateJobProgress(message.JobID, node.ID, *message.Progress)
+			}
 		case "result":
 			worker.release(message.JobID)
 			usage := priceUsage(message.Usage, r.cfg.Pricing)

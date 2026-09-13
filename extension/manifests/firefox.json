@@ -2,13 +2,13 @@
   "manifest_version": 3,
   "name": "ContextBridge",
   "short_name": "ContextBridge",
-  "version": "0.3.1",
-  "description": "Teach one browser tab how to exchange structured jobs with your local ContextBridge service.",
+  "version": "0.4.0",
+  "description": "Connect auto-detected or visually taught AI tabs to your local ContextBridge service.",
   "permissions": ["storage", "activeTab", "scripting"],
   "optional_permissions": ["tabs"],
   "optional_host_permissions": ["http://127.0.0.1/*", "http://localhost/*", "https://*/*", "http://*/*"],
   "background": {
-    "scripts": ["background.js"]
+    "scripts": ["profiles.js", "background.js"]
   },
   "action": {
     "default_title": "ContextBridge",

@@ -3,6 +3,8 @@ param(
     [ValidateSet("ask", "ollama", "managed", "browser", "later")][string]$Provider = "ask",
     [ValidateSet("ask", "local", "relay", "worker", "all")][string]$ClusterMode = "ask",
     [ValidateSet("jina", "nuextract", "both")][string]$ManagedModel = "jina",
+    [string]$RelayUrl = "",
+    [string]$NodeName = "auto",
     [switch]$NoAutostart,
     [switch]$NoStart,
     [switch]$NoDashboard,
@@ -24,7 +26,7 @@ if ($Provider -eq "ask") {
     Write-Host "Choose the first local target:"
     Write-Host "  1) Existing Ollama, with automatic local model detection (recommended)"
     Write-Host "  2) Managed llama.cpp runtime and a verified GGUF model"
-    Write-Host "  3) A visually taught browser tab"
+    Write-Host "  3) An auto-detected or visually taught browser tab"
     Write-Host "  4) Configure it later in YAML"
     $choice = Read-Host "Choose 1, 2, 3, or 4 [1]"
     if (-not $choice) { $choice = "1" }
@@ -110,9 +112,9 @@ if ($ClusterMode -eq "ask") {
 $clusterArguments = @("cluster", "configure", "--config", $config, "--mode", $ClusterMode)
 if ($ClusterMode -in @("relay", "all")) { $clusterArguments += @("--listen", "auto") }
 if ($ClusterMode -eq "worker") {
-    $relayUrl = Read-Host "Public HTTPS relay URL"
-    if (-not $relayUrl) { throw "A relay URL is required for worker mode." }
-    $clusterArguments += @("--relay-url", $relayUrl)
+    if (-not $RelayUrl) { $RelayUrl = Read-Host "Public HTTPS relay URL" }
+    if (-not $RelayUrl) { throw "A relay URL is required for worker mode." }
+    $clusterArguments += @("--relay-url", $RelayUrl, "--name", $NodeName)
 } elseif ($ClusterMode -eq "relay") {
     $publicUrl = Read-Host "Public HTTPS relay URL, or leave empty while configuring the reverse proxy"
     if ($publicUrl) { $clusterArguments += @("--public-url", $publicUrl) }
@@ -173,10 +175,24 @@ if (-not $NoAutostart -and (Get-Command Register-ScheduledTask -ErrorAction Sile
 }
 
 if (-not $NoStart) {
-    $existing = Get-Process contextbridge -ErrorAction SilentlyContinue
+    $started = $null
+    $existing = Get-Process contextbridge -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe }
     if (-not $existing) {
-        Start-Process -FilePath $exe -ArgumentList @("run", "--config", $config) -WindowStyle Hidden
-        Start-Sleep -Milliseconds 600
+        $started = Start-Process -FilePath $exe -ArgumentList @("run", "--config", $config) -WindowStyle Hidden -PassThru
+    }
+    $listenLine = Get-Content $config | Where-Object { $_ -match '^\s{4}listen:\s*(\S+)\s*$' } | Select-Object -First 1
+    $listenAddress = if ($listenLine -match '^\s{4}listen:\s*(\S+)\s*$') { $Matches[1] } else { '127.0.0.1:32145' }
+    $ready = $false
+    for ($attempt = 0; $attempt -lt 30; $attempt++) {
+        try {
+            $health = Invoke-RestMethod -Uri "http://$listenAddress/health" -TimeoutSec 2
+            if ($health.ok) { $ready = $true; break }
+        } catch {}
+        if ($started -and $started.HasExited) { break }
+        Start-Sleep -Milliseconds 500
+    }
+    if (-not $ready) {
+        throw "ContextBridge was installed but did not become healthy. Run: `"$exe`" doctor --config `"$config`""
     }
 }
 

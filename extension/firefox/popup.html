@@ -24,13 +24,13 @@
     </section>
 
     <section class="step" aria-labelledby="teach-heading">
-      <div class="step-heading"><span>02</span><h2 id="teach-heading">Teach the page</h2></div>
+      <div class="step-heading"><span>02</span><h2 id="teach-heading">Detect or teach the page</h2></div>
       <div class="profile-state" id="profile-state">
         <span class="profile-signal" aria-hidden="true"></span>
         <div><strong id="profile-title">No visual profile yet</strong><small id="profile-copy">Choose the prompt, send, response, and optional image controls.</small></div>
       </div>
       <div class="button-row">
-        <button id="teach" class="primary" type="button">Teach this page</button>
+        <button id="teach" class="primary" type="button">Customize detection</button>
         <button id="verify" class="secondary" type="button" disabled>Test profile</button>
       </div>
     </section>
@@ -46,7 +46,7 @@
       <div class="advanced-body">
         <label>Local bridge URL<input id="url" value="http://127.0.0.1:32145" spellcheck="false"></label>
         <label>Pairing token<div class="secret-row"><input id="token" type="password" autocomplete="off" spellcheck="false"><button id="toggle-token" class="secondary compact" type="button">Show</button></div></label>
-        <label class="mode"><input id="visual-mode" type="checkbox" checked><span>Use the visually taught page profile</span></label>
+        <label class="mode"><input id="visual-mode" type="checkbox" checked><span>Use the detected or customized page profile</span></label>
         <label id="yaml-profile-row">Accepted server profile<select id="profile"><option value="chatgpt">ChatGPT</option></select></label>
         <button id="test" class="secondary full" type="button">Test local service</button>
         <button id="export-profile" class="secondary full" type="button" disabled>Copy profile as YAML</button>
@@ -54,8 +54,9 @@
       </div>
     </details>
 
-    <p class="privacy">Access is requested only for the page you teach and the local ContextBridge service.</p>
+    <p class="privacy">Access is requested only for the page you select and the local ContextBridge service.</p>
   </main>
+  <script src="profiles.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

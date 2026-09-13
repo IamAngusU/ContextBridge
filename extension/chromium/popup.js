@@ -54,6 +54,9 @@ $('teach').addEventListener('click', async () => {
 
 $('verify').addEventListener('click', async () => {
   try {
+    const tab = await api.tabs.get(Number($('tab').value));
+    const granted = await api.permissions.request({ origins: [new URL(tab.url).origin + '/*'] });
+    if (!granted) return setStatus('error', 'Page access was not granted');
     const result = await api.runtime.sendMessage({ type: 'verify-profile', tabId: Number($('tab').value) });
     if (!result?.ok) throw new Error(result?.error || 'One or more targets are missing');
     const image = result.report.file_input ? 'image ready' : 'text only';
@@ -203,10 +206,16 @@ async function refreshState() {
       currentTab = { id: tab.id, title: tab.title || safeHost(tab.url), origin: new URL(tab.url).origin };
     }
   } catch (_) {}
-  currentProfile = currentTab ? saved.taughtProfiles[currentTab.origin] || null : null;
+  currentProfile = currentTab
+    ? saved.taughtProfiles[currentTab.origin] || globalThis.ContextBridgeProfiles?.forURL(currentTab.origin) || null
+    : null;
+  try {
+    const runtimeState = await api.runtime.sendMessage({ type: 'status' });
+    if (runtimeState?.profile && runtimeState?.tab?.id === currentTab?.id) currentProfile = runtimeState.profile;
+  } catch (_) {}
   renderProfile(currentProfile);
   renderRunning(saved.running);
-  updateActions(Boolean(currentProfile), saved.useVisualProfile);
+  updateActions(currentProfile, saved.useVisualProfile);
   if (saved.lastError) setStatus('error', saved.lastError);
   else if (saved.running) setStatus('live', 'Connected and waiting');
   else setStatus('idle', 'Not connected');
@@ -217,7 +226,9 @@ function renderProfile(profile, valid = null, copy = '') {
   $('profile-state').classList.toggle('invalid', valid === false);
   $('profile-title').textContent = profile ? profile.label : 'No visual profile yet';
   $('profile-copy').textContent = copy || (profile
-    ? `Saved locally for ${safeHost(profile.origin)}.`
+    ? (profile.source === 'builtin'
+      ? `Detected automatically for ${safeHost(profile.origin)}. You can customize it if the page changes.`
+      : `Saved locally for ${safeHost(profile.origin)}.`)
     : 'Choose the prompt, send, response, and optional image controls.');
 }
 
@@ -228,9 +239,10 @@ function renderRunning(running) {
   $('tab').disabled = running;
 }
 
-function updateActions(hasProfile, visualMode) {
+function updateActions(profile, visualMode) {
+  const hasProfile = Boolean(profile);
   $('verify').disabled = !hasProfile;
-  $('remove-profile').disabled = !hasProfile;
+  $('remove-profile').disabled = !hasProfile || profile.source === 'builtin';
   $('export-profile').disabled = !hasProfile;
   $('pair').disabled = visualMode ? !hasProfile : false;
 }

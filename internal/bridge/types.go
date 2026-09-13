@@ -77,6 +77,14 @@ type browserJob struct {
 	Deadline time.Time   `json:"deadline"`
 }
 
+type BrowserProgress struct {
+	Sequence  uint64    `json:"sequence"`
+	Text      string    `json:"text"`
+	Phase     string    `json:"phase,omitempty"`
+	Busy      bool      `json:"busy"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 func NormalizeDecision(raw []byte, provider, model string, latency time.Duration) Decision {
 	var parsed Decision
 	clean := strings.TrimSpace(string(raw))

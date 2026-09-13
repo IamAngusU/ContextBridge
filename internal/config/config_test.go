@@ -20,6 +20,9 @@ func TestDefaultConfigLoads(t *testing.T) {
 	if cfg.Server.Listen != "127.0.0.1:32145" {
 		t.Fatalf("unexpected listen address: %s", cfg.Server.Listen)
 	}
+	if profile, ok := cfg.BrowserProfiles["gemini"]; !ok || profile.MatchURL != "https://gemini.google.com/*" {
+		t.Fatalf("default Gemini browser profile is missing: %#v", profile)
+	}
 	if len(cfg.Server.Token) < 40 {
 		t.Fatal("generated token is too short")
 	}

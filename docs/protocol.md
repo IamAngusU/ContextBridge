@@ -84,11 +84,18 @@ The extension uses authenticated endpoints under `/v1/browser`:
 | --- | --- | --- |
 | `GET` | `/jobs/next` | Lease the next matching browser job |
 | `POST` | `/jobs/{id}/lease` | Renew an active browser lease |
+| `GET` | `/jobs/{id}/progress` | Read the latest progressive answer snapshot |
+| `POST` | `/jobs/{id}/progress` | Publish a progressive answer snapshot |
 | `POST` | `/jobs/{id}/complete` | Return a normalized decision |
 | `POST` | `/heartbeat` | Publish non-sensitive tab and worker status |
 | `GET` | `/profiles` | Read configured YAML browser profiles |
 
 The extension stores an undelivered completion locally and retries it. It does not resubmit the same prompt just because the completion response was interrupted.
+
+Unsealed cluster jobs expose the latest browser snapshot in the job's `progress`
+field. `sequence` is monotonic, `text` contains at most 1 MB of UTF-8, and
+`phase` is `generating`, `stabilizing`, or `final`. Plaintext progress is
+disabled for sealed jobs.
 
 ## Tunnel Status Endpoint
 

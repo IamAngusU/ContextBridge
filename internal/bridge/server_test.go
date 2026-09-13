@@ -83,6 +83,32 @@ func TestBrowserJobRoundTrip(t *testing.T) {
 	if leaseResp.StatusCode != http.StatusOK {
 		t.Fatalf("lease renewal returned %s", leaseResp.Status)
 	}
+	progressRaw := []byte(`{"sequence":1,"text":"partial answer","phase":"generating","busy":true}`)
+	progressReq, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/browser/jobs/"+work.Job.ID+"/progress", bytes.NewReader(progressRaw))
+	progressReq.Header.Set("Authorization", "Bearer "+cfg.Server.Token)
+	progressReq.Header.Set("Content-Type", "application/json")
+	progressResp, progressErr := http.DefaultClient.Do(progressReq)
+	if progressErr != nil {
+		t.Fatal(progressErr)
+	}
+	progressResp.Body.Close()
+	if progressResp.StatusCode != http.StatusOK {
+		t.Fatalf("progress update returned %s", progressResp.Status)
+	}
+	progressReq, _ = http.NewRequest(http.MethodGet, httpServer.URL+"/v1/browser/jobs/"+work.Job.ID+"/progress", nil)
+	progressReq.Header.Set("Authorization", "Bearer "+cfg.Server.Token)
+	progressResp, progressErr = http.DefaultClient.Do(progressReq)
+	if progressErr != nil {
+		t.Fatal(progressErr)
+	}
+	var progress BrowserProgress
+	if err := json.NewDecoder(progressResp.Body).Decode(&progress); err != nil {
+		t.Fatal(err)
+	}
+	progressResp.Body.Close()
+	if progress.Sequence != 1 || progress.Text != "partial answer" || !progress.Busy {
+		t.Fatalf("unexpected browser progress: %#v", progress)
+	}
 
 	decisionRaw := []byte(`{"verdict":"allow","flags":[],"confidence":0.9,"model":"test-ai"}`)
 	req, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/browser/jobs/"+work.Job.ID+"/complete", bytes.NewReader(decisionRaw))

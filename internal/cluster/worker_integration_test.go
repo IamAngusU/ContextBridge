@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -49,8 +50,9 @@ func TestWorkerRelayParallelCapacityEndToEnd(t *testing.T) {
 		case "/v1/jobs":
 			var payload struct {
 				Provider string `json:"provider"`
+				ID       string `json:"id"`
 			}
-			if json.NewDecoder(req.Body).Decode(&payload) == nil && payload.Provider == "browser" {
+			if json.NewDecoder(req.Body).Decode(&payload) == nil && payload.Provider == "browser" && strings.HasPrefix(payload.ID, "cluster-") {
 				providerSeen.Store(true)
 			}
 			current := running.Add(1)
@@ -65,6 +67,10 @@ func TestWorkerRelayParallelCapacityEndToEnd(t *testing.T) {
 			running.Add(-1)
 			writeJSON(w, http.StatusOK, map[string]interface{}{"mode": "text", "text": "ok", "model": "browser-tab"})
 		default:
+			if strings.HasPrefix(req.URL.Path, "/v1/browser/jobs/") && strings.HasSuffix(req.URL.Path, "/progress") {
+				writeJSON(w, http.StatusOK, JobProgress{Sequence: 1, Text: "working", Phase: "generating", Busy: true})
+				return
+			}
 			http.NotFound(w, req)
 		}
 	}))
@@ -132,6 +138,16 @@ func TestWorkerRelayParallelCapacityEndToEnd(t *testing.T) {
 	if peak.Load() != 2 {
 		t.Fatalf("peak parallelism = %d, want 2", peak.Load())
 	}
+	waitFor(t, 3*time.Second, func() bool {
+		progressing := 0
+		for _, submitted := range jobs {
+			job, getErr := relay.store.GetJob(submitted.ID)
+			if getErr == nil && job.Progress != nil && job.Progress.Text == "working" {
+				progressing++
+			}
+		}
+		return progressing == 2
+	}, "parallel browser progress did not reach the relay")
 
 	close(release)
 	completed := func() bool {

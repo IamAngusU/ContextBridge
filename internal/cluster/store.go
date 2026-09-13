@@ -406,6 +406,7 @@ func (s *Store) AssignJob(id, nodeID string) (Job, error) {
 		job.Status = JobAssigned
 		job.AssignedNode = nodeID
 		job.Attempt++
+		job.Progress = nil
 		job.AssignedAt = time.Now().UTC()
 		job.UpdatedAt = job.AssignedAt
 		if err := putJSON(tx.Bucket(bucketJobs), id, job); err != nil {
@@ -428,6 +429,34 @@ func (s *Store) MarkRunning(id, nodeID string) (Job, error) {
 		job.Status = JobRunning
 		job.StartedAt = time.Now().UTC()
 		job.UpdatedAt = job.StartedAt
+		return putJSON(tx.Bucket(bucketJobs), id, job)
+	})
+	return job, err
+}
+
+func (s *Store) UpdateJobProgress(id, nodeID string, progress JobProgress) (Job, error) {
+	var job Job
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		if err := getJSON(tx.Bucket(bucketJobs), id, &job); err != nil {
+			return err
+		}
+		if (job.Status != JobAssigned && job.Status != JobRunning) || job.AssignedNode != nodeID {
+			return errors.New("job is not running on this node")
+		}
+		if job.SealedPayload != nil {
+			return errors.New("plaintext progress is disabled for encrypted jobs")
+		}
+		if progress.Sequence == 0 || len(progress.Text) > 1<<20 {
+			return errors.New("invalid job progress")
+		}
+		if job.Progress != nil && progress.Sequence <= job.Progress.Sequence {
+			return nil
+		}
+		progress.Phase = cleanLabel(progress.Phase, 30)
+		progress.UpdatedAt = time.Now().UTC()
+		copy := progress
+		job.Progress = &copy
+		job.UpdatedAt = progress.UpdatedAt
 		return putJSON(tx.Bucket(bucketJobs), id, job)
 	})
 	return job, err
@@ -478,6 +507,7 @@ func (s *Store) CompleteJob(id string, result json.RawMessage, sealed *SealedEnv
 			job.AssignedNode = ""
 			job.Result = nil
 			job.SealedResult = nil
+			job.Progress = nil
 			if err := tx.Bucket(bucketQueue).Put(queueKey(job), []byte(job.ID)); err != nil {
 				return err
 			}
@@ -523,6 +553,7 @@ func (s *Store) RequeueNode(nodeID, reason string) ([]Job, error) {
 			if job.SealedPayload == nil && job.Attempt < job.MaxAttempts {
 				job.Status = JobQueued
 				job.AssignedNode = ""
+				job.Progress = nil
 				if err := tx.Bucket(bucketQueue).Put(queueKey(job), []byte(job.ID)); err != nil {
 					return err
 				}
@@ -579,6 +610,7 @@ func (s *Store) RecoverStaleJobs(now time.Time, sealedWait, execution time.Durat
 			if staleExecution && job.SealedPayload == nil && job.Attempt < job.MaxAttempts {
 				job.Status, job.AssignedNode, job.Error = JobQueued, "", "worker execution timed out; job requeued"
 				job.StartedAt, job.AssignedAt = time.Time{}, time.Time{}
+				job.Progress = nil
 				if err := tx.Bucket(bucketQueue).Put(queueKey(job), []byte(job.ID)); err != nil {
 					return err
 				}

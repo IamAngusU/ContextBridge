@@ -93,6 +93,14 @@ type Usage struct {
 	PeakVRAMBytes     uint64  `json:"peak_vram_bytes,omitempty"`
 }
 
+type JobProgress struct {
+	Sequence  uint64    `json:"sequence"`
+	Text      string    `json:"text"`
+	Phase     string    `json:"phase,omitempty"`
+	Busy      bool      `json:"busy"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 type SealedEnvelope struct {
 	Algorithm       string `json:"algorithm"`
 	EphemeralPublic string `json:"ephemeral_public"`
@@ -120,6 +128,7 @@ type Job struct {
 	AssignedNode   string          `json:"assigned_node,omitempty"`
 	Error          string          `json:"error,omitempty"`
 	Usage          Usage           `json:"usage"`
+	Progress       *JobProgress    `json:"progress,omitempty"`
 	CreatedAt      time.Time       `json:"created_at"`
 	UpdatedAt      time.Time       `json:"updated_at"`
 	AssignedAt     time.Time       `json:"assigned_at,omitempty"`
@@ -215,6 +224,7 @@ type WireMessage struct {
 	Result       json.RawMessage `json:"result,omitempty"`
 	SealedResult *SealedEnvelope `json:"sealed_result,omitempty"`
 	Usage        Usage           `json:"usage,omitempty"`
+	Progress     *JobProgress    `json:"progress,omitempty"`
 	Error        string          `json:"error,omitempty"`
 }
 

@@ -1,6 +1,6 @@
 # Visual Browser Teaching
 
-Visual teaching lets an operator define a browser workflow by clicking the controls in the real page.
+ChatGPT and Gemini are detected automatically. Visual teaching lets an operator override those profiles or define another browser workflow by clicking the controls in the real page.
 
 ![ContextBridge browser extension after teaching a page](assets/extension-popup.png)
 
@@ -32,11 +32,18 @@ Visual teaching lets an operator define a browser workflow by clicking the contr
 
 Firefox removes temporary add-ons when the browser closes. Permanent consumer installation requires a Mozilla-signed package. The release package already uses the Firefox-specific Manifest V3 background and content security policy needed for signing.
 
-## Teach A Page
+## Connect ChatGPT Or Gemini
+
+1. Start ContextBridge and open a dedicated ChatGPT or Gemini tab.
+2. Open the extension and choose that tab.
+3. The extension shows the automatically detected profile. Choose **Test profile**.
+4. Choose **Start browser bridge**.
+
+## Teach Another Page Or Override Detection
 
 1. Start ContextBridge and open the target AI page.
 2. Open the extension and choose the current tab. Grant optional all-tabs access only when you need another window.
-3. Choose **Teach this page**.
+3. Choose **Customize detection**.
 4. Click the prompt field.
 5. Click the send control, or skip when Enter submits.
 6. Click one complete assistant response.
@@ -51,6 +58,12 @@ share conversational history. ContextBridge waits for a stable answer and for
 common generation-busy indicators to disappear before it returns a result, but
 the page remains a stateful third-party interface. Only automate a provider when
 its account terms and your organization policy allow it.
+
+While the answer grows, the extension reports bounded progressive snapshots to
+the local bridge. A cluster worker forwards them to the relay and
+`contextbridge cluster submit --stream` displays the new text. Progress is not
+forwarded for E2EE jobs because an unencrypted partial answer would break the
+relay-blind privacy guarantee.
 
 The browser path avoids a separate inference API integration; it does not move a
 hosted provider's model onto the client. For actual client-side compute, use a
@@ -75,7 +88,7 @@ The optional tabs permission is requested only after choosing **Show tabs from e
 
 ## Retest Or Replace A Profile
 
-Page interfaces change. Choose **Test profile** after a provider redesign. Choose **Teach this page** again to replace the local profile, or use **Forget profile for this page** under advanced settings.
+Page interfaces change. Choose **Test profile** after a provider redesign. Choose **Customize detection** to replace an automatic or local profile, or use **Forget profile for this page** under advanced settings to return to automatic detection.
 
 YAML browser profiles remain available when a reviewed selector set must be distributed across several machines.
 

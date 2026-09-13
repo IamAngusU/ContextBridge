@@ -100,3 +100,33 @@ func TestStoreRecoversStaleJobsWithEncryptionBoundary(t *testing.T) {
 		t.Fatalf("unexpected recovery states: %s %s", normal.Status, sealed.Status)
 	}
 }
+
+func TestStoreTracksProgressOnlyForAssignedPlaintextJob(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "cluster.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	job, err := store.CreateJob(SubmitRequest{Requirements: Requirements{Task: "generation", Provider: "browser"}, Payload: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err = store.AssignJob(job.ID, "node-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.MarkRunning(job.ID, "node-a"); err != nil {
+		t.Fatal(err)
+	}
+	progress := JobProgress{Sequence: 1, Text: "partial", Phase: "generating", Busy: true}
+	if _, err := store.UpdateJobProgress(job.ID, "node-a", progress); err != nil {
+		t.Fatal(err)
+	}
+	job, err = store.GetJob(job.ID)
+	if err != nil || job.Progress == nil || job.Progress.Text != "partial" || job.Progress.Sequence != 1 {
+		t.Fatalf("progress was not stored: %#v %v", job.Progress, err)
+	}
+	if _, err := store.UpdateJobProgress(job.ID, "different-node", JobProgress{Sequence: 2, Text: "wrong"}); err == nil {
+		t.Fatal("a different node must not update job progress")
+	}
+}

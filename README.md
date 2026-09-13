@@ -17,13 +17,14 @@
 
 ContextBridge is a local-first runtime and decentralized compute router for structured AI jobs. A source can be a folder, website, database worker, command pipeline, private server, or any application that can send JSON. A destination can be one or many private computers running Ollama, a managed `llama.cpp` engine, or an AI page open in a browser tab.
 
-The browser workflow does not require hand-written CSS selectors. Choose a tab, click **Teach this page**, then click its prompt field, send control, answer area, and optional image upload. The learned profile stays in extension storage and can be replaced at any time.
+ChatGPT and Gemini are detected automatically from stable DOM and accessibility anchors. For another web chat, choose a tab and visually teach its prompt field, send control, answer area, and optional image upload. Learned overrides stay in extension storage and can be replaced at any time.
 
 ![ContextBridge local dashboard](docs/assets/contextbridge-dashboard.png)
 
 ## Why ContextBridge
 
 - **Visual browser teaching:** point at page controls instead of reverse engineering selectors.
+- **Progressive browser output:** follow a web-chat answer while it is generated, through the worker and relay, with `cluster submit --stream`.
 - **1:1, 1:N, and N:N compute:** connect one app to one worker, distribute one queue across many workers, or share a capability-aware node pool between producers.
 - **Outbound worker connections:** workers join through WebSockets without router port forwarding or fixed public worker ports.
 - **Durable scheduling:** priority queue, history, bounded retries, disconnect recovery, groups, tags, task requirements, and VRAM-aware placement survive relay restarts.
@@ -128,14 +129,16 @@ Set requirements such as `task`, `provider`, `group`, `model`, `vision`, `embedd
 
 This release uses one durable BoltDB file per relay process. It supports many producers and workers through one relay. Active-active relay replication is a separate deployment tier and requires a shared database and message broker rather than copying the BoltDB file.
 
-## Teach A Browser Tab
+## Connect A Browser Tab
 
 ![ContextBridge visual teaching overlay](docs/assets/visual-teaching.png)
 
 1. Load `extension/chromium` in Chrome, Edge, Opera, Brave, or Vivaldi. Use `extension/firefox` for Firefox.
-2. Open the page you want to connect and select it in the ContextBridge extension.
-3. Choose **Teach this page** and click the four requested controls directly in the page.
-4. Return to the extension, test the profile, then choose **Start browser bridge**.
+2. Open ChatGPT or Gemini and select the tab in the ContextBridge extension. Both are detected automatically.
+3. Choose **Test profile**, then **Start browser bridge**.
+4. For another provider, choose **Customize detection** and click the requested controls directly in the page.
+
+Add `--stream` to `contextbridge cluster submit` to print progressive browser text while the final normalized result remains on stdout. Plaintext progress is deliberately disabled for E2EE jobs.
 
 The Chromium package works with Manifest V3 browsers. The Firefox package has its own background manifest and localhost policy. Local Firefox development installs use `about:debugging`; a permanent consumer install requires a Mozilla-signed package.
 
@@ -289,6 +292,13 @@ go test ./...
 go vet ./...
 ./scripts/package-extensions.sh
 ./scripts/verify-extensions.sh
+```
+
+Releases do not depend on GitHub Actions. From PowerShell, build every supported
+platform bundle, both extension archives, and `SHA256SUMS` locally:
+
+```powershell
+.\scripts\build-release.ps1 -Version v0.4.0
 ```
 
 Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md), use a focused issue for behavior changes, and include tests for routing or protocol work.

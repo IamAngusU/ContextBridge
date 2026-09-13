@@ -172,6 +172,15 @@ browser_profiles:
       submit: ['button[data-testid="send-button"]', 'button[aria-label*="Send"]']
       response: ['[data-message-author-role="assistant"]']
 
+  gemini:
+    label: Gemini
+    match_url: https://gemini.google.com/*
+    selectors:
+      input: ['rich-textarea div[contenteditable="true"][role="textbox"]', 'div[contenteditable="true"][aria-label*="Prompt für Gemini" i]', 'div.ql-editor[contenteditable="true"][role="textbox"]']
+      file_input: ['input[type="file"]']
+      submit: ['button[data-test-id="send-button"]', 'button[data-testid="send-button"]', 'button[aria-label*="prompt senden" i]', 'button[aria-label*="send message" i]']
+      response: ['model-response message-content .markdown[aria-live="polite"]', 'model-response .model-response-text']
+
   custom_ai:
     label: My browser AI
     match_url: https://ai.example.com/*

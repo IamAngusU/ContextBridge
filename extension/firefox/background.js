@@ -1,3 +1,7 @@
+if (!globalThis.ContextBridgeProfiles && typeof importScripts === 'function') {
+  importScripts('profiles.js');
+}
+
 const api = globalThis.browser || globalThis.chrome;
 
 let polling = false;
@@ -47,7 +51,7 @@ async function startPairing() {
   if (!cfg.tabId) throw new Error('Select an AI tab first');
   const tab = await api.tabs.get(cfg.tabId);
   if (!tab?.url || !/^https?:/i.test(tab.url)) throw new Error('The selected tab is not a supported web page');
-  if (cfg.useVisualProfile && !profileForTab(cfg, tab)) throw new Error('Teach this page before starting the bridge');
+  if (cfg.useVisualProfile && !profileForTab(cfg, tab)) throw new Error('Detect or customize this page before starting the bridge');
 
   stopRequested = false;
   await api.storage.local.set({ running: true, teachingTabId: 0, lastError: '' });
@@ -201,7 +205,7 @@ function cleanSelectors(value) {
 function profileForTab(cfg, tab) {
   if (!tab?.url || !/^https?:/i.test(tab.url)) return null;
   try {
-    return cfg.taughtProfiles[new URL(tab.url).origin] || null;
+    return cfg.taughtProfiles[new URL(tab.url).origin] || globalThis.ContextBridgeProfiles?.forURL(tab.url) || null;
   } catch (_) {
     return null;
   }
@@ -216,7 +220,13 @@ async function poll() {
       if (!cfg.running || !cfg.token || !cfg.tabId) break;
       await flushPendingCompletions(cfg);
       try {
-        const requestedProfile = cfg.profile || '';
+        let requestedProfile = cfg.profile || '';
+        if (cfg.useVisualProfile) {
+          try {
+            const selectedTab = await api.tabs.get(cfg.tabId);
+            requestedProfile = profileForTab(cfg, selectedTab)?.name || requestedProfile;
+          } catch (_) {}
+        }
         const response = await fetch(`${cfg.bridgeUrl}/v1/browser/jobs/next?wait=25&profile=${encodeURIComponent(requestedProfile)}`, {
           headers: { Authorization: `Bearer ${cfg.token}` },
           cache: 'no-store'
@@ -244,6 +254,11 @@ async function processWork(cfg, work) {
   let tab;
   let effectiveProfile = work.profile || {};
   let leaseTimer = 0;
+  let progressTimer = 0;
+  let progressBusy = false;
+  let progressSequence = 0;
+  let baselineText = '';
+  let latestProgressText = '';
   await api.storage.local.set({ lastError: '' });
   try {
     tab = await api.tabs.get(cfg.tabId);
@@ -253,6 +268,31 @@ async function processWork(cfg, work) {
     if (!matches(tab.url || '', effectiveProfile.match_url || '')) throw new Error('The selected tab no longer matches its taught page');
     await sendHeartbeat('working');
     leaseTimer = setInterval(() => renewLease(cfg, work.job.id), 25000);
+    const initial = await captureTabProgress(cfg.tabId, effectiveProfile.selectors);
+    baselineText = initial.text || '';
+    latestProgressText = baselineText;
+    const sample = async () => {
+      if (progressBusy) return;
+      progressBusy = true;
+      try {
+        const snapshot = await captureTabProgress(cfg.tabId, effectiveProfile.selectors);
+        const text = String(snapshot.text || '').trim();
+        if (text && text !== baselineText && text !== latestProgressText) {
+          latestProgressText = text;
+          progressSequence += 1;
+          await reportProgress(cfg, work.job.id, {
+            sequence: progressSequence,
+            text: text.slice(0, 1024 * 1024),
+            phase: snapshot.busy ? 'generating' : 'stabilizing',
+            busy: Boolean(snapshot.busy)
+          });
+        }
+      } catch (_) {
+      } finally {
+        progressBusy = false;
+      }
+    };
+    progressTimer = setInterval(sample, 800);
     const results = await api.scripting.executeScript({
       target: { tabId: cfg.tabId },
       func: automate,
@@ -260,6 +300,15 @@ async function processWork(cfg, work) {
     });
     const answer = results?.[0]?.result;
     if (!answer?.ok) throw new Error(answer?.error || 'No browser response was captured');
+    if (answer.text && answer.text !== latestProgressText) {
+      progressSequence += 1;
+      await reportProgress(cfg, work.job.id, {
+        sequence: progressSequence,
+        text: String(answer.text).slice(0, 1024 * 1024),
+        phase: 'final',
+        busy: false
+      });
+    }
     decision = parseOutput(answer.text, work.job.output || {}, effectiveProfile.label || 'browser');
   } catch (error) {
     const mode = outputMode(work.job.output || {});
@@ -269,12 +318,36 @@ async function processWork(cfg, work) {
     await api.storage.local.set({ lastError: error.message || String(error) });
   } finally {
     if (leaseTimer) clearInterval(leaseTimer);
+    if (progressTimer) clearInterval(progressTimer);
   }
 
   const pendingCompletions = { ...cfg.pendingCompletions, [work.job.id]: decision };
   await api.storage.local.set({ pendingCompletions });
   await completeWork(await settings(), work.job.id, decision);
   await sendHeartbeat('waiting');
+}
+
+async function captureTabProgress(tabId, selectors) {
+  const results = await api.scripting.executeScript({
+    target: { tabId },
+    func: captureProgress,
+    args: [selectors]
+  });
+  return results?.[0]?.result || { text: '', busy: false };
+}
+
+async function reportProgress(cfg, jobId, progress) {
+  try {
+    const response = await fetch(`${cfg.bridgeUrl}/v1/browser/jobs/${encodeURIComponent(jobId)}/progress`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${cfg.token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(progress)
+    });
+    if (!response.ok && response.status !== 409) throw new Error(`Could not stream browser progress: ${response.status}`);
+  } catch (_) {}
 }
 
 async function renewLease(cfg, jobId) {
@@ -315,8 +388,9 @@ async function flushPendingCompletions(cfg) {
 
 function automate(job, profile) {
   const selectors = profile.selectors || {};
+  const isVisible = (element) => Boolean(element && (element.offsetWidth || element.offsetHeight || element.getClientRects().length));
   const first = (items) => (items || []).map((selector) => {
-    try { return document.querySelector(selector); } catch (_) { return null; }
+    try { return [...document.querySelectorAll(selector)].find(isVisible) || null; } catch (_) { return null; }
   }).find(Boolean);
   const all = (items) => {
     for (const selector of items || []) {
@@ -328,9 +402,12 @@ function automate(job, profile) {
     return [];
   };
   const visibleText = (element) => (element?.innerText || element?.textContent || '').trim();
-  const isVisible = (element) => Boolean(element && (element.offsetWidth || element.offsetHeight || element.getClientRects().length));
   const pageBusy = () => {
-    for (const selector of ['[aria-busy="true"]', 'button[data-testid*="stop" i]', 'button[aria-label*="stop generating" i]', 'button[aria-label*="stop response" i]']) {
+    for (const selector of [
+      '[aria-busy="true"]', '[data-is-streaming="true"]', '.result-streaming',
+      'button[data-testid*="stop" i]', 'button[aria-label*="stop" i]',
+      'button[aria-label*="beenden" i]', 'button[aria-label*="abbrechen" i]'
+    ]) {
       try {
         if ([...document.querySelectorAll(selector)].some(isVisible)) return true;
       } catch (_) {}
@@ -372,6 +449,7 @@ function automate(job, profile) {
       const input = first(selectors.input);
       if (!input) throw new Error('Prompt input was not found');
       const before = all(selectors.response);
+      const previousElement = before.length ? before[before.length - 1] : null;
       const previousText = before.length ? visibleText(before[before.length - 1]) : '';
       if (job.image_base64) {
         const fileInput = first(selectors.file_input);
@@ -381,7 +459,11 @@ function automate(job, profile) {
       }
       setInput(input, job.prompt);
       await wait(300);
-      const submit = first(selectors.submit);
+      let submit = first(selectors.submit);
+      for (let attempt = 0; !submit && attempt < 8; attempt += 1) {
+        await wait(150);
+        submit = first(selectors.submit);
+      }
       if (submit) {
         submit.click();
       } else {
@@ -392,11 +474,16 @@ function automate(job, profile) {
       const deadline = Date.now() + 120000;
       let stableText = '';
       let stableSince = 0;
+      let sawBusy = false;
       while (Date.now() < deadline) {
         await wait(650);
         const responses = all(selectors.response);
-        const latest = responses.length ? visibleText(responses[responses.length - 1]) : '';
-        if (!latest || latest === previousText) continue;
+        const latestElement = responses.length ? responses[responses.length - 1] : null;
+        const latest = visibleText(latestElement);
+        const changedResponse = latestElement !== previousElement || responses.length > before.length || latest !== previousText;
+        const busy = pageBusy();
+        sawBusy = sawBusy || busy;
+        if (!latest || !changedResponse) continue;
         if (latest !== stableText) {
           stableText = latest;
           stableSince = Date.now();
@@ -404,7 +491,8 @@ function automate(job, profile) {
         }
         const mode = String(job.output?.mode || 'decision').toLowerCase();
         const structured = mode === 'text' || ((latest.includes('{') && latest.includes('}')) || (latest.includes('[') && latest.includes(']')));
-        if (Date.now() - stableSince >= 2600 && structured && !pageBusy()) {
+        const stableFor = sawBusy ? 1300 : 2600;
+        if (Date.now() - stableSince >= stableFor && structured && !busy) {
           resolve({ ok: true, text: latest });
           return;
         }
@@ -414,6 +502,32 @@ function automate(job, profile) {
       resolve({ ok: false, error: error.message || String(error) });
     }
   });
+}
+
+function captureProgress(selectors) {
+  const visibleText = (element) => (element?.innerText || element?.textContent || '').trim();
+  const isVisible = (element) => Boolean(element && (element.offsetWidth || element.offsetHeight || element.getClientRects().length));
+  let responses = [];
+  for (const selector of selectors?.response || []) {
+    try {
+      responses = [...document.querySelectorAll(selector)].filter(isVisible);
+      if (responses.length) break;
+    } catch (_) {}
+  }
+  let busy = false;
+  for (const selector of [
+    '[aria-busy="true"]', '[data-is-streaming="true"]', '.result-streaming',
+    'button[data-testid*="stop" i]', 'button[aria-label*="stop" i]',
+    'button[aria-label*="beenden" i]', 'button[aria-label*="abbrechen" i]'
+  ]) {
+    try {
+      if ([...document.querySelectorAll(selector)].some(isVisible)) {
+        busy = true;
+        break;
+      }
+    } catch (_) {}
+  }
+  return { text: responses.length ? visibleText(responses[responses.length - 1]) : '', busy };
 }
 
 function inspectSelectors(selectors) {

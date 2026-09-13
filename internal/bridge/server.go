@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/IamAngusU/ContextBridge/internal/config"
 	"github.com/IamAngusU/ContextBridge/internal/updater"
@@ -356,14 +357,54 @@ func (s *Server) handleBrowserNext(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleBrowserJobAction(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
-		return
-	}
 	path := strings.TrimPrefix(r.URL.Path, "/v1/browser/jobs/")
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	if len(parts) != 2 || parts[0] == "" {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "browser job endpoint not found"})
+		return
+	}
+	if parts[1] == "progress" {
+		if r.Method == http.MethodGet {
+			progress, exists, ready := s.store.BrowserProgress(parts[0])
+			if !exists {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "job is missing or expired"})
+				return
+			}
+			if !ready {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			writeJSON(w, http.StatusOK, progress)
+			return
+		}
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", "GET, POST")
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET or POST required"})
+			return
+		}
+		var progress BrowserProgress
+		if err := decodeJSON(r.Body, &progress, 2<<20); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if progress.Sequence == 0 || len(progress.Text) > 1<<20 || !utf8.ValidString(progress.Text) {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "progress requires a sequence and at most 1 MB of UTF-8 text"})
+			return
+		}
+		progress.Phase = strings.ToLower(strings.TrimSpace(progress.Phase))
+		if progress.Phase != "generating" && progress.Phase != "stabilizing" && progress.Phase != "final" {
+			progress.Phase = "generating"
+		}
+		if !s.store.UpdateBrowserProgress(parts[0], progress) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "job is missing or expired"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
 		return
 	}
 	if parts[1] == "lease" {

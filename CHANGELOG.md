@@ -2,6 +2,26 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.4.0 - 2026-09-13
+
+### Added
+
+- Automatic ChatGPT and Gemini profiles derived from current DOM and accessibility anchors
+- Progressive browser answer snapshots across extension, local bridge, worker, and relay
+- `contextbridge cluster submit --stream` while preserving final stdout output
+- Non-interactive Windows worker setup through `-RelayUrl` and `-NodeName`
+
+### Changed
+
+- Browser completion detects new response elements, localized stop controls, busy state, and stable completion
+- Visual teaching is now an override and custom-provider path rather than a mandatory ChatGPT/Gemini step
+- Windows installation waits for a healthy local bridge before opening the dashboard
+- Releases are built and verified locally with `scripts/build-release.ps1`; GitHub Actions workflows were removed
+
+### Security
+
+- Progressive plaintext is never forwarded for E2EE jobs
+
 ## 0.3.1 - 2026-09-13
 
 ### Fixed

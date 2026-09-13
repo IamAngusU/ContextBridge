@@ -10,6 +10,7 @@ for browser in chromium firefox; do
   rm -rf "$target"
   mkdir -p "$target/icons"
   cp "$source_dir/background.js" "$target/background.js"
+  cp "$source_dir/profiles.js" "$target/profiles.js"
   cp "$source_dir/picker.js" "$target/picker.js"
   cp "$source_dir/popup.html" "$target/popup.html"
   cp "$source_dir/popup.css" "$target/popup.css"

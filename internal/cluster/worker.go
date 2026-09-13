@@ -3,6 +3,7 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -237,7 +238,9 @@ func (w *Worker) connect(ctx context.Context, logger func(string, ...interface{}
 			defer func() { <-w.sem; w.changeRunning(-1) }()
 			_ = write(WireMessage{Type: "started", JobID: job.ID})
 			logger("received %s for task %s", job.ID, job.Requirements.Task)
-			result, sealed, usage, runErr := w.execute(ctx, job)
+			result, sealed, usage, runErr := w.execute(ctx, job, func(progress JobProgress) {
+				_ = write(WireMessage{Type: "progress", JobID: job.ID, Progress: &progress})
+			})
 			errorText := ""
 			if runErr != nil {
 				errorText = runErr.Error()
@@ -250,7 +253,7 @@ func (w *Worker) connect(ctx context.Context, logger func(string, ...interface{}
 	}
 }
 
-func (w *Worker) execute(ctx context.Context, job Job) (json.RawMessage, *SealedEnvelope, Usage, error) {
+func (w *Worker) execute(ctx context.Context, job Job, emitProgress func(JobProgress)) (json.RawMessage, *SealedEnvelope, Usage, error) {
 	started := time.Now()
 	payload := []byte(job.Payload)
 	shared := ""
@@ -264,10 +267,22 @@ func (w *Worker) execute(ctx context.Context, job Job) (json.RawMessage, *Sealed
 	if !json.Valid(payload) {
 		return nil, nil, Usage{}, errors.New("job payload must be valid JSON")
 	}
-	payload, err := requireProvider(payload, job.Requirements.Provider)
+	localJobID := localExecutionID(job)
+	payload, err := prepareLocalPayload(payload, job.Requirements.Provider, localJobID)
 	if err != nil {
 		return nil, nil, Usage{}, err
 	}
+	progressCtx, stopProgress := context.WithCancel(ctx)
+	var progressWG sync.WaitGroup
+	if emitProgress != nil && job.SealedPayload == nil && strings.EqualFold(job.Requirements.Provider, "browser") {
+		progressWG.Add(1)
+		go func() {
+			defer progressWG.Done()
+			w.watchLocalBrowserProgress(progressCtx, localJobID, emitProgress)
+		}()
+	}
+	defer progressWG.Wait()
+	defer stopProgress()
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(w.cfg.LocalURL, "/")+"/v1/jobs", bytes.NewReader(payload))
 	if err != nil {
 		return nil, nil, Usage{}, err
@@ -304,18 +319,55 @@ func (w *Worker) execute(ctx context.Context, job Job) (json.RawMessage, *Sealed
 	return json.RawMessage(raw), nil, usage, nil
 }
 
-func requireProvider(payload []byte, provider string) ([]byte, error) {
+func prepareLocalPayload(payload []byte, provider, localJobID string) ([]byte, error) {
 	provider = strings.TrimSpace(provider)
-	if provider == "" {
-		return payload, nil
-	}
 	var job map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &job); err != nil || job == nil {
 		return nil, errors.New("job payload must be a JSON object")
 	}
-	rawProvider, _ := json.Marshal(provider)
-	job["provider"] = rawProvider
+	if provider != "" {
+		rawProvider, _ := json.Marshal(provider)
+		job["provider"] = rawProvider
+	}
+	rawID, _ := json.Marshal(localJobID)
+	job["id"] = rawID
 	return json.Marshal(job)
+}
+
+func localExecutionID(job Job) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s:%d", job.ID, job.Attempt)))
+	return fmt.Sprintf("cluster-%x", sum[:16])
+}
+
+func (w *Worker) watchLocalBrowserProgress(ctx context.Context, jobID string, emit func(JobProgress)) {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	var sequence uint64
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		requestCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		request, _ := http.NewRequestWithContext(requestCtx, http.MethodGet, strings.TrimRight(w.cfg.LocalURL, "/")+"/v1/browser/jobs/"+url.PathEscape(jobID)+"/progress", nil)
+		request.Header.Set("Authorization", "Bearer "+w.cfg.LocalToken)
+		response, err := w.client.Do(request)
+		if err != nil {
+			cancel()
+			continue
+		}
+		var progress JobProgress
+		if response.StatusCode == http.StatusOK {
+			err = json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(&progress)
+		}
+		response.Body.Close()
+		cancel()
+		if err == nil && progress.Sequence > sequence {
+			sequence = progress.Sequence
+			emit(progress)
+		}
+	}
 }
 
 func (w *Worker) capabilities(ctx context.Context) Capabilities {

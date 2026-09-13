@@ -73,6 +73,42 @@ type queuedJob struct {
 	deadline  time.Time
 	leasedTil time.Time
 	done      chan Output
+	progress  *BrowserProgress
+}
+
+func (s *Store) UpdateBrowserProgress(id string, progress BrowserProgress) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.queued[id]
+	if !ok || time.Now().After(item.deadline) {
+		if ok {
+			delete(s.queued, id)
+		}
+		return false
+	}
+	if item.progress != nil && progress.Sequence <= item.progress.Sequence {
+		return true
+	}
+	progress.UpdatedAt = time.Now().UTC()
+	copy := progress
+	item.progress = &copy
+	return true
+}
+
+func (s *Store) BrowserProgress(id string) (BrowserProgress, bool, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.queued[id]
+	if !ok || time.Now().After(item.deadline) {
+		if ok {
+			delete(s.queued, id)
+		}
+		return BrowserProgress{}, false, false
+	}
+	if item.progress == nil {
+		return BrowserProgress{}, true, false
+	}
+	return *item.progress, true, true
 }
 
 func NewStore(dir string) (*Store, error) {
