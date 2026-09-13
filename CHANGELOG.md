@@ -2,6 +2,15 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.11 - 2026-09-13
+
+### Changed
+
+- use native select-all/insert-text in Gemini's Quill composer, make only one insertion attempt per job, and require an exact normalized draft before clicking Send
+- leave a mismatched or unrelated draft untouched rather than appending retries or submitting it
+
+The live Gemini Pro completion test remains pending until the operator clears the unsent test draft and reloads the extension.
+
 ## 0.5.10 - 2026-09-13
 
 ### Added

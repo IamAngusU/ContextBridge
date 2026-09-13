@@ -562,7 +562,7 @@ async function processWork(cfg, work, claimedTabId) {
 
 function classifyFailureReason(message) {
   const text = String(message || '');
-  if (/prompt editor did not retain/i.test(text)) return 'prompt_not_retained';
+  if (/prompt editor did not retain|prompt editor changed|gemini editor did not accept/i.test(text)) return 'prompt_not_retained';
   if (/send button stayed disabled/i.test(text)) return 'send_disabled';
   if (/send button is not visible/i.test(text)) return 'send_missing';
   if (/prompt editor contains another draft/i.test(text)) return 'composer_draft';
@@ -826,13 +826,19 @@ function automate(job, profile, jobDeadline) {
       const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
       setter ? setter.call(element, value) : (element.value = value);
     } else {
-      const selection = window.getSelection();
-      const range = document.createRange();
-      range.selectNodeContents(element);
-      selection.removeAllRanges();
-      selection.addRange(range);
-      document.execCommand('insertText', false, value);
-      if (!visibleText(element)) element.textContent = value;
+      if (profile.name === 'gemini' && element.matches?.('.ql-editor[contenteditable="true"]')) {
+        if (document.activeElement !== element) throw new Error('Gemini editor did not accept focus');
+        document.execCommand('selectAll', false, null);
+        if (!document.execCommand('insertText', false, value)) throw new Error('Gemini editor did not accept input');
+      } else {
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        document.execCommand('insertText', false, value);
+        if (!visibleText(element)) element.textContent = value;
+      }
     }
     element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
     element.dispatchEvent(new Event('change', { bubbles: true }));
@@ -1109,22 +1115,21 @@ function automate(job, profile, jobDeadline) {
       }
       if (!resumeOnly) {
         const editorText = (element) => String(element?.value || element?.innerText || element?.textContent || '');
-        const draft = editorText(input).trim();
-        if (draft && draft !== String(job.prompt).trim()) throw new Error('Prompt editor contains another draft');
+        const normalized = (value) => String(value || '').replace(/[\u200b-\u200d\ufeff]/g, '').replace(/\s+/g, ' ').trim();
+        const expected = normalized(job.prompt);
+        const draft = normalized(editorText(input));
+        if (draft && draft !== expected) throw new Error('Prompt editor contains another draft');
         if (!draft) setInput(input, job.prompt);
         let retained = false;
         for (let attempt = 0; attempt < 6; attempt += 1) {
           const liveInput = first(selectors.input);
-          const liveText = editorText(liveInput);
-          if (liveInput && liveText.includes(job.prompt)) {
+          const liveText = normalized(editorText(liveInput));
+          if (liveInput && liveText === expected) {
             input = liveInput;
             retained = true;
             break;
           }
-          if (liveInput && liveInput !== input && !liveText.trim() && attempt < 3) {
-            input = liveInput;
-            setInput(input, job.prompt);
-          }
+          if (liveText) throw new Error('Prompt editor changed the submitted text');
           await wait(150);
         }
         if (!retained) throw new Error('Prompt editor did not retain the submitted text');
@@ -1226,7 +1231,7 @@ function automate(job, profile, jobDeadline) {
       const code = /requested model|model selector/i.test(message)
 		? 'browser_model_unavailable'
 		: (/requested reasoning|reasoning selector/i.test(message) ? 'browser_reasoning_unavailable'
-			: (/send button stayed disabled|send button is not visible|prompt editor did not retain|incompatible selected tool/i.test(message) ? 'browser_submit_unavailable'
+			: (/send button stayed disabled|send button is not visible|prompt editor did not retain|prompt editor changed|gemini editor did not accept|incompatible selected tool/i.test(message) ? 'browser_submit_unavailable'
 			: (/prompt editor contains another draft/i.test(message) ? 'browser_composer_busy'
 			: (/image creation is rate limited/i.test(message) ? 'browser_rate_limited'
 				: (/image creation tool|image tool menu/i.test(message) ? 'browser_image_tool_unavailable' : 'browser_automation_error')))));

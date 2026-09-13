@@ -281,8 +281,40 @@ const element = (text = '', attributes = {}) => ({
   const result = await context.automate({ prompt: 'CB-PRO-TEST', output: { mode: 'text' } },
     { name: 'gemini', selectors: { input: ['#input'], response: [], submit: ['#send'] } },
     new Date(Date.now() + 5000).toISOString());
-  assert.equal(second.value, 'CB-PRO-TEST');
-  assert.equal(result.error, 'Fresh send control was used');
+  assert.equal(first.value, 'CB-PRO-TEST');
+  assert.equal(second.value, '');
+  assert.equal(result.code, 'browser_submit_unavailable');
+  const stable = new MockTextArea();
+  liveInput = stable;
+  const stableResult = await context.automate({ prompt: 'CB-PRO-TEST', output: { mode: 'text' } },
+    { name: 'gemini', selectors: { input: ['#input'], response: [], submit: ['#send'] } },
+    new Date(Date.now() + 5000).toISOString());
+  assert.equal(stable.value, 'CB-PRO-TEST');
+  assert.equal(stableResult.error, 'Fresh send control was used');
+}
+
+{
+  let insertions = 0;
+  const input = {
+    ...element(''),
+    matches: (selector) => selector.startsWith('.ql-editor'),
+    focus() { context.document.activeElement = input; },
+    dispatchEvent() {}
+  };
+  const send = { ...element(''), click() { throw new Error('Quill send was used'); } };
+  context.document = {
+    activeElement: null,
+    querySelectorAll(selector) { return selector === '#input' ? [input] : selector === '#send' ? [send] : []; },
+    execCommand(command, _show, value) {
+      if (command === 'insertText') { insertions += 1; input.innerText = value; return true; }
+      return true;
+    }
+  };
+  const result = await context.automate({ prompt: 'One Quill input', output: { mode: 'text' } },
+    { name: 'gemini', selectors: { input: ['#input'], response: [], submit: ['#send'] } },
+    new Date(Date.now() + 5000).toISOString());
+  assert.equal(insertions, 1);
+  assert.equal(result.error, 'Quill send was used');
 }
 
 {
