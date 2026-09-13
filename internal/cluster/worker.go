@@ -69,6 +69,7 @@ const (
 	WorkerConnecting   = "connecting"
 	WorkerRetrying     = "retrying"
 	WorkerConnected    = "connected"
+	WorkerCapabilities = "capabilities"
 	WorkerJobStarted   = "job_started"
 	WorkerJobProgress  = "job_progress"
 	WorkerJobCompleted = "job_completed"
@@ -76,21 +77,28 @@ const (
 )
 
 type WorkerEvent struct {
-	Kind         string
-	NodeName     string
-	Slots        int
-	Attempt      int
-	RetryIn      time.Duration
-	Error        string
-	JobID        string
-	Task         string
-	Phase        string
-	ComputeMS    uint64
-	Percent      int
-	Detail       string
-	Sequence     uint64
-	Text         string
-	Capabilities Capabilities
+	Kind              string
+	NodeName          string
+	Slots             int
+	Attempt           int
+	RetryIn           time.Duration
+	Error             string
+	JobID             string
+	Task              string
+	Provider          string
+	Profile           string
+	Model             string
+	Reasoning         string
+	ReportedProvider  string
+	ReportedModel     string
+	ReportedReasoning string
+	Phase             string
+	ComputeMS         uint64
+	Percent           int
+	Detail            string
+	Sequence          uint64
+	Text              string
+	Capabilities      Capabilities
 }
 
 type WorkerReporter func(WorkerEvent)
@@ -288,7 +296,9 @@ func (w *Worker) connect(ctx context.Context, report WorkerReporter) error {
 				return
 			case <-ticker.C:
 				latest := w.capabilities(heartbeatCtx)
-				_ = write(WireMessage{Type: "heartbeat", Capabilities: &latest})
+				if write(WireMessage{Type: "heartbeat", Capabilities: &latest}) == nil {
+					report(WorkerEvent{Kind: WorkerCapabilities, NodeName: node.Name, Slots: latest.MaxConcurrent, Capabilities: latest})
+				}
 			}
 		}
 	}()
@@ -307,7 +317,8 @@ func (w *Worker) connect(ctx context.Context, report WorkerReporter) error {
 		go func() {
 			defer func() { <-w.sem; w.changeRunning(-1) }()
 			_ = write(WireMessage{Type: "started", JobID: job.ID})
-			report(WorkerEvent{Kind: WorkerJobStarted, NodeName: node.Name, JobID: job.ID, Task: job.Requirements.Task})
+			provider, profile, model, reasoning := jobRequestLabels(job)
+			report(WorkerEvent{Kind: WorkerJobStarted, NodeName: node.Name, JobID: job.ID, Task: job.Requirements.Task, Provider: provider, Profile: profile, Model: model, Reasoning: reasoning})
 			result, sealed, usage, runErr := w.execute(ctx, job, func(progress JobProgress) {
 				_ = write(WireMessage{Type: "progress", JobID: job.ID, Progress: &progress})
 				report(WorkerEvent{Kind: WorkerJobProgress, NodeName: node.Name, JobID: job.ID, Task: job.Requirements.Task, Phase: progress.Phase, Percent: progress.Percent, Detail: progress.Detail, Sequence: progress.Sequence, Text: progress.Text})
@@ -317,11 +328,53 @@ func (w *Worker) connect(ctx context.Context, report WorkerReporter) error {
 				errorText = runErr.Error()
 				report(WorkerEvent{Kind: WorkerJobFailed, NodeName: node.Name, JobID: job.ID, Task: job.Requirements.Task, Error: errorText})
 			} else {
-				report(WorkerEvent{Kind: WorkerJobCompleted, NodeName: node.Name, JobID: job.ID, Task: job.Requirements.Task, ComputeMS: usage.ComputeMS})
+				reportedProvider, reportedModel, reportedReasoning := localResultSelection(result)
+				report(WorkerEvent{Kind: WorkerJobCompleted, NodeName: node.Name, JobID: job.ID, Task: job.Requirements.Task, ComputeMS: usage.ComputeMS, ReportedProvider: reportedProvider, ReportedModel: reportedModel, ReportedReasoning: reportedReasoning})
 			}
 			_ = write(WireMessage{Type: "result", JobID: job.ID, Result: result, SealedResult: sealed, Usage: usage, Error: errorText})
 		}()
 	}
+}
+
+func jobRequestLabels(job Job) (provider, profile, model, reasoning string) {
+	provider, model = job.Requirements.Provider, job.Requirements.Model
+	if job.SealedPayload != nil || len(job.Payload) == 0 {
+		return provider, "", model, ""
+	}
+	var payload struct {
+		Provider  string `json:"provider"`
+		Profile   string `json:"browser_profile"`
+		Model     string `json:"model"`
+		Reasoning string `json:"reasoning"`
+	}
+	if json.Unmarshal(job.Payload, &payload) != nil {
+		return provider, "", model, ""
+	}
+	if provider == "" {
+		provider = payload.Provider
+	}
+	if model == "" {
+		model = payload.Model
+	}
+	return provider, payload.Profile, model, payload.Reasoning
+}
+
+func localResultSelection(result json.RawMessage) (provider, model, reasoning string) {
+	var submission struct {
+		Output struct {
+			Provider          string `json:"provider"`
+			Model             string `json:"model"`
+			SelectedModel     string `json:"selected_model"`
+			SelectedReasoning string `json:"selected_reasoning"`
+		} `json:"output"`
+	}
+	if json.Unmarshal(result, &submission) == nil {
+		if submission.Output.Provider == "browser" {
+			return "browser", submission.Output.SelectedModel, submission.Output.SelectedReasoning
+		}
+		return submission.Output.Provider, submission.Output.Model, ""
+	}
+	return "", "", ""
 }
 
 func (w *Worker) execute(ctx context.Context, job Job, emitProgress func(JobProgress)) (result json.RawMessage, sealedResult *SealedEnvelope, usage Usage, resultErr error) {
@@ -572,9 +625,12 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 				ActiveTabs     int  `json:"active_tabs"`
 				BusyTabs       int  `json:"busy_tabs"`
 				Tabs           []struct {
-					Profile      string   `json:"profile"`
-					CurrentModel string   `json:"current_model"`
-					Models       []string `json:"models"`
+					ID               int      `json:"id"`
+					Profile          string   `json:"profile"`
+					State            string   `json:"state"`
+					CurrentModel     string   `json:"current_model"`
+					CurrentReasoning string   `json:"current_reasoning"`
+					Models           []string `json:"models"`
 				} `json:"tabs"`
 			} `json:"browser"`
 			Routes map[string]struct {
@@ -599,8 +655,16 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 			capability.QueueDepth = status.Queued
 			// Browser tabs are separate serial UI slots. They must not lower the
 			// worker-wide limit for Ollama or other local-model jobs.
-			capability.BrowserTabs = status.Browser.ActiveTabs
-			capability.BrowserBusy = status.Browser.BusyTabs
+			if len(w.cfg.AllowedProviders) == 0 || containsFold(w.cfg.AllowedProviders, "browser") {
+				capability.BrowserTabs = status.Browser.ActiveTabs
+				capability.BrowserBusy = status.Browser.BusyTabs
+				for _, tab := range status.Browser.Tabs {
+					capability.BrowserSessions = append(capability.BrowserSessions, BrowserSessionCapability{
+						TabID: tab.ID, Profile: truncate(tab.Profile, 40), State: truncate(tab.State, 40),
+						CurrentModel: truncate(tab.CurrentModel, 100), CurrentReasoning: truncate(tab.CurrentReasoning, 100),
+					})
+				}
+			}
 			seenTasks := map[string]bool{}
 			seenProviders := map[string]bool{}
 			providerAllowed := func(provider string) bool {

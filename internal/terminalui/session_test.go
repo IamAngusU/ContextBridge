@@ -46,3 +46,34 @@ func TestProgressPreviewKeepsLatestTextIteration(t *testing.T) {
 		t.Fatalf("short progress text changed: %q", actual)
 	}
 }
+
+func TestWorkerConsoleSeparatesRequestedAndReportedModel(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := New(writer)
+	capabilities := cluster.Capabilities{BrowserSessions: []cluster.BrowserSessionCapability{{TabID: 42, Profile: "gemini", CurrentModel: "Pro Erweitert"}}}
+	session.HandleWorker(cluster.WorkerEvent{Kind: cluster.WorkerConnected, NodeName: "test-pc", Slots: 2, Capabilities: capabilities})
+	session.HandleWorker(cluster.WorkerEvent{Kind: cluster.WorkerCapabilities, Capabilities: capabilities})
+	session.HandleWorker(cluster.WorkerEvent{Kind: cluster.WorkerJobStarted, JobID: "job-123456789", Task: "generation", Provider: "browser", Profile: "gemini", Model: "3.1 Pro", Reasoning: "high"})
+	session.HandleWorker(cluster.WorkerEvent{Kind: cluster.WorkerJobCompleted, JobID: "job-123456789", ComputeMS: 1000, ReportedProvider: "browser", ReportedModel: "Pro Erweitert"})
+	session.Close()
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := string(raw)
+	if strings.Count(output, "Tab 42 · gemini · Modell: Pro Erweitert") != 1 {
+		t.Fatalf("tab model update should be deduplicated: %s", output)
+	}
+	if !strings.Contains(output, "Modell angefragt: 3.1 Pro · Denkstufe angefragt: high") {
+		t.Fatalf("requested selection missing: %s", output)
+	}
+	if !strings.Contains(output, "Tab meldet: Pro Erweitert") {
+		t.Fatalf("reported selection missing: %s", output)
+	}
+}

@@ -116,6 +116,18 @@ func TestNormalizeBrowserOutputEnvelopeKeepsTrustedModel(t *testing.T) {
 	}
 }
 
+func TestNormalizeBrowserOutputSeparatesTabSelectionFromRequestedModel(t *testing.T) {
+	raw := []byte(`{"mode":"text","text":"ok","model":"forged","selected_model":"Pro Erweitert","selected_reasoning":"hoch"}`)
+	output := NormalizeOutput(raw, OutputSpec{Mode: "text"}, "browser", "browser:3.1 Pro", time.Millisecond)
+	if output.Model != "browser:3.1 Pro" || output.SelectedModel != "Pro Erweitert" || output.SelectedReasoning != "hoch" {
+		t.Fatalf("requested and tab-reported selections were mixed: %#v", output)
+	}
+	local := NormalizeOutput(raw, OutputSpec{Mode: "text"}, "ollama", "qwen", time.Millisecond)
+	if local.SelectedModel != "" || local.SelectedReasoning != "" {
+		t.Fatalf("non-browser output must not claim a tab selection: %#v", local)
+	}
+}
+
 func TestNormalizeTextOutputIsBounded(t *testing.T) {
 	output := NormalizeOutput([]byte("abcdef"), OutputSpec{Mode: "text", MaxBytes: 4}, "test", "model", time.Millisecond)
 	if output.Text != "abcdef" {

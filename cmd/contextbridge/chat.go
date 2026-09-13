@@ -202,6 +202,17 @@ type chatState struct {
 }
 
 func (s *chatState) turn(ctx context.Context, prompt string) error {
+	fmt.Printf("  → angefragt: %s", s.provider)
+	if s.profile != "" {
+		fmt.Printf(" / %s", s.profile)
+	}
+	if s.model != "" {
+		fmt.Printf(" · Modell %s", s.model)
+	}
+	if s.reasoning != "" {
+		fmt.Printf(" · Denkstufe %s", s.reasoning)
+	}
+	fmt.Println()
 	minimum := s.minArtifacts
 	if s.requireImage {
 		if minimum < 1 {
@@ -354,6 +365,18 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 				fmt.Print(submission.Output.Text)
 			}
 			fmt.Println()
+			if submission.Output.SelectedModel != "" || submission.Output.SelectedReasoning != "" {
+				fmt.Print("  ↳ Tab meldet:")
+				if submission.Output.SelectedModel != "" {
+					fmt.Printf(" Modell %s", submission.Output.SelectedModel)
+				}
+				if submission.Output.SelectedReasoning != "" {
+					fmt.Printf(" · Denkstufe: %s", submission.Output.SelectedReasoning)
+				}
+				fmt.Println()
+			} else if !strings.EqualFold(s.provider, "browser") && submission.Output.Model != "" {
+				fmt.Printf("  ↳ verwendet: %s · %s\n", submission.Output.Provider, submission.Output.Model)
+			}
 			paths, references, err := saveOutputArtifacts(submission.Output, s.artifactDir)
 			if err != nil {
 				return err

@@ -2,6 +2,19 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.12 - 2026-09-13
+
+### Added
+
+- show each attached tab's currently visible model and reasoning level in the worker console, updating only when the selection changes
+- label the model and reasoning requested for each job separately from the selection reported after a successful browser run; show the same distinction in terminal chat
+- expose content-free attached-tab selection and state in worker capabilities for relay monitoring
+
+### Fixed
+
+- do not present a requested browser model as the confirmed model in the terminal; only the extension's successful selection confirmation is labeled as tab-reported
+- reject Gemini output if the visible mode changes from the requested model family before sending or before accepting the answer (for example Pro falling back to Flash)
+
 ## 0.5.11 - 2026-09-13
 
 ### Changed

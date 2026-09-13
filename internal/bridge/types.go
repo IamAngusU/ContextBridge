@@ -82,23 +82,25 @@ type Submission struct {
 }
 
 type Output struct {
-	Mode         string              `json:"mode"`
-	JSON         json.RawMessage     `json:"json,omitempty"`
-	Text         string              `json:"text,omitempty"`
-	Embeddings   [][]float32         `json:"embeddings,omitempty"`
-	Dimensions   int                 `json:"dimensions,omitempty"`
-	TenantID     string              `json:"tenant_id,omitempty"`
-	Matches      []vectorstore.Match `json:"matches,omitempty"`
-	Indexed      int                 `json:"indexed,omitempty"`
-	Decision     *Decision           `json:"decision,omitempty"`
-	Model        string              `json:"model,omitempty"`
-	Provider     string              `json:"provider,omitempty"`
-	LatencyMS    int64               `json:"latency_ms,omitempty"`
-	InputTokens  uint64              `json:"input_tokens,omitempty"`
-	OutputTokens uint64              `json:"output_tokens,omitempty"`
-	TotalTokens  uint64              `json:"total_tokens,omitempty"`
-	Artifacts    []Artifact          `json:"artifacts,omitempty"`
-	Error        string              `json:"error,omitempty"`
+	Mode              string              `json:"mode"`
+	JSON              json.RawMessage     `json:"json,omitempty"`
+	Text              string              `json:"text,omitempty"`
+	Embeddings        [][]float32         `json:"embeddings,omitempty"`
+	Dimensions        int                 `json:"dimensions,omitempty"`
+	TenantID          string              `json:"tenant_id,omitempty"`
+	Matches           []vectorstore.Match `json:"matches,omitempty"`
+	Indexed           int                 `json:"indexed,omitempty"`
+	Decision          *Decision           `json:"decision,omitempty"`
+	Model             string              `json:"model,omitempty"`
+	SelectedModel     string              `json:"selected_model,omitempty"`
+	SelectedReasoning string              `json:"selected_reasoning,omitempty"`
+	Provider          string              `json:"provider,omitempty"`
+	LatencyMS         int64               `json:"latency_ms,omitempty"`
+	InputTokens       uint64              `json:"input_tokens,omitempty"`
+	OutputTokens      uint64              `json:"output_tokens,omitempty"`
+	TotalTokens       uint64              `json:"total_tokens,omitempty"`
+	Artifacts         []Artifact          `json:"artifacts,omitempty"`
+	Error             string              `json:"error,omitempty"`
 }
 
 type browserJob struct {
@@ -163,9 +165,14 @@ func NormalizeOutput(raw []byte, spec OutputSpec, provider, model string, latenc
 	if json.Unmarshal(raw, &envelope) == nil {
 		artifacts = NormalizeArtifacts(envelope.Artifacts, spec)
 	}
+	selectedModel, selectedReasoning := "", ""
+	if provider == "browser" && envelope.Error == "" {
+		selectedModel = truncateUTF8(strings.TrimSpace(envelope.SelectedModel), 100)
+		selectedReasoning = truncateUTF8(strings.TrimSpace(envelope.SelectedReasoning), 100)
+	}
 	if mode == "decision" {
 		decision := NormalizeDecision(raw, provider, model, latency)
-		return Output{Mode: mode, Decision: &decision, Model: decision.Model, Provider: provider, LatencyMS: decision.LatencyMS, Artifacts: artifacts}
+		return Output{Mode: mode, Decision: &decision, Model: decision.Model, SelectedModel: selectedModel, SelectedReasoning: selectedReasoning, Provider: provider, LatencyMS: decision.LatencyMS, Artifacts: artifacts}
 	}
 	if json.Unmarshal(raw, &envelope) == nil && envelope.Mode == mode {
 		if envelope.Error != "" {
@@ -209,7 +216,7 @@ func NormalizeOutput(raw []byte, spec OutputSpec, provider, model string, latenc
 		if clean == "" {
 			return OutputError(mode, provider, model, "empty_response", latency)
 		}
-		return Output{Mode: mode, Text: clean, Model: model, Provider: provider, LatencyMS: latency.Milliseconds(), Artifacts: artifacts}
+		return Output{Mode: mode, Text: clean, Model: model, SelectedModel: selectedModel, SelectedReasoning: selectedReasoning, Provider: provider, LatencyMS: latency.Milliseconds(), Artifacts: artifacts}
 	}
 
 	if start := strings.IndexAny(clean, "[{"); start >= 0 {
@@ -237,7 +244,7 @@ func NormalizeOutput(raw []byte, spec OutputSpec, provider, model string, latenc
 			}
 		}
 	}
-	return Output{Mode: mode, JSON: json.RawMessage(clean), Model: model, Provider: provider, LatencyMS: latency.Milliseconds(), Artifacts: artifacts}
+	return Output{Mode: mode, JSON: json.RawMessage(clean), Model: model, SelectedModel: selectedModel, SelectedReasoning: selectedReasoning, Provider: provider, LatencyMS: latency.Milliseconds(), Artifacts: artifacts}
 }
 
 // NormalizeArtifacts applies the protocol's bounded, deterministic artifact

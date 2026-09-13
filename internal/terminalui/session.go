@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/IamAngusU/ContextBridge/internal/cluster"
 )
@@ -22,33 +23,35 @@ const (
 )
 
 type jobState struct {
-	task     string
-	phase    string
-	detail   string
-	percent  int
-	sequence uint64
-	preview  string
-	started  time.Time
+	task      string
+	phase     string
+	detail    string
+	percent   int
+	sequence  uint64
+	preview   string
+	selection string
+	started   time.Time
 }
 
 // Session renders an animated single-line status in a real terminal and
 // concise transition logs when stdout is redirected to a service log.
 type Session struct {
-	out         io.Writer
-	interactive bool
-	mu          sync.Mutex
-	partial     string
-	status      string
-	statusSince time.Time
-	frame       int
-	retries     int
-	jobs        map[string]jobState
-	node        string
-	slots       int
-	hardware    string
-	width       int
-	done        chan struct{}
-	closed      chan struct{}
+	out               io.Writer
+	interactive       bool
+	mu                sync.Mutex
+	partial           string
+	status            string
+	statusSince       time.Time
+	frame             int
+	retries           int
+	jobs              map[string]jobState
+	node              string
+	slots             int
+	hardware          string
+	browserSelections map[int]string
+	width             int
+	done              chan struct{}
+	closed            chan struct{}
 }
 
 func New(output *os.File) *Session {
@@ -62,7 +65,7 @@ func New(output *os.File) *Session {
 	if os.Getenv("TERM") == "dumb" || os.Getenv("NO_COLOR") != "" {
 		interactive = false
 	}
-	session := &Session{out: output, interactive: interactive, jobs: map[string]jobState{}, width: terminalWidth(output), done: make(chan struct{}), closed: make(chan struct{})}
+	session := &Session{out: output, interactive: interactive, jobs: map[string]jobState{}, browserSelections: map[int]string{}, width: terminalWidth(output), done: make(chan struct{}), closed: make(chan struct{})}
 	if interactive {
 		go session.animate()
 	} else {
@@ -124,11 +127,20 @@ func (s *Session) HandleWorker(event cluster.WorkerEvent) {
 			message += fmt.Sprintf(" · recovered after %d retries", s.retries)
 		}
 		s.writeEventLocked("✓", message)
+		s.recordBrowserSelectionsLocked(event.Capabilities.BrowserSessions)
 		s.retries = 0
 		s.setStatusLocked("Idle", time.Now())
+	case cluster.WorkerCapabilities:
+		s.hardware = capabilityLabel(event.Capabilities)
+		s.recordBrowserSelectionsLocked(event.Capabilities.BrowserSessions)
 	case cluster.WorkerJobStarted:
-		s.jobs[event.JobID] = jobState{task: event.Task, phase: "starting", started: time.Now()}
-		s.writeEventLocked("→", fmt.Sprintf("Job %s · %s", shortID(event.JobID), empty(event.Task, "generation")))
+		selection := requestedSelection(event)
+		s.jobs[event.JobID] = jobState{task: event.Task, phase: "starting", selection: selection, started: time.Now()}
+		message := fmt.Sprintf("Job %s · %s", shortID(event.JobID), empty(event.Task, "generation"))
+		if selection != "" {
+			message += " · " + selection
+		}
+		s.writeEventLocked("→", message)
 		s.refreshJobStatusLocked()
 	case cluster.WorkerJobProgress:
 		job := s.jobs[event.JobID]
@@ -143,13 +155,86 @@ func (s *Session) HandleWorker(event cluster.WorkerEvent) {
 		s.refreshJobStatusLocked()
 	case cluster.WorkerJobCompleted:
 		delete(s.jobs, event.JobID)
-		s.writeEventLocked("✓", fmt.Sprintf("Job %s completed · %s", shortID(event.JobID), compactDuration(time.Duration(event.ComputeMS)*time.Millisecond)))
+		message := fmt.Sprintf("Job %s completed · %s", shortID(event.JobID), compactDuration(time.Duration(event.ComputeMS)*time.Millisecond))
+		if event.ReportedProvider == "browser" {
+			if event.ReportedModel != "" {
+				message += " · Tab meldet: " + cleanTerminalLabel(event.ReportedModel, 80)
+			}
+			if event.ReportedReasoning != "" {
+				message += " · Denkstufe: " + cleanTerminalLabel(event.ReportedReasoning, 40)
+			}
+		} else if event.ReportedModel != "" {
+			message += " · verwendet: " + cleanTerminalLabel(event.ReportedProvider, 30) + " · " + cleanTerminalLabel(event.ReportedModel, 80)
+		}
+		s.writeEventLocked("✓", message)
 		s.refreshJobStatusLocked()
 	case cluster.WorkerJobFailed:
 		delete(s.jobs, event.JobID)
 		s.writeEventLocked("!", fmt.Sprintf("Job %s needs attention · %s", shortID(event.JobID), compactError(event.Error)))
 		s.refreshJobStatusLocked()
 	}
+}
+
+func requestedSelection(event cluster.WorkerEvent) string {
+	parts := []string{}
+	if event.Provider != "" {
+		parts = append(parts, cleanTerminalLabel(event.Provider, 30))
+	}
+	if event.Profile != "" {
+		parts = append(parts, cleanTerminalLabel(event.Profile, 30))
+	}
+	if event.Model != "" {
+		parts = append(parts, "Modell angefragt: "+cleanTerminalLabel(event.Model, 80))
+	}
+	if event.Reasoning != "" {
+		parts = append(parts, "Denkstufe angefragt: "+cleanTerminalLabel(event.Reasoning, 40))
+	}
+	return strings.Join(parts, " · ")
+}
+
+func (s *Session) recordBrowserSelectionsLocked(sessions []cluster.BrowserSessionCapability) {
+	current := make(map[int]string, len(sessions))
+	for _, tab := range sessions {
+		if tab.TabID <= 0 {
+			continue
+		}
+		parts := []string{cleanTerminalLabel(empty(tab.Profile, "browser"), 30)}
+		if tab.CurrentModel != "" {
+			parts = append(parts, "Modell: "+cleanTerminalLabel(tab.CurrentModel, 80))
+		} else {
+			parts = append(parts, "Modell noch nicht erkannt")
+		}
+		if tab.CurrentReasoning != "" {
+			parts = append(parts, "Denkstufe: "+cleanTerminalLabel(tab.CurrentReasoning, 40))
+		}
+		current[tab.TabID] = strings.Join(parts, " · ")
+	}
+	ids := make([]int, 0, len(current))
+	for id := range current {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
+	for _, id := range ids {
+		if s.browserSelections[id] != current[id] {
+			s.writeEventLocked("◇", fmt.Sprintf("Tab %d · %s", id, current[id]))
+		}
+	}
+	for id := range s.browserSelections {
+		if _, ok := current[id]; !ok {
+			s.writeEventLocked("◇", fmt.Sprintf("Tab %d getrennt", id))
+		}
+	}
+	s.browserSelections = current
+}
+
+func cleanTerminalLabel(value string, limit int) string {
+	value = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, strings.TrimSpace(value))
+	return truncateRunes(value, limit)
 }
 
 func (s *Session) Close() {
@@ -268,6 +353,9 @@ func (s *Session) visibleJobStatusLocked(limit int) (string, string) {
 	}
 	if job.sequence > 0 {
 		parts = append(parts, fmt.Sprintf("iter %d", job.sequence))
+	}
+	if job.selection != "" {
+		parts = append(parts, progressPreview(job.selection, 36))
 	}
 	status := strings.Join(parts, " · ")
 	if job.preview != "" {

@@ -188,7 +188,11 @@ const element = (text = '', attributes = {}) => ({
   let selectedPro = false;
   const picker = {
     ...element('Flash Erweitert', { 'aria-haspopup': 'true', 'aria-controls': 'gemini-mode-menu', 'aria-label': 'Modusauswahl öffnen, derzeit ausgewählt: Flash Erweitert' }),
-    closest: () => ({}), click() {}
+    closest: () => ({}), click() {},
+    getAttribute(name) {
+      if (name === 'aria-label') return `Modusauswahl öffnen, derzeit ausgewählt: ${selectedPro ? 'Pro Erweitert' : 'Flash Erweitert'}`;
+      return name === 'aria-controls' ? 'gemini-mode-menu' : name === 'aria-haspopup' ? 'true' : null;
+    }
   };
   const account = { ...element('Angus Pro', { 'aria-haspopup': 'menu' }), closest: () => null };
   const pro = {
@@ -200,6 +204,7 @@ const element = (text = '', attributes = {}) => ({
   const oldInput = { ...element(), focus() { throw new Error('Stale composer was used'); } };
   const newInput = { ...element(), focus() { throw new Error('Fresh composer was used'); } };
   context.document = {
+    querySelector(selector) { return selector === 'bard-mode-switcher button[aria-haspopup]' ? picker : null; },
     querySelectorAll(selector) {
       if (selector === '#input') return [selectedPro ? newInput : oldInput];
       if (selector === 'bard-mode-switcher button[aria-haspopup]') return [picker];
@@ -214,6 +219,77 @@ const element = (text = '', attributes = {}) => ({
     new Date(Date.now() + 5000).toISOString());
   assert.equal(selectedPro, true);
   assert.equal(result.error, 'Fresh composer was used');
+}
+
+{
+  let proClicked = false;
+  let sendClicked = false;
+  const picker = {
+    ...element('Flash Erweitert', { 'aria-haspopup': 'true', 'aria-controls': 'gemini-mode-menu' }),
+    closest: () => ({}), click() {},
+    getAttribute(name) {
+      if (name === 'aria-label') return 'Modusauswahl öffnen, derzeit ausgewählt: Flash Erweitert';
+      return name === 'aria-controls' ? 'gemini-mode-menu' : name === 'aria-haspopup' ? 'true' : null;
+    }
+  };
+  const pro = { ...element('3.1 Pro'), querySelector(selector) { return selector.includes('picker-primary-text') ? element('3.1 Pro') : null; }, click() { proClicked = true; } };
+  const input = element('');
+  const send = { ...element(''), click() { sendClicked = true; } };
+  context.document = {
+    querySelector(selector) { return selector === 'bard-mode-switcher button[aria-haspopup]' ? picker : null; },
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === '#send') return [send];
+      if (selector === 'bard-mode-switcher button[aria-haspopup]') return [picker];
+      return [];
+    },
+    getElementById: () => ({ querySelectorAll: () => [pro] }),
+    dispatchEvent() {}
+  };
+  const result = await context.automate({ prompt: 'must not send with Flash', model: '3.1 Pro', output: { mode: 'text' } },
+    { name: 'gemini', selectors: { input: ['#input'], response: [], submit: ['#send'] } },
+    new Date(Date.now() + 5000).toISOString());
+  assert.equal(proClicked, true);
+  assert.equal(sendClicked, false);
+  assert.equal(result.code, 'browser_model_unavailable');
+}
+
+{
+  let mode = 'Pro Erweitert';
+  let sent = false;
+  class TextArea {
+    constructor() { this.value = ''; this.offsetWidth = 1; this.offsetHeight = 1; }
+    getClientRects() { return [1]; }
+    focus() {}
+    dispatchEvent() {}
+  }
+  context.HTMLTextAreaElement = TextArea;
+  context.HTMLInputElement = class {};
+  context.InputEvent = class {};
+  context.Event = class {};
+  const input = new TextArea();
+  const picker = {
+    ...element('Pro Erweitert', { 'aria-haspopup': 'true' }), closest: () => ({}),
+    getAttribute(name) { return name === 'aria-label' ? `Modusauswahl öffnen, derzeit ausgewählt: ${mode}` : name === 'aria-haspopup' ? 'true' : null; }
+  };
+  const send = { ...element(''), click() { sent = true; mode = 'Flash Erweitert'; } };
+  const response = element('Wrong-model response');
+  context.document = {
+    querySelector(selector) { return selector === 'bard-mode-switcher button[aria-haspopup]' ? picker : null; },
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === '#send') return [send];
+      if (selector === '#response') return sent ? [response] : [];
+      if (selector === 'bard-mode-switcher button[aria-haspopup]') return [picker];
+      return [];
+    }
+  };
+  const result = await context.automate({ prompt: 'short test', model: 'Pro Erweitert', output: { mode: 'text' } },
+    { name: 'gemini', selectors: { input: ['#input'], response: ['#response'], submit: ['#send'] } },
+    new Date(Date.now() + 7000).toISOString());
+  assert.equal(sent, true);
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'browser_model_unavailable');
 }
 
 {

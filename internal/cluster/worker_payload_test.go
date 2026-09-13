@@ -37,3 +37,20 @@ func TestWorkerPolicyRestrictsRelayProvidersAndModels(t *testing.T) {
 		}
 	}
 }
+
+func TestWorkerConsoleLabelsDoNotExposePromptOrAssumeSelectedModel(t *testing.T) {
+	job := Job{Requirements: Requirements{Provider: "browser"}, Payload: json.RawMessage(`{"prompt":"private prompt","browser_profile":"gemini","model":"3.1 Pro","reasoning":"high"}`)}
+	provider, profile, model, reasoning := jobRequestLabels(job)
+	if provider != "browser" || profile != "gemini" || model != "3.1 Pro" || reasoning != "high" {
+		t.Fatalf("incorrect requested labels: %q %q %q %q", provider, profile, model, reasoning)
+	}
+	if _, got, _ := localResultSelection(json.RawMessage(`{"output":{"provider":"browser","model":"browser:3.1 Pro"}}`)); got != "" {
+		t.Fatalf("requested model was misreported as selected: %q", got)
+	}
+	if _, got, level := localResultSelection(json.RawMessage(`{"output":{"provider":"browser","selected_model":"Pro Erweitert","selected_reasoning":"hoch"}}`)); got != "Pro Erweitert" || level != "hoch" {
+		t.Fatalf("tab selection was not read back: %q %q", got, level)
+	}
+	if provider, got, _ := localResultSelection(json.RawMessage(`{"output":{"provider":"ollama","model":"qwen"}}`)); provider != "ollama" || got != "qwen" {
+		t.Fatalf("local model was not read back: %q %q", provider, got)
+	}
+}

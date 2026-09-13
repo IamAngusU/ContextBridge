@@ -51,30 +51,41 @@ type ModelCapability struct {
 	Provider  string   `json:"provider,omitempty"`
 }
 
+// BrowserSessionCapability reports only the visible selection and state of an
+// explicitly attached tab. Chat contents and tab titles never leave the PC.
+type BrowserSessionCapability struct {
+	TabID            int    `json:"tab_id"`
+	Profile          string `json:"profile,omitempty"`
+	State            string `json:"state,omitempty"`
+	CurrentModel     string `json:"current_model,omitempty"`
+	CurrentReasoning string `json:"current_reasoning,omitempty"`
+}
+
 type Capabilities struct {
-	OS             string            `json:"os"`
-	OSVersion      string            `json:"os_version,omitempty"`
-	Architecture   string            `json:"architecture"`
-	CPU            string            `json:"cpu"`
-	CPUCores       int               `json:"cpu_cores"`
-	CPUFrequency   int               `json:"cpu_frequency_mhz,omitempty"`
-	CPUUtilization int               `json:"cpu_utilization_percent,omitempty"`
-	UptimeSeconds  uint64            `json:"uptime_seconds,omitempty"`
-	AgentVersion   string            `json:"agent_version,omitempty"`
-	MemoryTotal    uint64            `json:"memory_total_bytes"`
-	MemoryFree     uint64            `json:"memory_free_bytes"`
-	MemoryType     string            `json:"memory_type,omitempty"`
-	GPUs           []GPUCapability   `json:"gpus,omitempty"`
-	Models         []ModelCapability `json:"models,omitempty"`
-	Providers      []string          `json:"providers,omitempty"`
-	Tasks          []string          `json:"tasks,omitempty"`
-	Tags           []string          `json:"tags,omitempty"`
-	Groups         []string          `json:"groups,omitempty"`
-	MaxConcurrent  int               `json:"max_concurrent"`
-	Running        int               `json:"running"`
-	BrowserTabs    int               `json:"browser_tabs,omitempty"`
-	BrowserBusy    int               `json:"browser_busy_tabs,omitempty"`
-	QueueDepth     int               `json:"queue_depth"`
+	OS              string                     `json:"os"`
+	OSVersion       string                     `json:"os_version,omitempty"`
+	Architecture    string                     `json:"architecture"`
+	CPU             string                     `json:"cpu"`
+	CPUCores        int                        `json:"cpu_cores"`
+	CPUFrequency    int                        `json:"cpu_frequency_mhz,omitempty"`
+	CPUUtilization  int                        `json:"cpu_utilization_percent,omitempty"`
+	UptimeSeconds   uint64                     `json:"uptime_seconds,omitempty"`
+	AgentVersion    string                     `json:"agent_version,omitempty"`
+	MemoryTotal     uint64                     `json:"memory_total_bytes"`
+	MemoryFree      uint64                     `json:"memory_free_bytes"`
+	MemoryType      string                     `json:"memory_type,omitempty"`
+	GPUs            []GPUCapability            `json:"gpus,omitempty"`
+	Models          []ModelCapability          `json:"models,omitempty"`
+	Providers       []string                   `json:"providers,omitempty"`
+	Tasks           []string                   `json:"tasks,omitempty"`
+	Tags            []string                   `json:"tags,omitempty"`
+	Groups          []string                   `json:"groups,omitempty"`
+	MaxConcurrent   int                        `json:"max_concurrent"`
+	Running         int                        `json:"running"`
+	BrowserTabs     int                        `json:"browser_tabs,omitempty"`
+	BrowserBusy     int                        `json:"browser_busy_tabs,omitempty"`
+	BrowserSessions []BrowserSessionCapability `json:"browser_sessions,omitempty"`
+	QueueDepth      int                        `json:"queue_depth"`
 }
 
 type Node struct {

@@ -454,15 +454,22 @@ async function processWork(cfg, work, claimedTabId) {
     const initial = await captureTabProgress(tabId, effectiveProfile.selectors);
     baselineText = initial.text || '';
     latestProgressText = baselineText;
-    latestProgressState = `${Boolean(initial.busy)}|${Number(initial.percent) || 0}|${initial.detail || ''}`;
+    latestProgressState = `${Boolean(initial.busy)}|${Number(initial.percent) || 0}|${initial.detail || ''}|false`;
     const sample = async () => {
       if (progressBusy) return;
       progressBusy = true;
       try {
         const snapshot = await captureTabProgress(tabId, effectiveProfile.selectors);
         const text = String(snapshot.text || '').trim();
-        const textChanged = Boolean(text && text !== baselineText && text !== latestProgressText);
-        const progressState = `${Boolean(snapshot.busy)}|${Number(snapshot.percent) || 0}|${snapshot.detail || ''}`;
+		const modeFamily = (value) => {
+		  const words = String(value || '').toLowerCase().normalize('NFKD').replace(/[^a-z0-9äöüß]+/g, ' ').split(/\s+/);
+		  return words.includes('thinking') ? 'thinking' : words.includes('pro') ? 'pro'
+		    : words.includes('lite') ? 'flash-lite' : words.includes('flash') ? 'flash' : '';
+		};
+		const modeMismatch = effectiveProfile.name === 'gemini' && Boolean(modeFamily(work.job.model)) && Boolean(snapshot.current_model)
+		  && Boolean(text && text !== baselineText) && modeFamily(snapshot.current_model) !== modeFamily(work.job.model);
+		const textChanged = Boolean(text && text !== baselineText && text !== latestProgressText && !modeMismatch);
+		const progressState = `${Boolean(snapshot.busy)}|${Number(snapshot.percent) || 0}|${snapshot.detail || ''}|${modeMismatch}`;
         if (textChanged || progressState !== latestProgressState) {
           if (textChanged) latestProgressText = text;
           latestProgressState = progressState;
@@ -470,8 +477,8 @@ async function processWork(cfg, work, claimedTabId) {
           await reportProgress(cfg, work.job.id, {
             sequence: progressSequence,
             text: textChanged ? text.slice(0, 1024 * 1024) : '',
-            phase: snapshot.busy ? 'generating' : 'stabilizing',
-            detail: snapshot.detail || '',
+            phase: modeMismatch ? 'model_mismatch' : (snapshot.busy ? 'generating' : 'stabilizing'),
+            detail: modeMismatch ? 'Gemini changed mode; holding answer for verification' : (snapshot.detail || ''),
             percent: Number(snapshot.percent) || 0,
             busy: Boolean(snapshot.busy)
           });
@@ -540,6 +547,10 @@ async function processWork(cfg, work, claimedTabId) {
       });
     }
     decision = parseOutput(answer.text, work.job.output || {}, answer.selected_model || work.job.model || effectiveProfile.label || 'browser', answer.artifacts || []);
+    // These are the selections confirmed by the tab automation, not merely
+    // the model/reasoning requested by the remote job.
+    if (answer.selected_model) decision.selected_model = String(answer.selected_model).slice(0, 100);
+    if (answer.selected_reasoning) decision.selected_reasoning = String(answer.selected_reasoning).slice(0, 100);
   } catch (error) {
     const mode = outputMode(work.job.output || {});
     decision = mode === 'decision'
@@ -562,6 +573,7 @@ async function processWork(cfg, work, claimedTabId) {
 
 function classifyFailureReason(message) {
   const text = String(message || '');
+  if (/requested model.+not retained/i.test(text)) return 'model_not_retained';
   if (/prompt editor did not retain|prompt editor changed|gemini editor did not accept/i.test(text)) return 'prompt_not_retained';
   if (/send button stayed disabled/i.test(text)) return 'send_disabled';
   if (/send button is not visible/i.test(text)) return 'send_missing';
@@ -885,6 +897,24 @@ function automate(job, profile, jobDeadline) {
 		}
 		return normalizedWords(normalized).filter((word) => word !== 'gpt' && word !== 'model' && word !== 'modell');
 	};
+	const geminiCurrentMode = () => String(document.querySelector('bard-mode-switcher button[aria-haspopup]')
+		?.getAttribute('aria-label')?.match(/(?:derzeit ausgewählt|currently selected|selected)\s*:\s*(.+)$/i)?.[1] || '').trim();
+	const geminiModeFamily = (value) => {
+		const words = normalizedWords(value);
+		if (words.includes('thinking')) return 'thinking';
+		if (words.includes('pro')) return 'pro';
+		if (words.includes('lite')) return 'flash-lite';
+		if (words.includes('flash')) return 'flash';
+		return '';
+	};
+	const confirmGeminiMode = (requested) => {
+		const observed = geminiCurrentMode();
+		const expectedFamily = geminiModeFamily(requested);
+		if (!observed || !expectedFamily || geminiModeFamily(observed) !== expectedFamily) {
+			throw new Error(`Requested model "${requested}" was not retained by Gemini (visible: ${observed || 'unknown'})`);
+		}
+		return observed;
+	};
 	const choosePreference = async (kind, requested) => {
 		if (!requested || ['auto', 'default'].includes(String(requested).toLowerCase())) return '';
 		const triggerSelectors = kind === 'model'
@@ -914,7 +944,7 @@ function automate(job, profile, jobDeadline) {
 				return (/model[-_ ]?(?:switcher|selector|picker|menu)|modellauswahl|modellmenü/i.test(semantic)
 					|| /^(?:gpt[\s._-]*\d|astra\b|sol\b|terra\b|luna\b)/i.test(visibleText(element))) && preferenceMatches(element);
 			});
-		if (current) return kind === 'model' && profile.name === 'gemini' ? String(requested) : (visibleText(current) || requested);
+		if (current) return kind === 'model' && profile.name === 'gemini' ? confirmGeminiMode(requested) : (visibleText(current) || requested);
 		const trigger = triggers.find((element) => {
 			const label = `${visibleText(element)} ${element.getAttribute('aria-label') || ''}`.toLowerCase();
 			return kind === 'model' ? (profile.name === 'gemini' && Boolean(element.closest?.('bard-mode-switcher'))) || /gpt|gemini|model|modell|astra|sol|terra|luna/.test(label) : /reason|denk|effort|thinking|sofort|instant|hoch|high|pro|max/.test(label);
@@ -938,7 +968,11 @@ function automate(job, profile, jobDeadline) {
 		}
 		match.click();
 		await wait(350);
-		return profile.name === 'gemini' && kind === 'model' ? String(requested) : (visibleText(match) || requested);
+		if (profile.name === 'gemini' && kind === 'model') {
+			await wait(650);
+			return confirmGeminiMode(requested);
+		}
+		return visibleText(match) || requested;
 	};
 	const chooseImageTool = async (input) => {
 		if (profile.name !== 'chatgpt') return;
@@ -1087,8 +1121,8 @@ function automate(job, profile, jobDeadline) {
       const previousText = String(job.metadata?.contextbridge_baseline_text || (before.length ? responseText(before[before.length - 1]) : ''));
       const previousIdentity = responseIdentity(previousElement);
       const resumeOnly = Boolean(job.metadata?.contextbridge_resume_only);
-      const selectedModel = !resumeOnly && job.model ? await choosePreference('model', job.model) : String(job.model || '');
-      const selectedReasoning = !resumeOnly && job.reasoning ? await choosePreference('reasoning', job.reasoning) : String(job.reasoning || '');
+	  const selectedModel = !resumeOnly && job.model ? await choosePreference('model', job.model) : '';
+	  const selectedReasoning = !resumeOnly && job.reasoning ? await choosePreference('reasoning', job.reasoning) : '';
 	  const clearedGeminiTool = !resumeOnly && await clearIncompatibleGeminiTools(job);
 	  if (!resumeOnly && (job.model || job.reasoning || clearedGeminiTool)) {
 		// Switching a provider mode may replace the entire composer. Never
@@ -1220,7 +1254,9 @@ function automate(job, profile, jobDeadline) {
 		  const imagesMissing = job.output?.min_images > imageCount;
 		  if ((filesMissing || imagesMissing) && Date.now() - stableSince < 15000) continue;
 		  const artifacts = await collectArtifacts(latestElement, job.output || {});
-		  resolve({ ok: true, text: latest, artifacts, selected_model: selectedModel, selected_reasoning: selectedReasoning });
+		  const confirmedModel = profile.name === 'gemini' && job.model && !['auto', 'default'].includes(String(job.model).toLowerCase()) && !resumeOnly
+			? confirmGeminiMode(job.model) : selectedModel;
+		  resolve({ ok: true, text: latest, artifacts, selected_model: confirmedModel, selected_reasoning: selectedReasoning });
           return;
         }
       }
@@ -1282,6 +1318,8 @@ function captureProgress(selectors) {
     } catch (_) {}
   }
   const latestText = responses.length ? responseText(responses[responses.length - 1]) : '';
+	const currentModel = String(document.querySelector?.('bard-mode-switcher button[aria-haspopup]')
+		?.getAttribute('aria-label')?.match(/(?:derzeit ausgewählt|currently selected|selected)\s*:\s*(.+)$/i)?.[1] || '').trim();
   const alerts = ['[role="alert"]', '[aria-live="assertive"]', '[data-testid*="error" i]', '.toast-error', '.error-message']
     .flatMap((selector) => { try { return [...document.querySelectorAll(selector)].filter(isVisible); } catch (_) { return []; } })
     .map(visibleText).filter(Boolean).join(' ');
@@ -1289,9 +1327,9 @@ function captureProgress(selectors) {
     .some((button) => /retry|try again|regenerate|erneut|noch einmal|wiederholen/i.test(`${visibleText(button)} ${button.getAttribute('aria-label') || ''}`));
   const failureText = alerts || (retryVisible ? latestText : '');
   if (/rate.?limit|usage.?limit|quota|capacity|limit erreicht|höchstgrenze erreicht|zu viele anfragen|too many requests|try again later|später erneut|temporarily unavailable|something went wrong|etwas ist schief/i.test(failureText)) {
-    return { text: '', busy: false, percent: 0, detail: 'Provider error' };
+    return { text: '', busy: false, percent: 0, detail: 'Provider error', current_model: currentModel };
   }
-  return { text: latestText, busy, percent, detail: detail || (busy ? 'Generating' : '') };
+  return { text: latestText, busy, percent, detail: detail || (busy ? 'Generating' : ''), current_model: currentModel };
 }
 
 function inspectSelectors(selectors) {
