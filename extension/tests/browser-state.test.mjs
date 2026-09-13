@@ -66,4 +66,43 @@ const element = (text = '', attributes = {}) => ({
   assert.equal(result.retryable, true);
 }
 
+{
+  const profileMenu = element('', { 'aria-label': 'Profil-Menü öffnen' });
+  context.document = {
+    querySelectorAll(selector) {
+      if (selector === 'button, [role="button"]') return [profileMenu];
+      return [];
+    }
+  };
+  const capabilities = context.inspectPageCapabilities();
+  assert.equal(capabilities.currentModel, '');
+  assert.equal(capabilities.currentReasoning, '');
+}
+
+{
+  const input = element();
+  const response = element('Finished answer');
+  const stop = element('', { 'data-testid': 'stop-button' });
+  let stopChecks = 0;
+  context.document = {
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === '#response') return [response];
+      if (selector === 'button[data-testid*="stop" i]') {
+        stopChecks += 1;
+        return stopChecks <= 2 ? [stop] : [];
+      }
+      return [];
+    },
+    dispatchEvent() {}
+  };
+  const result = await context.automate(
+    { prompt: 'ignored', metadata: { contextbridge_resume_only: true, contextbridge_baseline_text: 'Previous answer' }, output: { mode: 'text' } },
+    { selectors: { input: ['#input'], response: ['#response'], submit: ['#send'] } },
+    new Date(Date.now() + 10000).toISOString()
+  );
+  assert.equal(result.ok, true);
+  assert.equal(result.text, 'Finished answer');
+}
+
 console.log('Browser progress and provider failures verified');

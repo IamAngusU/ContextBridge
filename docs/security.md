@@ -8,6 +8,8 @@ Normal cluster jobs are encrypted in transit by TLS but remain readable by the r
 
 E2EE does not hide routing metadata such as task, group, model requirement, priority, timestamps, payload size, or selected node. It also prevents transparent failover because another worker has another private key. This is a deliberate security and availability tradeoff.
 
+Terminal chat supports E2EE per session with `--e2ee` or interactively with `/e2ee on`; `/e2ee off` returns to TLS-only relay-visible jobs. Plaintext progress streaming is disabled while E2EE is active. Encryption overhead is small compared with model inference, but worker reservation, loss of live plaintext progress, and loss of transparent failover are meaningful operational tradeoffs.
+
 The browser extension does not receive permanent access to every page. The operator chooses a tab, approves that tab's origin, and teaches or selects one browser profile. The visual profile contains CSS selectors, not executable JavaScript. The extension sends only the configured prompt and optional image, then reads the configured response elements. Optional all-tabs access is requested only when the operator chooses to browse tabs from every window.
 
 Submitted text and image text are treated as untrusted data. ContextBridge wraps them in trusted instructions that explicitly forbid following embedded commands. Model output is parsed as JSON and reduced to the configured decision vocabulary. Invalid, missing, or timed-out output becomes `review`.

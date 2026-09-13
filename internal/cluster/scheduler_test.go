@@ -72,3 +72,15 @@ func TestFirstPreferredNodeWinsEqualLoad(t *testing.T) {
 		t.Fatalf("preferred node did not win: %#v", ranked)
 	}
 }
+
+func TestRankPrefersLowerCPUPressure(t *testing.T) {
+	now := time.Now().UTC()
+	nodes := []Node{
+		{ID: "hot", Connected: true, LastSeen: now, Capabilities: Capabilities{Tasks: []string{"generation"}, MaxConcurrent: 2, CPUUtilization: 92, MemoryTotal: 32 << 30, MemoryFree: 24 << 30}},
+		{ID: "cool", Connected: true, LastSeen: now, Capabilities: Capabilities{Tasks: []string{"generation"}, MaxConcurrent: 2, CPUUtilization: 8, MemoryTotal: 32 << 30, MemoryFree: 24 << 30}},
+	}
+	ranked := Rank(nodes, Requirements{Task: "generation"})
+	if len(ranked) != 2 || ranked[0].Node.ID != "cool" {
+		t.Fatalf("lower CPU pressure was not preferred: %#v", ranked)
+	}
+}

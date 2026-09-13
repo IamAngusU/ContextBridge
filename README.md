@@ -128,6 +128,7 @@ contextbridge cluster token --role producer --subject support-api
 contextbridge cluster submit --file examples/cluster-job.json --token cb_producer_TOKEN
 contextbridge cluster submit --file examples/cluster-job.json --token cb_producer_TOKEN --e2ee
 contextbridge cluster chat --token cb_producer_TOKEN
+contextbridge cluster chat --token cb_producer_TOKEN --e2ee
 ```
 
 Set requirements such as `task`, `provider`, `group`, `model`, `vision`, `embedding`, tags, or minimum free VRAM. Use `provider: browser` to require a live, taught web-chat tab, or `provider: ollama` to require a local Ollama engine. The scheduler chooses a compatible online node using live concurrency, queue, RAM, and VRAM data. Measured VRAM demand is a preference, not a hidden requirement, so CPU-only workers remain useful unless `min_free_vram_bytes` is explicitly set. Normal TLS jobs can move to another node after a disconnect. E2EE jobs are bound to the worker key selected during reservation and fail clearly if that worker disappears.
@@ -143,7 +144,7 @@ contextbridge cluster chat --provider browser --profile chatgpt --model gpt-6-as
 contextbridge cluster chat --provider browser --profile gemini --model pro --reasoning high
 ```
 
-Inside interactive chat, `/model …`, `/reasoning …`, and `/profile …` change subsequent turns; `/settings` shows the active choices. The same `model`, `reasoning`, `browser_profile`, and `session_id` fields can be placed in an individual browser job payload. Choices are matched against the provider's visible localized menu. An unavailable choice fails clearly instead of silently running a different model.
+Inside interactive chat, `/model …`, `/reasoning …`, `/profile …`, and `/e2ee on|off` change subsequent turns; `/settings` shows the active choices. E2EE encrypts prompts and final results for one reserved worker; plaintext streaming and transparent failover are intentionally unavailable for that turn. The same `model`, `reasoning`, `browser_profile`, and `session_id` fields can be placed in an individual browser job payload. Choices are matched against the provider's visible localized menu. An unavailable choice fails clearly instead of silently running a different model.
 
 ## Connect A Browser Tab
 

@@ -34,6 +34,7 @@ type WorkerConfig struct {
 	HeartbeatEvery time.Duration
 	RequestTimeout time.Duration
 	AllowedTasks   []string
+	Version        string
 }
 
 type WorkerIdentity struct {
@@ -501,9 +502,9 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 	w.mu.Lock()
 	running := w.running
 	w.mu.Unlock()
-	capability := Capabilities{OS: hardware.OS, Architecture: hardware.Architecture, CPU: hardware.CPU, CPUCores: hardware.CPUCores, MemoryTotal: hardware.MemoryTotal, MemoryFree: hardware.MemoryAvailable, MemoryType: hardware.MemoryType, Groups: cleanList(w.cfg.Groups, 16, 80), Tags: cleanList(w.cfg.Tags, 32, 80), MaxConcurrent: w.cfg.MaxConcurrent, Running: running}
+	capability := Capabilities{OS: hardware.OS, OSVersion: hardware.OSVersion, Architecture: hardware.Architecture, CPU: hardware.CPU, CPUCores: hardware.CPUCores, CPUFrequency: hardware.CPUFrequencyMHz, CPUUtilization: hardware.CPUUtilization, UptimeSeconds: hardware.UptimeSeconds, AgentVersion: w.cfg.Version, MemoryTotal: hardware.MemoryTotal, MemoryFree: hardware.MemoryAvailable, MemoryType: hardware.MemoryType, Groups: cleanList(w.cfg.Groups, 16, 80), Tags: cleanList(w.cfg.Tags, 32, 80), MaxConcurrent: w.cfg.MaxConcurrent, Running: running}
 	for _, gpu := range hardware.GPUs {
-		capability.GPUs = append(capability.GPUs, GPUCapability{Name: gpu.Name, Backend: gpu.Backend, MemoryTotal: gpu.MemoryTotal, MemoryFree: gpu.MemoryFree, Temperature: gpu.Temperature, Utilization: gpu.Utilization})
+		capability.GPUs = append(capability.GPUs, GPUCapability{Name: gpu.Name, Backend: gpu.Backend, Driver: gpu.Driver, MemoryTotal: gpu.MemoryTotal, MemoryFree: gpu.MemoryFree, Temperature: gpu.Temperature, Utilization: gpu.Utilization})
 	}
 	statusCtx, statusCancel := context.WithTimeout(ctx, 4*time.Second)
 	defer statusCancel()

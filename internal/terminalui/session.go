@@ -11,6 +11,15 @@ import (
 	"github.com/IamAngusU/ContextBridge/internal/cluster"
 )
 
+const (
+	ansiReset  = "\x1b[0m"
+	ansiCyan   = "\x1b[36m"
+	ansiGreen  = "\x1b[32m"
+	ansiYellow = "\x1b[33m"
+	ansiRed    = "\x1b[31m"
+	ansiDim    = "\x1b[2m"
+)
+
 type jobState struct {
 	task    string
 	phase   string
@@ -196,7 +205,7 @@ func (s *Session) setStatusLocked(message string, started time.Time) {
 func (s *Session) writeEventLocked(symbol, message string) {
 	if s.interactive {
 		s.clearStatusLocked()
-		fmt.Fprintf(s.out, "  %s  %s\n", symbol, message)
+		fmt.Fprintf(s.out, "  %s  %s\n", coloredSymbol(symbol), message)
 		s.drawStatusLocked()
 		return
 	}
@@ -211,11 +220,24 @@ func (s *Session) drawStatusLocked() {
 	elapsed := compactDuration(time.Since(s.statusSince))
 	if s.status == "Idle" {
 		pool := fmt.Sprintf("0/%d jobs", max(1, s.slots))
-		fmt.Fprintf(s.out, "\r\x1b[2K  ◇  [Idle %s]  [%s]  [%s]%s", elapsed, pool, empty(s.node, "local"), optionalBracket(s.hardware))
+		fmt.Fprintf(s.out, "\r\x1b[2K  %s◇%s  [%sIdle%s %s]  [%s%s%s]  [%s]%s", ansiGreen, ansiReset, ansiGreen, ansiReset, elapsed, ansiDim, pool, ansiReset, empty(s.node, "local"), optionalBracket(s.hardware))
 		return
 	}
 	bar := pulseBar(s.frame, 14)
-	fmt.Fprintf(s.out, "\r\x1b[2K  %s  [%s]  [%d/%d jobs]  %s  %s", frames[s.frame%len(frames)], bar, len(s.jobs), max(1, s.slots), s.status, elapsed)
+	fmt.Fprintf(s.out, "\r\x1b[2K  %s%s%s  [%s%s%s]  [%d/%d jobs]  %s%s%s  %s", ansiCyan, frames[s.frame%len(frames)], ansiReset, ansiCyan, bar, ansiReset, len(s.jobs), max(1, s.slots), ansiYellow, s.status, ansiReset, elapsed)
+}
+
+func coloredSymbol(symbol string) string {
+	color := ansiCyan
+	switch symbol {
+	case "✓":
+		color = ansiGreen
+	case "!":
+		color = ansiRed
+	case "↻":
+		color = ansiYellow
+	}
+	return color + symbol + ansiReset
 }
 
 func (s *Session) clearStatusLocked() {

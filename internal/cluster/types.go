@@ -33,6 +33,7 @@ type Requirements struct {
 type GPUCapability struct {
 	Name        string `json:"name"`
 	Backend     string `json:"backend"`
+	Driver      string `json:"driver,omitempty"`
 	MemoryTotal uint64 `json:"memory_total_bytes"`
 	MemoryFree  uint64 `json:"memory_free_bytes"`
 	Temperature int    `json:"temperature_c,omitempty"`
@@ -51,22 +52,27 @@ type ModelCapability struct {
 }
 
 type Capabilities struct {
-	OS            string            `json:"os"`
-	Architecture  string            `json:"architecture"`
-	CPU           string            `json:"cpu"`
-	CPUCores      int               `json:"cpu_cores"`
-	MemoryTotal   uint64            `json:"memory_total_bytes"`
-	MemoryFree    uint64            `json:"memory_free_bytes"`
-	MemoryType    string            `json:"memory_type,omitempty"`
-	GPUs          []GPUCapability   `json:"gpus,omitempty"`
-	Models        []ModelCapability `json:"models,omitempty"`
-	Providers     []string          `json:"providers,omitempty"`
-	Tasks         []string          `json:"tasks,omitempty"`
-	Tags          []string          `json:"tags,omitempty"`
-	Groups        []string          `json:"groups,omitempty"`
-	MaxConcurrent int               `json:"max_concurrent"`
-	Running       int               `json:"running"`
-	QueueDepth    int               `json:"queue_depth"`
+	OS             string            `json:"os"`
+	OSVersion      string            `json:"os_version,omitempty"`
+	Architecture   string            `json:"architecture"`
+	CPU            string            `json:"cpu"`
+	CPUCores       int               `json:"cpu_cores"`
+	CPUFrequency   int               `json:"cpu_frequency_mhz,omitempty"`
+	CPUUtilization int               `json:"cpu_utilization_percent,omitempty"`
+	UptimeSeconds  uint64            `json:"uptime_seconds,omitempty"`
+	AgentVersion   string            `json:"agent_version,omitempty"`
+	MemoryTotal    uint64            `json:"memory_total_bytes"`
+	MemoryFree     uint64            `json:"memory_free_bytes"`
+	MemoryType     string            `json:"memory_type,omitempty"`
+	GPUs           []GPUCapability   `json:"gpus,omitempty"`
+	Models         []ModelCapability `json:"models,omitempty"`
+	Providers      []string          `json:"providers,omitempty"`
+	Tasks          []string          `json:"tasks,omitempty"`
+	Tags           []string          `json:"tags,omitempty"`
+	Groups         []string          `json:"groups,omitempty"`
+	MaxConcurrent  int               `json:"max_concurrent"`
+	Running        int               `json:"running"`
+	QueueDepth     int               `json:"queue_depth"`
 }
 
 type Node struct {

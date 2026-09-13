@@ -136,7 +136,11 @@ function renderRuntime(runtime) {
   const gpus = hardware.gpus || [];
   const memoryAvailable = formatBytes(hardware.memory_available_bytes);
   const memoryTotal = formatBytes(hardware.memory_total_bytes);
-  $('cpu-name').textContent = hardware.cpu || `${hardware.os || ''} ${hardware.architecture || ''}`.trim() || 'Unknown CPU';
+  const cpuName = hardware.cpu || `${hardware.os || ''} ${hardware.architecture || ''}`.trim() || 'Unknown CPU';
+  const cpuSpeed = hardware.cpu_frequency_mhz ? ` · ${(hardware.cpu_frequency_mhz / 1000).toFixed(2)} GHz` : '';
+  $('cpu-name').textContent = `${cpuName}${cpuSpeed} · ${hardware.cpu_utilization_percent || 0}% load`;
+  $('system-detail').textContent = hardware.os_version || `${hardware.os || 'unknown'}/${hardware.architecture || 'unknown'}`;
+  $('uptime-detail').textContent = formatUptime(hardware.uptime_seconds || 0);
   $('memory-detail').textContent = `${memoryAvailable} available of ${memoryTotal}${hardware.memory_type ? ` · ${hardware.memory_type}` : ''}`;
   $('gpu-detail').textContent = gpus.length
     ? gpus.map((gpu) => `${gpu.name} (${gpu.backend}, ${formatBytes(gpu.memory_free_bytes)} free, ${gpu.utilization_percent || 0}%, ${gpu.temperature_c || 0}°C)`).join(', ')
@@ -186,6 +190,16 @@ function renderRuntime(runtime) {
     }
     list.append(row);
   }
+}
+
+function formatUptime(seconds) {
+  seconds = Math.max(0, Number(seconds) || 0);
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (days) return `${days}d ${hours}h`;
+  if (hours) return `${hours}h ${minutes}m`;
+  return `${minutes}m`;
 }
 
 function renderModels(models, rag) {

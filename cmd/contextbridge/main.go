@@ -578,8 +578,20 @@ func hardwareCommand(args []string) error {
 	if *asJSON {
 		return json.NewEncoder(os.Stdout).Encode(snapshot)
 	}
-	fmt.Printf("%s/%s, %d CPU cores\n", snapshot.OS, snapshot.Architecture, snapshot.CPUCores)
-	fmt.Printf("CPU: %s\n", snapshot.CPU)
+	fmt.Printf("%s/%s", snapshot.OS, snapshot.Architecture)
+	if snapshot.OSVersion != "" {
+		fmt.Printf(" · %s", snapshot.OSVersion)
+	}
+	if snapshot.UptimeSeconds > 0 {
+		fmt.Printf(" · uptime %s", formatUptime(snapshot.UptimeSeconds))
+	}
+	fmt.Println()
+	fmt.Printf("CPU: %s · %d cores", snapshot.CPU, snapshot.CPUCores)
+	if snapshot.CPUFrequencyMHz > 0 {
+		fmt.Printf(" · %.2f GHz", float64(snapshot.CPUFrequencyMHz)/1000)
+	}
+	fmt.Printf(" · %d%% load", snapshot.CPUUtilization)
+	fmt.Println()
 	fmt.Printf("Memory: %s available of %s", formatBytes(snapshot.MemoryAvailable), formatBytes(snapshot.MemoryTotal))
 	if snapshot.MemoryType != "" {
 		fmt.Printf(" (%s)", snapshot.MemoryType)
@@ -867,7 +879,7 @@ func configuredWorker(cfg config.Config) (*cluster.Worker, error) {
 	if name == "" || name == "auto" {
 		name, _ = os.Hostname()
 	}
-	return cluster.LoadWorker(cluster.WorkerConfig{RelayURL: cfg.Cluster.Worker.RelayURL, IdentityFile: cfg.Cluster.Worker.IdentityFile, Name: name, Groups: cfg.Cluster.Worker.Groups, Tags: cfg.Cluster.Worker.Tags, MaxConcurrent: cfg.Cluster.Worker.MaxConcurrent, LocalURL: cfg.Cluster.Worker.LocalURL, LocalToken: cfg.Cluster.Worker.LocalToken, HeartbeatEvery: time.Duration(cfg.Cluster.Worker.HeartbeatSeconds) * time.Second, AllowedTasks: cfg.Cluster.Policies.AllowedTasks})
+	return cluster.LoadWorker(cluster.WorkerConfig{RelayURL: cfg.Cluster.Worker.RelayURL, IdentityFile: cfg.Cluster.Worker.IdentityFile, Name: name, Groups: cfg.Cluster.Worker.Groups, Tags: cfg.Cluster.Worker.Tags, MaxConcurrent: cfg.Cluster.Worker.MaxConcurrent, LocalURL: cfg.Cluster.Worker.LocalURL, LocalToken: cfg.Cluster.Worker.LocalToken, HeartbeatEvery: time.Duration(cfg.Cluster.Worker.HeartbeatSeconds) * time.Second, AllowedTasks: cfg.Cluster.Policies.AllowedTasks, Version: version})
 }
 
 func enabledLabel(enabled bool, label string) string {
@@ -1073,7 +1085,23 @@ func clusterStatusCommand(args []string) error {
 		if node.Capabilities.MemoryType != "" {
 			memory += " · " + node.Capabilities.MemoryType
 		}
-		fmt.Printf("  %s  [%s]  [%d/%d jobs]  [%d CPU cores]  [%s]\n", node.Name, state, node.Capabilities.Running, max(1, node.Capabilities.MaxConcurrent), node.Capabilities.CPUCores, memory)
+		cpu := fmt.Sprintf("%d CPU cores", node.Capabilities.CPUCores)
+		if node.Capabilities.CPUFrequency > 0 {
+			cpu += fmt.Sprintf(" · %.2f GHz", float64(node.Capabilities.CPUFrequency)/1000)
+		}
+		cpu += fmt.Sprintf(" · %d%% load", node.Capabilities.CPUUtilization)
+		fmt.Printf("  %s  [%s]  [%d/%d jobs]  [%s]  [%s]\n", node.Name, state, node.Capabilities.Running, max(1, node.Capabilities.MaxConcurrent), cpu, memory)
+		system := strings.TrimSpace(node.Capabilities.OSVersion)
+		if system == "" {
+			system = node.Capabilities.OS + "/" + node.Capabilities.Architecture
+		}
+		if node.Capabilities.AgentVersion != "" {
+			system += " · agent " + node.Capabilities.AgentVersion
+		}
+		if node.Capabilities.UptimeSeconds > 0 {
+			system += " · uptime " + formatUptime(node.Capabilities.UptimeSeconds)
+		}
+		fmt.Printf("      System  [%s]\n", system)
 		for _, gpu := range node.Capabilities.GPUs {
 			fmt.Printf("      GPU  [%s · %s/%s free · %d%% · %d°C]\n", gpu.Name, formatBytes(gpu.MemoryFree), formatBytes(gpu.MemoryTotal), gpu.Utilization, gpu.Temperature)
 		}
@@ -1090,6 +1118,19 @@ func clusterStatusCommand(args []string) error {
 	}
 	fmt.Printf("Jobs  [%d completed]  [%d failed]  [%.2f compute hours]\n", overview.JobsByState[cluster.JobCompleted], overview.JobsByState[cluster.JobFailed], float64(overview.Usage.ComputeMS)/3600000)
 	return nil
+}
+
+func formatUptime(seconds uint64) string {
+	days := seconds / 86400
+	hours := (seconds % 86400) / 3600
+	minutes := (seconds % 3600) / 60
+	if days > 0 {
+		return fmt.Sprintf("%dd %dh", days, hours)
+	}
+	if hours > 0 {
+		return fmt.Sprintf("%dh %dm", hours, minutes)
+	}
+	return fmt.Sprintf("%dm", minutes)
 }
 
 func clusterSubmitCommand(args []string) error {

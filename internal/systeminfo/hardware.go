@@ -15,9 +15,13 @@ import (
 
 type Snapshot struct {
 	OS              string    `json:"os"`
+	OSVersion       string    `json:"os_version,omitempty"`
 	Architecture    string    `json:"architecture"`
 	CPU             string    `json:"cpu"`
 	CPUCores        int       `json:"cpu_cores"`
+	CPUFrequencyMHz int       `json:"cpu_frequency_mhz,omitempty"`
+	CPUUtilization  int       `json:"cpu_utilization_percent,omitempty"`
+	UptimeSeconds   uint64    `json:"uptime_seconds,omitempty"`
 	MemoryTotal     uint64    `json:"memory_total_bytes"`
 	MemoryAvailable uint64    `json:"memory_available_bytes"`
 	MemoryType      string    `json:"memory_type,omitempty"`
@@ -46,9 +50,39 @@ type Backend struct {
 
 func Detect(ctx context.Context) Snapshot {
 	s := Snapshot{OS: runtime.GOOS, Architecture: runtime.GOARCH, CPUCores: runtime.NumCPU(), UpdatedAt: time.Now().UTC()}
-	s.CPU = cpuName(ctx)
-	s.MemoryTotal, s.MemoryAvailable = memory(ctx)
-	s.MemoryType = memoryType(ctx)
+	if runtime.GOOS == "windows" {
+		if details, ok := windowsDetails(ctx); ok {
+			s.CPU = details.CPU
+			s.CPUFrequencyMHz = details.CPUFrequencyMHz
+			s.CPUUtilization = details.CPUUtilization
+			s.OSVersion = details.OSVersion
+			s.UptimeSeconds = details.UptimeSeconds
+			s.MemoryTotal = details.MemoryTotal
+			s.MemoryAvailable = details.MemoryAvailable
+			s.MemoryType = memoryTypeLabel(details.MemoryType, details.MemorySpeed)
+		}
+	}
+	if s.CPU == "" {
+		s.CPU = cpuName(ctx)
+	}
+	if s.MemoryTotal == 0 {
+		s.MemoryTotal, s.MemoryAvailable = memory(ctx)
+	}
+	if s.MemoryType == "" {
+		s.MemoryType = memoryType(ctx)
+	}
+	if s.OSVersion == "" {
+		s.OSVersion = osVersion(ctx)
+	}
+	if s.CPUFrequencyMHz == 0 {
+		s.CPUFrequencyMHz = cpuFrequencyMHz(ctx)
+	}
+	if s.CPUUtilization == 0 {
+		s.CPUUtilization = cpuUtilization()
+	}
+	if s.UptimeSeconds == 0 {
+		s.UptimeSeconds = uptimeSeconds(ctx)
+	}
 	s.GPUs = append(s.GPUs, nvidiaGPUs(ctx)...)
 	if len(s.GPUs) == 0 {
 		s.GPUs = append(s.GPUs, rocmGPUs(ctx)...)
@@ -64,6 +98,33 @@ func Detect(ctx context.Context) Snapshot {
 		backendAny("llama.cpp", []string{"llama-server", "llama"}),
 	}
 	return s
+}
+
+type windowsSystemDetails struct {
+	CPU             string `json:"cpu"`
+	CPUFrequencyMHz int    `json:"cpu_frequency_mhz"`
+	CPUUtilization  int    `json:"cpu_utilization"`
+	OSVersion       string `json:"os_version"`
+	UptimeSeconds   uint64 `json:"uptime_seconds"`
+	MemoryTotal     uint64 `json:"memory_total"`
+	MemoryAvailable uint64 `json:"memory_available"`
+	MemoryType      int    `json:"memory_type"`
+	MemorySpeed     int    `json:"memory_speed"`
+}
+
+func windowsDetails(ctx context.Context) (windowsSystemDetails, bool) {
+	const script = `$p=Get-CimInstance Win32_Processor | Select-Object -First 1; $o=Get-CimInstance Win32_OperatingSystem; $m=Get-CimInstance Win32_PhysicalMemory | Select-Object -First 1; @{cpu=[string]$p.Name;cpu_frequency_mhz=[int]$p.MaxClockSpeed;cpu_utilization=[int]$p.LoadPercentage;os_version=([string]$o.Caption+' '+[string]$o.Version+' build '+[string]$o.BuildNumber);uptime_seconds=[uint64][Math]::Max(0,((Get-Date)-$o.LastBootUpTime).TotalSeconds);memory_total=[uint64]$o.TotalVisibleMemorySize*1024;memory_available=[uint64]$o.FreePhysicalMemory*1024;memory_type=[int]$m.SMBIOSMemoryType;memory_speed=[int]$m.ConfiguredClockSpeed}|ConvertTo-Json -Compress`
+	raw, err := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", script).Output()
+	if err != nil {
+		return windowsSystemDetails{}, false
+	}
+	var value windowsSystemDetails
+	if json.Unmarshal(raw, &value) != nil {
+		return windowsSystemDetails{}, false
+	}
+	value.CPU = strings.TrimSpace(value.CPU)
+	value.OSVersion = strings.TrimSpace(value.OSVersion)
+	return value, value.CPU != ""
 }
 
 func backend(name, command string) Backend {
@@ -115,6 +176,99 @@ func cpuName(ctx context.Context) string {
 	return runtime.GOARCH
 }
 
+func cpuFrequencyMHz(ctx context.Context) int {
+	if runtime.GOOS == "linux" {
+		if raw, err := os.ReadFile("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq"); err == nil {
+			value, _ := strconv.ParseUint(strings.TrimSpace(string(raw)), 10, 64)
+			if value > 0 {
+				return int(value / 1000)
+			}
+		}
+		if file, err := os.Open("/proc/cpuinfo"); err == nil {
+			defer file.Close()
+			scanner := bufio.NewScanner(file)
+			for scanner.Scan() {
+				parts := strings.SplitN(scanner.Text(), ":", 2)
+				if len(parts) == 2 && strings.TrimSpace(parts[0]) == "cpu MHz" {
+					value, _ := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+					return int(value + 0.5)
+				}
+			}
+		}
+	}
+	if runtime.GOOS == "darwin" {
+		raw, _ := exec.CommandContext(ctx, "sysctl", "-n", "hw.cpufrequency_max").Output()
+		value, _ := strconv.ParseUint(strings.TrimSpace(string(raw)), 10, 64)
+		return int(value / 1000000)
+	}
+	return 0
+}
+
+func cpuUtilization() int {
+	if runtime.GOOS != "linux" {
+		return 0
+	}
+	raw, err := os.ReadFile("/proc/loadavg")
+	if err != nil {
+		return 0
+	}
+	fields := strings.Fields(string(raw))
+	if len(fields) == 0 || runtime.NumCPU() == 0 {
+		return 0
+	}
+	load, _ := strconv.ParseFloat(fields[0], 64)
+	utilization := int(load/float64(runtime.NumCPU())*100 + 0.5)
+	if utilization > 100 {
+		return 100
+	}
+	return max(0, utilization)
+}
+
+func osVersion(ctx context.Context) string {
+	if runtime.GOOS == "linux" {
+		if raw, err := os.ReadFile("/etc/os-release"); err == nil {
+			for _, line := range strings.Split(string(raw), "\n") {
+				if strings.HasPrefix(line, "PRETTY_NAME=") {
+					return strings.Trim(strings.TrimPrefix(line, "PRETTY_NAME="), "\"'")
+				}
+			}
+		}
+	}
+	if runtime.GOOS == "darwin" {
+		if raw, err := exec.CommandContext(ctx, "sw_vers", "-productVersion").Output(); err == nil {
+			return "macOS " + strings.TrimSpace(string(raw))
+		}
+	}
+	return ""
+}
+
+func uptimeSeconds(ctx context.Context) uint64 {
+	if runtime.GOOS == "linux" {
+		if raw, err := os.ReadFile("/proc/uptime"); err == nil {
+			fields := strings.Fields(string(raw))
+			if len(fields) > 0 {
+				value, _ := strconv.ParseFloat(fields[0], 64)
+				return uint64(value)
+			}
+		}
+	}
+	if runtime.GOOS == "darwin" {
+		if raw, err := exec.CommandContext(ctx, "sysctl", "-n", "kern.boottime").Output(); err == nil {
+			text := string(raw)
+			if index := strings.Index(text, "sec ="); index >= 0 {
+				fields := strings.Fields(text[index+len("sec ="):])
+				if len(fields) > 0 {
+					boot, _ := strconv.ParseInt(strings.TrimRight(fields[0], ","), 10, 64)
+					if boot > 0 && time.Now().Unix() > boot {
+						return uint64(time.Now().Unix() - boot)
+					}
+				}
+			}
+		}
+	}
+	return 0
+}
+
 func memory(ctx context.Context) (uint64, uint64) {
 	if runtime.GOOS == "linux" {
 		raw, err := os.ReadFile("/proc/meminfo")
@@ -162,12 +316,16 @@ func memoryType(ctx context.Context) string {
 	if json.Unmarshal(raw, &value) != nil {
 		return ""
 	}
-	name := map[int]string{20: "DDR", 21: "DDR2", 24: "DDR3", 26: "DDR4", 30: "LPDDR4", 34: "DDR5", 35: "LPDDR5"}[value.Type]
+	return memoryTypeLabel(value.Type, value.Speed)
+}
+
+func memoryTypeLabel(memoryType, speed int) string {
+	name := map[int]string{20: "DDR", 21: "DDR2", 24: "DDR3", 26: "DDR4", 30: "LPDDR4", 34: "DDR5", 35: "LPDDR5"}[memoryType]
 	if name == "" {
 		return ""
 	}
-	if value.Speed > 0 {
-		return fmt.Sprintf("%s @ %d MT/s", name, value.Speed)
+	if speed > 0 {
+		return fmt.Sprintf("%s @ %d MT/s", name, speed)
 	}
 	return name
 }

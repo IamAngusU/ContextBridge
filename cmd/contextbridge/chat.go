@@ -30,6 +30,7 @@ func clusterChatCommand(args []string) error {
 	model := flags.String("model", "", "specific model")
 	profile := flags.String("profile", "", "browser profile such as chatgpt or gemini")
 	reasoning := flags.String("reasoning", "", "reasoning level such as instant, medium, high, xhigh, pro, or max")
+	e2ee := flags.Bool("e2ee", false, "encrypt prompts and results end-to-end for the selected worker")
 	sessionID := flags.String("session", "", "stable conversation ID")
 	prompt := flags.String("prompt", "", "send one turn and exit")
 	artifactDir := flags.String("artifacts", "auto", "artifact directory; auto uses local ContextBridge storage, off disables saving")
@@ -54,12 +55,12 @@ func clusterChatCommand(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	state := &chatState{relayURL: clusterBaseURL(cfg), token: *token, provider: *provider, group: *group, model: *model, profile: *profile, reasoning: *reasoning, sessionID: *sessionID, artifactDir: *artifactDir}
+	state := &chatState{relayURL: clusterBaseURL(cfg), token: *token, provider: *provider, group: *group, model: *model, profile: *profile, reasoning: *reasoning, e2ee: *e2ee, sessionID: *sessionID, artifactDir: *artifactDir}
 
 	if strings.TrimSpace(*prompt) != "" {
 		return state.turn(ctx, strings.TrimSpace(*prompt))
 	}
-	fmt.Printf("\n  ContextBridge Chat · %s\n  session %s · follow-ups stay in the same browser conversation\n  /model, /reasoning and /profile change this session · /settings shows it · /exit closes it\n\n", *provider, *sessionID)
+	fmt.Printf("\n  ContextBridge Chat · %s\n  session %s · follow-ups stay in the same browser conversation\n  /model, /reasoning, /profile and /e2ee change this session · /settings shows it · /exit closes it\n\n", *provider, *sessionID)
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 64<<10), 1<<20)
 	for {
@@ -104,8 +105,19 @@ func (s *chatState) command(line string) (bool, string) {
 	case "/profile":
 		s.profile = value
 		return true, "  ✓ browser profile: " + emptyChatSetting(s.profile)
+	case "/e2ee":
+		switch strings.ToLower(value) {
+		case "on", "true", "1", "yes", "an", "ein":
+			s.e2ee = true
+		case "off", "false", "0", "no", "aus":
+			s.e2ee = false
+		case "":
+		default:
+			return true, "  ! use /e2ee on or /e2ee off"
+		}
+		return true, fmt.Sprintf("  ✓ E2EE: %t", s.e2ee)
 	case "/settings":
-		return true, fmt.Sprintf("  session %s · provider %s · profile %s · model %s · reasoning %s", s.sessionID, s.provider, emptyChatSetting(s.profile), emptyChatSetting(s.model), emptyChatSetting(s.reasoning))
+		return true, fmt.Sprintf("  session %s · provider %s · profile %s · model %s · reasoning %s · E2EE %t", s.sessionID, s.provider, emptyChatSetting(s.profile), emptyChatSetting(s.model), emptyChatSetting(s.reasoning), s.e2ee)
 	default:
 		return false, ""
 	}
@@ -126,6 +138,7 @@ type chatState struct {
 	model       string
 	profile     string
 	reasoning   string
+	e2ee        bool
 	sessionID   string
 	artifactDir string
 	nodeID      string
@@ -150,11 +163,31 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 		Payload:      payload,
 		MaxAttempts:  1,
 	}
+	shared := ""
+	if s.e2ee {
+		var reservation cluster.AssignmentResponse
+		if err := clusterPOST(ctx, s.relayURL+"/v1/cluster/assign", s.token, requirements, &reservation); err != nil {
+			return fmt.Errorf("reserve E2EE worker: %w", err)
+		}
+		envelope, sharedKey, err := cluster.SealFor(reservation.Assignment.PublicKey, payload, []byte("job:"+reservation.Assignment.JobID+":"+reservation.Assignment.NodeID))
+		if err != nil {
+			return err
+		}
+		shared = sharedKey
+		input.ID = reservation.Assignment.JobID
+		input.Payload = nil
+		input.Sealed = envelope
+		input.AssignmentID = reservation.Assignment.ID
+		input.AssignmentSecret = reservation.Secret
+	}
 	var job cluster.Job
 	if err := clusterPOST(ctx, s.relayURL+"/v1/cluster/jobs", s.token, input, &job); err != nil {
 		return err
 	}
 	spinner := newChatSpinner("Queued · waiting for a worker")
+	if s.e2ee {
+		spinner.update("encrypted", "E2EE · waiting for encrypted final result", 0)
+	}
 	defer spinner.stop()
 	lastProgress := ""
 	lastSequence := uint64(0)
@@ -169,7 +202,7 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 		if err := clusterGET(ctx, s.relayURL+"/v1/cluster/jobs/"+url.PathEscape(job.ID), s.token, &job); err != nil {
 			return err
 		}
-		if job.Progress != nil && job.Progress.Sequence > lastSequence {
+		if !s.e2ee && job.Progress != nil && job.Progress.Sequence > lastSequence {
 			spinner.update(job.Progress.Phase, job.Progress.Detail, job.Progress.Percent)
 			if !streamed {
 				if strings.TrimSpace(job.Progress.Text) != "" {
@@ -195,8 +228,18 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 		switch job.Status {
 		case cluster.JobCompleted:
 			spinner.stop()
+			rawResult := job.Result
+			if s.e2ee {
+				if job.SealedResult == nil {
+					return errors.New("worker returned no encrypted result")
+				}
+				rawResult, err = cluster.OpenResponse(shared, job.SealedResult, []byte("result:"+job.ID+":"+job.AssignedNode))
+				if err != nil {
+					return fmt.Errorf("decrypt result: %w", err)
+				}
+			}
 			var submission bridge.Submission
-			if err := json.Unmarshal(job.Result, &submission); err != nil {
+			if err := json.Unmarshal(rawResult, &submission); err != nil {
 				return fmt.Errorf("decode result: %w", err)
 			}
 			if submission.Output == nil {

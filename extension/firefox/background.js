@@ -539,7 +539,13 @@ function automate(job, profile, jobDeadline) {
         if ([...document.querySelectorAll(selector)].some(isVisible)) return { busy: true, percent, detail: detail || 'Generating' };
       } catch (_) {}
     }
-    return { busy: false, percent, detail: '', composerReady: Boolean(first(selectors.submit)) };
+    return {
+      busy: false,
+      percent,
+      detail: '',
+      composerReady: Boolean(first(selectors.submit)),
+      inputReady: Boolean(first(selectors.input))
+    };
   };
   const pageBusy = () => pageState().busy;
   const providerError = (responseElement) => {
@@ -821,7 +827,7 @@ function automate(job, profile, jobDeadline) {
         const mode = String(job.output?.mode || 'decision').toLowerCase();
         const structured = mode === 'text' || ((latest.includes('{') && latest.includes('}')) || (latest.includes('[') && latest.includes(']')));
         const stableFor = sawBusy ? 1300 : 2600;
-		const composerFinished = !(selectors.submit || []).length || state.composerReady;
+		const composerFinished = !(selectors.submit || []).length || state.composerReady || (sawBusy && state.inputReady);
         if (Date.now() - stableSince >= stableFor && structured && !busy && composerFinished) {
 		  const artifacts = await collectArtifacts(latestElement, job.output || {});
 		  resolve({ ok: true, text: latest || `Generated ${artifacts.length} artifact(s).`, artifacts, selected_model: selectedModel, selected_reasoning: selectedReasoning });
@@ -1034,8 +1040,8 @@ function inspectPageCapabilities() {
   const unique = (values, limit) => [...new Set(values.filter(Boolean))].slice(0, limit);
   const controls = [...document.querySelectorAll('button, [role="button"]')].filter(visible);
   const options = [...document.querySelectorAll('[role="menuitem"], [role="option"], [aria-checked], [aria-selected]')].filter(visible);
-  const modelPattern = /(?:gpt|gemini|astra|sol|terra|luna|flash|thinking|pro)(?:[\s._-]*\d)?/i;
-  const reasoningPattern = /(?:reason|denk|effort|thinking|instant|sofort|low|niedrig|medium|mittel|high|hoch|pro|max)/i;
+  const modelPattern = /\b(?:gpt|gemini|astra|sol|terra|luna|flash|thinking|pro)\b(?:[\s._-]*\d(?:\.\d+)?)?/i;
+  const reasoningPattern = /\b(?:reason|denk|effort|thinking|instant|sofort|low|niedrig|medium|mittel|high|hoch|pro|max)\b/i;
   const currentModel = text(controls.find((element) => {
     const label = `${text(element)} ${element.getAttribute('aria-label') || ''}`;
     return modelPattern.test(label) && !/modelle ergänzen|add models/i.test(label);
@@ -1054,8 +1060,8 @@ async function discoverPageCapabilities() {
   const text = (element) => String(element?.innerText || element?.textContent || element?.getAttribute?.('aria-label') || '').replace(/\s+/g, ' ').trim().slice(0, 100);
   const unique = (values, limit) => [...new Set(values.filter(Boolean))].slice(0, limit);
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-  const modelPattern = /(?:gpt|gemini|astra|sol|terra|luna|flash|thinking|pro)(?:[\s._-]*\d)?/i;
-  const reasoningPattern = /(?:reason|denk|effort|thinking|instant|sofort|low|niedrig|medium|mittel|high|hoch|pro|max)/i;
+  const modelPattern = /\b(?:gpt|gemini|astra|sol|terra|luna|flash|thinking|pro)\b(?:[\s._-]*\d(?:\.\d+)?)?/i;
+  const reasoningPattern = /\b(?:reason|denk|effort|thinking|instant|sofort|low|niedrig|medium|mittel|high|hoch|pro|max)\b/i;
   const scan = async (kind) => {
     const pattern = kind === 'model' ? modelPattern : reasoningPattern;
     const triggers = [...document.querySelectorAll('button, [role="button"]')].filter(visible).filter((element) => {

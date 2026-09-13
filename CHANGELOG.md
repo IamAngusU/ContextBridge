@@ -2,6 +2,23 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.1 - 2026-09-13
+
+### Added
+
+- optional E2EE for terminal chat through `--e2ee` and interactive `/e2ee on|off`
+- CPU frequency/load, operating-system build, machine uptime, agent version, and GPU driver telemetry
+- colored interactive terminal states while preserving plain redirected logs and `NO_COLOR`
+
+### Fixed
+
+- ChatGPT jobs now finalize when the stop control disappears and the composer is ready, even when the empty composer hides its send button
+- localized profile-menu labels are no longer misidentified as model or reasoning selections
+
+### Changed
+
+- CPU utilization now contributes to multi-worker scheduling, including zero-GPU jobs
+
 ## 0.5.0 - 2026-09-13
 
 ### Added
