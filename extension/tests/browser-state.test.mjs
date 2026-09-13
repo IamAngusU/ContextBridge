@@ -88,9 +88,10 @@ const element = (text = '', attributes = {}) => ({
   const accountMenu = element('Angus Uelsmann Pro');
   const securityControl = element('High Security System');
   const pricingControl = element('Fixierung von Preismodell für PRISM aufheben');
+  const geminiHistory = element('Aktivitätsverlauf in Gemini-Apps');
   context.document = {
     querySelectorAll(selector) {
-      if (selector === 'button, [role="button"]') return [profileMenu, accountMenu, securityControl, pricingControl];
+      if (selector === 'button, [role="button"]') return [profileMenu, accountMenu, securityControl, pricingControl, geminiHistory];
       return [];
     }
   };

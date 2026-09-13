@@ -66,7 +66,7 @@ The installer verifies the matching published release checksum, creates a privat
 
 ## Automatic Updates
 
-Verified stable updates are enabled by default. The Go service checks independently of the dashboard, and supported installers also register a daily operating-system update job. A JavaScript or dashboard failure cannot disable the updater.
+Verified stable core updates are enabled by default. The Go service checks independently of the dashboard, and supported installers also register a daily operating-system update job. Release checks happen at the configured interval (24 hours by default); installation waits until the local bridge, worker, and relay have no active jobs. `updates.enabled: false` in the config disables automatic installation even if the saved UI preference says otherwise. A JavaScript or dashboard failure cannot disable the core updater.
 
 ```bash
 contextbridge update status
@@ -76,7 +76,7 @@ contextbridge update disable
 contextbridge update enable
 ```
 
-An update is downloaded beside the current executable, checked against both `SHA256SUMS` and the GitHub release asset digest, started once to verify its reported version, then activated atomically. The previous executable remains as `.previous` for rollback. Windows uses a short-lived local PowerShell helper after the running process exits; Linux and macOS replace the executable directly and let the managed service restart.
+An update is downloaded beside the current executable, checked against both `SHA256SUMS` and GitHub asset digests, and started to verify its reported version and compatibility with the current config. The previous executable remains available for rollback. Windows uses a short-lived local PowerShell helper after the running process exits; it verifies the restarted service's versioned health response and restores the previous binary if that fails. Linux and macOS keep a pending rollback until the updated service reports healthy. A failed version is not retried automatically; a newer release or an explicit `update apply` can be tried. Unpacked browser extensions still need their files refreshed with the installer and then reloaded in the browser; the core updater does not silently replace a live extension.
 
 The public installer endpoint counts total requests and privacy-preserving unique installer starts. Unique values use an HMAC of a masked network prefix and short user-agent family. Raw IP addresses, cookies, prompts, results, device names, and model activity are not collected. Self-hosted installations do not send runtime telemetry to `angusu.de`.
 
@@ -151,7 +151,7 @@ Inside interactive chat, `/model …`, `/reasoning …`, `/profile …`, `/image
 ![ContextBridge visual teaching overlay](docs/assets/visual-teaching.png)
 
 1. Load `extension/chromium` in Chrome, Edge, Opera, Brave, or Vivaldi. Use `extension/firefox` for Firefox.
-2. Open one or more ChatGPT/Gemini conversations and select all desired tabs in the ContextBridge extension. Each selected tab becomes a parallel slot.
+2. Open one or more ChatGPT/Gemini conversations. In the ContextBridge extension, click **Select all open ChatGPT + Gemini tabs** and then **Start browser bridge**. The button also adds newly opened supported tabs to an already-running connection. Each selected tab becomes a parallel slot; individual tabs can still be selected manually.
 3. Choose **Test profile**. Optionally choose **Scan available models and reasoning levels**, then **Start browser bridge**.
 4. For another provider, choose **Customize detection** and click the requested controls directly in the page.
 

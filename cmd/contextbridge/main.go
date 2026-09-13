@@ -91,6 +91,11 @@ func main() {
 		os.Exit(2)
 	}
 	if err != nil {
+		if len(os.Args) > 1 && (os.Args[1] == "run" || os.Args[1] == "serve" || os.Args[1] == "relay" || os.Args[1] == "worker") {
+			if rollbackErr := updater.RollbackFailedStart(version); rollbackErr != nil {
+				fmt.Fprintln(os.Stderr, "ContextBridge update rollback:", rollbackErr)
+			}
+		}
 		fmt.Fprintln(os.Stderr, "ContextBridge:", err)
 		os.Exit(1)
 	}
@@ -158,9 +163,11 @@ func serveCommand(args []string) error {
 		return err
 	}
 	server.SetUpdater(updateManager)
+	updateManager.SetConfigPath(*path)
+	updateManager.SetHealthURL(localHealthURL(cfg.Server.Listen))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	startUpdater(ctx, updateManager, logger)
+	startUpdater(ctx, updateManager, logger, func(context.Context) bool { return server.Idle() })
 	logger.Printf("version %s", version)
 	logger.Printf("routes: %d, browser profiles: %d", len(cfg.Routes), len(cfg.BrowserProfiles))
 	return server.Run(ctx)
@@ -191,7 +198,8 @@ func runCommand(args []string) error {
 		return err
 	}
 	local.SetUpdater(updateManager)
-	startUpdater(ctx, updateManager, logger)
+	updateManager.SetConfigPath(*path)
+	updateManager.SetHealthURL(localHealthURL(cfg.Server.Listen))
 	components := 1
 	var relay *cluster.Relay
 	var worker *cluster.Worker
@@ -210,6 +218,12 @@ func runCommand(args []string) error {
 		}
 		components++
 	}
+	startUpdater(ctx, updateManager, logger, func(context.Context) bool {
+		if !local.Idle() || (relay != nil && !relay.Idle()) || (worker != nil && !worker.Idle()) {
+			return false
+		}
+		return true
+	})
 	session.Banner(version, fmt.Sprintf("%d components · local bridge%s%s", components, enabledLabel(cfg.Cluster.Relay.Enabled, " · relay"), enabledLabel(cfg.Cluster.Worker.Enabled, " · worker")))
 	go func() { errorsCh <- local.Run(ctx) }()
 	if relay != nil {
@@ -227,7 +241,14 @@ func runCommand(args []string) error {
 	return nil
 }
 
-func startUpdater(ctx context.Context, manager *updater.Manager, logger *log.Logger) {
+func startUpdater(ctx context.Context, manager *updater.Manager, logger *log.Logger, idle func(context.Context) bool) {
+	manager.SetIdleCheck(idle)
+	go func() {
+		if err := manager.ConfirmStartup(ctx); err != nil {
+			logger.Printf("update startup check: %v", err)
+			os.Exit(75)
+		}
+	}()
 	go manager.Run(ctx, func(result updater.Result, err error) {
 		if err != nil {
 			logger.Printf("automatic update check: %v", err)
@@ -260,9 +281,17 @@ func updateCommand(args []string) error {
 	if err != nil {
 		return err
 	}
+	if action == "self-test" {
+		return nil
+	}
 	manager, err := updater.New(cfg.Updates, cfg.Storage.Directory, version)
 	if err != nil {
 		return err
+	}
+	manager.SetHealthURL(localHealthURL(cfg.Server.Listen))
+	manager.SetConfigPath(*path)
+	if cfg.Cluster.Relay.Enabled && !cfg.Cluster.Worker.Enabled {
+		manager.SetHealthURL(localHealthURL(cfg.Cluster.Relay.Listen))
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -277,6 +306,7 @@ func updateCommand(args []string) error {
 		result, applyErr := manager.Apply(ctx, *force)
 		value, err = result, applyErr
 	case "auto":
+		manager.SetIdleCheck(func(ctx context.Context) bool { return installedServiceIdle(ctx, cfg) })
 		result, autoErr := manager.Auto(ctx)
 		value, err = result, autoErr
 	case "enable", "disable":
@@ -291,6 +321,53 @@ func updateCommand(args []string) error {
 		printUpdateResult(value)
 	}
 	return err
+}
+
+// The scheduled updater is a separate process: it must consult the running
+// service instead of assuming that a quiet updater means a quiet worker.
+func installedServiceIdle(ctx context.Context, cfg config.Config) bool {
+	check := func(address string) bool {
+		host, _, err := net.SplitHostPort(address)
+		if err != nil {
+			return false
+		}
+		if host != "localhost" && host != "" && host != "0.0.0.0" && host != "::" && (net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback()) {
+			return false
+		}
+		probe, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		request, err := http.NewRequestWithContext(probe, http.MethodGet, localHealthURL(address), nil)
+		if err != nil {
+			return false
+		}
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			return false
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			return false
+		}
+		var health struct {
+			Idle bool `json:"idle"`
+		}
+		return json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&health) == nil && health.Idle
+	}
+	if cfg.Cluster.Relay.Enabled && !check(cfg.Cluster.Relay.Listen) {
+		return false
+	}
+	return check(cfg.Server.Listen)
+}
+
+func localHealthURL(address string) string {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return ""
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port) + "/health"
 }
 
 func printUpdateResult(value interface{}) {
@@ -795,7 +872,9 @@ func relayCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	startUpdater(ctx, updateManager, logger)
+	updateManager.SetHealthURL(localHealthURL(cfg.Cluster.Relay.Listen))
+	updateManager.SetConfigPath(*path)
+	startUpdater(ctx, updateManager, logger, func(context.Context) bool { return relay.Idle() })
 	return relay.Run(ctx)
 }
 
@@ -865,16 +944,17 @@ func workerCommand(args []string) error {
 	if err != nil {
 		return err
 	}
+	updateManager.SetConfigPath(*path)
 	session := terminalui.New(os.Stdout)
 	defer session.Close()
 	logger := log.New(session, "", 0)
-	startUpdater(ctx, updateManager, logger)
+	startUpdater(ctx, updateManager, logger, func(context.Context) bool { return worker.Idle() })
 	session.Banner(version, "worker · "+name)
 	return worker.RunWithEvents(ctx, session.HandleWorker)
 }
 
 func relayConfig(cfg config.Config) cluster.RelayConfig {
-	return cluster.RelayConfig{Listen: cfg.Cluster.Relay.Listen, PublicURL: cfg.Cluster.Relay.PublicURL, Database: cfg.Cluster.Relay.Database, AdminToken: cfg.Cluster.Relay.AdminToken, AllowedOrigins: cfg.Cluster.Relay.AllowedOrigins, MaxJobBytes: cfg.Cluster.Relay.MaxJobBytes, MaxQueuedJobs: cfg.Cluster.Relay.MaxQueue, PairingTTL: time.Duration(cfg.Cluster.Relay.PairingTTLSeconds) * time.Second, Pricing: cfg.Cluster.Pricing, AllowedTasks: cfg.Cluster.Policies.AllowedTasks, MaxAttempts: cfg.Cluster.Policies.MaxAttempts, Pipelines: cfg.Cluster.Pipelines, MaxPipelineRuntime: time.Duration(cfg.Cluster.Policies.MaxRuntime) * time.Second, JobTimeout: time.Duration(cfg.Cluster.Policies.MaxJobRuntime) * time.Second}
+	return cluster.RelayConfig{Version: version, Listen: cfg.Cluster.Relay.Listen, PublicURL: cfg.Cluster.Relay.PublicURL, Database: cfg.Cluster.Relay.Database, AdminToken: cfg.Cluster.Relay.AdminToken, AllowedOrigins: cfg.Cluster.Relay.AllowedOrigins, MaxJobBytes: cfg.Cluster.Relay.MaxJobBytes, MaxQueuedJobs: cfg.Cluster.Relay.MaxQueue, PairingTTL: time.Duration(cfg.Cluster.Relay.PairingTTLSeconds) * time.Second, Pricing: cfg.Cluster.Pricing, AllowedTasks: cfg.Cluster.Policies.AllowedTasks, MaxAttempts: cfg.Cluster.Policies.MaxAttempts, Pipelines: cfg.Cluster.Pipelines, MaxPipelineRuntime: time.Duration(cfg.Cluster.Policies.MaxRuntime) * time.Second, JobTimeout: time.Duration(cfg.Cluster.Policies.MaxJobRuntime) * time.Second}
 }
 
 func configuredWorker(cfg config.Config) (*cluster.Worker, error) {

@@ -13,7 +13,7 @@ import (
 	"syscall"
 )
 
-func replaceExecutable(current, staged, expectedVersion string) (bool, error) {
+func replaceExecutable(current, staged, expectedVersion, configPath, healthURL, failurePath string) (bool, error) {
 	next := current + ".next.exe"
 	backup := current + ".previous.exe"
 	script := current + ".update.ps1"
@@ -21,7 +21,7 @@ func replaceExecutable(current, staged, expectedVersion string) (bool, error) {
 	if err := copyFile(staged, next, 0700); err != nil {
 		return false, err
 	}
-	if err := validateExecutable(next, expectedVersion); err != nil {
+	if err := validateExecutable(next, expectedVersion, configPath); err != nil {
 		_ = os.Remove(next)
 		return false, err
 	}
@@ -32,33 +32,73 @@ $backup = $args[2]
 $expected = $args[3]
 $parentPid = [int]$args[4]
 $restartLine = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($args[5]))
+$healthUrl = $args[6]
+$failurePath = $args[7]
+$maxProbes = [int]$args[8]
 try { Wait-Process -Id $parentPid -Timeout 60 -ErrorAction SilentlyContinue } catch {}
 $managedTask = Get-ScheduledTask -TaskName "ContextBridge" -ErrorAction SilentlyContinue
+if ($managedTask -and ($managedTask.State -ne 'Running' -or $managedTask.Actions[0].Execute -ne $current)) { $managedTask = $null }
 if ($managedTask) {
   Stop-ScheduledTask -TaskName "ContextBridge" -ErrorAction SilentlyContinue
-  Start-Sleep -Milliseconds 500
+  Start-Sleep -Seconds 1
 }
+$startedProcess = $null
+function Start-Managed {
+  if ($managedTask) { Start-ScheduledTask -TaskName "ContextBridge" }
+  elseif ($restartLine) { $script:startedProcess = Start-Process -FilePath $current -ArgumentList $restartLine -WindowStyle Hidden -PassThru }
+}
+function Test-Healthy {
+  if (-not $healthUrl) {
+    Start-Sleep -Seconds 10
+    if ($managedTask) { return (Get-ScheduledTask -TaskName "ContextBridge").State -eq 'Running' }
+    return $startedProcess -and -not $startedProcess.HasExited
+  }
+  for ($probe = 0; $probe -lt $maxProbes; $probe++) {
+    try {
+      $health = Invoke-RestMethod -Uri $healthUrl -TimeoutSec 2
+      if ($health.ok -eq $true -and $health.version -eq $expected) { return $true }
+    } catch {}
+    Start-Sleep -Seconds 1
+  }
+  return $false
+}
+$installed = $false
+if (Test-Path $backup) { Remove-Item $backup -Force }
 for ($attempt = 0; $attempt -lt 30; $attempt++) {
   try {
-    if (Test-Path $backup) { Remove-Item $backup -Force }
-    Move-Item $current $backup -Force
-    Move-Item $next $current -Force
-    $reported = (& $current version | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or $reported -ne $expected) { throw "Updated executable validation failed." }
-    if ($managedTask) {
-      Start-ScheduledTask -TaskName "ContextBridge" -ErrorAction SilentlyContinue
-    } elseif ($restartLine) {
-      Start-Process -FilePath $current -ArgumentList $restartLine -WindowStyle Hidden
-    }
-    exit 0
+    if (-not (Test-Path $current) -and (Test-Path $backup)) { Move-Item $backup $current -Force }
+    Move-Item $current $backup
+    Move-Item $next $current
+    $installed = $true
+    break
   } catch {
     if ((Test-Path $backup) -and -not (Test-Path $current)) { Move-Item $backup $current -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Seconds 1
   }
 }
-if ((Test-Path $backup) -and -not (Test-Path $current)) { Move-Item $backup $current -Force -ErrorAction SilentlyContinue }
-if ($managedTask) { Start-ScheduledTask -TaskName "ContextBridge" -ErrorAction SilentlyContinue }
-elseif ($restartLine -and (Test-Path $current)) { Start-Process -FilePath $current -ArgumentList $restartLine -WindowStyle Hidden }
+if ($installed) {
+  try {
+    $reported = (& $current version | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $reported -ne $expected) { throw 'Updated executable validation failed.' }
+    Start-Managed
+    if (-not (Test-Healthy)) { throw 'Updated service did not become healthy.' }
+    Remove-Item $failurePath -Force -ErrorAction SilentlyContinue
+    exit 0
+  } catch {}
+}
+if ($managedTask) { Stop-ScheduledTask -TaskName "ContextBridge" -ErrorAction SilentlyContinue }
+if ($startedProcess -and -not $startedProcess.HasExited) { Stop-Process -Id $startedProcess.Id -Force -ErrorAction SilentlyContinue }
+if (Test-Path $backup) {
+  if (Test-Path $current) {
+    $failed = $current + '.failed.exe'
+    Remove-Item $failed -Force -ErrorAction SilentlyContinue
+    Move-Item $current $failed -Force -ErrorAction SilentlyContinue
+  }
+  if (-not (Test-Path $current)) { Move-Item $backup $current -Force -ErrorAction SilentlyContinue }
+}
+$failure = @{ version = $expected; error = "Update $expected failed validation or health check; previous version restored."; at = [DateTime]::UtcNow.ToString('o') }
+[IO.File]::WriteAllText($failurePath, ($failure | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding($false)))
+if (Test-Path $current) { Start-Managed }
 exit 1
 `
 	if err := os.WriteFile(script, []byte(strings.ReplaceAll(body, "\n", "\r\n")), 0600); err != nil {
@@ -74,7 +114,7 @@ exit 1
 		restartLine = strings.Join(quoted, " ")
 	}
 	encodedRestart := base64.StdEncoding.EncodeToString([]byte(restartLine))
-	command := exec.Command("powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, current, next, backup, expectedVersion, strconv.Itoa(os.Getpid()), encodedRestart)
+	command := exec.Command("powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, current, next, backup, expectedVersion, strconv.Itoa(os.Getpid()), encodedRestart, healthURL, failurePath, "45")
 	command.Dir = filepath.Dir(current)
 	if err := command.Start(); err != nil {
 		_ = os.Remove(next)

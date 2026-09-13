@@ -8,6 +8,7 @@ let stopRequested = false;
 let heartbeatTimer = 0;
 const pollers = new Map();
 const busyTabs = new Set();
+const acceptedModelLabel = /^(?:gpt[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:astra|sol|terra|luna|pro|mini|nano|codex|thinking|instant))?|gemini(?:[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:pro|flash|lite|thinking|preview|experimental))*)?|astra|sol|terra|luna|\d+(?:\.\d+)?\s+(?:pro|flash|astra|sol|terra|luna))$/i;
 
 api.runtime.onInstalled.addListener(() => resume());
 api.runtime.onStartup.addListener(() => resume());
@@ -29,6 +30,12 @@ async function handleMessage(message, sender) {
       return testBridge();
     case 'status':
       return currentStatus();
+    case 'refresh-tabs':
+      if ((await settings()).running) {
+        poll();
+        await sendHeartbeat(busyTabs.size ? 'working' : 'waiting');
+      }
+      return { ok: true };
     case 'start-teaching':
       return startTeaching(Number(message.tabId));
     case 'picker-complete':
@@ -1142,9 +1149,9 @@ async function sendHeartbeat(state) {
         const live = report?.[0]?.result || {};
         capabilities = {
           ...capabilities,
-          currentModel: live.currentModel || capabilities.currentModel || '',
+          currentModel: live.currentModel || (acceptedModelLabel.test(capabilities.currentModel || '') ? capabilities.currentModel : ''),
           currentReasoning: live.currentReasoning || capabilities.currentReasoning || '',
-          models: [...new Set([...(capabilities.models || []), ...(live.models || [])])],
+          models: [...new Set([...(capabilities.models || []), ...(live.models || [])])].filter((value) => acceptedModelLabel.test(value)),
           reasoningLevels: [...new Set([...(capabilities.reasoningLevels || []), ...(live.reasoningLevels || [])])]
         };
       } catch (_) {}
@@ -1216,13 +1223,13 @@ function inspectPageCapabilities() {
   const unique = (values, limit) => [...new Set(values.filter(Boolean))].slice(0, limit);
   const controls = [...document.querySelectorAll('button, [role="button"]')].filter(visible);
   const options = [...document.querySelectorAll('[role="menuitem"], [role="option"], [aria-checked], [aria-selected]')].filter(visible);
-  const modelPattern = /\b(?:gpt|gemini|astra|sol|terra|luna|flash)\b(?:[\s._-]*\d(?:\.\d+)?)?|^\d+(?:\.\d+)?\s+(?:pro|flash)$/i;
+  const modelPattern = /^(?:gpt[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:astra|sol|terra|luna|pro|mini|nano|codex|thinking|instant))?|gemini(?:[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:pro|flash|lite|thinking|preview|experimental))*)?|astra|sol|terra|luna|\d+(?:\.\d+)?\s+(?:pro|flash|astra|sol|terra|luna))$/i;
   const reasoningPattern = /^(?:instant|sofort|fast|schnell|low|niedrig|medium|mittel|high|hoch|very high|sehr hoch|xhigh|pro|max|maximum)$/i;
   const semantic = (element, pattern) => pattern.test(`${element.getAttribute('data-testid') || ''} ${element.getAttribute('aria-label') || ''}`);
   const modelControl = (element) => semantic(element, /model[-_ ]?(?:switcher|selector|picker|menu)|(?:choose|select|current)[-_ ]?model|modellauswahl|modellmenü|modellmodus/i);
   const currentModel = text(controls.find((element) => {
     const label = `${text(element)} ${element.getAttribute('aria-label') || ''}`;
-    return (modelControl(element) || modelPattern.test(text(element))) && !/modelle ergänzen|add models|preismodell|pricing model/i.test(label);
+    return modelPattern.test(text(element)) && !/modelle ergänzen|add models|preismodell|pricing model/i.test(label);
   }));
   const currentReasoning = text(controls.find((element) => semantic(element, /reason|denk|effort|thinking/i) || reasoningPattern.test(text(element))));
   return {
@@ -1308,7 +1315,7 @@ async function discoverPageCapabilities() {
   const text = (element) => String(element?.innerText || element?.textContent || element?.getAttribute?.('aria-label') || '').replace(/\s+/g, ' ').trim().slice(0, 100);
   const unique = (values, limit) => [...new Set(values.filter(Boolean))].slice(0, limit);
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-  const modelPattern = /\b(?:gpt|gemini|astra|sol|terra|luna|flash)\b(?:[\s._-]*\d(?:\.\d+)?)?|^\d+(?:\.\d+)?\s+(?:pro|flash)$/i;
+  const modelPattern = /^(?:gpt[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:astra|sol|terra|luna|pro|mini|nano|codex|thinking|instant))?|gemini(?:[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:pro|flash|lite|thinking|preview|experimental))*)?|astra|sol|terra|luna|\d+(?:\.\d+)?\s+(?:pro|flash|astra|sol|terra|luna))$/i;
   const reasoningPattern = /^(?:instant|sofort|fast|schnell|low|niedrig|medium|mittel|high|hoch|very high|sehr hoch|xhigh|pro|max|maximum)$/i;
   const semantic = (element, pattern) => pattern.test(`${element.getAttribute('data-testid') || ''} ${element.getAttribute('aria-label') || ''}`);
   const modelControl = (element) => semantic(element, /model[-_ ]?(?:switcher|selector|picker|menu)|(?:choose|select|current)[-_ ]?model|modellauswahl|modellmenü|modellmodus/i);
@@ -1321,7 +1328,7 @@ async function discoverPageCapabilities() {
       return semantic(element, /reason|denk|effort|thinking/i) || reasoningPattern.test(text(element));
     });
     if (!triggers.length) return { current: '', values: [] };
-    const current = text(triggers[0]);
+    const current = modelPattern.test(text(triggers[0])) ? text(triggers[0]) : '';
     triggers[0].click();
     await wait(350);
     const values = unique([...document.querySelectorAll('[role="menuitem"], [role="option"], [data-radix-collection-item], [aria-checked], [aria-selected]')].filter(visible).map(text).filter((value) => pattern.test(value)), kind === 'model' ? 50 : 20);

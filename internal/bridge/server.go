@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -26,13 +27,20 @@ import (
 )
 
 type Server struct {
-	cfg       config.Config
-	store     *Store
-	processor *Processor
-	runtime   *RuntimeManager
-	updates   *updater.Manager
-	rag       vectorstore.Store
-	logger    *log.Logger
+	cfg        config.Config
+	store      *Store
+	processor  *Processor
+	runtime    *RuntimeManager
+	updates    *updater.Manager
+	rag        vectorstore.Store
+	logger     *log.Logger
+	activeJobs atomic.Int64
+}
+
+// Idle reports whether replacing this process would interrupt local work.
+func (s *Server) Idle() bool {
+	queued, _ := s.store.Stats()
+	return s.activeJobs.Load() == 0 && queued == 0 && s.store.BrowserStatus().BusyTabs == 0
 }
 
 func (s *Server) SetUpdater(manager *updater.Manager) {
@@ -104,6 +112,8 @@ func (s *Server) Run(ctx context.Context) error {
 }
 
 func (s *Server) Process(ctx context.Context, job Job) (Output, error) {
+	s.activeJobs.Add(1)
+	defer s.activeJobs.Add(-1)
 	prepareJob(&job)
 	if routeTask := strings.TrimSpace(s.cfg.Route(job.Route).Task); routeTask != "" {
 		job.Task = routeTask
@@ -164,12 +174,14 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	queued, completed := s.store.Stats()
 	browser := s.store.BrowserStatus()
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"ok":        true,
-		"service":   "contextbridge",
-		"version":   Version,
-		"queued":    queued,
-		"completed": completed,
-		"browser":   browser.Connected,
+		"ok":          true,
+		"service":     "contextbridge",
+		"version":     Version,
+		"queued":      queued,
+		"active_jobs": s.activeJobs.Load(),
+		"idle":        s.Idle(),
+		"completed":   completed,
+		"browser":     browser.Connected,
 	})
 }
 

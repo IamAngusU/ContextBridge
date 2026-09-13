@@ -24,6 +24,8 @@ import (
 
 const maxReleaseBytes = 512 << 20
 
+var errUpdateBusy = errors.New("update deferred while jobs are active")
+
 type Settings struct {
 	Enabled            *bool  `yaml:"enabled" json:"enabled"`
 	Channel            string `yaml:"channel" json:"channel"`
@@ -73,6 +75,9 @@ type State struct {
 	LastAvailable   string    `json:"last_available,omitempty"`
 	LastInstalled   string    `json:"last_installed,omitempty"`
 	LastError       string    `json:"last_error,omitempty"`
+	BlockedVersion  string    `json:"blocked_version,omitempty"`
+	RetryAfter      time.Time `json:"retry_after,omitempty"`
+	Failures        int       `json:"failures,omitempty"`
 	UpdatedAt       time.Time `json:"updated_at,omitempty"`
 }
 
@@ -86,6 +91,8 @@ type Status struct {
 	LastChecked      time.Time `json:"last_checked,omitempty"`
 	LastInstalled    string    `json:"last_installed,omitempty"`
 	LastError        string    `json:"last_error,omitempty"`
+	BlockedVersion   string    `json:"blocked_version,omitempty"`
+	RetryAfter       time.Time `json:"retry_after,omitempty"`
 	ManagedBuild     bool      `json:"managed_build"`
 }
 
@@ -116,6 +123,33 @@ type Manager struct {
 	executable     string
 	client         *http.Client
 	mu             sync.Mutex
+	idleCheck      func(context.Context) bool
+	healthURL      string
+	configPath     string
+}
+
+func (m *Manager) SetConfigPath(path string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.configPath = path
+}
+
+func (m *Manager) SetHealthURL(value string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.healthURL = value
+}
+
+// SetIdleCheck supplies a fail-closed runtime check for automatic activation.
+// Explicit `update apply` remains an operator action and does not use it.
+func (m *Manager) SetIdleCheck(check func(context.Context) bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.idleCheck = check
+}
+
+func (m *Manager) idle(ctx context.Context) bool {
+	return m.idleCheck != nil && m.idleCheck(ctx)
 }
 
 func New(settings Settings, dataDir, currentVersion string) (*Manager, error) {
@@ -136,7 +170,12 @@ func New(settings Settings, dataDir, currentVersion string) (*Manager, error) {
 	}
 	return &Manager{
 		settings: settings, dataDir: dataDir, currentVersion: strings.TrimSpace(currentVersion), executable: executable,
-		client: &http.Client{Timeout: 90 * time.Second},
+		client: &http.Client{Timeout: 90 * time.Second, CheckRedirect: func(request *http.Request, via []*http.Request) error {
+			if request.URL.Scheme != "https" || len(via) > 10 {
+				return errors.New("update download redirected to an insecure or excessive destination")
+			}
+			return nil
+		}},
 	}, nil
 }
 
@@ -187,11 +226,15 @@ func (m *Manager) Check(ctx context.Context) (Status, error) {
 	state.UpdatedAt = state.LastChecked
 	if err != nil {
 		state.LastError = cleanError(err)
+		state.LastChecked = time.Time{}
+		scheduleRetry(&state)
 		_ = m.saveState(state)
 		return m.status(state), err
 	}
 	state.LastAvailable = release.TagName
 	state.LastError = ""
+	state.RetryAfter = time.Time{}
+	state.Failures = 0
 	if err := m.saveState(state); err != nil {
 		return Status{}, err
 	}
@@ -214,11 +257,36 @@ func (m *Manager) Auto(ctx context.Context) (Result, error) {
 	if !status.Enabled || !status.ManagedBuild {
 		return Result{Status: status}, nil
 	}
-	interval := time.Duration(m.settings.CheckIntervalHours) * time.Hour
-	if !state.LastChecked.IsZero() && time.Since(state.LastChecked) < interval {
+	if time.Now().Before(state.RetryAfter) {
 		return Result{Status: status}, nil
 	}
-	return m.applyLocked(ctx, state, false)
+	interval := time.Duration(m.settings.CheckIntervalHours) * time.Hour
+	if state.LastChecked.IsZero() || time.Since(state.LastChecked) >= interval {
+		release, checkErr := m.latest(ctx)
+		state.LastChecked = time.Now().UTC()
+		state.UpdatedAt = state.LastChecked
+		if checkErr != nil {
+			state.LastError = cleanError(checkErr)
+			state.LastChecked = time.Time{}
+			scheduleRetry(&state)
+			_ = m.saveState(state)
+			return Result{Status: m.status(state)}, checkErr
+		}
+		state.LastAvailable = release.TagName
+		state.RetryAfter = time.Time{}
+		state.Failures = 0
+		if state.BlockedVersion != release.TagName {
+			state.LastError = ""
+		}
+		if err := m.saveState(state); err != nil {
+			return Result{}, err
+		}
+	}
+	status = m.status(state)
+	if !status.UpdateAvailable || state.BlockedVersion == state.LastAvailable || !m.idle(ctx) {
+		return Result{Status: status}, nil
+	}
+	return m.applyLocked(ctx, state, false, true)
 }
 
 func (m *Manager) Apply(ctx context.Context, force bool) (Result, error) {
@@ -233,10 +301,10 @@ func (m *Manager) Apply(ctx context.Context, force bool) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	return m.applyLocked(ctx, state, force)
+	return m.applyLocked(ctx, state, force, false)
 }
 
-func (m *Manager) applyLocked(ctx context.Context, state State, force bool) (Result, error) {
+func (m *Manager) applyLocked(ctx context.Context, state State, force, automatic bool) (Result, error) {
 	if !managedVersion(m.currentVersion) && !force {
 		return Result{Status: m.status(state)}, errors.New("development builds are not replaced automatically; use --force to install the latest release")
 	}
@@ -245,6 +313,10 @@ func (m *Manager) applyLocked(ctx context.Context, state State, force bool) (Res
 	state.UpdatedAt = state.LastChecked
 	if err != nil {
 		state.LastError = cleanError(err)
+		state.LastChecked = time.Time{}
+		if automatic {
+			scheduleRetry(&state)
+		}
 		_ = m.saveState(state)
 		return Result{Status: m.status(state)}, err
 	}
@@ -256,14 +328,28 @@ func (m *Manager) applyLocked(ctx context.Context, state State, force bool) (Res
 		}
 		return Result{Status: m.status(state)}, nil
 	}
-	restart, err := m.install(ctx, release)
+	if automatic && !m.idle(ctx) {
+		_ = m.saveState(state)
+		return Result{Status: m.status(state)}, nil
+	}
+	restart, err := m.install(ctx, release, automatic)
 	if err != nil {
+		if automatic && errors.Is(err, errUpdateBusy) {
+			_ = m.saveState(state)
+			return Result{Status: m.status(state)}, nil
+		}
 		state.LastError = cleanError(err)
+		if automatic {
+			scheduleRetry(&state)
+		}
 		_ = m.saveState(state)
 		return Result{Status: m.status(state)}, err
 	}
 	state.LastInstalled = release.TagName
+	state.BlockedVersion = ""
 	state.LastError = ""
+	state.RetryAfter = time.Time{}
+	state.Failures = 0
 	state.UpdatedAt = time.Now().UTC()
 	if err := m.saveState(state); err != nil {
 		return Result{}, err
@@ -286,21 +372,68 @@ func (m *Manager) Run(ctx context.Context, notify func(Result, error)) {
 			if notify != nil {
 				notify(result, err)
 			}
-			timer.Reset(time.Hour)
+			timer.Reset(time.Minute)
+		}
+	}
+}
+
+// ConfirmStartup completes a Unix update only after the new service responds
+// with the expected version. A failed health check restores the prior binary.
+func (m *Manager) ConfirmStartup(ctx context.Context) error {
+	if !pendingUpdateFor(m.executable, m.currentVersion) {
+		return nil
+	}
+	if m.healthURL == "" {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(15 * time.Second):
+		}
+		return clearPendingUpdate(m.executable)
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	deadline := time.NewTimer(45 * time.Second)
+	defer deadline.Stop()
+	probe := time.NewTicker(time.Second)
+	defer probe.Stop()
+	for {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, m.healthURL, nil)
+		if err == nil {
+			if response, callErr := client.Do(request); callErr == nil {
+				var health struct {
+					OK      bool   `json:"ok"`
+					Version string `json:"version"`
+				}
+				decodeErr := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&health)
+				_ = response.Body.Close()
+				if response.StatusCode == http.StatusOK && decodeErr == nil && health.OK && health.Version == m.currentVersion {
+					return clearPendingUpdate(m.executable)
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-deadline.C:
+			if err := RollbackFailedStart(m.currentVersion); err != nil {
+				return fmt.Errorf("updated service failed health check and rollback failed: %w", err)
+			}
+			return errors.New("updated service failed health check; previous version restored")
+		case <-probe.C:
 		}
 	}
 }
 
 func (m *Manager) status(state State) Status {
 	enabled := m.settings.DefaultEnabled()
-	if state.EnabledOverride != nil {
+	if enabled && state.EnabledOverride != nil {
 		enabled = *state.EnabledOverride
 	}
 	return Status{
 		Enabled: enabled, Channel: m.settings.Channel, Repository: m.settings.Repository,
 		CurrentVersion: m.currentVersion, AvailableVersion: state.LastAvailable,
 		UpdateAvailable: managedVersion(m.currentVersion) && newerVersion(m.currentVersion, state.LastAvailable),
-		LastChecked:     state.LastChecked, LastInstalled: state.LastInstalled, LastError: state.LastError,
+		LastChecked:     state.LastChecked, LastInstalled: state.LastInstalled, LastError: state.LastError, BlockedVersion: state.BlockedVersion, RetryAfter: state.RetryAfter,
 		ManagedBuild: managedVersion(m.currentVersion),
 	}
 }
@@ -347,7 +480,7 @@ func (m *Manager) latest(ctx context.Context) (Release, error) {
 	return release, nil
 }
 
-func (m *Manager) install(ctx context.Context, release Release) (bool, error) {
+func (m *Manager) install(ctx context.Context, release Release, automatic bool) (bool, error) {
 	assetName := releaseAssetName(runtime.GOOS, runtime.GOARCH)
 	asset, checksums, err := releaseAssets(release, assetName)
 	if err != nil {
@@ -363,6 +496,9 @@ func (m *Manager) install(ctx context.Context, release Release) (bool, error) {
 	if err := m.download(ctx, asset, archivePath); err != nil {
 		return false, err
 	}
+	if checksums.Size > 1<<20 {
+		return false, errors.New("release checksum file is too large")
+	}
 	if err := m.download(ctx, checksums, checksumPath); err != nil {
 		return false, err
 	}
@@ -377,8 +513,11 @@ func (m *Manager) install(ctx context.Context, release Release) (bool, error) {
 	if !strings.EqualFold(expected, actual) {
 		return false, errors.New("release checksum does not match SHA256SUMS")
 	}
-	if asset.Digest != "" && !strings.EqualFold(strings.TrimPrefix(asset.Digest, "sha256:"), actual) {
+	if !strings.HasPrefix(asset.Digest, "sha256:") || !strings.EqualFold(strings.TrimPrefix(asset.Digest, "sha256:"), actual) {
 		return false, errors.New("release checksum does not match the GitHub asset digest")
+	}
+	if digest, err := fileSHA256(checksumPath); err != nil || !strings.EqualFold(checksums.Digest, "sha256:"+digest) {
+		return false, errors.New("SHA256SUMS does not match the GitHub asset digest")
 	}
 	staged := filepath.Join(temporary, executableName(runtime.GOOS))
 	if err := extractExecutable(archivePath, staged); err != nil {
@@ -387,10 +526,13 @@ func (m *Manager) install(ctx context.Context, release Release) (bool, error) {
 	if err := os.Chmod(staged, 0755); err != nil && runtime.GOOS != "windows" {
 		return false, err
 	}
-	if err := validateExecutable(staged, release.TagName); err != nil {
+	if err := validateExecutable(staged, release.TagName, m.configPath); err != nil {
 		return false, err
 	}
-	return replaceExecutable(m.executable, staged, release.TagName)
+	if automatic && !m.idle(ctx) {
+		return false, errUpdateBusy
+	}
+	return replaceExecutable(m.executable, staged, release.TagName, m.configPath, m.healthURL, m.failurePath())
 }
 
 func (m *Manager) download(ctx context.Context, asset Asset, destination string) error {
@@ -532,7 +674,7 @@ func writeExecutable(input io.Reader, destination string) error {
 	return nil
 }
 
-func validateExecutable(path, expected string) error {
+func validateExecutable(path, expected, configPath string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	output, err := exec.CommandContext(ctx, path, "version").CombinedOutput()
@@ -541,6 +683,13 @@ func validateExecutable(path, expected string) error {
 	}
 	if strings.TrimSpace(string(output)) != expected {
 		return fmt.Errorf("staged executable reports %q instead of %q", strings.TrimSpace(string(output)), expected)
+	}
+	if configPath != "" {
+		checkCtx, checkCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer checkCancel()
+		if output, err := exec.CommandContext(checkCtx, path, "update", "self-test", "--config", configPath).CombinedOutput(); err != nil {
+			return fmt.Errorf("staged executable rejected the current configuration: %s: %w", strings.TrimSpace(string(output)), err)
+		}
 	}
 	return nil
 }
@@ -577,7 +726,8 @@ func fileSHA256(path string) (string, error) {
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-func (m *Manager) statePath() string { return filepath.Join(m.dataDir, "update-state.json") }
+func (m *Manager) statePath() string   { return filepath.Join(m.dataDir, "update-state.json") }
+func (m *Manager) failurePath() string { return filepath.Join(m.dataDir, "update-failed.json") }
 
 func (m *Manager) acquireLock(ctx context.Context) (func(), error) {
 	path := filepath.Join(m.dataDir, "update.lock")
@@ -605,15 +755,25 @@ func (m *Manager) acquireLock(ctx context.Context) (func(), error) {
 
 func (m *Manager) loadState() (State, error) {
 	raw, err := os.ReadFile(m.statePath())
-	if errors.Is(err, os.ErrNotExist) {
-		return State{}, nil
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return State{}, err
 	}
 	var state State
-	if err := json.Unmarshal(raw, &state); err != nil {
-		return State{}, fmt.Errorf("parse update state: %w", err)
+	if err == nil {
+		if err := json.Unmarshal(raw, &state); err != nil {
+			return State{}, fmt.Errorf("parse update state: %w", err)
+		}
+	}
+	if failed, readErr := os.ReadFile(m.failurePath()); readErr == nil {
+		var marker struct {
+			Version string `json:"version"`
+			Error   string `json:"error"`
+		}
+		if json.Unmarshal(failed, &marker) == nil && marker.Version != "" {
+			state.BlockedVersion = marker.Version
+			state.LastError = marker.Error
+			state.LastInstalled = m.currentVersion
+		}
 	}
 	return state, nil
 }
@@ -695,4 +855,13 @@ func cleanError(err error) string {
 		value = value[:500]
 	}
 	return value
+}
+
+func scheduleRetry(state *State) {
+	state.Failures = min(state.Failures+1, 8)
+	delay := 15 * time.Minute * time.Duration(1<<(state.Failures-1))
+	if delay > 24*time.Hour {
+		delay = 24 * time.Hour
+	}
+	state.RetryAfter = time.Now().UTC().Add(delay)
 }

@@ -57,6 +57,12 @@ type Worker struct {
 	hardwareAt time.Time
 }
 
+func (w *Worker) Idle() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.running == 0
+}
+
 const (
 	WorkerConnecting   = "connecting"
 	WorkerRetrying     = "retrying"

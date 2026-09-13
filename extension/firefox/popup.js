@@ -18,6 +18,22 @@ async function initialize() {
 }
 
 $('refresh-tabs').addEventListener('click', () => loadTabs(selectedTabIDs(), false));
+$('select-ai-tabs').addEventListener('click', async () => {
+  try {
+    const granted = await api.permissions.request({ permissions: ['tabs'] });
+    if (!granted) throw new Error('Tab access was not granted');
+    const allTabs = await api.tabs.query({});
+    const supported = allTabs.filter((tab) => tab.id && globalThis.ContextBridgeProfiles?.forURL(tab.url || ''));
+    if (!supported.length) throw new Error('No open ChatGPT or Gemini tab was found');
+    const origins = [...new Set(supported.map((tab) => new URL(tab.url).origin + '/*'))];
+    if (!await api.permissions.request({ origins })) throw new Error('Page access was not granted');
+    await loadTabs(supported.map((tab) => tab.id), true);
+    await refreshState();
+    setStatus('live', `${supported.length} AI tab${supported.length === 1 ? '' : 's'} selected`);
+  } catch (error) {
+    setStatus('error', error.message || String(error));
+  }
+});
 $('all-tabs').addEventListener('click', async () => {
   const granted = await api.permissions.request({ permissions: ['tabs'] });
   if (!granted) return setStatus('error', 'Tab access was not granted');
@@ -27,6 +43,7 @@ $('all-tabs').addEventListener('click', async () => {
 $('tab').addEventListener('change', async () => {
   const tabIds = selectedTabIDs();
   await api.storage.local.set({ tabId: tabIds[0] || 0, tabIds });
+  await api.runtime.sendMessage({ type: 'refresh-tabs' });
   await refreshState();
 });
 $('visual-mode').addEventListener('change', async () => {
@@ -190,6 +207,7 @@ async function loadTabs(selected, allWindows) {
   $('all-tabs').hidden = await hasTabsPermission();
   const tabIds = selectedTabIDs();
   await api.storage.local.set({ tabId: tabIds[0] || 0, tabIds });
+  await api.runtime.sendMessage({ type: 'refresh-tabs' });
 }
 
 async function loadProfiles(saved) {

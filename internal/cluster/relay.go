@@ -19,6 +19,7 @@ import (
 )
 
 type RelayConfig struct {
+	Version            string
 	Listen             string
 	PublicURL          string
 	Database           string
@@ -46,6 +47,14 @@ type Relay struct {
 	rateMu  sync.Mutex
 	rate    map[string]*rateWindow
 	wake    chan struct{}
+}
+
+func (r *Relay) Idle() bool {
+	overview, err := r.store.Overview()
+	if err != nil {
+		return false
+	}
+	return overview.JobsByState[JobQueued] == 0 && overview.JobsByState[JobAssigned] == 0 && overview.JobsByState[JobRunning] == 0
 }
 
 type workerConnection struct {
@@ -202,7 +211,8 @@ func (r *Relay) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "service": "contextbridge-relay", "protocol": ProtocolVersion, "overview": overview})
+	idle := overview.JobsByState[JobQueued] == 0 && overview.JobsByState[JobAssigned] == 0 && overview.JobsByState[JobRunning] == 0
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "service": "contextbridge-relay", "version": r.cfg.Version, "protocol": ProtocolVersion, "overview": overview, "idle": idle})
 }
 
 func (r *Relay) handlePairRequest(w http.ResponseWriter, req *http.Request) {

@@ -8,14 +8,14 @@ import (
 	"path/filepath"
 )
 
-func replaceExecutable(current, staged, expectedVersion string) (bool, error) {
+func replaceExecutable(current, staged, expectedVersion, configPath, _, failurePath string) (bool, error) {
 	backup := current + ".previous"
 	next := current + ".next"
 	_ = os.Remove(next)
 	if err := copyFile(staged, next, 0755); err != nil {
 		return false, err
 	}
-	if err := validateExecutable(next, expectedVersion); err != nil {
+	if err := validateExecutable(next, expectedVersion, configPath); err != nil {
 		_ = os.Remove(next)
 		return false, err
 	}
@@ -28,7 +28,7 @@ func replaceExecutable(current, staged, expectedVersion string) (bool, error) {
 		_ = os.Rename(backup, current)
 		return false, fmt.Errorf("activate updated executable: %w", err)
 	}
-	if err := validateExecutable(current, expectedVersion); err != nil {
+	if err := validateExecutable(current, expectedVersion, configPath); err != nil {
 		failed := current + ".failed"
 		_ = os.Remove(failed)
 		_ = os.Rename(current, failed)
@@ -36,6 +36,10 @@ func replaceExecutable(current, staged, expectedVersion string) (bool, error) {
 			return false, fmt.Errorf("updated executable failed validation (%v) and rollback failed: %w", err, rollbackErr)
 		}
 		return false, fmt.Errorf("updated executable failed validation and was rolled back: %w", err)
+	}
+	if err := writePendingUpdate(current, expectedVersion, failurePath); err != nil {
+		_ = restorePreviousAt(current)
+		return false, fmt.Errorf("could not arm startup rollback: %w", err)
 	}
 	return true, nil
 }

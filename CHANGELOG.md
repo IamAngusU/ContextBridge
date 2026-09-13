@@ -2,6 +2,20 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.5 - 2026-09-13
+
+### Added
+
+- automatic release checks remain enabled by default, but activation waits for an idle local bridge, worker, and relay; the separate Windows update task also checks live service health
+- staged releases must pass a version and current-config self-test; Windows rolls back if the restarted service fails its versioned health check, and Unix-like services keep a pending rollback until healthy
+- a failed release is quarantined against repeated automatic attempts; `updates.enabled: false` in the config always wins
+- the extension can select all open ChatGPT and Gemini tabs with one click, adding parallel slots to an already-running connection
+
+### Fixed
+
+- Gemini account-activity controls are no longer misreported as the current AI model
+- update downloads require both GitHub asset digests and SHA256SUMS, and redirects remain HTTPS-only
+
 ## 0.5.4 - 2026-09-13
 
 ### Fixed
