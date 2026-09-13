@@ -35,9 +35,8 @@ Firefox removes temporary add-ons when the browser closes. Permanent consumer in
 ## Connect ChatGPT Or Gemini
 
 1. Start ContextBridge and open a dedicated ChatGPT or Gemini tab.
-2. Open the extension on that page and click **Attach current page**. For another tab, choose its row and click **Allow this tab**. Choosing a row alone does not grant access. Alternatively, **Attach fresh ChatGPT + Gemini chats** finds only confirmed empty chats.
-3. The extension shows the automatically detected profile. Choose **Test profile**.
-4. Choose **Start browser bridge**.
+2. Open the extension on that page. It recognizes ChatGPT or Gemini automatically; click **Connect this AI page**. This attaches the current page, checks the saved local pairing token, and starts the browser bridge. No separate test or provider selection is needed.
+3. To add another page, open the popup on that page and click **Attach this page**. **Detach this page** reverses it. **Manage other tabs** contains the optional list, filters, and fresh-chat helper; selecting a row alone does not grant access.
 
 On a completely new conversation, the built-in profile can be verified before
 the first assistant response exists. The extension marks that response target
@@ -46,14 +45,14 @@ as ready to appear after the first answer.
 ## Teach Another Page Or Override Detection
 
 1. Start ContextBridge and open the target AI page.
-2. Open the extension on the AI page and click **Attach current page** to connect even an existing conversation. The button changes to **Detach current page** while attached. Grant optional all-tabs access only when you need another window or automatic fresh-tab discovery.
-3. Choose **Customize detection**.
+2. Open **Advanced setup and diagnostics** in the extension on the AI page and choose **Customize detection for selected tab**. Grant optional all-tabs access only when you need another window or automatic fresh-tab discovery.
+3. The visual picker opens on that page.
 4. Click the prompt field.
 5. Click the send control, or skip when Enter submits.
 6. Click one complete assistant response.
 7. Click the image upload control, or skip for a text-only workflow.
-8. Open the extension again and choose **Test profile**.
-9. Choose **Start browser bridge**.
+8. Open the extension again and choose **Test selected page profile** if you want a diagnostic check.
+9. Click **Connect this AI page**, or **Attach this page** if the bridge is already connected.
 
 The page overlay intercepts teaching clicks, so it does not submit text or open the file chooser while controls are being selected.
 
@@ -92,7 +91,7 @@ The optional tabs permission is requested by **Show tabs from every window** or 
 
 ## Retest Or Replace A Profile
 
-Page interfaces change. Choose **Test profile** after a provider redesign. Choose **Customize detection** to replace an automatic or local profile, or use **Forget profile for this page** under advanced settings to return to automatic detection.
+Page interfaces change. Under **Advanced setup and diagnostics**, choose **Test selected page profile** after a provider redesign, **Customize detection for selected tab** to replace an automatic or local profile, or **Forget customized profile** to return to automatic detection.
 
 YAML browser profiles remain available when a reviewed selector set must be distributed across several machines.
 

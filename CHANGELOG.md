@@ -2,6 +2,22 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.15 - 2026-09-13
+
+### Fixed
+
+- keep Connect available when the selected tab-list row has no profile; ChatGPT and Gemini are recognized from the current page without manual provider selection
+- validate the saved pairing token against the authenticated local service before marking the browser bridge connected
+- require a successful browser heartbeat before Connect reports success, and show connection errors separately from stale website-job failures
+- recover a reloaded Opera tab when its AI prompt is actually ready, even if the browser has not reported the tab as fully loaded
+- withhold provisional browser text unless a live Stop or streaming control is visible, so a stale Gemini answer does not leak into the next job's terminal stream
+
+### Changed
+
+- reduce the default popup to current-page attach/detach and one Connect/Disconnect action; move multi-tab management, model scanning, profile teaching, and diagnostics under Advanced
+- let Connect explicitly attach the current recognized AI page when no tab was attached yet, so a separate profile or local-service test is not part of normal setup
+- default fresh-tab auto-attachment to off for new users; it remains opt-in under Manage other tabs and existing saved choices are preserved
+
 ## 0.5.14 - 2026-09-13
 
 ### Fixed

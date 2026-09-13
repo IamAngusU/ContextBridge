@@ -77,7 +77,7 @@ async function handleMessage(message, sender) {
 
 async function startPairing() {
   const cfg = await settings();
-  if (!cfg.token) throw new Error('Enter the local pairing token first');
+  if (!cfg.token) throw new Error('Enter the pairing token once in Advanced settings');
   const tabIds = configuredTabIDs(cfg);
   if (!tabIds.length) throw new Error('Select at least one AI tab first');
   for (const tabId of tabIds) {
@@ -85,12 +85,19 @@ async function startPairing() {
     if (!tab?.url || !/^https?:/i.test(tab.url)) throw new Error('One selected tab is not a supported web page');
     if (cfg.useVisualProfile && !profileForTab(cfg, tab)) throw new Error(`Detect or customize ${tab.title || 'the selected page'} before starting the bridge`);
   }
+  const ready = await testBridge();
+  if (!ready.ok) throw new Error(ready.error || 'Local ContextBridge service is unavailable');
 
   stopRequested = false;
   await api.storage.local.set({ running: true, teachingTabId: 0, lastError: '' });
+  const heartbeatReady = await sendHeartbeat('waiting');
+  if (!heartbeatReady) {
+    stopRequested = true;
+    await api.storage.local.set({ running: false });
+    throw new Error('Local ContextBridge did not accept the browser connection; check the pairing token and service');
+  }
   startHeartbeat();
   poll();
-  await sendHeartbeat('waiting');
   void discoverFreshTabs();
   return { ok: true };
 }
@@ -206,11 +213,16 @@ async function detachClosedTab(tabId) {
 async function testBridge() {
   const cfg = await settings();
   try {
-    const response = await fetch(`${cfg.bridgeUrl}/health`, { cache: 'no-store' });
+    if (!cfg.token) return { ok: false, error: 'Enter the pairing token once in Advanced settings' };
+    const response = await fetch(`${cfg.bridgeUrl}/v1/status`, {
+      headers: { Authorization: `Bearer ${cfg.token}` }, cache: 'no-store'
+    });
+    if (response.status === 401) return { ok: false, error: 'Pairing token is invalid; check Advanced settings' };
+    if (!response.ok) return { ok: false, error: `Local ContextBridge service returned HTTP ${response.status}` };
     const data = await response.json();
-    return { ok: response.ok && data.ok, version: data.version || '' };
+    return { ok: Boolean(data.ok), version: data.version || '', error: data.ok ? '' : 'Local ContextBridge service is not ready' };
   } catch (error) {
-    return { ok: false, error: error.message || 'Local bridge unavailable' };
+    return { ok: false, error: 'Local ContextBridge service is unreachable; check that the desktop worker is running' };
   }
 }
 
@@ -470,7 +482,9 @@ async function processWork(cfg, work, claimedTabId) {
 		  && Boolean(text && text !== baselineText)
 		  && (Boolean(snapshot.model_fallback)
 		    || (Boolean(snapshot.current_model) && modeFamily(snapshot.current_model) !== modeFamily(work.job.model)));
-		const textChanged = Boolean(text && text !== baselineText && text !== latestProgressText && !modeMismatch
+		// aria-busy can survive on an older Gemini turn. Only a live Stop or
+		// streaming signal may put provisional assistant text on the relay.
+		const textChanged = Boolean(snapshot.active_generation && text && text !== baselineText && text !== latestProgressText && !modeMismatch
 		  && Number(work.job.output?.min_images || 0) === 0);
 		const progressState = `${Boolean(snapshot.busy)}|${Number(snapshot.percent) || 0}|${snapshot.detail || ''}|${modeMismatch}`;
         if (textChanged || progressState !== latestProgressState) {
@@ -500,16 +514,17 @@ async function processWork(cfg, work, claimedTabId) {
       failureCode = 'browser_navigation_interrupted';
       progressSequence += 1;
       await reportProgress(cfg, work.job.id, { sequence: progressSequence, text: '', phase: 'recovering', detail: 'The tab navigated; reattaching to the conversation', busy: true });
-      await waitForTabReady(tabId, 30000);
+      await waitForTabReady(tabId, effectiveProfile.selectors, 30000);
       const resumeJob = { ...work.job, metadata: { ...(work.job.metadata || {}), contextbridge_resume_only: true, contextbridge_baseline_text: baselineText } };
       const resumed = await api.scripting.executeScript({ target: { tabId }, func: automate, args: [resumeJob, effectiveProfile, work.deadline] });
       answer = resumed?.[0]?.result;
     }
     if (!answer?.ok && answer?.recoverable) {
+      failureCode = 'browser_recovery_failed';
       progressSequence += 1;
       await reportProgress(cfg, work.job.id, { sequence: progressSequence, text: '', phase: 'recovering', detail: answer.error || 'Recovering browser tab', percent: Number(answer.percent) || 0, busy: true });
       await api.tabs.reload(tabId);
-      await waitForTabReady(tabId, 30000);
+      await waitForTabReady(tabId, effectiveProfile.selectors, 30000);
       const resumeJob = { ...work.job, metadata: { ...(work.job.metadata || {}), contextbridge_resume_only: true, contextbridge_baseline_text: baselineText } };
       const resumed = await api.scripting.executeScript({ target: { tabId }, func: automate, args: [resumeJob, effectiveProfile, work.deadline] });
       answer = resumed?.[0]?.result;
@@ -561,7 +576,9 @@ async function processWork(cfg, work, claimedTabId) {
       : { mode, error: failureCode, model: effectiveProfile?.label || 'browser' };
     const tabFailures = { ...(await api.storage.local.get({ tabFailures: {} })).tabFailures };
     if (tabId) tabFailures[tabId] = { code: failureCode, reason: failureReason === 'other' ? classifyFailureReason(error.message) : failureReason, at: new Date().toISOString() };
-    await api.storage.local.set({ lastError: error.message || String(error), tabFailures });
+    // A failed website job is visible on its tab and in its job result; it is
+    // not a failure of the local browser-bridge connection itself.
+    await api.storage.local.set({ tabFailures });
   } finally {
     if (leaseTimer) clearInterval(leaseTimer);
     if (progressTimer) clearInterval(progressTimer);
@@ -617,19 +634,26 @@ async function waitForTabSlot(tabId, deadlineValue) {
   busyTabs.add(tabId);
 }
 
-async function waitForTabReady(tabId, timeout) {
+async function waitForTabReady(tabId, selectors, timeout) {
   const deadline = Date.now() + timeout;
+  let missingTabChecks = 0;
+  await delay(600);
   while (Date.now() < deadline) {
     try {
       const tab = await api.tabs.get(tabId);
-      if (tab.status === 'complete') {
-        await delay(600);
-        return;
+      missingTabChecks = 0;
+      if (tab.url && /^https?:/i.test(tab.url)) {
+        try {
+          const result = await api.scripting.executeScript({ target: { tabId }, func: inspectSelectors, args: [selectors] });
+          if (Number(result?.[0]?.result?.input || 0) > 0) return;
+        } catch (_) { /* The new page may not be scriptable yet. */ }
       }
-    } catch (_) {}
-    await delay(250);
+    } catch (_) {
+      if (++missingTabChecks >= 3) throw new Error('The browser tab was closed during job recovery');
+    }
+    await delay(500);
   }
-  throw new Error('The browser tab did not finish reloading');
+  throw new Error('The AI prompt did not become ready after tab navigation');
 }
 
 async function captureTabProgress(tabId, selectors) {
@@ -1380,6 +1404,13 @@ function captureProgress(selectors) {
       }
     } catch (_) {}
   }
+  const activeGeneration = [
+    '[data-is-streaming="true"]', '.result-streaming',
+    'button[data-testid*="stop" i]', 'button[aria-label*="stop" i]',
+    'button[aria-label*="beenden" i]', 'button[aria-label*="abbrechen" i]'
+  ].some((selector) => {
+    try { return [...document.querySelectorAll(selector)].some(isVisible); } catch (_) { return false; }
+  });
   const latestText = responses.length ? responseText(responses[responses.length - 1]) : '';
 	const fallbackNotice = responses.at(-1)?.closest?.('.conversation-container')?.querySelector?.('peak-hour-fallback-disclaimer');
 	const modelFallback = isVisible(fallbackNotice);
@@ -1394,7 +1425,7 @@ function captureProgress(selectors) {
   if (/rate.?limit|usage.?limit|quota|capacity|limit erreicht|höchstgrenze erreicht|zu viele anfragen|too many requests|try again later|später erneut|temporarily unavailable|something went wrong|etwas ist schief/i.test(failureText)) {
     return { text: '', busy: false, percent: 0, detail: 'Provider error', current_model: currentModel };
   }
-  return { text: latestText, busy, percent, detail: detail || (busy ? 'Generating' : ''), current_model: currentModel, model_fallback: modelFallback };
+  return { text: latestText, busy, active_generation: activeGeneration, percent, detail: detail || (busy ? 'Generating' : ''), current_model: currentModel, model_fallback: modelFallback };
 }
 
 function inspectSelectors(selectors) {
@@ -1542,7 +1573,7 @@ async function sendHeartbeatOnce(state) {
   const profile = tab ? (cfg.taughtProfiles[tab.origin] || globalThis.ContextBridgeProfiles?.forURL(tab.origin)) : null;
   const effectiveState = busyTabs.size ? 'working' : state;
   try {
-    await fetch(`${cfg.bridgeUrl}/v1/browser/heartbeat`, {
+    const response = await fetch(`${cfg.bridgeUrl}/v1/browser/heartbeat`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${cfg.token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1558,7 +1589,8 @@ async function sendHeartbeatOnce(state) {
         tabs
       })
     });
-  } catch (_) {}
+    return response.ok;
+  } catch (_) { return false; }
 }
 
 async function settings() {
@@ -1569,7 +1601,7 @@ async function settings() {
     tabId: 0,
     tabIds: [],
     running: false,
-    autoAttachFreshTabs: true,
+    autoAttachFreshTabs: false,
     autoAttachBlockedTabIds: [],
     useVisualProfile: true,
     taughtProfiles: {},

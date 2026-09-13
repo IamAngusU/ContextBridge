@@ -48,6 +48,24 @@ const element = (text = '', attributes = {}) => ({
 }
 
 {
+  const response = element('Older Gemini answer');
+  const staleBusy = element();
+  const stop = element();
+  let generating = false;
+  context.document = {
+    querySelectorAll(selector) {
+      if (selector === '#response') return [response];
+      if (selector === '[aria-busy="true"]') return [staleBusy];
+      if (selector === 'button[data-testid*="stop" i]') return generating ? [stop] : [];
+      return [];
+    }
+  };
+  assert.equal(context.captureProgress({ response: ['#response'] }).active_generation, false);
+  generating = true;
+  assert.equal(context.captureProgress({ response: ['#response'] }).active_generation, true);
+}
+
+{
   const failure = element('Du hast deine Höchstgrenze erreicht. Versuche es später erneut.');
   const retry = element('Erneut versuchen');
   context.document = {
