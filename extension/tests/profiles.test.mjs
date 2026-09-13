@@ -23,4 +23,12 @@ assert.ok(gemini.selectors.response.some((selector) => selector.includes('model-
 assert.equal(context.ContextBridgeProfiles.forURL('https://chatgpt.com.example.test/'), null);
 assert.equal(context.ContextBridgeProfiles.forURL('https://example.test/'), null);
 
+const blankBuiltIn = context.ContextBridgeProfiles.verification(chatgpt, { input: 1, submit: 0, response: 0, enterFallback: true });
+assert.equal(blankBuiltIn.ok, true);
+assert.equal(blankBuiltIn.responsePending, true);
+
+const blankCustom = context.ContextBridgeProfiles.verification({ ...chatgpt, source: 'visual' }, { input: 1, submit: 1, response: 0, enterFallback: true });
+assert.equal(blankCustom.ok, false);
+assert.equal(blankCustom.responsePending, false);
+
 console.log('Built-in browser profiles verified');

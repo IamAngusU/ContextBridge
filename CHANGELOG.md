@@ -2,6 +2,13 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.4.2 - 2026-09-13
+
+### Fixed
+
+- Built-in ChatGPT and Gemini profiles can be verified in a fresh chat before the first assistant response exists
+- Browser profile verification now explains when the response target will appear after the first answer
+
 ## 0.4.1 - 2026-09-13
 
 ### Fixed

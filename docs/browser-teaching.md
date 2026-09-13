@@ -39,6 +39,10 @@ Firefox removes temporary add-ons when the browser closes. Permanent consumer in
 3. The extension shows the automatically detected profile. Choose **Test profile**.
 4. Choose **Start browser bridge**.
 
+On a completely new conversation, the built-in profile can be verified before
+the first assistant response exists. The extension marks that response target
+as ready to appear after the first answer.
+
 ## Teach Another Page Or Override Detection
 
 1. Start ContextBridge and open the target AI page.

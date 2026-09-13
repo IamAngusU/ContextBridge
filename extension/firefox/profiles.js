@@ -72,8 +72,17 @@
     }
   }
 
+  function verification(profile, report) {
+    const responsePending = !Boolean(report?.response) && profile?.source === 'builtin';
+    return {
+      ok: Boolean(report?.input && (report.response || responsePending) && (report.submit || report.enterFallback)),
+      responsePending
+    };
+  }
+
   globalThis.ContextBridgeProfiles = Object.freeze({
     forURL,
+    verification,
     all: () => profiles.map((profile) => ({ ...profile, hosts: [...profile.hosts] }))
   });
 })();

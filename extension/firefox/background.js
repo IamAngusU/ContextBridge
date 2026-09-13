@@ -162,9 +162,10 @@ async function verifyTaughtProfile(tabId) {
     args: [profile.selectors]
   });
   const report = results?.[0]?.result || {};
+  const verification = globalThis.ContextBridgeProfiles.verification(profile, report);
   return {
-    ok: Boolean(report.input && report.response && (report.submit || report.enterFallback)),
-    report,
+    ok: verification.ok,
+    report: { ...report, response_pending: verification.responsePending },
     profile
   };
 }

@@ -60,7 +60,8 @@ $('verify').addEventListener('click', async () => {
     const result = await api.runtime.sendMessage({ type: 'verify-profile', tabId: Number($('tab').value) });
     if (!result?.ok) throw new Error(result?.error || 'One or more targets are missing');
     const image = result.report.file_input ? 'image ready' : 'text only';
-    renderProfile(currentProfile, true, `Prompt, send, and response found. ${image}.`);
+    const response = result.report.response_pending ? 'response target ready after the first answer' : 'response found';
+    renderProfile(currentProfile, true, `Prompt and send ready; ${response}. ${image}.`);
     setStatus('live', 'Profile is ready');
   } catch (error) {
     renderProfile(currentProfile, false, error.message || String(error));
