@@ -105,6 +105,7 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 		Source:       "terminal-chat",
 		Requirements: cluster.Requirements{Task: "generation", Provider: s.provider, Group: s.group, Model: s.model, SessionID: s.sessionID},
 		Payload:      payload,
+		MaxAttempts:  1,
 	}
 	var job cluster.Job
 	if err := clusterPOST(ctx, s.relayURL+"/v1/cluster/jobs", s.token, input, &job); err != nil {
@@ -150,6 +151,9 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 			}
 			if submission.Output == nil {
 				return errors.New("worker returned no text output")
+			}
+			if submission.Output.Error != "" {
+				return fmt.Errorf("browser job failed: %s", submission.Output.Error)
 			}
 			if !streamed || submission.Output.Text != lastProgress {
 				if streamed {

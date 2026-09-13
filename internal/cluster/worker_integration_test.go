@@ -176,6 +176,18 @@ func TestWorkerRelayParallelCapacityEndToEnd(t *testing.T) {
 	}
 }
 
+func TestLocalOutputErrorRecognizesSubmissionAndDirectOutput(t *testing.T) {
+	if got := localOutputError([]byte(`{"status":"completed","output":{"mode":"text","error":"providers_unavailable"}}`)); got != "providers_unavailable" {
+		t.Fatalf("wrapped output error was missed: %q", got)
+	}
+	if got := localOutputError([]byte(`{"mode":"text","error":"browser_automation_error"}`)); got != "browser_automation_error" {
+		t.Fatalf("direct output error was missed: %q", got)
+	}
+	if got := localOutputError([]byte(`{"status":"completed","output":{"mode":"text","text":"ok"}}`)); got != "" {
+		t.Fatalf("successful output was treated as an error: %q", got)
+	}
+}
+
 func waitFor(t *testing.T, timeout time.Duration, condition func() bool, message string) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)

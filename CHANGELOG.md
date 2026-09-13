@@ -15,6 +15,7 @@ All notable changes are documented here. ContextBridge follows semantic versioni
 
 - Reconnect log floods are now an animated terminal status with an indeterminate progress bar, compact lifecycle events, and deduplicated non-interactive retry logs
 - Zero-GPU scheduling and parallel worker placement remain available while ordered worker preferences are deterministic
+- Local provider errors now fail the cluster job instead of being mislabeled as successful; interactive browser turns default to one attempt to avoid duplicate UI submissions
 
 ## 0.4.3 - 2026-09-13
 

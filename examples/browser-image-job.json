@@ -17,5 +17,5 @@
     }
   },
   "priority": 10,
-  "max_attempts": 2
+  "max_attempts": 1
 }

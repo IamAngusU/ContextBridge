@@ -505,6 +505,13 @@ function automate(job, profile, jobDeadline) {
 			const mediaType = mediaTypeFor(href);
 			add(href, cleanFileName(anchor.download || path.split('/').pop(), `file-${candidates.length + 1}.${extensionFor(mediaType)}`), mediaType);
 		}
+		for (const citation of responseElement.querySelectorAll('[data-file-citation-primary-file-id]')) {
+			const fileId = String(citation.getAttribute('data-file-citation-primary-file-id') || '');
+			if (!/^file_[a-z0-9]+$/i.test(fileId)) continue;
+			const label = citation.querySelector('p')?.textContent || citation.querySelector('button')?.textContent || '';
+			const endpoint = `${location.origin}/backend-api/files/${encodeURIComponent(fileId)}/download`;
+			add(endpoint, cleanFileName(label, `file-${candidates.length + 1}.bin`), mediaTypeFor(label));
+		}
 		const artifacts = [];
 		let total = 0;
 		for (const candidate of candidates.slice(0, 4)) {
@@ -586,7 +593,7 @@ function automate(job, profile, jobDeadline) {
         sawBusy = sawBusy || busy;
 		const artifactCount = job.output?.artifacts && latestElement
 			? [...latestElement.querySelectorAll('img')].filter((image) => (!image.naturalWidth || image.naturalWidth >= 128) && (!image.naturalHeight || image.naturalHeight >= 128)).length
-				+ latestElement.querySelectorAll('a[download], pre code').length
+				+ latestElement.querySelectorAll('a[download], pre code, [data-file-citation-primary-file-id]').length
 			: 0;
 		const stableValue = latest || (artifactCount ? `artifact:${artifactCount}` : '');
 		if (!stableValue || !changedResponse) continue;

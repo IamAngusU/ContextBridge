@@ -354,6 +354,9 @@ func (w *Worker) execute(ctx context.Context, job Job, emitProgress func(JobProg
 	}
 	usage := extractUsage(raw)
 	usage.ComputeMS = uint64(time.Since(started).Milliseconds())
+	if outputErr := localOutputError(raw); outputErr != "" {
+		return nil, nil, usage, errors.New(outputErr)
+	}
 	for _, gpu := range w.hardwareSnapshot(ctx, 2*time.Second).GPUs {
 		used := uint64(0)
 		if gpu.MemoryTotal >= gpu.MemoryFree {
@@ -620,6 +623,22 @@ func extractUsage(raw []byte) Usage {
 		usage.TotalTokens = usage.InputTokens + usage.OutputTokens
 	}
 	return usage
+}
+
+func localOutputError(raw []byte) string {
+	var value struct {
+		Error  string `json:"error"`
+		Output *struct {
+			Error string `json:"error"`
+		} `json:"output"`
+	}
+	if json.Unmarshal(raw, &value) != nil {
+		return ""
+	}
+	if value.Output != nil && strings.TrimSpace(value.Output.Error) != "" {
+		return strings.TrimSpace(value.Output.Error)
+	}
+	return strings.TrimSpace(value.Error)
 }
 
 func walkNumbers(value interface{}, visit func(string, float64)) {
