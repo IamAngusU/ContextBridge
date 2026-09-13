@@ -69,7 +69,7 @@ func TestTrustedPromptAllowsExplicitArtifactCreation(t *testing.T) {
 }
 
 func TestExplicitBrowserErrorIsNotAcceptedAsAnAnswer(t *testing.T) {
-	for _, failure := range []string{"browser_rate_limited", "artifacts_missing: expected 1 file(s), received 0", "images_missing: expected 1 image(s), received 0"} {
+	for _, failure := range []string{"browser_rate_limited", "browser_timeout", "artifacts_missing: expected 1 file(s), received 0", "images_missing: expected 1 image(s), received 0"} {
 		t.Run(failure, func(t *testing.T) {
 			store, err := NewStore(t.TempDir())
 			if err != nil {
@@ -96,6 +96,18 @@ func TestExplicitBrowserErrorIsNotAcceptedAsAnAnswer(t *testing.T) {
 				t.Fatalf("browser error became output: %#v", output)
 			}
 		})
+	}
+}
+
+func TestBrowserRouteTimeoutKeepsSpecificFailure(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{Routes: map[string]config.Route{"default": {Provider: "browser", TimeoutSeconds: 1}}, Providers: config.Providers{Browser: config.BrowserProvider{LeaseSeconds: 30}}}
+	output := NewProcessor(cfg, store).Process(context.Background(), Job{ID: "browser-timeout-test", Provider: "browser", Prompt: "test", Output: OutputSpec{Mode: "text"}})
+	if output.Error != "browser_timeout" || output.Text != "" {
+		t.Fatalf("browser timeout was hidden or treated as an answer: %#v", output)
 	}
 }
 

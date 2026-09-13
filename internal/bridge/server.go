@@ -531,6 +531,25 @@ func (s *Server) handleBrowserHeartbeat(w http.ResponseWriter, r *http.Request) 
 			dom.Tools = limitedDOMControls(dom.Tools, 32)
 			dom.AssistantTurns = max(0, min(dom.AssistantTurns, 10000))
 			dom.InputCharacters = max(0, min(dom.InputCharacters, 100000))
+			dom.LastResponseCharacters = max(0, min(dom.LastResponseCharacters, 100000))
+			allowedBusy := map[string]bool{"aria_busy": true, "streaming_attribute": true, "streaming_class": true, "image_loading": true, "stop_button": true}
+			safeBusy := make([]string, 0, 5)
+			for _, indicator := range dom.BusyIndicators {
+				if !allowedBusy[indicator] {
+					continue
+				}
+				seen := false
+				for _, previous := range safeBusy {
+					if previous == indicator {
+						seen = true
+						break
+					}
+				}
+				if !seen {
+					safeBusy = append(safeBusy, indicator)
+				}
+			}
+			dom.BusyIndicators = safeBusy
 			dom.LastResponseImages = max(0, min(dom.LastResponseImages, 100))
 			dom.ImageProgress = max(0, min(dom.ImageProgress, 100))
 		}

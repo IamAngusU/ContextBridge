@@ -286,10 +286,93 @@ const element = (text = '', attributes = {}) => ({
   };
   const result = await context.automate({ prompt: 'short test', model: 'Pro Erweitert', output: { mode: 'text' } },
     { name: 'gemini', selectors: { input: ['#input'], response: ['#response'], submit: ['#send'] } },
-    new Date(Date.now() + 7000).toISOString());
+    new Date(Date.now() + 12000).toISOString());
   assert.equal(sent, true);
   assert.equal(result.ok, false);
   assert.equal(result.code, 'browser_model_unavailable');
+}
+
+{
+  let sent = false;
+  class TextArea {
+    constructor() { this.value = ''; this.offsetWidth = 1; this.offsetHeight = 1; }
+    getClientRects() { return [1]; }
+    focus() {}
+    dispatchEvent() {}
+  }
+  context.HTMLTextAreaElement = TextArea;
+  context.HTMLInputElement = class {};
+  context.InputEvent = class {};
+  context.Event = class {};
+  const input = new TextArea();
+  const picker = {
+    ...element('Pro Erweitert', { 'aria-haspopup': 'true' }), closest: () => ({}),
+    getAttribute(name) { return name === 'aria-label' ? 'Modusauswahl öffnen, derzeit ausgewählt: Pro Erweitert' : name === 'aria-haspopup' ? 'true' : null; }
+  };
+  const send = { ...element(''), click() { sent = true; input.value = ''; } };
+  const response = element('Completed Gemini answer');
+  context.document = {
+    querySelector(selector) { return selector === 'bard-mode-switcher button[aria-haspopup]' ? picker : null; },
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === '#send') return sent ? [] : [send];
+      if (selector === '#response') return sent ? [response] : [];
+      if (selector === 'bard-mode-switcher button[aria-haspopup]') return [picker];
+      return [];
+    }
+  };
+  const result = await context.automate({ prompt: 'short test', model: 'Pro Erweitert', output: { mode: 'text' } },
+    { name: 'gemini', selectors: { input: ['#input'], response: ['#response'], submit: ['#send'] } },
+    new Date(Date.now() + 9000).toISOString());
+  assert.equal(sent, true);
+  assert.equal(result.ok, true);
+  assert.equal(result.text, 'Completed Gemini answer');
+  assert.equal(result.selected_model, 'Pro Erweitert');
+}
+
+{
+  let sent = false;
+  let fakeNow = Date.now();
+  const realDate = context.Date;
+  const realSetTimeout = context.setTimeout;
+  context.Date = class extends Date { static now() { return fakeNow; } };
+  context.setTimeout = (callback, milliseconds) => realSetTimeout(() => { fakeNow += milliseconds; callback(); }, 1);
+  class TextArea {
+    constructor() { this.value = ''; this.offsetWidth = 1; this.offsetHeight = 1; }
+    getClientRects() { return [1]; }
+    focus() {}
+    dispatchEvent() {}
+  }
+  context.HTMLTextAreaElement = TextArea;
+  context.HTMLInputElement = class {};
+  context.InputEvent = class {};
+  context.Event = class {};
+  const input = new TextArea();
+  const send = { ...element(''), click() { sent = true; input.value = ''; } };
+  const response = element('Gemini answer with stale busy flag');
+  const staleBusy = element();
+  context.document = {
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === '#send') return sent ? [] : [send];
+      if (selector === '#response') return sent ? [response] : [];
+      if (selector === '[aria-busy="true"]') return sent ? [staleBusy] : [];
+      return [];
+    }
+  };
+  try {
+    const result = await context.automate(
+      { prompt: 'test', output: { mode: 'text' } },
+      { name: 'gemini', selectors: { input: ['#input'], response: ['#response'], submit: ['#send'] } },
+      new Date(Date.now() + 60000).toISOString()
+    );
+    assert.equal(result.ok, true);
+    assert.equal(result.text, 'Gemini answer with stale busy flag');
+    assert.ok(fakeNow - Date.now() >= 12000);
+  } finally {
+    context.Date = realDate;
+    context.setTimeout = realSetTimeout;
+  }
 }
 
 {
@@ -542,6 +625,29 @@ const element = (text = '', attributes = {}) => ({
   assert.equal(snapshot.file_inputs[0].accept, 'image/*');
   assert.equal(snapshot.last_response_images, 2);
   assert.equal(JSON.stringify(snapshot).includes('private answer'), false);
+}
+
+{
+  const response = {
+    ...element('private streaming answer'),
+    querySelectorAll: (selector) => selector.includes('aria-busy') ? [element()] : []
+  };
+  const busy = element();
+  const stop = element();
+  context.document = {
+    querySelectorAll(selector) {
+      if (selector === '#turns') return [response];
+      if (selector === '[aria-busy="true"]') return [busy];
+      if (selector.startsWith('button[data-testid*="stop" i],')) return [stop];
+      return [];
+    },
+    querySelector: () => null
+  };
+  const snapshot = context.inspectPageDOM({ response: ['#turns'] });
+  assert.equal(snapshot.last_response_busy, true);
+  assert.deepEqual([...snapshot.busy_indicators], ['aria_busy', 'stop_button']);
+  assert.equal(snapshot.last_response_characters, 'private streaming answer'.length);
+  assert.equal(JSON.stringify(snapshot).includes('private streaming answer'), false);
 }
 
 console.log('Browser progress and provider failures verified');

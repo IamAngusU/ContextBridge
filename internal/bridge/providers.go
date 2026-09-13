@@ -401,7 +401,7 @@ func (p *Processor) browser(parent context.Context, job Job, route config.Route)
 		return output, nil
 	case <-timer.C:
 		p.store.Cancel(job.ID)
-		return Output{}, errors.New("browser review timed out")
+		return Output{}, errors.New("browser_timeout")
 	case <-parent.Done():
 		p.store.Cancel(job.ID)
 		return Output{}, parent.Err()

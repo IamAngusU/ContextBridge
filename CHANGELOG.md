@@ -2,6 +2,19 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.13 - 2026-09-13
+
+### Added
+
+- sample content-free DOM status for attached tabs even during an active job: busy indicator types, last response length, and whether that response is still marked busy; no prompt or answer text is included in the heartbeat
+
+### Fixed
+
+- recognize Gemini's empty, ready composer as a completed turn once a fresh response has stayed stable for six seconds, even though the Send button disappears
+- finish a Gemini turn when only a stale `aria-busy` flag remains after a new answer has stayed unchanged for twelve seconds and no Stop, streaming, or image-generation signal is visible
+- make `cluster chat --artifacts off` disable artifact collection in the job as well as local saving, avoiding an unnecessary five-minute browser wait
+- reserve time before the local route deadline to finalize a browser result, and report `browser_timeout` instead of masking it as `providers_unavailable`
+
 ## 0.5.12 - 2026-09-13
 
 ### Added

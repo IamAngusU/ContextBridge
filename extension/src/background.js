@@ -790,20 +790,27 @@ function automate(job, profile, jobDeadline) {
       percent = Math.max(percent, Math.max(0, Math.min(100, Number(indicator.getAttribute('aria-valuenow')) || 0)));
       detail = 'Image generation';
     }
-    for (const selector of [
-      '[aria-busy="true"]', '[data-is-streaming="true"]', '.result-streaming',
-      '[data-testid="image-gen-loading-state"]', '[data-testid="image-gen-loading-state-frame"]',
-      'button[data-testid*="stop" i]', 'button[aria-label*="stop" i]',
-      'button[aria-label*="beenden" i]', 'button[aria-label*="abbrechen" i]'
+    const busyReasons = [];
+    for (const [reason, selector] of [
+      ['aria_busy', '[aria-busy="true"]'],
+      ['streaming_attribute', '[data-is-streaming="true"]'],
+      ['streaming_class', '.result-streaming'],
+      ['image_loading', '[data-testid="image-gen-loading-state"]'],
+      ['image_loading', '[data-testid="image-gen-loading-state-frame"]'],
+      ['stop_button', 'button[data-testid*="stop" i]'],
+      ['stop_button', 'button[aria-label*="stop" i]'],
+      ['stop_button', 'button[aria-label*="beenden" i]'],
+      ['stop_button', 'button[aria-label*="abbrechen" i]']
     ]) {
       try {
-        if ([...document.querySelectorAll(selector)].some(isVisible)) return { busy: true, percent, detail: detail || 'Generating' };
+        if (!busyReasons.includes(reason) && [...document.querySelectorAll(selector)].some(isVisible)) busyReasons.push(reason);
       } catch (_) {}
     }
     return {
-      busy: false,
+      busy: busyReasons.length > 0,
+      busyReasons,
       percent,
-      detail: '',
+      detail: busyReasons.length ? (detail || 'Generating') : '',
       composerReady: Boolean(first(selectors.submit)),
       inputReady: Boolean(first(selectors.input))
     };
@@ -1185,8 +1192,10 @@ function automate(job, profile, jobDeadline) {
 
 		const suppliedDeadline = Date.parse(jobDeadline || '');
 		const defaultWait = job.output?.artifacts ? 300000 : 180000;
+		const reserve = Number.isFinite(suppliedDeadline)
+			? Math.min(15000, Math.max(1000, (suppliedDeadline - Date.now()) / 10)) : 0;
 		const deadline = Number.isFinite(suppliedDeadline)
-			? Math.min(Date.now() + defaultWait, suppliedDeadline - 1000)
+			? Math.min(Date.now() + defaultWait, suppliedDeadline - reserve)
 			: Date.now() + defaultWait;
       let stableText = '';
       let stableSince = 0;
@@ -1203,7 +1212,16 @@ function automate(job, profile, jobDeadline) {
 		const changedResponse = responses.length > before.length || latest !== previousText
 			|| Boolean(previousIdentity && latestIdentity && latestIdentity !== previousIdentity);
         const state = pageState();
-        const busy = state.busy;
+        // Gemini can leave aria-busy on the finished response after its Stop
+        // control has vanished. Treat that one stale attribute as finished
+        // only after a *new* answer has stayed unchanged for 12 seconds.
+        // Any streaming, Stop, or image indicator still blocks completion.
+        const staleGeminiBusy = profile.name === 'gemini'
+          && state.busyReasons.length === 1 && state.busyReasons[0] === 'aria_busy'
+          && changedResponse && Boolean(latest) && latest === stableText
+          && stableSince > 0 && Date.now() - stableSince >= 12000
+          && state.inputReady && !job.output?.min_images;
+        const busy = state.busy && !staleGeminiBusy;
         sawBusy = sawBusy || busy;
 		if (busy) lastBusyAt = Date.now();
 		if (sawBusy && !busy && !changedResponse && !resumeOnly && Date.now() - lastBusyAt > 10000) {
@@ -1247,8 +1265,11 @@ function automate(job, profile, jobDeadline) {
         }
         const mode = String(job.output?.mode || 'decision').toLowerCase();
         const structured = mode === 'text' || ((latest.includes('{') && latest.includes('}')) || (latest.includes('[') && latest.includes(']')));
-		const stableFor = sawBusy ? 1300 : 2600;
-		const composerFinished = !(selectors.submit || []).length || state.composerReady || (sawBusy && state.inputReady);
+		// Gemini hides Send again as soon as its composer is empty. Its ready
+		// textbox plus a stable new assistant turn is a valid finished state.
+		const stableFor = sawBusy ? 1300 : (profile.name === 'gemini' ? 6000 : 2600);
+		const composerFinished = !(selectors.submit || []).length || state.composerReady
+			|| (state.inputReady && (sawBusy || profile.name === 'gemini'));
         if (Date.now() - stableSince >= stableFor && structured && !busy && composerFinished) {
 		  const filesMissing = job.output?.min_artifacts > artifactCount;
 		  const imagesMissing = job.output?.min_images > imageCount;
@@ -1455,12 +1476,13 @@ async function sendHeartbeatOnce(state) {
           reasoningLevels: [...new Set([...(capabilities.reasoningLevels || []), ...(live.reasoningLevels || [])])]
         };
       } catch (_) {}
-      if (!busyTabs.has(tabId)) {
-        try {
-          const snapshot = await api.scripting.executeScript({ target: { tabId }, func: inspectPageDOM, args: [profile?.selectors || {}] });
-          dom = snapshot?.[0]?.result || null;
-        } catch (_) {}
-      }
+      // Selector-only diagnostics are safe to sample while a job is running.
+      // They let the bridge distinguish a still-streaming answer from a stale
+      // busy flag without copying prompts, responses, or the complete DOM.
+      try {
+        const snapshot = await api.scripting.executeScript({ target: { tabId }, func: inspectPageDOM, args: [profile?.selectors || {}] });
+        dom = snapshot?.[0]?.result || null;
+      } catch (_) {}
       tabs.push({
         id: tabId,
         origin: tab?.url && /^https?:/i.test(tab.url) ? new URL(tab.url).origin : '',
@@ -1611,6 +1633,20 @@ function inspectPageDOM(selectors) {
   }
   const responses = bySelectors(selectors.response, 10000);
   const latest = responses.at(-1);
+  const busySelectors = [
+    ['aria_busy', '[aria-busy="true"]'],
+    ['streaming_attribute', '[data-is-streaming="true"]'],
+    ['streaming_class', '.result-streaming'],
+    ['image_loading', '[data-testid="image-gen-loading-state"], [data-testid="image-gen-loading-state-frame"]'],
+    ['stop_button', 'button[data-testid*="stop" i], button[aria-label*="stop" i], button[aria-label*="beenden" i], button[aria-label*="abbrechen" i]']
+  ];
+  const busyIndicators = busySelectors.flatMap(([name, selector]) => {
+    try { return [...document.querySelectorAll(selector)].some(visible) ? [name] : []; } catch (_) { return []; }
+  });
+  const latestMarkdown = latest?.querySelector?.('message-content .markdown, [data-message-author-role="assistant"] .markdown');
+  const latestText = String(latestMarkdown?.innerText || latestMarkdown?.textContent || latest?.innerText || '').trim();
+  let latestResponseBusy = false;
+  try { latestResponseBusy = Boolean(latest?.querySelectorAll?.('[aria-busy="true"], [data-is-streaming="true"], .result-streaming')?.length); } catch (_) {}
   let imageProgress = 0;
   for (const element of document.querySelectorAll('[data-testid="image-gen-loading-progress"], [role="progressbar"][aria-valuenow]')) {
     if (visible(element)) imageProgress = Math.max(imageProgress, Number(element.getAttribute('aria-valuenow')) || 0);
@@ -1630,6 +1666,9 @@ function inspectPageDOM(selectors) {
       return item;
     }),
     assistant_turns: responses.length,
+    last_response_characters: Math.min(latestText.length, 100000),
+    last_response_busy: latestResponseBusy,
+    busy_indicators: busyIndicators,
     last_response_images: latest ? latest.querySelectorAll('img').length : 0,
     image_progress: Math.max(0, Math.min(100, imageProgress))
   };

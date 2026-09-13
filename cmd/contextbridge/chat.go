@@ -227,7 +227,7 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 		Source: "terminal-chat", Task: "generation", Prompt: prompt,
 		SessionID: s.sessionID, BrowserProfile: s.profile, Model: s.model, Reasoning: s.reasoning,
 		ImageBase64: s.imageBase64, ImageMediaType: s.imageMediaType,
-		Output: bridge.OutputSpec{Mode: "text", MaxBytes: 1 << 20, Artifacts: true, MaxArtifactBytes: 12 << 20, MinArtifacts: minimum, MinImages: minimumImages},
+		Output: bridge.OutputSpec{Mode: "text", MaxBytes: 1 << 20, Artifacts: s.artifactDir != "", MaxArtifactBytes: 12 << 20, MinArtifacts: minimum, MinImages: minimumImages},
 	})
 	if err != nil {
 		return err
