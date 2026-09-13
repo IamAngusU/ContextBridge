@@ -2,6 +2,17 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.3 - 2026-09-13
+
+### Added
+
+- interactive workers show the latest compact browser-output iteration in place, with deterministic rotation across parallel jobs
+
+### Fixed
+
+- long progress text respects the current console width instead of producing scrolling status lines
+- pricing and unpin controls containing the word "model" are no longer reported as AI model selectors
+
 ## 0.5.2 - 2026-09-13
 
 ### Fixed

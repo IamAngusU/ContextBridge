@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -21,11 +22,13 @@ const (
 )
 
 type jobState struct {
-	task    string
-	phase   string
-	detail  string
-	percent int
-	started time.Time
+	task     string
+	phase    string
+	detail   string
+	percent  int
+	sequence uint64
+	preview  string
+	started  time.Time
 }
 
 // Session renders an animated single-line status in a real terminal and
@@ -43,6 +46,7 @@ type Session struct {
 	node        string
 	slots       int
 	hardware    string
+	width       int
 	done        chan struct{}
 	closed      chan struct{}
 }
@@ -58,7 +62,7 @@ func New(output *os.File) *Session {
 	if os.Getenv("TERM") == "dumb" || os.Getenv("NO_COLOR") != "" {
 		interactive = false
 	}
-	session := &Session{out: output, interactive: interactive, jobs: map[string]jobState{}, done: make(chan struct{}), closed: make(chan struct{})}
+	session := &Session{out: output, interactive: interactive, jobs: map[string]jobState{}, width: terminalWidth(output), done: make(chan struct{}), closed: make(chan struct{})}
 	if interactive {
 		go session.animate()
 	} else {
@@ -131,6 +135,10 @@ func (s *Session) HandleWorker(event cluster.WorkerEvent) {
 		job.phase = empty(event.Phase, "working")
 		job.detail = event.Detail
 		job.percent = event.Percent
+		job.sequence = event.Sequence
+		if preview := progressPreview(event.Text, 80); preview != "" {
+			job.preview = preview
+		}
 		s.jobs[event.JobID] = job
 		s.refreshJobStatusLocked()
 	case cluster.WorkerJobCompleted:
@@ -180,18 +188,13 @@ func (s *Session) refreshJobStatusLocked() {
 		s.setStatusLocked("Idle", time.Now())
 		return
 	}
+	started := time.Now()
 	for _, job := range s.jobs {
-		phase := empty(job.detail, empty(job.phase, "working"))
-		if job.percent > 0 {
-			phase += fmt.Sprintf(" · %d%%", job.percent)
+		if job.started.Before(started) {
+			started = job.started
 		}
-		label := fmt.Sprintf("%s · %s", empty(job.task, "generation"), phase)
-		if len(s.jobs) > 1 {
-			label += fmt.Sprintf(" · %d parallel jobs", len(s.jobs))
-		}
-		s.setStatusLocked(label, job.started)
-		return
 	}
+	s.setStatusLocked("Working", started)
 }
 
 func (s *Session) setStatusLocked(message string, started time.Time) {
@@ -223,8 +226,63 @@ func (s *Session) drawStatusLocked() {
 		fmt.Fprintf(s.out, "\r\x1b[2K  %s◇%s  [%sIdle%s %s]  [%s%s%s]  [%s]%s", ansiGreen, ansiReset, ansiGreen, ansiReset, elapsed, ansiDim, pool, ansiReset, empty(s.node, "local"), optionalBracket(s.hardware))
 		return
 	}
-	bar := pulseBar(s.frame, 14)
-	fmt.Fprintf(s.out, "\r\x1b[2K  %s%s%s  [%s%s%s]  [%d/%d jobs]  %s%s%s  %s", ansiCyan, frames[s.frame%len(frames)], ansiReset, ansiCyan, bar, ansiReset, len(s.jobs), max(1, s.slots), ansiYellow, s.status, ansiReset, elapsed)
+	barWidth := 14
+	if s.width > 0 && s.width < 100 {
+		barWidth = 8
+	}
+	bar := pulseBar(s.frame, barWidth)
+	status := s.status
+	// Reserve space for the spinner, pulse bar, slot count, colors and elapsed
+	// time. Keeping the visible text within the console width prevents wrapping.
+	statusLimit := 0
+	if s.width > 0 {
+		fixed := barWidth + 30 + len(fmt.Sprintf("%d/%d", len(s.jobs), max(1, s.slots))) + len(elapsed)
+		statusLimit = max(24, s.width-fixed)
+	}
+	if len(s.jobs) > 0 {
+		status, elapsed = s.visibleJobStatusLocked(statusLimit)
+	} else if statusLimit > 0 {
+		status = truncateRunes(status, statusLimit)
+	}
+	fmt.Fprintf(s.out, "\r\x1b[2K  %s%s%s  [%s%s%s]  [%d/%d jobs]  %s%s%s  %s", ansiCyan, frames[s.frame%len(frames)], ansiReset, ansiCyan, bar, ansiReset, len(s.jobs), max(1, s.slots), ansiYellow, status, ansiReset, elapsed)
+}
+
+func (s *Session) visibleJobStatusLocked(limit int) (string, string) {
+	ids := make([]string, 0, len(s.jobs))
+	for id := range s.jobs {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	index := (s.frame / 20) % len(ids)
+	id := ids[index]
+	job := s.jobs[id]
+	phase := progressPreview(empty(job.detail, empty(job.phase, "working")), 16)
+	parts := []string{}
+	if len(ids) > 1 {
+		parts = append(parts, fmt.Sprintf("job %d/%d", index+1, len(ids)), progressPreview(empty(job.task, "generation"), 16))
+	}
+	phaseIndex := len(parts)
+	parts = append(parts, phase)
+	if job.percent > 0 {
+		parts[phaseIndex] += fmt.Sprintf(" %d%%", job.percent)
+	}
+	if job.sequence > 0 {
+		parts = append(parts, fmt.Sprintf("iter %d", job.sequence))
+	}
+	status := strings.Join(parts, " · ")
+	if job.preview != "" {
+		previewLimit := 80
+		if limit > 0 {
+			previewLimit = limit - len([]rune(status)) - 3
+		}
+		if previewLimit >= 4 {
+			status += " › " + progressPreview(job.preview, previewLimit)
+		}
+	}
+	if limit > 0 {
+		status = truncateRunes(status, limit)
+	}
+	return status, compactDuration(time.Since(job.started))
 }
 
 func coloredSymbol(symbol string) string {
@@ -288,6 +346,26 @@ func shortID(value string) string {
 		return value
 	}
 	return value[:12] + "…" + value[len(value)-5:]
+}
+
+func progressPreview(value string, limit int) string {
+	value = strings.Join(strings.Fields(value), " ")
+	characters := []rune(value)
+	if limit <= 0 || len(characters) <= limit {
+		return value
+	}
+	return "…" + string(characters[len(characters)-limit+1:])
+}
+
+func truncateRunes(value string, limit int) string {
+	characters := []rune(value)
+	if limit <= 0 || len(characters) <= limit {
+		return value
+	}
+	if limit == 1 {
+		return "…"
+	}
+	return string(characters[:limit-1]) + "…"
 }
 
 func empty(value, fallback string) string {

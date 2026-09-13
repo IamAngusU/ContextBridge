@@ -80,6 +80,8 @@ type WorkerEvent struct {
 	ComputeMS    uint64
 	Percent      int
 	Detail       string
+	Sequence     uint64
+	Text         string
 	Capabilities Capabilities
 }
 
@@ -294,7 +296,7 @@ func (w *Worker) connect(ctx context.Context, report WorkerReporter) error {
 			report(WorkerEvent{Kind: WorkerJobStarted, NodeName: node.Name, JobID: job.ID, Task: job.Requirements.Task})
 			result, sealed, usage, runErr := w.execute(ctx, job, func(progress JobProgress) {
 				_ = write(WireMessage{Type: "progress", JobID: job.ID, Progress: &progress})
-				report(WorkerEvent{Kind: WorkerJobProgress, NodeName: node.Name, JobID: job.ID, Task: job.Requirements.Task, Phase: progress.Phase, Percent: progress.Percent, Detail: progress.Detail})
+				report(WorkerEvent{Kind: WorkerJobProgress, NodeName: node.Name, JobID: job.ID, Task: job.Requirements.Task, Phase: progress.Phase, Percent: progress.Percent, Detail: progress.Detail, Sequence: progress.Sequence, Text: progress.Text})
 			})
 			errorText := ""
 			if runErr != nil {

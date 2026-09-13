@@ -70,9 +70,10 @@ const element = (text = '', attributes = {}) => ({
   const profileMenu = element('', { 'aria-label': 'Profil-Menü öffnen' });
   const accountMenu = element('Angus Uelsmann Pro');
   const securityControl = element('High Security System');
+  const pricingControl = element('Fixierung von Preismodell für PRISM aufheben');
   context.document = {
     querySelectorAll(selector) {
-      if (selector === 'button, [role="button"]') return [profileMenu, accountMenu, securityControl];
+      if (selector === 'button, [role="button"]') return [profileMenu, accountMenu, securityControl, pricingControl];
       return [];
     }
   };

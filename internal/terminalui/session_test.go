@@ -36,3 +36,13 @@ func TestNonInteractiveSessionDeduplicatesRetryNoise(t *testing.T) {
 		t.Fatalf("connection lifecycle was not summarized: %s", output)
 	}
 }
+
+func TestProgressPreviewKeepsLatestTextIteration(t *testing.T) {
+	actual := progressPreview("  first\nsecond   third  ", 12)
+	if actual != "…econd third" {
+		t.Fatalf("unexpected progress preview %q", actual)
+	}
+	if actual := progressPreview("short answer", 80); actual != "short answer" {
+		t.Fatalf("short progress text changed: %q", actual)
+	}
+}
