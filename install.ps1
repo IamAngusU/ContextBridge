@@ -161,13 +161,13 @@ if ($Provider -eq "browser") {
 if (-not $NoAutostart -and (Get-Command Register-ScheduledTask -ErrorAction SilentlyContinue)) {
     $taskName = "ContextBridge"
     $arguments = "run --config `"$config`""
-    $action = New-ScheduledTaskAction -Execute $exe -Argument $arguments
+    $action = New-ScheduledTaskAction -Execute $exe -Argument $arguments -WorkingDirectory $InstallDir
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-    $settings = New-ScheduledTaskSettingsSet -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Days 3650)
+    $settings = New-ScheduledTaskSettingsSet -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Days 3650) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
     Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Description "Local ContextBridge service" -Force | Out-Null
-    $updateAction = New-ScheduledTaskAction -Execute $exe -Argument "update auto --config `"$config`""
+    $updateAction = New-ScheduledTaskAction -Execute $exe -Argument "update auto --config `"$config`"" -WorkingDirectory $InstallDir
     $updateTrigger = New-ScheduledTaskTrigger -Daily -At "03:00"
-    $updateSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5)
+    $updateSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
     Register-ScheduledTask -TaskName "ContextBridge Update" -Action $updateAction -Trigger $updateTrigger -Settings $updateSettings -Description "Verified ContextBridge automatic updater" -Force | Out-Null
     Good "Autostart installed for this Windows account."
 } elseif (-not $NoAutostart) {

@@ -2,6 +2,13 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.4.1 - 2026-09-13
+
+### Fixed
+
+- Windows service and update tasks now use the installation directory explicitly
+- Windows autostart and updates are no longer blocked or stopped on battery power
+
 ## 0.4.0 - 2026-09-13
 
 ### Added
