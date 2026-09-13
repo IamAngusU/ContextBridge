@@ -151,7 +151,7 @@ Inside interactive chat, `/model …`, `/reasoning …`, `/profile …`, `/image
 ![ContextBridge visual teaching overlay](docs/assets/visual-teaching.png)
 
 1. Load `extension/chromium` in Chrome, Edge, Opera, Brave, or Vivaldi. Use `extension/firefox` for Firefox.
-2. Open one or more ChatGPT/Gemini conversations. In the ContextBridge extension, click **Select all open ChatGPT + Gemini tabs** and then **Start browser bridge**. The button also adds newly opened supported tabs to an already-running connection. Each selected tab becomes a parallel slot; individual tabs can still be selected manually.
+2. Open one or more ChatGPT/Gemini conversations. In the ContextBridge extension, click **Select a ChatGPT + Gemini tab** and then **Start browser bridge**. The button chooses a recently active tab for each provider, avoiding a flood of old conversations. Use Ctrl-click in the tab list to add more; changes also reach an already-running connection. Each selected tab becomes a parallel slot.
 3. Choose **Test profile**. Optionally choose **Scan available models and reasoning levels**, then **Start browser bridge**.
 4. For another provider, choose **Customize detection** and click the requested controls directly in the page.
 

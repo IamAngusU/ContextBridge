@@ -2,6 +2,12 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.6 - 2026-09-13
+
+### Fixed
+
+- the one-click browser setup now picks one recently active ChatGPT tab and one Gemini tab, instead of filling the 16-tab limit with historical ChatGPT conversations
+
 ## 0.5.5 - 2026-09-13
 
 ### Added
