@@ -20,13 +20,66 @@ async function initialize() {
   $('visual-mode').checked = saved.useVisualProfile;
   $('auto-attach-fresh').checked = saved.autoAttachFreshTabs;
   $('preserve-drafts').checked = saved.preserveDrafts;
+  $('session-mode').value = saved.sessionMode;
   attachedTabIDs = [...new Set((saved.tabIds?.length ? saved.tabIds : [saved.tabId]).map(Number).filter(Boolean))];
   toggleProfileMode();
   await loadTabs(0, false);
   await loadProfiles(saved);
   await refreshState();
+  await refreshUpdatePreference(saved);
   setInterval(() => { if (!document.hidden) void refreshLiveTabs(); }, 2500);
 }
+
+async function refreshUpdatePreference(saved = null) {
+  const toggle = $('auto-update');
+  toggle.disabled = true;
+  const cfg = saved || await settings();
+  if (!cfg.token) {
+    toggle.checked = false;
+    $('auto-update-state').textContent = 'Off by default. Connect to change this PC\'s setting.';
+    return;
+  }
+  try {
+    const response = await fetch(`${cfg.bridgeUrl}/v1/settings/updates`, {
+      headers: { Authorization: `Bearer ${cfg.token}` }, cache: 'no-store'
+    });
+    if (!response.ok) throw new Error('Local update setting unavailable');
+    const status = await response.json();
+    toggle.checked = Boolean(status.enabled);
+    toggle.disabled = false;
+    $('auto-update-state').textContent = status.enabled
+      ? 'On for this PC. Changes install only while it is idle.'
+      : 'Off for this PC. Manual updates still work.';
+  } catch (_) {
+    $('auto-update-state').textContent = 'Connect to the local service to manage updates.';
+  }
+}
+
+$('auto-update').addEventListener('change', async () => {
+  const toggle = $('auto-update');
+  const requested = toggle.checked;
+  toggle.disabled = true;
+  try {
+    const cfg = await settings();
+    const response = await fetch(`${cfg.bridgeUrl}/v1/settings/updates`, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${cfg.token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: requested })
+    });
+    if (!response.ok) throw new Error('Local update setting could not be saved');
+    const status = await response.json();
+    if (Boolean(status.enabled) !== requested) throw new Error('The device config locks automatic updates off');
+    toggle.checked = Boolean(status.enabled);
+    $('auto-update-state').textContent = status.enabled
+      ? 'On for this PC. Changes install only while it is idle.'
+      : 'Off for this PC. Manual updates still work.';
+  } catch (error) {
+    toggle.checked = !requested;
+    setStatus('error', error.message || String(error));
+  } finally {
+    toggle.disabled = false;
+  }
+});
 
 async function refreshLiveTabs(refreshProfile = false) {
   try {
@@ -159,6 +212,17 @@ $('auto-attach-fresh').addEventListener('change', async () => {
 $('preserve-drafts').addEventListener('change', async () => {
   await api.storage.local.set({ preserveDrafts: $('preserve-drafts').checked });
 });
+$('session-mode').addEventListener('change', async () => {
+  await api.storage.local.set({ sessionMode: $('session-mode').value === 'new_chat' ? 'new_chat' : 'manual' });
+});
+$('release-session-tab').addEventListener('click', async () => {
+  try {
+    const tab = await currentPageTab();
+    const result = await api.runtime.sendMessage({ type: 'release-session-tab', tabId: tab?.id });
+    if (!result?.ok) throw new Error(result?.error || 'This page could not be released');
+    setStatus('live', 'Empty chat ready for the next session');
+  } catch (error) { setStatus('error', error.message || String(error)); }
+});
 $('all-tabs').addEventListener('click', async () => {
   const granted = await api.permissions.request({ permissions: ['tabs'] });
   if (!granted) return setStatus('error', 'Tab access was not granted');
@@ -245,6 +309,7 @@ $('pair').addEventListener('click', async () => {
     if (!result?.ok) throw new Error(result?.error || 'Connection could not start');
     renderRunning(true);
     setStatus('live', `Connected · ${tabs.length} tab${tabs.length === 1 ? '' : 's'} ready`);
+    await refreshUpdatePreference();
   } catch (error) {
     const message = error.message || String(error);
     await api.storage.local.set({ connectionError: message });
@@ -328,6 +393,8 @@ async function loadTabs(selected, allWindows) {
   }
   const filter = $('tab-filter').value || 'all';
   const eligible = filterTabList(tabs, filter, attachedTabIDs);
+  const saved = await settings();
+  const bindings = Object.values(saved.sessionBindings || {});
   let runtimeTabs = new Map();
   try {
     const status = await api.runtime.sendMessage({ type: 'status' });
@@ -341,8 +408,10 @@ async function loadTabs(selected, allWindows) {
     const attached = attachedTabIDs.includes(tab.id);
     const live = runtimeTabs.get(tab.id);
     const state = tabDisplayState(attached, live?.state);
+    const reservation = bindings.find((entry) => Number(entry?.tabId) === tab.id);
+    const session = reservation ? (reservation.legacy ? ' · old chat: open a new one' : ` · session: ${reservation.label || 'reserved'}`) : '';
     const model = attached && live?.currentModel ? ` · ${live.currentModel}` : '';
-    return { id: tab.id, label: `${attached ? '●' : '○'} ${state}${model} · ${windowLabel}${tab.title || 'Untitled'}  |  ${host}` };
+    return { id: tab.id, label: `${attached ? '●' : '○'} ${state}${session}${model} · ${windowLabel}${tab.title || 'Untitled'}  |  ${host}` };
   });
   const existing = [...$('tab').options];
   if (existing.length !== desired.length || desired.some((item, index) => existing[index]?.value !== String(item.id) || existing[index]?.textContent !== item.label)) {
@@ -373,15 +442,17 @@ async function updateCurrentPageAction() {
   const origin = available ? new URL(tab.url).origin : '';
   const profile = available ? saved.taughtProfiles[origin] || globalThis.ContextBridgeProfiles?.forURL(tab.url) : null;
   const attached = available && attachedTabIDs.includes(tab.id);
+  const binding = Object.values(saved.sessionBindings || {}).find((entry) => Number(entry?.tabId) === tab?.id);
   $('current-page').classList.toggle('ready', Boolean(profile));
   $('current-provider').textContent = profile
     ? `${String(profile.label || profile.name || 'AI page').replace(/ \(auto-detected\)$/, '')} detected`
     : 'No supported AI page detected';
   $('toggle-current-tab').disabled = !available || (!attached && ((!profile && saved.useVisualProfile) || attachedTabIDs.length >= 16));
   $('toggle-current-tab').textContent = attached ? 'Detach this page' : 'Attach this page';
+  $('release-session-tab').hidden = !attached;
   $('current-tab-state').textContent = !available
     ? 'Open ChatGPT or Gemini to connect it.'
-    : `${tab.title || safeHost(tab.url)} · ${attached ? (saved.running ? 'connected' : 'attached, connection stopped') : (profile ? 'ready' : 'teach this page in Advanced setup')}`;
+    : `${tab.title || safeHost(tab.url)} · ${attached ? (binding?.legacy ? 'old chat; open a new empty chat' : binding ? `session ${binding.label || 'reserved'}` : (saved.running ? 'connected' : 'attached, connection stopped')) : (profile ? 'ready' : 'teach this page in Advanced setup')}`;
 }
 
 function filterTabList(tabs, filter, attachedIDs) {
@@ -579,9 +650,11 @@ async function settings() {
     running: false,
     autoAttachFreshTabs: false,
     preserveDrafts: false,
+    sessionMode: 'manual',
     autoAttachBlockedTabIds: [],
     useVisualProfile: true,
     taughtProfiles: {},
+    sessionBindings: {},
     tabCapabilities: {},
     tabCapabilityScans: {},
     tabFailures: {},

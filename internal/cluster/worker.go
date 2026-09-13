@@ -396,7 +396,7 @@ func (w *Worker) execute(ctx context.Context, job Job, emitProgress func(JobProg
 		return nil, nil, Usage{}, err
 	}
 	localJobID := localExecutionID(job)
-	payload, err = prepareLocalPayload(payload, requirements, localJobID)
+	payload, err = prepareLocalPayload(payload, requirements, localJobID, job.OwnerSubject)
 	if err != nil {
 		return nil, nil, Usage{}, err
 	}
@@ -545,7 +545,7 @@ func (w *Worker) monitorResources(parent context.Context) func() Usage {
 	}
 }
 
-func prepareLocalPayload(payload []byte, requirements Requirements, localJobID string) ([]byte, error) {
+func prepareLocalPayload(payload []byte, requirements Requirements, localJobID string, owner ...string) ([]byte, error) {
 	provider := strings.TrimSpace(requirements.Provider)
 	var job map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &job); err != nil || job == nil {
@@ -564,6 +564,23 @@ func prepareLocalPayload(payload []byte, requirements Requirements, localJobID s
 	if session := strings.TrimSpace(requirements.SessionID); session != "" {
 		rawSession, _ := json.Marshal(session)
 		job["session_id"] = rawSession
+	}
+	// A browser tab is a security boundary between producer conversations.
+	// Derive its internal binding from the authenticated producer, never from a
+	// producer-supplied scope field. The public session_id remains unchanged.
+	if strings.EqualFold(provider, "browser") {
+		var session string
+		_ = json.Unmarshal(job["session_id"], &session)
+		if session == "" {
+			session = "default"
+		}
+		producer := "local"
+		if len(owner) > 0 && owner[0] != "" {
+			producer = owner[0]
+		}
+		sum := sha256.Sum256([]byte(producer + "\x00" + session))
+		key, _ := json.Marshal(fmt.Sprintf("cb:%x", sum[:]))
+		job["contextbridge_session_key"] = key
 	}
 	return json.Marshal(job)
 }

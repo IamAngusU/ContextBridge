@@ -15,6 +15,7 @@ node "$root/extension/tests/profiles.test.mjs"
 node "$root/extension/tests/browser-state.test.mjs"
 node "$root/extension/tests/tab-selection.test.mjs"
 node "$root/extension/tests/tab-consent.test.mjs"
+node "$root/extension/tests/session-isolation.test.mjs"
 
 for browser in chromium firefox; do
   package="$root/extension/$browser"

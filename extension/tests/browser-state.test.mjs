@@ -716,6 +716,47 @@ const element = (text = '', attributes = {}) => ({
 }
 
 {
+  let sent = false;
+  let now = Date.now();
+  class FastDate extends Date {
+    static now() { now += 5000; return now; }
+    static parse(value) { return Date.parse(value); }
+  }
+  class TextArea {
+    constructor() { this.value = ''; this.offsetWidth = 1; }
+    getClientRects() { return [1]; }
+    focus() {}
+    dispatchEvent() {}
+  }
+  const input = new TextArea();
+  const send = { ...element(), click() { sent = true; } };
+  const stop = element('', { 'data-testid': 'stop-button' });
+  const ariaBusy = element();
+  const response = element('MODEASCII19');
+  const document = {
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === '#send') return [send];
+      if (selector === '#response') return sent ? [response] : [];
+      if (sent && selector === '[aria-busy="true"]') return [ariaBusy];
+      if (sent && selector.includes('stop')) return [stop];
+      return [];
+    }
+  };
+  const isolated = vm.createContext({ document, window: {}, HTMLTextAreaElement: TextArea,
+    HTMLInputElement: class {}, InputEvent: class {}, Event: class {},
+    setTimeout: (callback) => callback(), clearTimeout() {}, Date: FastDate, Promise });
+  const injectedAutomate = vm.runInContext(`(${context.automate.toString()})`, isolated);
+  const result = await injectedAutomate(
+    { prompt: 'MODEASCII19', output: { mode: 'text' } },
+    { name: 'gemini', selectors: { input: ['#input'], submit: ['#send'], response: ['#response'] } },
+    new Date(Date.now() + 3600000).toISOString()
+  );
+  assert.equal(result.code, 'stalled_response');
+  assert.equal(result.recoverable, true);
+}
+
+{
   const input = element();
   const previous = element('Previous answer', { 'data-testid': 'conversation-turn-2' });
   const remounted = element('Previous answer', { 'data-testid': 'conversation-turn-2' });

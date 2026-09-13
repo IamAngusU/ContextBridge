@@ -19,6 +19,31 @@ func TestPrepareLocalPayloadCarriesProviderAndSession(t *testing.T) {
 	}
 }
 
+func TestBrowserSessionBindingIsScopedToAuthenticatedProducer(t *testing.T) {
+	forged := []byte(`{"prompt":"hello","contextbridge_session_key":"forged"}`)
+	var first, second, followup map[string]interface{}
+	for _, entry := range []struct {
+		owner string
+		out   *map[string]interface{}
+	}{
+		{"producer-a", &first}, {"producer-b", &second}, {"producer-a", &followup},
+	} {
+		raw, err := prepareLocalPayload(forged, Requirements{Provider: "browser", SessionID: "shared-name"}, "local-job", entry.owner)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(raw, entry.out); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if first["contextbridge_session_key"] == "forged" || first["contextbridge_session_key"] == second["contextbridge_session_key"] {
+		t.Fatal("producer supplied or cross-producer browser session key was accepted")
+	}
+	if first["contextbridge_session_key"] != followup["contextbridge_session_key"] {
+		t.Fatal("follow-up turn did not retain its producer-scoped browser session key")
+	}
+}
+
 func TestWorkerPolicyRestrictsRelayProvidersAndModels(t *testing.T) {
 	worker := &Worker{cfg: WorkerConfig{
 		AllowedTasks: []string{"generation"}, AllowedProviders: []string{"browser"}, AllowedModels: []string{"3.1 Pro"},

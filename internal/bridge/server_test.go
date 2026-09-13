@@ -40,7 +40,7 @@ func TestBrowserJobRoundTrip(t *testing.T) {
 
 	result := make(chan Submission, 1)
 	go func() {
-		jobRaw, _ := json.Marshal(Job{Prompt: "Review safely", Text: "hello"})
+		jobRaw, _ := json.Marshal(Job{Prompt: "Review safely", Text: "hello", SessionID: "shared-name", ContextBridgeSessionKey: "cb:producer-scoped-test"})
 		req, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/jobs", bytes.NewReader(jobRaw))
 		req.Header.Set("Authorization", "Bearer "+cfg.Server.Token)
 		req.Header.Set("Content-Type", "application/json")
@@ -72,6 +72,9 @@ func TestBrowserJobRoundTrip(t *testing.T) {
 	}
 	if work.Job.ID == "" {
 		t.Fatal("browser job was not queued")
+	}
+	if work.Job.ContextBridgeSessionKey != "cb:producer-scoped-test" {
+		t.Fatal("worker-derived session scope was lost before reaching the browser extension")
 	}
 	leaseReq, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/browser/jobs/"+work.Job.ID+"/lease", nil)
 	leaseReq.Header.Set("Authorization", "Bearer "+cfg.Server.Token)

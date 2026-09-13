@@ -21,6 +21,7 @@
         <div><strong id="current-provider">Detecting page…</strong><small id="current-tab-state">ChatGPT and Gemini are recognized automatically.</small></div>
       </div>
       <button id="toggle-current-tab" class="primary full" type="button" disabled>Attach this page</button>
+      <button id="release-session-tab" class="text-button" type="button" hidden>Use this page for a new session</button>
       <small class="field-hint" id="attached-summary">No AI tabs attached yet.</small>
     </section>
 
@@ -29,6 +30,10 @@
       <button id="pair" class="primary full" type="button">Connect</button>
       <button id="stop" class="secondary full" type="button" hidden>Disconnect</button>
       <small class="field-hint" id="connect-hint">If no tab is attached yet, Connect asks to use the current AI page. No separate test is required.</small>
+      <label class="mode"><input id="auto-update" type="checkbox" disabled><span>Automatically install verified updates</span></label>
+      <small class="field-hint" id="auto-update-state">Off by default. Connect to change this PC's setting.</small>
+      <label class="session-mode">New browser session<select id="session-mode"><option value="manual">Use an unassigned attached tab</option><option value="new_chat">Open a new chat tab automatically</option></select></label>
+      <small class="field-hint">Sessions never share a conversation. In manual mode, open a new empty chat in an attached tab and use “Use this page for a new session” to free it. A job can opt in with <code>metadata.contextbridge_new_chat: true</code>.</small>
     </section>
 
     <details class="advanced" id="manage-tabs">

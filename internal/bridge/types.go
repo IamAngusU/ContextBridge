@@ -22,24 +22,27 @@ type Job struct {
 	Route    string `json:"route,omitempty"`
 	Provider string `json:"provider,omitempty"`
 	// SessionID keeps browser follow-ups on the same selected conversation.
-	SessionID      string                 `json:"session_id,omitempty"`
-	BrowserProfile string                 `json:"browser_profile,omitempty"`
-	Model          string                 `json:"model,omitempty"`
-	Reasoning      string                 `json:"reasoning,omitempty"`
-	Kind           string                 `json:"kind,omitempty"`
-	Task           string                 `json:"task,omitempty"`
-	Prompt         string                 `json:"prompt"`
-	Text           string                 `json:"text,omitempty"`
-	Texts          []string               `json:"texts,omitempty"`
-	TenantID       string                 `json:"tenant_id,omitempty"`
-	Documents      []vectorstore.Document `json:"documents,omitempty"`
-	Query          string                 `json:"query,omitempty"`
-	TopK           int                    `json:"top_k,omitempty"`
-	ImageBase64    string                 `json:"image_base64,omitempty"`
-	ImageMediaType string                 `json:"image_media_type,omitempty"`
-	Metadata       map[string]interface{} `json:"metadata,omitempty"`
-	Output         OutputSpec             `json:"output,omitempty"`
-	CreatedAt      time.Time              `json:"created_at,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+	// ContextBridgeSessionKey is worker-derived for clustered browser jobs.
+	// It survives the local bridge queue so the extension can isolate producers.
+	ContextBridgeSessionKey string                 `json:"contextbridge_session_key,omitempty"`
+	BrowserProfile          string                 `json:"browser_profile,omitempty"`
+	Model                   string                 `json:"model,omitempty"`
+	Reasoning               string                 `json:"reasoning,omitempty"`
+	Kind                    string                 `json:"kind,omitempty"`
+	Task                    string                 `json:"task,omitempty"`
+	Prompt                  string                 `json:"prompt"`
+	Text                    string                 `json:"text,omitempty"`
+	Texts                   []string               `json:"texts,omitempty"`
+	TenantID                string                 `json:"tenant_id,omitempty"`
+	Documents               []vectorstore.Document `json:"documents,omitempty"`
+	Query                   string                 `json:"query,omitempty"`
+	TopK                    int                    `json:"top_k,omitempty"`
+	ImageBase64             string                 `json:"image_base64,omitempty"`
+	ImageMediaType          string                 `json:"image_media_type,omitempty"`
+	Metadata                map[string]interface{} `json:"metadata,omitempty"`
+	Output                  OutputSpec             `json:"output,omitempty"`
+	CreatedAt               time.Time              `json:"created_at,omitempty"`
 }
 
 type OutputSpec struct {

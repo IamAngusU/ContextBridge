@@ -34,10 +34,6 @@ type Settings struct {
 }
 
 func (s *Settings) ApplyDefaults() {
-	if s.Enabled == nil {
-		enabled := true
-		s.Enabled = &enabled
-	}
 	if s.Channel == "" {
 		s.Channel = "stable"
 	}
@@ -66,7 +62,7 @@ func (s Settings) Validate() error {
 }
 
 func (s Settings) DefaultEnabled() bool {
-	return s.Enabled == nil || *s.Enabled
+	return s.Enabled != nil && *s.Enabled
 }
 
 type State struct {
@@ -433,7 +429,9 @@ func (m *Manager) ConfirmInstalled(ctx context.Context, expectedVersion string) 
 
 func (m *Manager) status(state State) Status {
 	enabled := m.settings.DefaultEnabled()
-	if enabled && state.EnabledOverride != nil {
+	// An omitted config value starts off but permits the local dashboard or
+	// extension toggle to opt in. An explicit false remains an admin lock.
+	if (m.settings.Enabled == nil || enabled) && state.EnabledOverride != nil {
 		enabled = *state.EnabledOverride
 	}
 	return Status{

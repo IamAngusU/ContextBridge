@@ -731,7 +731,7 @@ func validateJob(job Job) error {
 	if job.ID != "" && (!jobIDPattern.MatchString(job.ID) || strings.Contains(job.ID, "..")) {
 		return errors.New("id must use 1 to 128 letters, numbers, dots, underscores, or hyphens")
 	}
-	for name, value := range map[string]string{"source": job.Source, "route": job.Route, "provider": job.Provider, "kind": job.Kind, "session_id": job.SessionID, "browser_profile": job.BrowserProfile, "model": job.Model, "reasoning": job.Reasoning} {
+	for name, value := range map[string]string{"source": job.Source, "route": job.Route, "provider": job.Provider, "kind": job.Kind, "session_id": job.SessionID, "contextbridge_session_key": job.ContextBridgeSessionKey, "browser_profile": job.BrowserProfile, "model": job.Model, "reasoning": job.Reasoning} {
 		if len(value) > 100 || strings.IndexFunc(value, unicode.IsControl) >= 0 {
 			return fmt.Errorf("%s must be at most 100 bytes without control characters", name)
 		}

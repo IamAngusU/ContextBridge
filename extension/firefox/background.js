@@ -11,6 +11,7 @@ const pollers = new Map();
 const busyTabs = new Set();
 const freshTabChecks = new Map();
 let freshTabWrite = Promise.resolve();
+let sessionWrite = Promise.resolve();
 const acceptedModelLabel = /^(?:gpt[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:astra|sol|terra|luna|pro|mini|nano|codex|thinking|instant))?|gemini(?:[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:pro|flash|lite|thinking|preview|experimental))*)?|astra|sol|terra|luna|\d+(?:\.\d+)?\s+(?:pro|flash|astra|sol|terra|luna))$/i;
 
 api.runtime.onInstalled.addListener(() => resume());
@@ -53,6 +54,8 @@ async function handleMessage(message, sender) {
       return { ok: true };
     case 'check-tab-freshness':
       return { ok: true, fresh: await checkFreshTab(Number(message.tabId)) };
+    case 'release-session-tab':
+      return releaseSessionTab(Number(message.tabId));
     case 'discover-fresh-tabs':
       await discoverFreshTabs();
       return { ok: true };
@@ -201,6 +204,16 @@ async function detachClosedTab(tabId) {
   delete tabCapabilities[tabId];
   delete tabCapabilityScans[tabId];
   delete tabFailures[tabId];
+  await serializeSessionWrite(async () => {
+    const latest = await settings();
+    const sessionBindings = { ...latest.sessionBindings };
+    for (const [key, binding] of Object.entries(sessionBindings)) {
+      if (Number(binding?.tabId) !== tabId) continue;
+      if (binding.url && !isFreshChatURL(binding.url) && !binding.legacy) sessionBindings[key] = { ...binding, tabId: 0 };
+      else delete sessionBindings[key];
+    }
+    await api.storage.local.set({ sessionBindings });
+  });
   if (!configuredTabIDs(cfg).includes(tabId)) {
     await api.storage.local.set({ autoAttachBlockedTabIds, tabCapabilities, tabCapabilityScans, tabFailures });
     return;
@@ -443,13 +456,16 @@ async function processWork(cfg, work, claimedTabId) {
   let latestProgressState = '';
   let tabId = claimedTabId;
   let tabSlotHeld = false;
-  let failureCode = 'browser_automation_error';
+  let jobCompleted = false;
+  let failureCode = 'browser_session_unavailable';
   let failureReason = 'other';
   await api.storage.local.set({ lastError: '' });
   try {
     tabId = await resolveWorkTab(cfg, work, claimedTabId);
     await waitForTabSlot(tabId, work.deadline);
     tabSlotHeld = true;
+    await assertSessionTab(workSessionKey(work), tabId);
+    failureCode = 'browser_automation_error';
     const previousFailures = (await api.storage.local.get({ tabFailures: {} })).tabFailures;
     if (previousFailures[tabId]) {
       const tabFailures = { ...previousFailures };
@@ -578,6 +594,7 @@ async function processWork(cfg, work, claimedTabId) {
     // the model/reasoning requested by the remote job.
     if (answer.selected_model) decision.selected_model = String(answer.selected_model).slice(0, 100);
     if (answer.selected_reasoning) decision.selected_reasoning = String(answer.selected_reasoning).slice(0, 100);
+    jobCompleted = true;
   } catch (error) {
     const mode = outputMode(work.job.output || {});
     decision = mode === 'decision'
@@ -591,6 +608,9 @@ async function processWork(cfg, work, claimedTabId) {
   } finally {
     if (leaseTimer) clearInterval(leaseTimer);
     if (progressTimer) clearInterval(progressTimer);
+    if (jobCompleted && tabSlotHeld) {
+      try { await rememberSessionURL(workSessionKey(work), tabId); } catch (_) {}
+    }
     if (tabSlotHeld) busyTabs.delete(tabId);
   }
 
@@ -617,23 +637,168 @@ async function coolDownTab(tabId, duration) {
   await api.storage.local.set({ tabCooldowns });
 }
 
-async function resolveWorkTab(cfg, work, claimedTabId) {
-  const session = String(work?.job?.session_id || '').trim();
-  if (!session) return claimedTabId;
-  const sessionTabs = { ...(cfg.sessionTabs || {}) };
-  const mapped = Number(sessionTabs[session] || 0);
-  if (mapped && configuredTabIDs(cfg).includes(mapped)) {
-    try {
-      const tab = await api.tabs.get(mapped);
-      const requested = String(work?.profile?.name || '');
-      const actual = profileForTab(cfg, tab)?.name || '';
-      if (!requested || requested === actual) return mapped;
-    } catch (_) {}
+function workSessionKey(work) {
+  const session = String(work?.job?.contextbridge_session_key || work?.job?.session_id || 'local-default').trim().slice(0, 200);
+  const profile = String(work?.profile?.name || work?.job?.browser_profile || '').trim().slice(0, 50);
+  // One terminal session can explicitly switch providers, but ChatGPT and
+  // Gemini must never be treated as the same browser conversation.
+  return JSON.stringify([session, profile]);
+}
+
+function serializeSessionWrite(operation) {
+  const result = sessionWrite.catch(() => {}).then(operation);
+  sessionWrite = result.then(() => {}, () => {});
+  return result;
+}
+
+async function sessionBindingState() {
+  const cfg = await settings();
+  const bindings = { ...cfg.sessionBindings };
+  if (!cfg.sessionBindingsMigrated) {
+    // Old releases could put multiple sessions into one conversation. Their
+    // history cannot be separated retroactively, so quarantine those tabs.
+    for (const tabId of Object.values(cfg.sessionTabs || {}).map(Number)) {
+      if (!tabId || Object.values(bindings).some((entry) => Number(entry?.tabId) === tabId)) continue;
+      bindings[`legacy-tab:${tabId}`] = { tabId, url: '', legacy: true };
+    }
+    await api.storage.local.set({ sessionBindings: bindings, sessionBindingsMigrated: true, sessionTabs: {} });
   }
-  sessionTabs[session] = claimedTabId;
-  const entries = Object.entries(sessionTabs).slice(-200);
-  await api.storage.local.set({ sessionTabs: Object.fromEntries(entries) });
-  return claimedTabId;
+  return { cfg, bindings };
+}
+
+async function resolveWorkTab(_cfg, work, claimedTabId) {
+  return serializeSessionWrite(async () => {
+    const { cfg, bindings } = await sessionBindingState();
+    const key = workSessionKey(work);
+    const requested = String(work?.profile?.name || '');
+    const compatible = async (tabId) => {
+      try {
+        const tab = await api.tabs.get(tabId);
+        return tab && (!requested || profileForTab(cfg, tab)?.name === requested) ? tab : null;
+      } catch (_) { return null; }
+    };
+    if (bindings[key]) {
+      const binding = bindings[key];
+      const mapped = Number(binding.tabId);
+      if (configuredTabIDs(cfg).includes(mapped)) {
+        const tab = await compatible(mapped);
+        if (tab && (!binding.url || tab.url === binding.url)) return mapped;
+      }
+      // The user may manually switch back to a known conversation, including
+      // after closing its original tab. Match the exact saved URL, never title
+      // or visible text, and park the previous occupant before reassigning.
+      if (binding.url && !isFreshChatURL(binding.url)) {
+        for (const id of configuredTabIDs(cfg)) {
+          if (busyTabs.has(id)) continue;
+          const tab = await compatible(id);
+          if (!tab || tab.url !== binding.url) continue;
+          const occupants = Object.entries(bindings).filter(([otherKey, entry]) => otherKey !== key && Number(entry?.tabId) === id);
+          if (occupants.some(([, entry]) => entry.legacy || entry.url === tab.url || isFreshChatURL(entry.url))) continue;
+          for (const [otherKey, entry] of occupants) bindings[otherKey] = { ...entry, tabId: 0 };
+          bindings[key] = { ...binding, tabId: id };
+          await api.storage.local.set({ sessionBindings: bindings });
+          return id;
+        }
+      }
+      throw new Error('The session tab moved or closed. Open its original chat in an attached tab before sending another turn');
+    }
+    const occupied = new Set(Object.values(bindings).map((entry) => Number(entry?.tabId)));
+    for (const [oldKey, entry] of Object.entries(bindings)) {
+      if (!entry.legacy || !configuredTabIDs(cfg).includes(Number(entry.tabId))) continue;
+      const oldTab = await compatible(Number(entry.tabId));
+      if (oldTab && isFreshChatURL(oldTab.url) && await checkFreshTab(oldTab.id)) {
+        occupied.delete(oldTab.id);
+        delete bindings[oldKey];
+      }
+    }
+    const order = [claimedTabId, ...configuredTabIDs(cfg).filter((id) => id !== claimedTabId)];
+    const requestedMode = work?.job?.metadata?.contextbridge_new_chat === true ? 'new_chat' : cfg.sessionMode;
+    let tab = null;
+    if (requestedMode !== 'new_chat') {
+      for (const id of order) {
+        if (occupied.has(id)) continue;
+        tab = await compatible(id);
+        if (!tab) continue;
+        // A parked session still owns its exact conversation URL.
+        if (Object.values(bindings).some((entry) => entry.url && !isFreshChatURL(entry.url) && entry.url === tab.url)) {
+          tab = null;
+          continue;
+        }
+        break;
+      }
+    }
+    if (!tab && requestedMode === 'new_chat') tab = await createFreshSessionTab(cfg, work, claimedTabId);
+    if (!tab) throw new Error('No unassigned AI tab is available for this session. Open a fresh chat and attach it, or enable New chat per session');
+    if (isFreshChatURL(tab.url) && !await checkFreshTab(tab.id)) {
+      throw new Error('The new AI chat is not empty; no prompt was sent');
+    }
+    bindings[key] = { tabId: tab.id, url: tab.url || '', label: String(work?.job?.session_id || 'default').slice(0, 80) };
+    await api.storage.local.set({ sessionBindings: bindings });
+    return tab.id;
+  });
+}
+
+async function createFreshSessionTab(cfg, work, claimedTabId) {
+  const profile = String(work?.profile?.name || profileForTab(cfg, await api.tabs.get(claimedTabId))?.name || '');
+  const url = profile === 'chatgpt' ? 'https://chatgpt.com/' : profile === 'gemini' ? 'https://gemini.google.com/app' : '';
+  if (!url) throw new Error('Automatic new chats are supported only for ChatGPT and Gemini');
+  if (configuredTabIDs(cfg).length >= 16) throw new Error('The 16-tab safety limit is reached; close or detach a session tab first');
+  if (!await api.permissions.contains({ origins: [new URL(url).origin + '/*'] })) throw new Error('Page access for the new AI chat is not granted');
+  const created = await api.tabs.create({ url, active: false });
+  await waitForTabReady(created.id, work.profile?.selectors || {}, 30000);
+  if (!await checkFreshTab(created.id)) throw new Error('The new AI chat was not confirmed empty; no prompt was sent');
+  const tabIds = [...configuredTabIDs(cfg), created.id];
+  await api.storage.local.set({ tabId: tabIds[0], tabIds });
+  void poll();
+  void sendHeartbeat('waiting');
+  return api.tabs.get(created.id);
+}
+
+async function rememberSessionURL(key, tabId) {
+  await serializeSessionWrite(async () => {
+    const { bindings } = await sessionBindingState();
+    const binding = bindings[key];
+    if (!binding || Number(binding.tabId) !== tabId || !isFreshChatURL(binding.url)) return;
+    const tab = await api.tabs.get(tabId);
+    if (!tab?.url || isFreshChatURL(tab.url)) return;
+    const before = new URL(binding.url);
+    const after = new URL(tab.url);
+    if (before.origin !== after.origin) return;
+    bindings[key] = { ...binding, url: tab.url };
+    await api.storage.local.set({ sessionBindings: bindings });
+  });
+}
+
+async function assertSessionTab(key, tabId) {
+  const cfg = await settings();
+  const binding = cfg.sessionBindings?.[key];
+  const tab = await api.tabs.get(tabId);
+  if (!binding || Number(binding.tabId) !== tabId || (binding.url && binding.url !== tab?.url)) {
+    throw new Error('The session tab changed or was released while the job was waiting; no prompt was sent');
+  }
+  if (isFreshChatURL(binding.url) && !await checkFreshTab(tabId)) {
+    throw new Error('The session chat was no longer empty before Send; no prompt was sent');
+  }
+}
+
+async function releaseSessionTab(tabId) {
+  if (!tabId || busyTabs.has(tabId)) throw new Error('Wait for this tab to finish its job first');
+  const cfg = await settings();
+  if (!configuredTabIDs(cfg).includes(tabId)) throw new Error('Attach this AI tab first');
+  if (!await checkFreshTab(tabId)) throw new Error('Open a new, empty ChatGPT or Gemini chat in this tab first; no conversation was released');
+  return serializeSessionWrite(async () => {
+    if (busyTabs.has(tabId) || !isFreshChatURL((await api.tabs.get(tabId))?.url)) {
+      throw new Error('The tab changed while it was being checked; no conversation was released');
+    }
+    const { bindings } = await sessionBindingState();
+    for (const [key, binding] of Object.entries(bindings)) {
+      if (Number(binding?.tabId) !== tabId) continue;
+      if (binding.url && !isFreshChatURL(binding.url) && !binding.legacy) bindings[key] = { ...binding, tabId: 0 };
+      else delete bindings[key];
+    }
+    await api.storage.local.set({ sessionBindings: bindings });
+    return { ok: true };
+  });
 }
 
 async function waitForTabSlot(tabId, deadlineValue) {
@@ -1473,10 +1638,14 @@ function automate(job, profile, jobDeadline) {
 		const plainTextJob = String(job.output?.mode || '').toLowerCase() === 'text'
 			&& !Number(job.output?.min_artifacts || 0) && !Number(job.output?.min_images || 0) && !Number(job.output?.min_media || 0)
 			&& !job.metadata?.contextbridge_image_tool && !job.metadata?.contextbridge_music_tool;
-		if (profile.name === 'chatgpt' && plainTextJob && !resumeOnly && job.metadata?.contextbridge_auto_reload !== false
-			&& state.busyReasons.length === 1 && state.busyReasons[0] === 'stop_button'
-			&& changedResponse && stableText && stableSince > 0 && Date.now() - stableSince >= 90000) {
-			resolve({ ok: false, error: 'ChatGPT kept Stop visible after 90 seconds of unchanged text; reloading once to verify the finished turn', code: 'stalled_response', recoverable: true });
+		const staleStop = state.busyReasons.includes('stop_button')
+			&& state.busyReasons.every((reason) => reason === 'stop_button' || reason === 'aria_busy');
+		const staleStopWait = profile.name === 'gemini' ? 120000 : 90000;
+		if ((profile.name === 'chatgpt' || profile.name === 'gemini') && plainTextJob && !resumeOnly
+			&& job.metadata?.contextbridge_auto_reload !== false && staleStop
+			&& changedResponse && stableText && stableSince > 0 && state.inputReady
+			&& Date.now() - stableSince >= staleStopWait) {
+			resolve({ ok: false, error: `${profile.name} kept Stop visible after unchanged text; reloading once to verify the finished turn`, code: 'stalled_response', recoverable: true });
 			return;
 		}
 		if (job.output?.min_images > 0 && changedResponse && !busy && latest) {
@@ -1517,7 +1686,7 @@ function automate(job, profile, jobDeadline) {
 		  const mediaMissing = job.output?.min_media > mediaCount;
 		  if ((filesMissing || imagesMissing || mediaMissing) && Date.now() - stableSince < 15000) continue;
 		  const artifacts = await collectArtifacts(latestElement, job.output || {});
-		  const confirmedModel = profile.name === 'gemini' && job.model && !['auto', 'default'].includes(String(job.model).toLowerCase()) && !resumeOnly
+		  const confirmedModel = profile.name === 'gemini' && job.model && !['auto', 'default'].includes(String(job.model).toLowerCase())
 			? confirmGeminiMode(job.model) : selectedModel;
 		  resolve({ ok: true, text: latest, artifacts, selected_model: confirmedModel, selected_reasoning: selectedReasoning });
           return;
@@ -1797,6 +1966,9 @@ async function settings() {
     useVisualProfile: true,
     taughtProfiles: {},
     sessionTabs: {},
+    sessionBindings: {},
+    sessionBindingsMigrated: false,
+    sessionMode: 'manual',
     tabCapabilities: {},
     tabCapabilityScans: {},
     tabFailures: {},

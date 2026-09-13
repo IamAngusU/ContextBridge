@@ -19,6 +19,7 @@ const stored = {};
 const statuses = [];
 const runtimeMessages = [];
 const permissionRequests = [];
+let updatesEnabled = false;
 let startError = '';
 let activePageID = 52;
 const element = (id) => {
@@ -30,6 +31,10 @@ const element = (id) => {
   return elements.get(id);
 };
 const context = vm.createContext({
+  fetch: async (_url, request = {}) => ({ ok: true, json: async () => {
+    if (request.method === 'PUT') updatesEnabled = JSON.parse(request.body).enabled;
+    return { enabled: updatesEnabled };
+  } }),
   chrome: {
     runtime: { onMessage: { addListener() {} }, sendMessage: async (message) => {
       runtimeMessages.push(message.type);
@@ -110,6 +115,18 @@ assert.equal(permissionRequests.length - requestsBeforeConnect, 1);
 assert.deepEqual(Array.from(permissionRequests.at(-1).origins), ['https://gemini.google.com/*', 'https://contribution.usercontent.google.com/*', 'http://127.0.0.1/*']);
 assert.ok(runtimeMessages.includes('start'));
 assert.ok(!runtimeMessages.includes('test'));
+await context.refreshUpdatePreference();
+assert.equal(element('auto-update').disabled, false);
+assert.equal(element('auto-update').checked, false);
+element('auto-update').checked = true;
+await listeners.get('auto-update:change')();
+assert.equal(updatesEnabled, true);
+assert.equal(element('auto-update').checked, true);
+element('session-mode').value = 'new_chat';
+await listeners.get('session-mode:change')();
+assert.equal(stored.sessionMode, 'new_chat');
+await listeners.get('release-session-tab:click')();
+assert.equal(runtimeMessages.at(-1), 'release-session-tab');
 stored.lastError = 'The browser tab did not finish reloading';
 startError = 'Local ContextBridge did not accept the browser connection';
 await listeners.get('pair:click')();

@@ -88,7 +88,7 @@ func TestNewerVersion(t *testing.T) {
 func TestSettingsDefaultAndOverride(t *testing.T) {
 	settings := Settings{}
 	settings.ApplyDefaults()
-	if !settings.DefaultEnabled() || settings.Channel != "stable" || settings.CheckIntervalHours != 24 {
+	if settings.DefaultEnabled() || settings.Channel != "stable" || settings.CheckIntervalHours != 24 {
 		t.Fatalf("unexpected defaults: %#v", settings)
 	}
 	manager, err := New(settings, t.TempDir(), "v0.1.0")
@@ -101,6 +101,21 @@ func TestSettingsDefaultAndOverride(t *testing.T) {
 	}
 	if status.Enabled {
 		t.Fatal("expected persisted override to disable updates")
+	}
+	status, err = manager.SetEnabled(true)
+	if err != nil || !status.Enabled {
+		t.Fatalf("local opt-in did not enable updates: %+v, %v", status, err)
+	}
+}
+
+func TestAutomaticUpdateIsInertByDefault(t *testing.T) {
+	manager, err := New(Settings{Repository: "no-such-owner/no-such-repository"}, t.TempDir(), "v0.5.20")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := manager.Auto(context.Background())
+	if err != nil || result.Status.Enabled || !result.Status.LastChecked.IsZero() {
+		t.Fatalf("disabled automatic update should not check the network: %+v, %v", result, err)
 	}
 }
 
@@ -128,7 +143,8 @@ func TestReleaseAssetName(t *testing.T) {
 }
 
 func TestAutomaticUpdateDefersActiveJobs(t *testing.T) {
-	manager, err := New(Settings{}, t.TempDir(), "v0.5.4")
+	enabled := true
+	manager, err := New(Settings{Enabled: &enabled}, t.TempDir(), "v0.5.4")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +160,8 @@ func TestAutomaticUpdateDefersActiveJobs(t *testing.T) {
 }
 
 func TestFailedVersionIsNotRetriedAutomatically(t *testing.T) {
-	manager, err := New(Settings{}, t.TempDir(), "v0.5.4")
+	enabled := true
+	manager, err := New(Settings{Enabled: &enabled}, t.TempDir(), "v0.5.4")
 	if err != nil {
 		t.Fatal(err)
 	}

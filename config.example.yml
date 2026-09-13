@@ -13,7 +13,7 @@ runtime:
   hardware_refresh_seconds: 10
 
 updates:
-  enabled: true
+  enabled: null # off by default; enable from the dashboard, extension, or CLI
   channel: stable
   repository: IamAngusU/ContextBridge
   check_interval_hours: 24

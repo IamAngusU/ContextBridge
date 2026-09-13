@@ -32,7 +32,7 @@ automatically enforce `requirements.provider` on the forwarded local job.
 
 The synchronous HTTP response contains the normalized decision. Folder jobs are renamed while processing and produce a neighboring `.result.json` file.
 
-For browser jobs, `session_id` pins follow-ups to one selected conversation. `browser_profile` selects a provider tab such as `chatgpt` or `gemini`; `model` and `reasoning` are matched against that provider's localized visible menus. These fields are bounded preferences: an unavailable explicit choice is an error, never a silent substitution.
+For browser jobs, `session_id` pins follow-ups to one selected conversation. The worker namespaces it by authenticated producer; distinct keys cannot reuse an occupied chat. With no ID, jobs from one producer share its default session. A new session requires an unassigned attached tab unless the extension is set to create a new chat tab or `metadata.contextbridge_new_chat: true` is set on that job. Manual switching requires navigating to the saved conversation URL; a moved tab fails before Send. `browser_profile` selects a provider tab such as `chatgpt` or `gemini`; `model` and `reasoning` are matched against that provider's localized visible menus. These fields are bounded preferences: an unavailable explicit choice is an error, never a silent substitution.
 
 ```json
 {
