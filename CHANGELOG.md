@@ -2,6 +2,21 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.39 - 2026-09-14
+
+### Added
+
+- durable local schedules and a resource-aware due queue: once, interval, daily, weekdays, weekly, and five-field cron with explicit timezones; authenticated API, CLI, and dashboard controls
+- authenticated retrieval of a saved scheduled-job result by job ID
+- opt-in ordered browser model/reasoning alternatives, considered only when a visible choice is unavailable before sending
+- failure-rate breakdowns by requested provider, model, reasoning, and combined selection in CLI and dashboard
+
+### Improved
+
+- on a proven stalled ContextBridge-created ChatGPT tab, foreground and observe the owned turn without resending before guarded reload recovery
+- open scheduled browser chats in the foreground from the start, while preserving background creation for ordinary jobs unless explicitly requested
+- keep schedule prompts out of routine status snapshots; persist claimed runs before dispatch and never replay interrupted sends automatically
+
 ## 0.5.38 - 2026-09-14
 
 ### Improved

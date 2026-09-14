@@ -579,6 +579,27 @@ async function processWork(cfg, work, claimedTabId) {
       const resumed = await api.scripting.executeScript({ target: { tabId }, func: automate, args: [resumeJob, effectiveProfile, work.deadline] });
       answer = resumed?.[0]?.result;
     }
+    if (shouldForegroundStalledTab(binding, effectiveProfile, answer)) {
+      // An automatically created background tab can be throttled by the
+      // browser. Foreground it only after proving this is our submitted turn,
+      // then observe without sending again. Keep the tab visible if it wakes.
+      try {
+        await assertRecoveryTab(workSessionKey(work), tabId);
+        const proof = await api.scripting.executeScript({ target: { tabId }, func: inspectLatestOwnedTurn,
+          args: [work.job.prompt, effectiveProfile.name] });
+        const remaining = (Date.parse(work.deadline || '') || Date.now() + 45000) - Date.now() - 5000;
+        if (proof?.[0]?.result && remaining >= 10000 && !(await api.tabs.get(tabId)).active) {
+          progressSequence += 1;
+          await reportProgress(cfg, work.job.id, { sequence: progressSequence, text: '', phase: 'recovering',
+            detail: 'Foregrounding a stalled, ContextBridge-created tab without resending', busy: true });
+          await api.tabs.update(tabId, { active: true });
+          const resumeJob = { ...work.job, metadata: { ...(work.job.metadata || {}), contextbridge_resume_only: true, contextbridge_baseline_text: baselineText } };
+          const observed = await api.scripting.executeScript({ target: { tabId }, func: automate,
+            args: [resumeJob, effectiveProfile, new Date(Date.now() + Math.min(35000, remaining)).toISOString()] });
+          if (observed?.[0]?.result?.ok) answer = observed[0].result;
+        }
+      } catch (_) { /* Existing ownership-checked recovery still applies. */ }
+    }
     if (!answer?.ok && answer?.recoverable) {
       failureCode = 'browser_recovery_unsafe';
       await assertRecoveryTab(workSessionKey(work), tabId);
@@ -682,6 +703,11 @@ async function processWork(cfg, work, claimedTabId) {
   await api.storage.local.set({ pendingCompletions });
   await completeWork(await settings(), work.job.id, decision);
   await sendHeartbeat('waiting');
+}
+
+function shouldForegroundStalledTab(binding, profile, answer) {
+  return binding?.autoCreated === true && profile?.name === 'chatgpt' && !answer?.ok
+    && answer?.recoverable === true && ['stalled_response', 'missing_response_after_generation'].includes(answer.code);
 }
 
 function classifyFailureReason(message) {
@@ -814,12 +840,13 @@ async function resolveWorkTab(_cfg, work, claimedTabId) {
         break;
       }
     }
-    if (!tab && requestedMode === 'new_chat') tab = await createFreshSessionTab(cfg, work, claimedTabId);
+    let autoCreated = false;
+    if (!tab && requestedMode === 'new_chat') { tab = await createFreshSessionTab(cfg, work, claimedTabId); autoCreated = true; }
     if (!tab) throw new Error('No unassigned AI tab is available for this session. Open a fresh chat and attach it, or enable New chat per session');
     if (isFreshChatURL(tab.url) && !await checkFreshTab(tab.id)) {
       throw new Error('The new AI chat is not empty; no prompt was sent');
     }
-    bindings[key] = { tabId: tab.id, url: tab.url || '', label: String(work?.job?.session_id || 'default').slice(0, 80) };
+    bindings[key] = { tabId: tab.id, url: tab.url || '', label: String(work?.job?.session_id || 'default').slice(0, 80), autoCreated };
     await api.storage.local.set({ sessionBindings: bindings });
     return tab.id;
   });
@@ -831,7 +858,7 @@ async function createFreshSessionTab(cfg, work, claimedTabId) {
   if (!url) throw new Error('Automatic new chats are supported only for ChatGPT and Gemini');
   if (configuredTabIDs(cfg).length >= 16) throw new Error('The 16-tab safety limit is reached; close or detach a session tab first');
   if (!await api.permissions.contains({ origins: [new URL(url).origin + '/*'] })) throw new Error('Page access for the new AI chat is not granted');
-  const created = await api.tabs.create({ url, active: false });
+  const created = await api.tabs.create({ url, active: work?.job?.metadata?.contextbridge_foreground_new_chat === true });
   await waitForTabReady(created.id, work.profile?.selectors || {}, 30000);
   if (!await checkFreshTab(created.id)) throw new Error('The new AI chat was not confirmed empty; no prompt was sent');
   const tabIds = [...configuredTabIDs(cfg), created.id];
@@ -1916,8 +1943,21 @@ function automate(job, profile, jobDeadline, editTarget = null) {
 	  if (!resumeOnly && profile.name === 'chatgpt' && chatGPTStopVisible()) {
 	    throw new Error('ChatGPT still shows Stop; the previous generation may be active and no new prompt was typed');
 	  }
-	  const selectedModel = !resumeOnly && job.model ? await choosePreference('model', job.model) : '';
-	  const selectedReasoning = !resumeOnly && job.reasoning ? await choosePreference('reasoning', job.reasoning) : '';
+	  const chooseWithFallback = async (kind, requested, alternatives) => {
+		const choices = [requested, ...(Array.isArray(alternatives) ? alternatives.slice(0, 4) : [])]
+			.map((value) => String(value || '').trim()).filter((value, index, all) => value && all.indexOf(value) === index);
+		for (let index = 0; index < choices.length; index += 1) {
+			try { return await choosePreference(kind, choices[index]); }
+			catch (error) {
+				// No fallback for missing selectors, uncertain post-selection state,
+				// timeouts, or a submitted prompt. These are not proof of absence.
+				if (index === choices.length - 1 || !new RegExp(`^Requested ${kind} "[^"]+" is (?:not available|disabled) in this chat`, 'i').test(String(error?.message || ''))) throw error;
+			}
+		}
+		return '';
+	  };
+	  const selectedModel = !resumeOnly && job.model ? await chooseWithFallback('model', job.model, job.metadata?.contextbridge_model_fallbacks) : '';
+	  const selectedReasoning = !resumeOnly && job.reasoning ? await chooseWithFallback('reasoning', job.reasoning, job.metadata?.contextbridge_reasoning_fallbacks) : '';
 	  const clearedGeminiTool = !resumeOnly && !editTarget && await clearIncompatibleGeminiTools(job);
 	  if (!resumeOnly && (job.model || job.reasoning || clearedGeminiTool)) {
 		// Switching a provider mode may replace the entire composer. Never
@@ -2030,7 +2070,7 @@ function automate(job, profile, jobDeadline, editTarget = null) {
 		const changedResponse = responses.length > before.length || latest !== previousText
 			|| Boolean(previousIdentity && latestIdentity && latestIdentity !== previousIdentity);
         const fallbackNotice = latestElement?.closest?.('.conversation-container')?.querySelector?.('peak-hour-fallback-disclaimer');
-        if (profile.name === 'gemini' && geminiModeFamily(job.model) === 'pro' && changedResponse && isVisible(fallbackNotice)) {
+        if (profile.name === 'gemini' && geminiModeFamily(selectedModel || job.model) === 'pro' && changedResponse && isVisible(fallbackNotice)) {
           resolve({ ok: false, error: 'Gemini used another model during peak demand; requested Pro output was not accepted', code: 'browser_model_unavailable', retryable: true });
           return;
         }
@@ -2132,8 +2172,8 @@ function automate(job, profile, jobDeadline, editTarget = null) {
 		  const mediaMissing = job.output?.min_media > mediaCount;
 		  if ((filesMissing || imagesMissing || mediaMissing) && Date.now() - stableSince < 15000) continue;
 		  const artifacts = await collectArtifacts(latestElement, job.output || {});
-		  const confirmedModel = profile.name === 'gemini' && job.model && !['auto', 'default'].includes(String(job.model).toLowerCase())
-			? confirmGeminiMode(job.model) : selectedModel;
+		  const confirmedModel = profile.name === 'gemini' && (selectedModel || job.model) && !['auto', 'default'].includes(String(selectedModel || job.model).toLowerCase())
+			? confirmGeminiMode(selectedModel || job.model) : selectedModel;
 		  resolve({ ok: true, text: latest, artifacts, selected_model: confirmedModel, selected_reasoning: selectedReasoning });
           return;
         }

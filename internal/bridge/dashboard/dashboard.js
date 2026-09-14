@@ -24,6 +24,10 @@ $('auth-form').addEventListener('submit', async (event) => {
 });
 $('refresh').addEventListener('click', refresh);
 $('update-toggle').addEventListener('change', updateAutomaticUpdates);
+$('schedule-form').addEventListener('submit', createSchedule);
+$('schedule-form').elements.frequency.addEventListener('change', updateScheduleFields);
+$('schedule-list').addEventListener('click', scheduleAction);
+updateScheduleFields();
 $('forget-token').addEventListener('click', () => {
   sessionStorage.removeItem('contextbridge-token');
   token = '';
@@ -82,6 +86,7 @@ function render(data) {
   renderRuntime(data.runtime || {});
   renderModels(data.runtime?.models || [], data.rag || {});
   renderMetrics(data.metrics || {});
+  renderSchedules(data.schedules || []);
   renderBrowser(data.browser || {});
   renderRoutes(data.routes || {});
   renderActivity(data.activity || []);
@@ -248,6 +253,94 @@ function renderMetrics(metrics) {
   renderProviderBreakdown(metrics);
   renderBreakdown('metrics-models', metrics.by_model || {});
   renderBreakdown('metrics-flags', metrics.by_flag || {});
+  renderRateBreakdown('metrics-attempted-providers',metrics.by_attempted_provider || {},metrics.attempted_provider_failures || {});
+  renderRateBreakdown('metrics-attempted-models',metrics.by_attempted_model || {},metrics.model_failures || {});
+  renderRateBreakdown('metrics-reasoning',metrics.by_reasoning || {},metrics.reasoning_failures || {});
+  renderRateBreakdown('metrics-selections',metrics.by_selection || {},metrics.selection_failures || {});
+}
+
+function renderRateBreakdown(id, totals, failures) {
+  const list=$(id);
+  list.textContent='';
+  const entries=Object.entries(totals).sort((a,b)=>Number(b[1])-Number(a[1]) || a[0].localeCompare(b[0]));
+  if (!entries.length) { const row=document.createElement('li'); row.className='empty'; row.textContent='No samples since this version'; list.append(row); return; }
+  for (const [name,totalValue] of entries.slice(0,8)) {
+    const total=Number(totalValue), failed=Number(failures[name] || 0);
+    const row=document.createElement('li'), label=document.createElement('span'), value=document.createElement('strong');
+    label.textContent=name || 'unknown';
+    value.textContent=`${failed}/${total} · ${total ? (100*failed/total).toFixed(1) : '0.0'}%`;
+    row.append(label,value); list.append(row);
+  }
+}
+
+function updateScheduleFields() {
+  const frequency=$('schedule-form').elements.frequency.value;
+  for (const field of $('schedule-form').querySelectorAll('[data-frequency]')) field.hidden=!field.dataset.frequency.split(' ').includes(frequency);
+}
+
+async function createSchedule(event) {
+  event.preventDefault();
+  const form=event.currentTarget, values=new FormData(form), frequency=String(values.get('frequency'));
+  const timing={type:frequency};
+  if (frequency==='at') {
+    const date=new Date(String(values.get('at')));
+    if (!Number.isFinite(date.getTime())) { $('schedule-message').textContent='Choose a future date and time.'; return; }
+    timing.at=date.toISOString();
+  } else if (frequency==='interval') timing.interval_seconds=Number(values.get('interval'))*60;
+  else {
+    timing.timezone=String(values.get('timezone') || Intl.DateTimeFormat().resolvedOptions().timeZone || 'Local').trim();
+    if (frequency==='cron') timing.cron=String(values.get('cron') || '').trim();
+    else timing.time=String(values.get('time') || '').trim();
+    if (frequency==='weekly') timing.days=String(values.get('days') || '').split(',').map((item)=>item.trim()).filter(Boolean);
+  }
+  const alternatives=(name)=>String(values.get(name) || '').split(',').map((item)=>item.trim()).filter(Boolean);
+  const job={prompt:String(values.get('prompt') || ''),route:String(values.get('route') || 'default').trim() || 'default',
+    output:{mode:'text'}};
+  for (const name of ['provider','model','reasoning']) { const value=String(values.get(name) || '').trim(); if (value) job[name]=value; }
+  job.metadata={contextbridge_foreground_new_chat:values.has('foreground')};
+  if (values.has('new-chat')) job.metadata.contextbridge_new_chat_per_run=true;
+  const payload={name:String(values.get('name') || '').trim(),job,timing,
+    fallback:{models:alternatives('model-fallbacks'),reasoning:alternatives('reasoning-fallbacks')}};
+  $('schedule-message').textContent='Saving…';
+  try {
+    const response=await fetch('/v1/schedules',{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    const result=await response.json();
+    if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    $('schedule-message').textContent=`Created ${result.name}.`;
+    form.reset(); updateScheduleFields(); await refresh();
+  } catch (error) { $('schedule-message').textContent=error.message || String(error); }
+}
+
+function renderSchedules(items) {
+  $('schedule-count').textContent=`${items.length} schedule${items.length===1?'':'s'}`;
+  const list=$('schedule-list'); list.textContent='';
+  if (!items.length) { const empty=document.createElement('p'); empty.className='empty'; empty.textContent='No scheduled jobs yet.'; list.append(empty); return; }
+  for (const item of items) {
+    const row=document.createElement('article'), detail=document.createElement('div'), title=document.createElement('strong'), state=document.createElement('span'), controls=document.createElement('div');
+    row.className='schedule-row'; title.textContent=item.name || item.id;
+    const next=item.enabled && meaningfulTimestamp(item.next_run) ? `next ${new Date(item.next_run).toLocaleString()}` : 'paused / finished';
+    const last=item.last_outcome ? ` · last ${item.last_outcome}${item.last_error ? ` (${item.last_error})` : ''}` : '';
+    state.textContent=`${item.timing?.type || 'once'} · ${item.route || 'default'} · ${item.provider || 'route provider'} · ${item.model || 'auto model'} · ${item.reasoning || 'default reasoning'} · ${item.current_run_id ? 'running' : item.waiting_reason || next}${last}`;
+    detail.append(title,state);
+    for (const [action,label] of [[item.enabled?'pause':'resume',item.enabled?'Pause':'Resume'],['run','Run now'],['delete','Delete']]) {
+      const button=document.createElement('button'); button.type='button'; button.className='outline'; button.dataset.action=action; button.dataset.id=item.id; button.textContent=label; controls.append(button);
+    }
+    row.append(detail,controls); list.append(row);
+  }
+}
+
+async function scheduleAction(event) {
+  const button=event.target.closest('button[data-action]'); if (!button) return;
+  const action=button.dataset.action, id=button.dataset.id;
+  if (action==='delete' && !window.confirm('Delete this schedule? A running job cannot be unsent.')) return;
+  button.disabled=true;
+  try {
+    const response=await fetch(`/v1/schedules/${encodeURIComponent(id)}${action==='delete'?'':`/${action}`}`,{
+      method:action==='delete'?'DELETE':'POST',headers:{Authorization:`Bearer ${token}`}});
+    const result=await response.json(); if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    $('schedule-message').textContent=action==='run'?`Run accepted: ${result.run_id}`:`Schedule ${action}d.`;
+    await refresh();
+  } catch (error) { $('schedule-message').textContent=error.message || String(error); button.disabled=false; }
 }
 
 function renderProviderBreakdown(metrics) {

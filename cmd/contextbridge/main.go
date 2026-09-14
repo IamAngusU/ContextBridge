@@ -53,6 +53,10 @@ func main() {
 		err = runCommand(os.Args[2:])
 	case "submit":
 		err = submitCommand(os.Args[2:])
+	case "schedule":
+		err = scheduleCommand(os.Args[2:])
+	case "result":
+		err = resultCommand(os.Args[2:])
 	case "review":
 		err = reviewCommand(os.Args[2:])
 	case "health":
@@ -109,6 +113,9 @@ Usage:
   contextbridge serve [--config path]
   contextbridge run [--config path] [--slots N] [--topmost]
   contextbridge submit --file job.json [--config path]
+  contextbridge schedule add --file schedule.json [--config path]
+  contextbridge schedule list|show|pause|resume|run|delete [ID] [--config path]
+  contextbridge result JOB_ID [--config path]
   contextbridge review --job-dir path [--config path]
   contextbridge health [--config path]
   contextbridge dashboard [--config path] [--no-open]
@@ -645,6 +652,11 @@ func statusCommand(args []string) error {
 		Browser   bridge.BrowserClientStatus `json:"browser"`
 		Runtime   bridge.RuntimeStatus       `json:"runtime"`
 		Metrics   bridge.Metrics             `json:"metrics"`
+		Schedules []struct {
+			Enabled       bool   `json:"enabled"`
+			CurrentRunID  string `json:"current_run_id"`
+			WaitingReason string `json:"waiting_reason"`
+		} `json:"schedules"`
 	}
 	if err := json.Unmarshal(raw, &status); err != nil {
 		return err
@@ -657,6 +669,21 @@ func statusCommand(args []string) error {
 		fmt.Printf("Tunnel: %s\n", status.Tunnel.State)
 	}
 	fmt.Printf("Queue: %d waiting, %d completed this session\n", status.Queued, status.Completed)
+	if len(status.Schedules) > 0 {
+		active, running, waiting := 0, 0, 0
+		for _, item := range status.Schedules {
+			if item.Enabled {
+				active++
+			}
+			if item.CurrentRunID != "" {
+				running++
+			}
+			if item.WaitingReason != "" {
+				waiting++
+			}
+		}
+		fmt.Printf("Schedules: %d total, %d enabled, %d running, %d waiting for resources\n", len(status.Schedules), active, running, waiting)
+	}
 	if status.Browser.Connected {
 		fmt.Printf("Browser: %d tab(s), %d busy, extension %s\n", max(1, status.Browser.ActiveTabs), status.Browser.BusyTabs, status.Browser.ExtensionVersion)
 		for _, tab := range status.Browser.Tabs {
@@ -673,7 +700,7 @@ func statusCommand(args []string) error {
 	} else {
 		fmt.Println("Browser: not connected")
 	}
-	fmt.Printf("Jobs: %d total, %d failed\n", status.Metrics.JobsTotal, status.Metrics.JobsFailed)
+	fmt.Printf("Jobs: %d total, %d failed (%.1f%%)\n", status.Metrics.JobsTotal, status.Metrics.JobsFailed, failureRate(status.Metrics.JobsFailed, status.Metrics.JobsTotal))
 	providers := make([]string, 0, len(status.Metrics.ByProvider))
 	for provider := range status.Metrics.ByProvider {
 		providers = append(providers, provider)
@@ -690,6 +717,10 @@ func statusCommand(args []string) error {
 		}
 		fmt.Printf("Provider %s: %d jobs%s\n", provider, count, detail)
 	}
+	printFailureBreakdown("Requested provider", status.Metrics.ByAttemptedProvider, status.Metrics.AttemptedProviderFailures)
+	printFailureBreakdown("Requested model", status.Metrics.ByAttemptedModel, status.Metrics.ModelFailures)
+	printFailureBreakdown("Requested reasoning", status.Metrics.ByReasoning, status.Metrics.ReasoningFailures)
+	printFailureBreakdown("Requested selection", status.Metrics.BySelection, status.Metrics.SelectionFailures)
 	for name, engine := range status.Runtime.Engines {
 		detail := engine.Affinity
 		if detail == "" {

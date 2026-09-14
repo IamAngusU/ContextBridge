@@ -17,10 +17,11 @@ import (
 )
 
 type Job struct {
-	ID       string `json:"id,omitempty"`
-	Source   string `json:"source,omitempty"`
-	Route    string `json:"route,omitempty"`
-	Provider string `json:"provider,omitempty"`
+	routeProvider string
+	ID            string `json:"id,omitempty"`
+	Source        string `json:"source,omitempty"`
+	Route         string `json:"route,omitempty"`
+	Provider      string `json:"provider,omitempty"`
 	// SessionID keeps browser follow-ups on the same selected conversation.
 	SessionID string `json:"session_id,omitempty"`
 	// ContextBridgeSessionKey is worker-derived for clustered browser jobs.

@@ -5,6 +5,7 @@ import vm from 'node:vm';
 const source = fs.readFileSync(new URL('../src/background.js', import.meta.url), 'utf8');
 const listener = { addListener() {} };
 const state = { tabId: 1, tabIds: [1, 2], sessionMode: 'manual', sessionBindingsMigrated: true };
+let createForeground = false;
 const tabs = new Map([
   [1, { id: 1, url: 'https://chatgpt.com/c/first' }],
   [2, { id: 2, url: 'https://chatgpt.com/c/second' }]
@@ -15,7 +16,7 @@ const chrome = {
     onUpdated: listener, onRemoved: listener,
     get: async (id) => { if (!tabs.has(id)) throw new Error('closed tab'); return { ...tabs.get(id) }; },
     create: async ({ url, active }) => {
-      assert.equal(active, false);
+      assert.equal(active, Boolean(createForeground));
       const tab = { id: 3, url };
       tabs.set(3, tab);
       return { ...tab };
@@ -67,6 +68,14 @@ assert.equal(await context.resolveWorkTab({}, work('session-3'), 1), 1);
 state.sessionMode = 'new_chat';
 assert.equal(await context.resolveWorkTab({}, work('session-4'), 1), 3);
 assert.deepEqual(Array.from(state.tabIds), [1, 2, 3]);
+assert.equal(state.sessionBindings[bindingKey('session-4')].autoCreated, true);
+const savedBindings = state.sessionBindings;
+state.sessionBindings = {};
+state.tabIds = [1, 2];
+createForeground = true;
+assert.equal(await context.resolveWorkTab({}, work('foreground', { contextbridge_foreground_new_chat: true }), 1), 3);
+createForeground = false;
+state.sessionBindings = savedBindings;
 state.sessionMode = 'manual';
 await assert.rejects(context.resolveWorkTab({}, work('session-5'), 1), /No unassigned AI tab/);
 state.sessionBindings = {};

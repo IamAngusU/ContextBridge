@@ -69,6 +69,36 @@
         <div class="section-heading"><div><p class="eyebrow">Local statistics</p><h2>Runtime activity</h2></div><span id="metrics-updated" class="refresh-time">Waiting for the first job</span></div>
         <div class="metrics-summary"><div><span>Jobs</span><strong id="metrics-jobs">0</strong></div><div><span>Average latency</span><strong id="metrics-latency">No samples</strong></div><div><span>Failure rate</span><strong id="metrics-failure">0%</strong></div><div><span>Embedded vectors</span><strong id="metrics-vectors">0</strong></div></div>
         <div class="metric-breakdowns"><section><h3>Routes</h3><ul id="metrics-routes"></ul></section><section><h3>Tasks</h3><ul id="metrics-tasks"></ul></section><section><h3>Providers</h3><ul id="metrics-providers"></ul></section><section><h3>Models</h3><ul id="metrics-models"></ul></section><section><h3>Flags</h3><ul id="metrics-flags"></ul></section></div>
+        <div class="metric-breakdowns"><section><h3>Requested providers · failures</h3><ul id="metrics-attempted-providers"></ul></section><section><h3>Requested models · failures</h3><ul id="metrics-attempted-models"></ul></section><section><h3>Requested reasoning · failures</h3><ul id="metrics-reasoning"></ul></section><section><h3>Requested selection · failures</h3><ul id="metrics-selections"></ul></section></div>
+      </section>
+
+      <section class="content-band schedule-band">
+        <div class="section-heading"><div><p class="eyebrow">Durable local queue</p><h2>Schedules and wake-ups</h2></div><span id="schedule-count" class="refresh-time">No schedules</span></div>
+        <p class="schedule-note">Due jobs wait for a free slot or connected browser. Interrupted sends are never replayed automatically. Fallback choices are tried only before sending, when a provider menu explicitly says the requested choice is unavailable. Scheduled browser chats open in the foreground by default and may switch your active browser tab.</p>
+        <div id="schedule-list" class="schedule-list"></div>
+        <form id="schedule-form" class="schedule-form">
+          <h3>Add schedule</h3>
+          <div class="schedule-fields">
+            <label>Name<input name="name" maxlength="100" required placeholder="Morning summary"></label>
+            <label>Route<input name="route" placeholder="default" value="default"></label>
+            <label>Provider override<input name="provider" placeholder="browser / ollama / blank"></label>
+            <label>Model<input name="model" placeholder="exact model, or blank"></label>
+            <label>Reasoning<input name="reasoning" placeholder="exact level, or blank"></label>
+            <label>Model alternatives<input name="model-fallbacks" placeholder="comma-separated, opt-in"></label>
+            <label>Reasoning alternatives<input name="reasoning-fallbacks" placeholder="e.g. Hoch, Mittel"></label>
+            <label>Frequency<select name="frequency"><option value="at">Once</option><option value="interval">Interval</option><option value="daily">Daily</option><option value="weekdays">Weekdays</option><option value="weekly">Weekly</option><option value="cron">Custom cron</option></select></label>
+            <label data-frequency="at">Run at<input name="at" type="datetime-local"></label>
+            <label data-frequency="interval" hidden>Every minutes<input name="interval" type="number" min="1" max="525600" value="60"></label>
+            <label data-frequency="daily weekdays weekly" hidden>Time (HH:MM)<input name="time" type="time" value="09:00"></label>
+            <label data-frequency="weekly" hidden>Days (mon,tue,...,sun)<input name="days" value="mon"></label>
+            <label data-frequency="cron" hidden>Cron (5 fields)<input name="cron" placeholder="0 9 * * 1-5"></label>
+            <label data-frequency="daily weekdays weekly cron" hidden>Timezone<input name="timezone" placeholder="Europe/Berlin"></label>
+          </div>
+          <label class="schedule-prompt">Prompt<textarea name="prompt" maxlength="20000" rows="4" required></textarea></label>
+          <label class="schedule-check"><input name="new-chat" type="checkbox"> Open a new browser chat for each run (attached-tab limit applies)</label>
+          <label class="schedule-check"><input name="foreground" type="checkbox" checked> Open new browser chats in the foreground</label>
+          <div class="schedule-actions"><button type="submit">Create schedule</button><span id="schedule-message" role="status"></span></div>
+        </form>
       </section>
 
       <section class="content-band activity-band">

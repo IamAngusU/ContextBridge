@@ -33,19 +33,27 @@ type TunnelStatus struct {
 }
 
 type Metrics struct {
-	JobsTotal        uint64            `json:"jobs_total"`
-	JobsFailed       uint64            `json:"jobs_failed"`
-	LatencyTotalMS   uint64            `json:"latency_total_ms"`
-	ByRoute          map[string]uint64 `json:"by_route"`
-	ByTask           map[string]uint64 `json:"by_task"`
-	ByProvider       map[string]uint64 `json:"by_provider"`
-	ByModel          map[string]uint64 `json:"by_model"`
-	ByFlag           map[string]uint64 `json:"by_flag"`
-	ProviderLatency  map[string]uint64 `json:"provider_latency_ms"`
-	ProviderSamples  map[string]uint64 `json:"provider_latency_samples"`
-	ProviderFailures map[string]uint64 `json:"provider_failures"`
-	EmbeddingVectors uint64            `json:"embedding_vectors"`
-	UpdatedAt        time.Time         `json:"updated_at"`
+	JobsTotal                 uint64            `json:"jobs_total"`
+	JobsFailed                uint64            `json:"jobs_failed"`
+	LatencyTotalMS            uint64            `json:"latency_total_ms"`
+	ByRoute                   map[string]uint64 `json:"by_route"`
+	ByTask                    map[string]uint64 `json:"by_task"`
+	ByProvider                map[string]uint64 `json:"by_provider"`
+	ByModel                   map[string]uint64 `json:"by_model"`
+	ByFlag                    map[string]uint64 `json:"by_flag"`
+	ProviderLatency           map[string]uint64 `json:"provider_latency_ms"`
+	ProviderSamples           map[string]uint64 `json:"provider_latency_samples"`
+	ProviderFailures          map[string]uint64 `json:"provider_failures"`
+	ByAttemptedProvider       map[string]uint64 `json:"by_attempted_provider"`
+	AttemptedProviderFailures map[string]uint64 `json:"attempted_provider_failures"`
+	ByAttemptedModel          map[string]uint64 `json:"by_attempted_model"`
+	ByReasoning               map[string]uint64 `json:"by_reasoning"`
+	ReasoningFailures         map[string]uint64 `json:"reasoning_failures"`
+	ModelFailures             map[string]uint64 `json:"model_failures"`
+	BySelection               map[string]uint64 `json:"by_selection"`
+	SelectionFailures         map[string]uint64 `json:"selection_failures"`
+	EmbeddingVectors          uint64            `json:"embedding_vectors"`
+	UpdatedAt                 time.Time         `json:"updated_at"`
 }
 
 type BrowserClientStatus struct {
@@ -185,6 +193,7 @@ func NewStore(dir string) (*Store, error) {
 		metrics: Metrics{
 			ByRoute: map[string]uint64{}, ByTask: map[string]uint64{}, ByProvider: map[string]uint64{},
 			ByModel: map[string]uint64{}, ByFlag: map[string]uint64{}, ProviderLatency: map[string]uint64{}, ProviderSamples: map[string]uint64{}, ProviderFailures: map[string]uint64{},
+			ByAttemptedProvider: map[string]uint64{}, AttemptedProviderFailures: map[string]uint64{}, ByAttemptedModel: map[string]uint64{}, ByReasoning: map[string]uint64{}, ReasoningFailures: map[string]uint64{}, ModelFailures: map[string]uint64{}, BySelection: map[string]uint64{}, SelectionFailures: map[string]uint64{},
 		},
 	}
 	raw, _ := os.ReadFile(filepath.Join(dir, "metrics.json"))
@@ -213,6 +222,30 @@ func NewStore(dir string) (*Store, error) {
 		}
 		if store.metrics.ProviderFailures == nil {
 			store.metrics.ProviderFailures = map[string]uint64{}
+		}
+		if store.metrics.ByAttemptedProvider == nil {
+			store.metrics.ByAttemptedProvider = map[string]uint64{}
+		}
+		if store.metrics.AttemptedProviderFailures == nil {
+			store.metrics.AttemptedProviderFailures = map[string]uint64{}
+		}
+		if store.metrics.ByAttemptedModel == nil {
+			store.metrics.ByAttemptedModel = map[string]uint64{}
+		}
+		if store.metrics.ByReasoning == nil {
+			store.metrics.ByReasoning = map[string]uint64{}
+		}
+		if store.metrics.ReasoningFailures == nil {
+			store.metrics.ReasoningFailures = map[string]uint64{}
+		}
+		if store.metrics.ModelFailures == nil {
+			store.metrics.ModelFailures = map[string]uint64{}
+		}
+		if store.metrics.BySelection == nil {
+			store.metrics.BySelection = map[string]uint64{}
+		}
+		if store.metrics.SelectionFailures == nil {
+			store.metrics.SelectionFailures = map[string]uint64{}
 		}
 	}
 	return store, nil
@@ -284,6 +317,38 @@ func (s *Store) RecordCompleted(job Job, output Output) {
 	s.metrics.ByTask[task]++
 	s.metrics.ByProvider[provider]++
 	s.metrics.ByModel[model]++
+	attemptedProvider := strings.TrimSpace(job.Provider)
+	if attemptedProvider == "" {
+		attemptedProvider = strings.TrimSpace(job.routeProvider)
+	}
+	if attemptedProvider == "" {
+		attemptedProvider = provider
+	}
+	attemptedModel := strings.TrimSpace(job.Model)
+	if attemptedModel == "" {
+		attemptedModel = strings.TrimSpace(output.SelectedModel)
+	}
+	if attemptedModel == "" {
+		attemptedModel = model
+	}
+	reasoning := strings.TrimSpace(job.Reasoning)
+	if reasoning == "" {
+		reasoning = strings.TrimSpace(output.SelectedReasoning)
+	}
+	if reasoning == "" {
+		reasoning = "unknown"
+	}
+	selection := attemptedProvider + " / " + attemptedModel + " / " + reasoning
+	s.metrics.ByAttemptedProvider[attemptedProvider]++
+	s.metrics.ByAttemptedModel[attemptedModel]++
+	s.metrics.ByReasoning[reasoning]++
+	s.metrics.BySelection[selection]++
+	if output.Error != "" {
+		s.metrics.AttemptedProviderFailures[attemptedProvider]++
+		s.metrics.ModelFailures[attemptedModel]++
+		s.metrics.ReasoningFailures[reasoning]++
+		s.metrics.SelectionFailures[selection]++
+	}
 	if output.LatencyMS > 0 {
 		s.metrics.ProviderLatency[provider] += uint64(output.LatencyMS)
 		s.metrics.ProviderSamples[provider]++

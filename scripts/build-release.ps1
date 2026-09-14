@@ -25,7 +25,7 @@ function Copy-BundleFiles([string]$Destination) {
     Copy-Item -LiteralPath (Join-Path $repoRoot "extension\README.md") -Destination (Join-Path $Destination "extension\README.md")
     Copy-Item -LiteralPath (Join-Path $repoRoot "extension\chromium") -Destination (Join-Path $Destination "extension\chromium") -Recurse
     Copy-Item -LiteralPath (Join-Path $repoRoot "extension\firefox") -Destination (Join-Path $Destination "extension\firefox") -Recurse
-    foreach ($directory in @("examples", "deploy", "web")) {
+    foreach ($directory in @("examples", "deploy", "web", "docs")) {
         Copy-Item -LiteralPath (Join-Path $repoRoot $directory) -Destination (Join-Path $Destination $directory) -Recurse
     }
     foreach ($file in @("config.example.yml", "README.md", "LICENSE", "CHANGELOG.md", "install.sh", "install.ps1")) {

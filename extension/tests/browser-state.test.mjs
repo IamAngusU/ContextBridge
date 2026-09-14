@@ -32,6 +32,10 @@ assert.equal(context.classifyFailureReason('The submitted ContextBridge turn cou
 assert.equal(context.classifyFailureReason('Automatic reload skipped: the latest user message is not the expected ContextBridge turn; the tab was left untouched'), 'recovery_turn_mismatch');
 assert.equal(context.classifyFailureReason('Automatic reload skipped: an unsent draft is present; the tab was left untouched'), 'recovery_draft');
 assert.equal(context.classifyFailureReason('A provider error containing private text'), 'other');
+assert.equal(context.shouldForegroundStalledTab({ autoCreated: true }, { name: 'chatgpt' }, { ok: false, recoverable: true, code: 'stalled_response' }), true);
+assert.equal(context.shouldForegroundStalledTab({ autoCreated: false }, { name: 'chatgpt' }, { ok: false, recoverable: true, code: 'stalled_response' }), false);
+assert.equal(context.shouldForegroundStalledTab({ autoCreated: true }, { name: 'gemini' }, { ok: false, recoverable: true, code: 'stalled_response' }), false);
+assert.equal(context.shouldForegroundStalledTab({ autoCreated: true }, { name: 'chatgpt' }, { ok: false, recoverable: false, code: 'browser_timeout' }), false);
 assert.equal(context.isNewAssistantTurn({ response_count: 2 }, { response_count: 2, text: 'Old music player clock changed', active_generation: true }), false);
 assert.equal(context.isNewAssistantTurn({ response_count: 2 }, { response_count: 3, text: 'Fresh answer', active_generation: true }), true);
 assert.equal(context.isNewAssistantTurn({ response_count: 2, response_identity: 'old' }, { response_count: 2, response_identity: 'new' }), true);
@@ -523,6 +527,12 @@ const element = (text = '', attributes = {}) => ({
     { name: 'chatgpt', selectors: { input: ['#input'], response: [], submit: [] } },
     new Date(Date.now() + 12000).toISOString());
   assert.match(unavailable.error, /Requested model "GPT-5.5" is not available/);
+  assert.equal(modelClicks, 0);
+  const fallback = await context.automate({ prompt: 'not sent', model: 'GPT-5.5',
+    metadata: { contextbridge_model_fallbacks: ['GPT-5.6 Sol'] }, output: { mode: 'text' } },
+  { name: 'chatgpt', selectors: { input: ['#input'], response: [], submit: [] } },
+  new Date(Date.now() + 12000).toISOString());
+  assert.equal(fallback.error, 'Model menu path reached');
   assert.equal(modelClicks, 0);
   delete context.PointerEvent;
 }

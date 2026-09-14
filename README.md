@@ -44,6 +44,7 @@ ChatGPT and Gemini are detected automatically from stable DOM and accessibility 
 - **Fail-safe moderation:** invalid, missing, or timed-out decisions become `review`, never silent approval.
 - **Flexible inputs:** HTTP, stdin, folders, SSH pipelines, database workers, and custom adapters use one protocol.
 - **Inspectable operation:** a local dashboard shows routes, hardware, providers, models, latency, flags, jobs, and decisions.
+- **Durable local schedules:** a resource-aware due queue runs one-time and recurring jobs with explicit route/model/reasoning choices, safe restart semantics, and failure-rate breakdowns ([schedules guide](docs/schedules.md)).
 - **Portable deployment:** one executable for Windows, Linux, and macOS on AMD64 and ARM64.
 
 ## Quick Start

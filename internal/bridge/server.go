@@ -30,6 +30,7 @@ import (
 type Server struct {
 	cfg             config.Config
 	store           *Store
+	schedules       *scheduleStore
 	processor       *Processor
 	runtime         *RuntimeManager
 	updates         *updater.Manager
@@ -45,7 +46,7 @@ var browserScanDiagnosticPattern = regexp.MustCompile(`^(?:no trigger \([0-9]{1,
 // Idle reports whether replacing this process would interrupt local work.
 func (s *Server) Idle() bool {
 	queued, _ := s.store.Stats()
-	return s.activeJobs.Load() == 0 && queued == 0 && s.store.BrowserStatus().BusyTabs == 0
+	return s.activeJobs.Load() == 0 && s.schedules.runningCount() == 0 && queued == 0 && s.store.BrowserStatus().BusyTabs == 0
 }
 
 func (s *Server) SetUpdater(manager *updater.Manager) {
@@ -57,13 +58,17 @@ func NewServer(cfg config.Config, logger *log.Logger) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	schedules, err := newScheduleStore(cfg.Storage.Directory)
+	if err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(cfg.Storage.Inbox, 0700); err != nil {
 		return nil, err
 	}
 	if logger == nil {
 		logger = log.New(os.Stderr, "", log.LstdFlags)
 	}
-	server := &Server{cfg: cfg, store: store, processor: NewProcessor(cfg, store), runtime: NewRuntimeManager(cfg, logger), logger: logger}
+	server := &Server{cfg: cfg, store: store, schedules: schedules, processor: NewProcessor(cfg, store), runtime: NewRuntimeManager(cfg, logger), logger: logger}
 	if home, homeErr := os.UserHomeDir(); homeErr == nil {
 		server.draftHistoryDir = filepath.Join(home, ".contextbridge")
 	}
@@ -82,6 +87,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/v1/status", s.auth(s.handleStatus))
 	mux.HandleFunc("/v1/jobs", s.auth(s.handleJobs))
+	mux.HandleFunc("/v1/jobs/", s.auth(s.handleJobResult))
+	mux.HandleFunc("/v1/schedules", s.auth(s.handleSchedules))
+	mux.HandleFunc("/v1/schedules/", s.auth(s.handleScheduleAction))
 	mux.HandleFunc("/v1/browser/jobs/next", s.auth(s.handleBrowserNext))
 	mux.HandleFunc("/v1/browser/heartbeat", s.auth(s.handleBrowserHeartbeat))
 	mux.HandleFunc("/v1/browser/drafts", s.auth(s.handleBrowserDrafts))
@@ -103,6 +111,7 @@ func (s *Server) Run(ctx context.Context) error {
 		MaxHeaderBytes:    32 << 10,
 	}
 	go s.watchInbox(ctx)
+	go s.runSchedules(ctx)
 	s.runtime.Run(ctx)
 	go func() {
 		<-ctx.Done()
@@ -124,6 +133,7 @@ func (s *Server) Process(ctx context.Context, job Job) (Output, error) {
 	s.activeJobs.Add(1)
 	defer s.activeJobs.Add(-1)
 	prepareJob(&job)
+	job.routeProvider = s.cfg.Route(job.Route).Provider
 	if routeTask := strings.TrimSpace(s.cfg.Route(job.Route).Task); routeTask != "" {
 		job.Task = routeTask
 	}
@@ -222,6 +232,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"tunnel":    s.store.TunnelStatus(),
 		"runtime":   runtimeStatus,
 		"metrics":   s.store.Metrics(),
+		"schedules": s.schedules.status(),
 		"updates":   updateStatus(s.updates),
 		"rag": map[string]interface{}{
 			"enabled": s.rag != nil, "backend": s.cfg.RAG.Backend,
