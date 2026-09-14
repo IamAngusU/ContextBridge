@@ -169,7 +169,7 @@ $('toggle-current-tab').addEventListener('click', async () => {
 
 async function checkedAttachTab(tabId) {
   if (!tabId) throw new Error('Choose a tab first');
-  const tab = await api.tabs.get(tabId);
+  const tab = await withPopupDeadline(api.tabs.get(tabId), 2000);
   if (!/^https?:/i.test(tab.url || '')) throw new Error('Only web pages can be attached');
   const saved = await settings();
   if (saved.useVisualProfile && !saved.taughtProfiles[new URL(tab.url).origin] && !globalThis.ContextBridgeProfiles?.forURL(tab.url)) {
@@ -196,7 +196,7 @@ async function detachTab(tabId) {
 }
 
 async function currentPageTab() {
-  const tabs = await api.tabs.query({ active: true, currentWindow: true });
+  const tabs = await withPopupDeadline(api.tabs.query({ active: true, currentWindow: true }), 2000);
   return tabs.find((tab) => tab.id) || null;
 }
 
@@ -325,7 +325,7 @@ $('pair').addEventListener('click', async () => {
   setStatus('connecting', 'Connecting to the local service…');
   try {
     await api.storage.local.set({ connectionError: '', lastError: '' });
-    let tabs = await Promise.all(selectedTabIDs().map((tabId) => api.tabs.get(tabId)));
+    let tabs = await Promise.all(selectedTabIDs().map((tabId) => withPopupDeadline(api.tabs.get(tabId), 2000)));
     let attachCurrentID = 0;
     if (!selectedTabIDs().length) {
       const current = await currentPageTab();
@@ -345,7 +345,7 @@ $('pair').addEventListener('click', async () => {
     const result = await api.runtime.sendMessage({ type: 'start' });
     if (!result?.ok) throw new Error(result?.error || 'Connection could not start');
     renderRunning(true);
-    setStatus('live', `Connected · ${tabs.length} tab${tabs.length === 1 ? '' : 's'} ready`);
+    setStatus('live', `Connected · ${tabs.length} tab${tabs.length === 1 ? '' : 's'} registered · scanning page controls in background`);
     await refreshUpdatePreference();
   } catch (error) {
     const message = error.message || String(error);
@@ -702,6 +702,14 @@ function profileYAML(profile) {
     lines.push(`      ${key}: [${values.map(quote).join(', ')}]`);
   }
   return `${lines.join('\n')}\n`;
+}
+
+function withPopupDeadline(promise, milliseconds) {
+  let timeout;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('A selected browser tab did not respond; try Connect again')), milliseconds); })
+  ]).finally(() => clearTimeout(timeout));
 }
 
 async function settings() {

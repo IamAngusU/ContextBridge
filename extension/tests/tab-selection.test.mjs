@@ -58,6 +58,8 @@ const context = vm.createContext({
   document: { addEventListener() {}, getElementById: element },
   URL,
   console,
+  setTimeout,
+  clearTimeout,
   ContextBridgeProfiles: {
     forURL(url) {
       if (url.startsWith('https://chatgpt.com/')) return { name: 'chatgpt', label: 'ChatGPT (auto-detected)' };

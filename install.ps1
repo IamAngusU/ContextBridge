@@ -187,6 +187,29 @@ if (-not $NoAutostart -and (Get-Command Register-ScheduledTask -ErrorAction Sile
     Muted "Windows Task Scheduler cmdlets are unavailable. Start ContextBridge manually when needed."
 }
 
+try {
+    $programs = [Environment]::GetFolderPath('Programs')
+    if ($programs) {
+        $menuDir = Join-Path $programs 'ContextBridge'
+        New-Item -ItemType Directory -Path $menuDir -Force | Out-Null
+        $shell = New-Object -ComObject WScript.Shell
+        foreach ($entry in @(
+            @{ Name = 'Terminal'; Command = 'console'; Description = 'View the running ContextBridge service without starting another one' },
+            @{ Name = 'Dashboard'; Command = 'dashboard'; Description = 'Open the local ContextBridge dashboard' }
+        )) {
+            $shortcut = $shell.CreateShortcut((Join-Path $menuDir ("$($entry.Name).lnk")))
+            $shortcut.TargetPath = $exe
+            $shortcut.Arguments = "$($entry.Command) --config `"$config`""
+            $shortcut.WorkingDirectory = $InstallDir
+            $shortcut.Description = $entry.Description
+            $shortcut.Save()
+        }
+        Good 'Start menu: ContextBridge > Terminal / Dashboard'
+    }
+} catch {
+    Muted 'Start menu shortcuts could not be created; use contextbridge console or contextbridge dashboard.'
+}
+
 if (-not $NoStart) {
     $started = $null
     $existing = Get-Process contextbridge -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe }

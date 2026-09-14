@@ -65,6 +65,10 @@ curl -fsSL https://angusu.de/contextbridge/install.sh | sh
 
 The installer verifies the matching published release checksum, creates a private config, asks whether this device is local-only, a relay, a worker, or both, sets up user autostart where supported, starts the service, and opens the dashboard. It can use an existing Ollama installation, install a managed `llama.cpp` runtime, or pair a browser tab.
 
+On Windows, the installer also creates **ContextBridge → Terminal** and **ContextBridge → Dashboard** shortcuts in the user's Start menu. Terminal attaches read-only to the already running service; closing that window does not stop the service or interrupt jobs. Developers can use `contextbridge console` for the same live view, `contextbridge status` for a one-time snapshot, and `contextbridge doctor` for actionable setup checks. `contextbridge run` is only for starting the service itself; do not launch a second copy merely to see its terminal output.
+
+Browser Connect confirms the local service and selected tabs first. Page-control and model scans continue in the background, so an idle or suspended AI page does not hold the Connect button indefinitely; a tab still has to become ready before a job can send to it.
+
 ## Automatic Updates
 
 Automatic updates are **off by default**. Opt in from the local dashboard, the browser extension's Connection section, `contextbridge update enable`, or `updates.enabled: true` in config. Supported installers may register an operating-system update job, but while disabled it performs no release check or installation. Once enabled, the Go service checks independently of the UI at the configured interval (24 hours by default); installation waits until the local bridge, worker, and relay have no active jobs. An explicit `updates.enabled: false` is an administrator lock that the UI cannot override. The starter config uses `enabled: null`, which starts off but permits the local toggle. A JavaScript or dashboard failure cannot turn updates on.

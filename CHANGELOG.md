@@ -2,6 +2,21 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.43 - 2026-09-14
+
+### Added
+
+- `contextbridge console`: a read-only live view of the already running service, with the configured panel/classic theme, tab selections, queue, browser state, job totals, and hardware status; no duplicate service process
+- Windows Start menu shortcuts for the attached Terminal and local Dashboard
+
+### Improved
+
+- browser Connect confirms the local service and selected tabs before asynchronous page/model diagnostics; slow, inactive, or hung AI pages no longer hold the handshake open
+- a registered tab must expose a prompt editor before a job types into it; an unloaded page times out without touching a draft
+- bounded diagnostic scripting and network requests; duplicate Connect requests share one attempt, while tab detail scans refresh in the background without blocking heartbeats
+- honest popup copy distinguishes a registered connection from page controls that are still being scanned
+- command defaults now prefer `config.yml` beside the executable, avoiding a stale second installation's settings; explicit `--config` and `CONTEXTBRIDGE_CONFIG` still win
+
 ## 0.5.42 - 2026-09-14
 
 ### Added

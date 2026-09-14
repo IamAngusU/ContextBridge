@@ -51,6 +51,8 @@ func main() {
 		err = serveCommand(os.Args[2:])
 	case "run":
 		err = runCommand(os.Args[2:])
+	case "console":
+		err = consoleCommand(os.Args[2:])
 	case "submit":
 		err = submitCommand(os.Args[2:])
 	case "schedule":
@@ -112,6 +114,7 @@ Usage:
   contextbridge init [--config path]
   contextbridge serve [--config path]
   contextbridge run [--config path] [--slots N] [--topmost]
+  contextbridge console [--config path] # read-only view of the running service
   contextbridge submit --file job.json [--config path]
   contextbridge schedule add --file schedule.json [--config path]
   contextbridge schedule list|show|pause|resume|run|delete [ID] [--config path]
@@ -1830,6 +1833,11 @@ func defaultConfigPath() string {
 	if env := os.Getenv("CONTEXTBRIDGE_CONFIG"); env != "" {
 		return env
 	}
+	if executable, err := os.Executable(); err == nil {
+		if adjacent := adjacentConfigPath(executable); adjacent != "" {
+			return adjacent
+		}
+	}
 	if runtime.GOOS == "windows" {
 		if appData := os.Getenv("LOCALAPPDATA"); appData != "" {
 			return filepath.Join(appData, "ContextBridge", "config.yml")
@@ -1837,4 +1845,12 @@ func defaultConfigPath() string {
 	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".config", "contextbridge", "config.yml")
+}
+
+func adjacentConfigPath(executable string) string {
+	path := filepath.Join(filepath.Dir(executable), "config.yml")
+	if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+		return path
+	}
+	return ""
 }

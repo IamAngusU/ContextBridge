@@ -8,6 +8,9 @@ let stopRequested = false;
 let heartbeatTimer = 0;
 let heartbeatInFlight = null;
 let finishedTabCleanup = null;
+let pairingInFlight = null;
+const diagnosticsInFlight = new Map();
+const tabDOMDiagnostics = new Map();
 let connectionStartedAt = 0;
 let connectionPhase = '';
 let connectionPhaseStartedAt = 0;
@@ -16,12 +19,14 @@ const busyTabs = new Set();
 const freshTabChecks = new Map();
 let freshTabWrite = Promise.resolve();
 let sessionWrite = Promise.resolve();
+let capabilityWrite = Promise.resolve();
 const acceptedModelLabel = /^(?:gpt[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:astra|sol|terra|luna|pro|mini|nano|codex|thinking|instant))?|gemini(?:[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:pro|flash|lite|thinking|preview|experimental))*)?|astra|sol|terra|luna|\d+(?:\.\d+)?\s+(?:pro|flash|astra|sol|terra|luna))$/i;
 
 api.runtime.onInstalled.addListener(() => resume());
 api.runtime.onStartup.addListener(() => resume());
 api.tabs.onUpdated?.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status !== 'complete') return;
+  tabDOMDiagnostics.delete(tabId);
   scheduleFreshTabCheck(tabId, tab?.url || changeInfo.url || '');
   void settings().then((cfg) => {
     if (cfg.running && configuredTabIDs(cfg).includes(tabId)) return sendHeartbeat('waiting');
@@ -30,6 +35,7 @@ api.tabs.onUpdated?.addListener((tabId, changeInfo, tab) => {
 api.tabs.onRemoved?.addListener((tabId) => {
   if (freshTabChecks.has(tabId)) clearTimeout(freshTabChecks.get(tabId));
   freshTabChecks.delete(tabId);
+  tabDOMDiagnostics.delete(tabId);
   void detachClosedTab(tabId);
 });
 
@@ -84,7 +90,13 @@ async function handleMessage(message, sender) {
   }
 }
 
-async function startPairing() {
+function startPairing() {
+  if (pairingInFlight) return pairingInFlight;
+  pairingInFlight = startPairingOnce().finally(() => { pairingInFlight = null; });
+  return pairingInFlight;
+}
+
+async function startPairingOnce() {
   const cfg = await settings();
   if (!cfg.token) throw new Error('Enter the pairing token once in Advanced settings');
   const tabIds = configuredTabIDs(cfg);
@@ -93,7 +105,7 @@ async function startPairing() {
   await reportConnectionProgress('Checking selected tabs', 0, tabIds.length);
   try {
     for (let index = 0; index < tabIds.length; index += 1) {
-      const tab = await api.tabs.get(tabIds[index]);
+      const tab = await withDeadline(api.tabs.get(tabIds[index]), 2000);
       if (!tab?.url || !/^https?:/i.test(tab.url)) throw new Error('One selected tab is not a supported web page');
       if (cfg.useVisualProfile && !profileForTab(cfg, tab)) throw new Error(`Detect or customize ${tab.title || 'the selected page'} before starting the bridge`);
       await reportConnectionProgress('Checking selected tabs', index + 1, tabIds.length);
@@ -112,6 +124,7 @@ async function startPairing() {
     }
     startHeartbeat();
     poll();
+    void sendHeartbeat('waiting'); // Fill in model and DOM diagnostics after the confirmed handshake.
     void discoverFreshTabs();
     return { ok: true };
   } finally {
@@ -137,10 +150,14 @@ async function stopPairing() {
 
 async function resume() {
   const { running } = await api.storage.local.get({ running: false });
-  if (!running) return;
+  if (!running) {
+    await api.storage.local.set({ connectionProgress: null });
+    return;
+  }
   stopRequested = false;
   startHeartbeat();
   poll();
+  void sendHeartbeat('waiting');
   void discoverFreshTabs();
 }
 
@@ -253,9 +270,9 @@ async function testBridge() {
   const cfg = await settings();
   try {
     if (!cfg.token) return { ok: false, error: 'Enter the pairing token once in Advanced settings' };
-    const response = await fetch(`${cfg.bridgeUrl}/v1/status`, {
+    const response = await fetchWithTimeout(`${cfg.bridgeUrl}/v1/status`, {
       headers: { Authorization: `Bearer ${cfg.token}` }, cache: 'no-store'
-    });
+    }, 5000);
     if (response.status === 401) return { ok: false, error: 'Pairing token is invalid; check Advanced settings' };
     if (!response.ok) return { ok: false, error: `Local ContextBridge service returned HTTP ${response.status}` };
     const data = await response.json();
@@ -534,6 +551,10 @@ async function processWork(cfg, work, claimedTabId) {
       tab = await api.tabs.get(tabId);
       await assertSessionTab(workSessionKey(work), tabId);
     }
+    // A tab can be registered before its provider UI mounts. Never type into
+    // that tab until a real prompt control is visible; opening it manually is
+    // not required, and an unready page fails without touching a draft.
+    await waitForTabReady(tabId, effectiveProfile.selectors, 30000, 0);
     if (cfg.preserveDrafts || cfg.ownedDrafts?.[tabId]) {
       try {
         await preserveAndClearDraft(cfg, tabId, tab, effectiveProfile, work.job);
@@ -1137,17 +1158,17 @@ async function waitForTabSlot(tabId, deadlineValue) {
   busyTabs.add(tabId);
 }
 
-async function waitForTabReady(tabId, selectors, timeout) {
+async function waitForTabReady(tabId, selectors, timeout, initialDelay = 600) {
   const deadline = Date.now() + timeout;
   let missingTabChecks = 0;
-  await delay(600);
+  if (initialDelay > 0) await delay(initialDelay);
   while (Date.now() < deadline) {
     try {
-      const tab = await api.tabs.get(tabId);
+      const tab = await withDeadline(api.tabs.get(tabId), 2500);
       missingTabChecks = 0;
       if (tab.url && /^https?:/i.test(tab.url)) {
         try {
-          const result = await api.scripting.executeScript({ target: { tabId }, func: inspectSelectors, args: [selectors] });
+          const result = await withDeadline(api.scripting.executeScript({ target: { tabId }, func: inspectSelectors, args: [selectors] }), 2500);
           if (Number(result?.[0]?.result?.input || 0) > 0) return;
         } catch (_) { /* The new page may not be scriptable yet. */ }
       }
@@ -2558,7 +2579,10 @@ function stopHeartbeat() {
 }
 
 function sendHeartbeat(state, connecting = false) {
-  if (heartbeatInFlight) return connecting ? heartbeatInFlight.then(() => sendHeartbeat(state, true)) : heartbeatInFlight;
+  // A Connect click must not queue behind an older, slow diagnostic heartbeat.
+  if (connecting) return sendHeartbeatOnce(state, true);
+  if (state === 'paused' && heartbeatInFlight) return heartbeatInFlight.finally(() => sendHeartbeatOnce('paused'));
+  if (heartbeatInFlight) return heartbeatInFlight;
   heartbeatInFlight = sendHeartbeatOnce(state, connecting).finally(() => { heartbeatInFlight = null; });
   return heartbeatInFlight;
 }
@@ -2576,60 +2600,17 @@ function capabilityScanInterval(profileName, capabilities) {
 
 async function sendHeartbeatOnce(state, connecting = false) {
   const cfg = await settings();
-  if (!cfg.token) return;
+  if (!cfg.token) return false;
+  if (stopRequested && state !== 'paused' && !connecting) return false;
   const tabs = [];
   const tabIds = configuredTabIDs(cfg);
-  if (connecting) await reportConnectionProgress('Inspecting AI tabs', 0, tabIds.length);
+  if (connecting) await reportConnectionProgress('Registering selected tabs', 0, tabIds.length);
   for (const [index, tabId] of tabIds.entries()) {
     try {
-      const tab = await api.tabs.get(tabId);
+      const tab = await withDeadline(api.tabs.get(tabId), 2000);
       const profile = profileForTab(cfg, tab);
-      let capabilities = cfg.tabCapabilities?.[tabId] || {};
-      let dom = null;
-      const scanInterval = capabilityScanInterval(profile?.name, capabilities);
-      const needsUpdatedChatGPTScan = profile?.name === 'chatgpt' && !capabilities.currentModel
-        && capabilities.scanDiagnostic?.version !== api.runtime.getManifest().version;
-      if (['chatgpt', 'gemini'].includes(profile?.name) && !busyTabs.has(tabId)
-          && (needsUpdatedChatGPTScan || Date.now() - Number(cfg.tabCapabilityScans?.[tabId] || 0) > scanInterval)) {
-        try {
-          const safe = await api.scripting.executeScript({ target: { tabId }, func: safeToDiscoverPageCapabilities });
-          if (safe?.[0]?.result === true) {
-            const scanned = await api.scripting.executeScript({ target: { tabId }, func: discoverPageCapabilities });
-            const previousAttempts = Number(capabilities.scanDiagnostic?.noTriggerAttempts || 0);
-            capabilities = scanned?.[0]?.result || capabilities;
-            capabilities.scanDiagnostic = { ...(capabilities.scanDiagnostic || {}), version: api.runtime.getManifest().version };
-            if (String(capabilities.scanDiagnostic.model || '').startsWith('no trigger')) {
-              capabilities.scanDiagnostic.noTriggerAttempts = Math.min(3, previousAttempts + 1);
-            }
-            const latest = await api.storage.local.get({ tabCapabilities: {}, tabCapabilityScans: {} });
-            await api.storage.local.set({
-              tabCapabilities: { ...latest.tabCapabilities, [tabId]: capabilities },
-              tabCapabilityScans: { ...latest.tabCapabilityScans, [tabId]: Date.now() }
-            });
-          }
-        } catch (_) {}
-      }
-      try {
-        const report = await api.scripting.executeScript({ target: { tabId }, func: inspectPageCapabilities });
-        const live = report?.[0]?.result || {};
-        const validModel = profile?.name === 'gemini'
-          ? (value) => Boolean(String(value || '').trim() && String(value).length <= 100)
-          : (value) => acceptedModelLabel.test(value);
-        capabilities = {
-          ...capabilities,
-          currentModel: live.currentModel || (validModel(capabilities.currentModel || '') ? capabilities.currentModel : ''),
-          currentReasoning: live.currentReasoning || capabilities.currentReasoning || '',
-          models: [...new Set([...(capabilities.models || []), ...(live.models || [])])].filter(validModel),
-          reasoningLevels: [...new Set([...(capabilities.reasoningLevels || []), ...(live.reasoningLevels || [])])]
-        };
-      } catch (_) {}
-      // Selector-only diagnostics are safe to sample while a job is running.
-      // They let the bridge distinguish a still-streaming answer from a stale
-      // busy flag without copying prompts, responses, or the complete DOM.
-      try {
-        const snapshot = await api.scripting.executeScript({ target: { tabId }, func: inspectPageDOM, args: [profile?.selectors || {}] });
-        dom = snapshot?.[0]?.result || null;
-      } catch (_) {}
+      const capabilities = cfg.tabCapabilities?.[tabId] || {};
+      const diagnostic = tabDOMDiagnostics.get(tabId);
       tabs.push({
         id: tabId,
         origin: tab?.url && /^https?:/i.test(tab.url) ? new URL(tab.url).origin : '',
@@ -2639,17 +2620,20 @@ async function sendHeartbeatOnce(state, connecting = false) {
         models: capabilities.models || [], reasoning_levels: capabilities.reasoningLevels || [],
         model_scan: capabilities.scanDiagnostic?.model || '',
         reasoning_scan: capabilities.scanDiagnostic?.reasoning || '',
-        last_failure: cfg.tabFailures?.[tabId] || null, dom
+        last_failure: cfg.tabFailures?.[tabId] || null,
+        dom: !connecting && diagnostic?.url === tab.url ? diagnostic.dom : null
       });
     } catch (_) {}
-    if (connecting) await reportConnectionProgress('Inspecting AI tabs', index + 1, tabIds.length);
+    if (connecting) await reportConnectionProgress('Registering selected tabs', index + 1, tabIds.length);
   }
+  if (connecting && tabs.length !== tabIds.length) return false;
   const tab = tabs[0] || null;
   const profile = tab ? (cfg.taughtProfiles[tab.origin] || globalThis.ContextBridgeProfiles?.forURL(tab.origin)) : null;
-  const effectiveState = busyTabs.size ? 'working' : state;
+  const effectiveState = state === 'paused' ? 'paused' : (busyTabs.size ? 'working' : state);
   if (connecting) await reportConnectionProgress('Registering with local service', 0, 1);
+  if (stopRequested && state !== 'paused') return false;
   try {
-    const response = await fetch(`${cfg.bridgeUrl}/v1/browser/heartbeat`, {
+    const response = await fetchWithTimeout(`${cfg.bridgeUrl}/v1/browser/heartbeat`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${cfg.token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -2664,12 +2648,98 @@ async function sendHeartbeatOnce(state, connecting = false) {
         busy_tabs: busyTabs.size,
         tabs
       })
-    });
+    }, 5000);
     if (response.ok && state !== 'paused' && !finishedTabCleanup) {
       finishedTabCleanup = closeFinishedOwnedTabs().catch(() => {}).finally(() => { finishedTabCleanup = null; });
     }
+    if (response.ok && !connecting && state !== 'paused') {
+      for (const tabId of tabIds) scheduleTabDiagnostics(tabId);
+    }
     return response.ok;
   } catch (_) { return false; }
+}
+
+function scheduleTabDiagnostics(tabId) {
+  if (diagnosticsInFlight.has(tabId)) return;
+  const task = refreshTabDiagnostics(tabId).catch(() => {}).finally(() => diagnosticsInFlight.delete(tabId));
+  diagnosticsInFlight.set(tabId, task);
+}
+
+async function refreshTabDiagnostics(tabId) {
+  const cfg = await settings();
+  if (!cfg.running || !configuredTabIDs(cfg).includes(tabId)) return;
+  const tab = await withDeadline(api.tabs.get(tabId), 2000);
+  const profile = profileForTab(cfg, tab);
+  let capabilities = cfg.tabCapabilities?.[tabId] || {};
+  let scannedAt = 0;
+  const scanInterval = capabilityScanInterval(profile?.name, capabilities);
+  const needsUpdatedChatGPTScan = profile?.name === 'chatgpt' && !capabilities.currentModel
+    && capabilities.scanDiagnostic?.version !== api.runtime.getManifest().version;
+  if (['chatgpt', 'gemini'].includes(profile?.name) && !busyTabs.has(tabId)
+      && (needsUpdatedChatGPTScan || Date.now() - Number(cfg.tabCapabilityScans?.[tabId] || 0) > scanInterval)) {
+    try {
+      const safe = await withDeadline(api.scripting.executeScript({ target: { tabId }, func: safeToDiscoverPageCapabilities }), 4000);
+      if (safe?.[0]?.result === true) {
+        const scanned = await withDeadline(api.scripting.executeScript({ target: { tabId }, func: discoverPageCapabilities }), 8000);
+        const previousAttempts = Number(capabilities.scanDiagnostic?.noTriggerAttempts || 0);
+        capabilities = scanned?.[0]?.result || capabilities;
+        capabilities.scanDiagnostic = { ...(capabilities.scanDiagnostic || {}), version: api.runtime.getManifest().version };
+        if (String(capabilities.scanDiagnostic.model || '').startsWith('no trigger')) {
+          capabilities.scanDiagnostic.noTriggerAttempts = Math.min(3, previousAttempts + 1);
+        }
+        scannedAt = Date.now();
+      }
+    } catch (_) {}
+  }
+  try {
+    const report = await withDeadline(api.scripting.executeScript({ target: { tabId }, func: inspectPageCapabilities }), 4000);
+    const live = report?.[0]?.result || {};
+    const validModel = profile?.name === 'gemini'
+      ? (value) => Boolean(String(value || '').trim() && String(value).length <= 100)
+      : (value) => acceptedModelLabel.test(value);
+    capabilities = {
+      ...capabilities,
+      currentModel: live.currentModel || (validModel(capabilities.currentModel || '') ? capabilities.currentModel : ''),
+      currentReasoning: live.currentReasoning || capabilities.currentReasoning || '',
+      models: [...new Set([...(capabilities.models || []), ...(live.models || [])])].filter(validModel),
+      reasoningLevels: [...new Set([...(capabilities.reasoningLevels || []), ...(live.reasoningLevels || [])])]
+    };
+  } catch (_) {}
+  // Keep bounded selector-only diagnostics separate from the heartbeat. A slow
+  // or suspended AI page must never prevent the service from staying paired.
+  try {
+    const snapshot = await withDeadline(api.scripting.executeScript({ target: { tabId }, func: inspectPageDOM, args: [profile?.selectors || {}] }), 4000);
+    const current = await withDeadline(api.tabs.get(tabId), 2000);
+    if (current.url === tab.url) tabDOMDiagnostics.set(tabId, { url: tab.url, dom: snapshot?.[0]?.result || null });
+  } catch (_) {}
+  const current = await withDeadline(api.tabs.get(tabId), 2000).catch(() => null);
+  if (current?.url !== tab.url) return;
+  const write = capabilityWrite.then(async () => {
+    const latest = await api.storage.local.get({ tabCapabilities: {}, tabCapabilityScans: {} });
+    if (JSON.stringify(latest.tabCapabilities?.[tabId] || {}) !== JSON.stringify(capabilities) || scannedAt) {
+      await api.storage.local.set({
+        tabCapabilities: { ...latest.tabCapabilities, [tabId]: capabilities },
+        ...(scannedAt ? { tabCapabilityScans: { ...latest.tabCapabilityScans, [tabId]: scannedAt } } : {})
+      });
+    }
+  });
+  capabilityWrite = write.catch(() => {});
+  await write;
+}
+
+function withDeadline(promise, milliseconds) {
+  let timeout;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('AI tab did not respond in time')), milliseconds); })
+  ]).finally(() => clearTimeout(timeout));
+}
+
+async function fetchWithTimeout(url, options, milliseconds) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), milliseconds);
+  try { return await fetch(url, { ...options, signal: controller.signal }); }
+  finally { clearTimeout(timeout); }
 }
 
 async function settings() {

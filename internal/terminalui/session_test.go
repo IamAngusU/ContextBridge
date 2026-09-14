@@ -60,6 +60,26 @@ func TestPanelBannerAndEventHierarchy(t *testing.T) {
 	}
 }
 
+func TestAttachedConsoleOnlyLogsObservedChanges(t *testing.T) {
+	var output bytes.Buffer
+	session := &Session{out: &output, interactive: true, style: "panel", widthFn: func() int { return 90 },
+		jobs: map[string]jobState{}, browserSelections: map[int]browserSelection{}}
+	snapshot := ServiceSnapshot{Version: "v0.test", BrowserConnected: true, ActiveTabs: 1,
+		Tabs: []cluster.BrowserSessionCapability{{TabID: 7, Profile: "chatgpt", CurrentModel: "GPT-5.6 Sol"}}}
+	session.ObserveService(snapshot)
+	session.ObserveService(snapshot)
+	snapshot.Completed, snapshot.JobsTotal = 1, 1
+	session.ObserveService(snapshot)
+	got := output.String()
+	if strings.Count(got, "Attached to running service") != 1 || strings.Count(got, "Tab 7") != 1 ||
+		strings.Count(got, "Completed total 1 (+1 since last check)") != 1 || !strings.Contains(got, "+-- ACTIVITY") {
+		t.Fatalf("attached console emitted duplicate or missing events: %q", got)
+	}
+	if !strings.Contains(got, "[queue 0] [browser 0/1 busy]") {
+		t.Fatalf("attached console live status is missing: %q", got)
+	}
+}
+
 func TestPanelFallsBackWhenTerminalTooNarrow(t *testing.T) {
 	var output bytes.Buffer
 	session := &Session{out: &output, interactive: true, style: "panel", widthFn: func() int { return 20 }}

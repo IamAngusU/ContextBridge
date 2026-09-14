@@ -17,7 +17,7 @@ const chrome = {
   scripting: { executeScript: async () => [{ result: true }] }
 };
 const context = vm.createContext({
-  chrome, console, URL, setTimeout, clearTimeout, setInterval, clearInterval, Date, Promise,
+  chrome, console, URL, AbortController, setTimeout, clearTimeout, setInterval, clearInterval, Date, Promise,
   ContextBridgeProfiles: { forURL: (url) => url.startsWith('https://chatgpt.com/') ? { name: 'chatgpt' } : null }
 });
 vm.runInContext(source, context);

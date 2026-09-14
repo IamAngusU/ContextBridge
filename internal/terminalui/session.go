@@ -43,6 +43,22 @@ type browserSelection struct {
 	reasoning string
 }
 
+// ServiceSnapshot is the read-only subset shown by an attached console. It
+// reflects a service status response, not inferred worker or job events.
+type ServiceSnapshot struct {
+	Version          string
+	Queued           int
+	Completed        int
+	BrowserConnected bool
+	ActiveTabs       int
+	BusyTabs         int
+	Tabs             []cluster.BrowserSessionCapability
+	JobsTotal        uint64
+	JobsFailed       uint64
+	GPU              string
+	GPUUtilization   int
+}
+
 // Session renders an animated single-line status in a real terminal and
 // concise transition logs when stdout is redirected to a service log.
 type Session struct {
@@ -69,6 +85,9 @@ type Session struct {
 	widthFn           func() int
 	done              chan struct{}
 	closed            chan struct{}
+	observing         bool
+	observedOnline    bool
+	observed          ServiceSnapshot
 }
 
 func New(output *os.File) *Session {
@@ -240,6 +259,59 @@ func (s *Session) HandleWorker(event cluster.WorkerEvent) {
 		s.writeEventLocked("!", fmt.Sprintf("Job %s needs attention · %s", shortID(event.JobID), compactError(event.Error)))
 		s.refreshJobStatusLocked()
 	}
+}
+
+// ObserveService updates a read-only console without starting another bridge.
+// Only changes that can be established from consecutive snapshots are logged.
+func (s *Session) ObserveService(snapshot ServiceSnapshot) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	previous, wasOnline := s.observed, s.observedOnline
+	s.observing, s.observedOnline = true, true
+	s.observed = snapshot
+	if !wasOnline {
+		s.nextSection = "CONNECTION"
+		s.writeEventLocked("✓", "Attached to running service · "+cleanTerminalLabel(snapshot.Version, 30)+" · read-only")
+	}
+	if !wasOnline || previous.BrowserConnected != snapshot.BrowserConnected {
+		s.nextSection = "AI TABS"
+		if snapshot.BrowserConnected {
+			s.writeEventLocked("✓", fmt.Sprintf("Browser connected · %d tab(s)", snapshot.ActiveTabs))
+		} else {
+			s.writeEventLocked("◇", "No browser extension connected")
+		}
+	}
+	if snapshot.BrowserConnected {
+		s.recordBrowserSelectionsLocked(snapshot.Tabs)
+	} else if len(s.browserSelections) > 0 {
+		s.browserSelections = map[int]browserSelection{}
+	}
+	if wasOnline {
+		if snapshot.Completed > previous.Completed {
+			s.nextSection = "ACTIVITY"
+			s.writeEventLocked("✓", fmt.Sprintf("Completed total %d (+%d since last check)", snapshot.Completed, snapshot.Completed-previous.Completed))
+		}
+		if snapshot.JobsFailed > previous.JobsFailed {
+			s.nextSection = "ACTIVITY"
+			s.writeEventLocked("!", fmt.Sprintf("Failed total %d (+%d since last check)", snapshot.JobsFailed, snapshot.JobsFailed-previous.JobsFailed))
+		}
+	}
+	if s.status == "" || s.status == "Offline" {
+		s.setStatusLocked("Idle", time.Now())
+	} else {
+		s.drawStatusLocked()
+	}
+}
+
+func (s *Session) ObserveServiceUnavailable(reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.observing || s.observedOnline {
+		s.nextSection = "CONNECTION"
+		s.writeEventLocked("!", "Service unavailable · "+cleanTerminalLabel(reason, 120))
+	}
+	s.observing, s.observedOnline = true, false
+	s.setStatusLocked("Offline", time.Now())
 }
 
 func requestedSelection(event cluster.WorkerEvent) string {
@@ -496,6 +568,10 @@ func (s *Session) drawStatusLocked() {
 			s.width = width
 		}
 	}
+	if s.observing {
+		s.drawObservedStatusLocked()
+		return
+	}
 	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 	elapsed := compactDuration(time.Since(s.statusSince))
 	slots := max(1, s.slots)
@@ -529,6 +605,28 @@ func (s *Session) drawStatusLocked() {
 			line = fmt.Sprintf("  %s%s%s [%s%s%s] [%d/%d jobs · %d%%] %s %s %s %s", ansiCyan, frames[s.frame%len(frames)], ansiReset, ansiCyan, bar, ansiReset, len(s.jobs), slots, load, indicators, ansiYellow+status+ansiReset, elapsed, identity)
 		}
 	}
+	s.drawLineLocked(line)
+}
+
+func (s *Session) drawObservedStatusLocked() {
+	var line string
+	if !s.observedOnline {
+		line = "  " + ansiYellow + "↻" + ansiReset + " [service offline] [retrying automatically]"
+	} else {
+		browser := "browser offline"
+		if s.observed.BrowserConnected {
+			browser = fmt.Sprintf("browser %d/%d busy", s.observed.BusyTabs, s.observed.ActiveTabs)
+		}
+		line = fmt.Sprintf("  %s◇%s [service %s] [queue %d] [%s] [jobs %d · failed %d]", ansiGreen, ansiReset,
+			cleanTerminalLabel(s.observed.Version, 30), s.observed.Queued, browser, s.observed.JobsTotal, s.observed.JobsFailed)
+		if s.observed.GPU != "" {
+			line += fmt.Sprintf(" [%s · %d%%]", cleanTerminalLabel(s.observed.GPU, 36), s.observed.GPUUtilization)
+		}
+	}
+	s.drawLineLocked(line)
+}
+
+func (s *Session) drawLineLocked(line string) {
 	if s.width > 0 {
 		line = clipANSIColumns(line, max(1, s.width-2))
 	}
