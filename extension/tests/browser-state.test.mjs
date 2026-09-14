@@ -6,14 +6,35 @@ import { TextEncoder } from 'node:util';
 
 const source = fs.readFileSync(new URL('../src/background.js', import.meta.url), 'utf8');
 const listeners = { addListener() {} };
+let alarmListener;
+const alarmCalls = [];
 const chrome = {
   runtime: { onInstalled: listeners, onStartup: listeners, onMessage: listeners, getManifest: () => ({ version: 'test' }) },
   storage: { local: { get: async (defaults) => defaults, set: async () => {} } },
-  tabs: {}, scripting: {}, i18n: { getMessage: () => '' }
+  tabs: {}, scripting: {}, i18n: { getMessage: () => '' },
+  alarms: {
+    onAlarm: { addListener(fn) { alarmListener = fn; } },
+    create: (name, schedule) => alarmCalls.push(['create', name, schedule.periodInMinutes]),
+    clear: (name) => alarmCalls.push(['clear', name])
+  }
 };
 const context = vm.createContext({ chrome, console, URL, TextEncoder, setTimeout, clearTimeout, setInterval, clearInterval, Date, Promise });
 vm.runInContext(source, context);
 context.crypto = webcrypto;
+{
+  assert.equal(typeof alarmListener, 'function', 'a suspended worker must have an alarm wake listener');
+  context.startHeartbeat();
+  assert.ok(alarmCalls.some(([action, name, minutes]) => action === 'create' && name === 'contextbridge-heartbeat' && minutes === 0.5));
+  context.stopHeartbeat();
+  assert.ok(alarmCalls.some(([action, name]) => action === 'clear' && name === 'contextbridge-heartbeat'));
+  const originalResume = context.resume;
+  let wakes = 0;
+  context.resume = () => { wakes += 1; };
+  alarmListener({ name: 'unrelated' });
+  alarmListener({ name: 'contextbridge-heartbeat' });
+  assert.equal(wakes, 1);
+  context.resume = originalResume;
+}
 chrome.tabs.get = async (id) => ({ id, url: 'https://bugcrowd.com/engagements/openai-safety' });
 await assert.rejects(context.scanPageCapabilities(99), /only on a ChatGPT or Gemini tab/);
 assert.equal(context.capabilityScanInterval('chatgpt', { currentModel: '', scanDiagnostic: { model: 'no trigger (0 composer menus)', noTriggerAttempts: 1 } }), 15000);
@@ -135,6 +156,23 @@ const element = (text = '', attributes = {}) => ({
 });
 
 {
+  const markdown = element('CB43-LIVE-OK');
+  const response = {
+    ...element('Thinking chrome outside the answer'),
+    matches: (selector) => selector === 'section[data-turn="assistant"]',
+    querySelectorAll: (selector) => selector === '.markdown' ? [markdown] : []
+  };
+  context.document = { querySelectorAll: (selector) => selector === 'section[data-turn="assistant"]' ? [response] : [] };
+  const snapshot = context.captureProgress({ response: ['section[data-turn="assistant"]'] });
+  assert.equal(snapshot.text, 'CB43-LIVE-OK', 'a visible ChatGPT answer inside a section must not be mistaken for thinking chrome');
+  response.querySelectorAll = () => [];
+  assert.equal(context.captureProgress({ response: ['section[data-turn="assistant"]'] }).text, '',
+    'a ChatGPT thinking section without answer markdown is not a finished answer');
+  assert.equal((source.match(/if \(!markdownParts.length\) markdownParts = \[\.\.\.element.querySelectorAll\('\.markdown'\)\];/g) || []).length, 2,
+    'both progress sampling and final response capture must use the fallback');
+}
+
+{
   const response = element('Generating an image');
   const progress = element('95 %', { 'aria-valuenow': '95' });
   const loading = element();
@@ -235,6 +273,35 @@ const element = (text = '', attributes = {}) => ({
   assert.equal(result.ok, false);
   assert.equal(result.code, 'browser_model_unavailable');
   assert.match(result.error, /peak demand/);
+}
+
+{
+  // On a resumed fresh chat, the original baseline is explicitly empty. The
+  // answer may already be visible when automation resumes, but must not be
+  // adopted as the baseline or it can never be completed.
+  const input = element();
+  const send = element();
+  const markdown = element('CB45-LIVE-OK');
+  const response = {
+    ...element('Thinking chrome outside the answer'),
+    matches: (selector) => selector === 'section[data-turn="assistant"]',
+    querySelectorAll: (selector) => selector === '.markdown' ? [markdown] : []
+  };
+  context.document = {
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === '#send') return [send];
+      if (selector === '#response') return [response];
+      return [];
+    }
+  };
+  const result = await context.automate(
+    { prompt: 'Never send this again', metadata: { contextbridge_resume_only: true, contextbridge_baseline_text: '' }, output: { mode: 'text' } },
+    { name: 'chatgpt', selectors: { input: ['#input'], response: ['#response'], submit: ['#send'] } },
+    new Date(Date.now() + 8000).toISOString()
+  );
+  assert.equal(result.ok, true, result.error);
+  assert.equal(result.text, 'CB45-LIVE-OK');
 }
 
 {

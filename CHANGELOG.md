@@ -2,6 +2,25 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.46 - 2026-09-14
+
+### Fixed
+
+- the Chromium service worker now uses a periodic browser alarm to wake after suspension and restore browser heartbeats and job polling; an idle relay no longer requires reopening the popup to reconnect
+
+## 0.5.45 - 2026-09-14
+
+### Fixed
+
+- recovery of a completed answer in a fresh ChatGPT chat now preserves an explicitly empty pre-send baseline; the already visible answer is captured without resubmitting the prompt
+
+## 0.5.44 - 2026-09-14
+
+### Fixed
+
+- ChatGPT answer text nested in a turn's general `.markdown` element is now recognized by both progress sampling and final capture; a visible answer no longer times out solely because its section lacks the older author-role markup
+- a stable plain-text answer in an auto-created background ChatGPT tab triggers the existing ownership-checked foreground recovery sooner when the Stop button remains visible
+
 ## 0.5.43 - 2026-09-14
 
 ### Added

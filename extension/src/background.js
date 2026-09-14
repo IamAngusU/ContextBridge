@@ -7,6 +7,7 @@ const api = globalThis.browser || globalThis.chrome;
 let stopRequested = false;
 let heartbeatTimer = 0;
 let heartbeatInFlight = null;
+const HEARTBEAT_ALARM = 'contextbridge-heartbeat';
 let finishedTabCleanup = null;
 let pairingInFlight = null;
 const diagnosticsInFlight = new Map();
@@ -24,6 +25,12 @@ const acceptedModelLabel = /^(?:gpt[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:astra|sol|
 
 api.runtime.onInstalled.addListener(() => resume());
 api.runtime.onStartup.addListener(() => resume());
+// Chromium MV3 may suspend the service worker despite an interval or a
+// pending long poll. An alarm wakes a fresh worker so it can re-register the
+// tabs and restart pollers without requiring the user to reopen the popup.
+api.alarms?.onAlarm?.addListener((alarm) => {
+  if (alarm.name === HEARTBEAT_ALARM) void resume();
+});
 api.tabs.onUpdated?.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status !== 'complete') return;
   tabDOMDiagnostics.delete(tabId);
@@ -1551,7 +1558,8 @@ function automate(job, profile, jobDeadline, editTarget = null) {
   const responseText = (element) => {
     if (!element) return '';
     if (element.querySelector('[data-testid="image-gen-loading-state"], [data-testid="image-gen-loading-progress"]')) return '';
-    const markdownParts = [...element.querySelectorAll('[data-message-author-role="assistant"] .markdown, message-content .markdown')];
+    let markdownParts = [...element.querySelectorAll('[data-message-author-role="assistant"] .markdown, message-content .markdown')];
+    if (!markdownParts.length) markdownParts = [...element.querySelectorAll('.markdown')];
     if (markdownParts.length) return markdownParts.map(visibleText).filter(Boolean).join('\n');
     if (element.querySelector('img') && element.matches?.('section[data-turn="assistant"], model-response')) return '';
     const assistantParts = [...element.querySelectorAll('[data-message-author-role="assistant"]')];
@@ -2140,7 +2148,12 @@ function automate(job, profile, jobDeadline, editTarget = null) {
       const beforeIdentities = new Set(before.map(responseIdentity).filter(Boolean));
       const beforeUserTurns = document.querySelectorAll('[data-turn="user"]').length;
       const previousElement = before.length ? before[before.length - 1] : null;
-      const previousText = String(job.metadata?.contextbridge_baseline_text || (before.length ? responseText(before[before.length - 1]) : ''));
+      // An explicitly supplied empty baseline is meaningful: on resume the
+      // finished answer may already be visible. Falling back to that answer
+      // as the baseline would make the owned turn look unchanged forever.
+      const hasBaseline = Object.prototype.hasOwnProperty.call(job.metadata || {}, 'contextbridge_baseline_text');
+      const previousText = hasBaseline ? String(job.metadata.contextbridge_baseline_text || '')
+        : (before.length ? responseText(before[before.length - 1]) : '');
       const previousIdentity = responseIdentity(previousElement);
       const resumeOnly = Boolean(job.metadata?.contextbridge_resume_only);
 	  if (!resumeOnly && profile.name === 'chatgpt' && chatGPTStopVisible()) {
@@ -2335,7 +2348,10 @@ function automate(job, profile, jobDeadline, editTarget = null) {
 			&& !job.metadata?.contextbridge_image_tool && !job.metadata?.contextbridge_music_tool;
 		const staleStop = state.busyReasons.includes('stop_button')
 			&& state.busyReasons.every((reason) => reason === 'stop_button' || reason === 'aria_busy');
-		const staleStopWait = profile.name === 'gemini' ? 120000 : 90000;
+		// Background ChatGPT tabs can keep Stop mounted long after plain text is
+		// visible. Wake only our auto-created tab after a stable new answer;
+		// the caller verifies ownership before foregrounding or reloading it.
+		const staleStopWait = profile.name === 'gemini' ? 120000 : 30000;
 		if (profile.name === 'chatgpt' && plainTextJob && !resumeOnly && !editTarget
 			&& job.metadata?.contextbridge_auto_reload !== false && staleStop && state.stopDisabled
 			&& !changedResponse && state.inputReady && document.querySelectorAll('[data-turn="user"]').length > beforeUserTurns
@@ -2433,7 +2449,8 @@ function captureProgress(selectors) {
   const responseText = (element) => {
     if (!element) return '';
     if (element.querySelector('[data-testid="image-gen-loading-state"], [data-testid="image-gen-loading-progress"]')) return '';
-    const markdownParts = [...element.querySelectorAll('[data-message-author-role="assistant"] .markdown, message-content .markdown')];
+    let markdownParts = [...element.querySelectorAll('[data-message-author-role="assistant"] .markdown, message-content .markdown')];
+    if (!markdownParts.length) markdownParts = [...element.querySelectorAll('.markdown')];
     if (markdownParts.length) return markdownParts.map(visibleText).filter(Boolean).join('\n');
     // A ChatGPT assistant turn without answer markup can contain only thinking
     // chrome (such as "Pro-Denkvorgang"); it is not user-facing answer text.
@@ -2569,13 +2586,15 @@ function matches(url, pattern) {
 }
 
 function startHeartbeat() {
-  stopHeartbeat();
+  if (heartbeatTimer) clearInterval(heartbeatTimer);
   heartbeatTimer = setInterval(() => sendHeartbeat('waiting'), 5000);
+  try { Promise.resolve(api.alarms?.create?.(HEARTBEAT_ALARM, { periodInMinutes: 0.5 })).catch(() => {}); } catch (_) {}
 }
 
 function stopHeartbeat() {
   if (heartbeatTimer) clearInterval(heartbeatTimer);
   heartbeatTimer = 0;
+  try { Promise.resolve(api.alarms?.clear?.(HEARTBEAT_ALARM)).catch(() => {}); } catch (_) {}
 }
 
 function sendHeartbeat(state, connecting = false) {
