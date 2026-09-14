@@ -89,6 +89,7 @@ type BrowserTabStatus struct {
 	ReasoningLevels  []string            `json:"reasoning_levels,omitempty"`
 	ModelScan        string              `json:"model_scan,omitempty"`
 	ReasoningScan    string              `json:"reasoning_scan,omitempty"`
+	DOMStatus        string              `json:"dom_status,omitempty"`
 	LastFailure      *BrowserTabFailure  `json:"last_failure,omitempty"`
 	DOM              *BrowserDOMSnapshot `json:"dom,omitempty"`
 }
@@ -109,6 +110,7 @@ type BrowserDOMSnapshot struct {
 	Submit                   []BrowserDOMControl `json:"submit,omitempty"`
 	FileInputs               []BrowserDOMControl `json:"file_inputs,omitempty"`
 	Tools                    []BrowserDOMControl `json:"tools,omitempty"`
+	ModelControls            []BrowserDOMControl `json:"model_controls,omitempty"`
 	AssistantTurns           int                 `json:"assistant_turns"`
 	LastResponseCharacters   int                 `json:"last_response_characters,omitempty"`
 	LastResponseBusy         bool                `json:"last_response_busy,omitempty"`

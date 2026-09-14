@@ -42,6 +42,19 @@ await assert.rejects(context.scanPageCapabilities(99), /only on a ChatGPT or Gem
 assert.equal(context.capabilityScanInterval('chatgpt', { currentModel: '', scanDiagnostic: { model: 'no trigger (0 composer menus)', noTriggerAttempts: 1 } }), 15000);
 assert.equal(context.capabilityScanInterval('chatgpt', { currentModel: '', scanDiagnostic: { model: 'no trigger (0 composer menus)', noTriggerAttempts: 3 } }), 300000);
 assert.equal(context.capabilityScanInterval('chatgpt', { currentModel: 'GPT-5.6 Sol' }), 1800000);
+{
+  const pill = { innerText: '5.6 Hoch', offsetWidth: 1, getAttribute: () => null };
+  const composer = { querySelectorAll: () => [pill] };
+  const input = { closest: () => composer };
+  context.document = {
+    querySelector: (selector) => selector.startsWith('#prompt-textarea') ? input : null,
+    querySelectorAll: () => []
+  };
+  const visibleSelection = context.inspectPageCapabilities();
+  assert.equal(visibleSelection.currentReasoning, 'Hoch');
+  assert.equal(visibleSelection.currentModelVersion, '5.6');
+  assert.equal(visibleSelection.currentModel, '', 'a compact version label must not invent a model variant');
+}
 assert.equal(context.classifyFailureReason('Prompt editor did not retain the submitted text'), 'prompt_not_retained');
 assert.equal(context.classifyFailureReason('Send button stayed disabled after filling the prompt'), 'send_disabled');
 assert.equal(context.classifyFailureReason('ChatGPT still shows Stop; the draft was left untouched'), 'provider_busy');
@@ -630,6 +643,32 @@ const element = (text = '', attributes = {}) => ({
   assert.deepEqual(Array.from(context.inspectPageCapabilities().models), ['Flash Erweitert', 'Pro', 'Flash-Lite']);
   const capabilities = await context.discoverPageCapabilities();
   assert.deepEqual(Array.from(capabilities.models), ['Flash Erweitert', 'Pro', 'Flash-Lite']);
+}
+
+{
+  context.location = { hostname: 'gemini.google.com' };
+  let uploadClicks = 0;
+  const picker = { ...element('Gemini Flash', { 'aria-label': 'Modusauswahl öffnen, derzeit ausgewählt: Gemini Flash' }),
+    className: 'gds-mode-switch-button', click() {}, dispatchEvent() {} };
+  const uploads = { ...element('Uploads & Tools', { 'aria-haspopup': 'menu' }), click() { uploadClicks += 1; } };
+  const menu = { ...element(''), querySelectorAll: () => [element('Flash'), element('Pro')] };
+  context.document = {
+    querySelector: () => null,
+    querySelectorAll: (selector) => selector === 'button, [role="button"]' ? [uploads, picker]
+      : selector === '[role="menu"], .cdk-overlay-pane' ? [menu] : [],
+    getElementById: () => null
+  };
+  assert.equal(context.inspectPageCapabilities().currentModel, 'Gemini Flash');
+  const capabilities = await context.discoverPageCapabilities();
+  assert.equal(capabilities.currentModel, 'Gemini Flash');
+  assert.deepEqual(Array.from(capabilities.models), ['Flash', 'Pro']);
+  assert.equal(uploadClicks, 0, 'Gemini model discovery must never click the upload menu');
+  context.document.querySelectorAll = (selector) => selector === 'button, [role="button"]' ? [uploads] : [];
+  const missing = await context.discoverPageCapabilities();
+  assert.equal(missing.currentModel, '');
+  assert.deepEqual(Array.from(missing.models), []);
+  assert.equal(uploadClicks, 0, 'without a verified picker the model must remain unknown');
+  delete context.location;
 }
 
 {
@@ -1582,6 +1621,30 @@ for (const disabled of [true, false]) {
     context.Date = realDate;
     context.setTimeout = realSetTimeout;
   }
+}
+
+{
+  const handlers = {};
+  const hints = [];
+  const previousSetTimeout = context.setTimeout;
+  const previousClearTimeout = context.clearTimeout;
+  chrome.runtime.sendMessage = async (message) => { hints.push(message); };
+  context.setTimeout = (fn) => { fn(); return 1; };
+  context.clearTimeout = () => {};
+  context.document = { addEventListener: (name, handler) => { handlers[name] = handler; } };
+  assert.equal(context.watchPageCapabilityInteractions(), true);
+  assert.equal(context.watchPageCapabilityInteractions(), true, 'watcher must not install twice');
+  const control = {
+    innerText: 'GPT-5.5', getAttribute: () => '', matches: () => false
+  };
+  const target = { closest: () => control };
+  handlers.click({ isTrusted: false, target });
+  assert.equal(hints.length, 0, 'synthetic scanner clicks must not retrigger a scan');
+  handlers.click({ isTrusted: true, target });
+  assert.equal(hints.length, 1);
+  assert.equal(hints[0].type, 'page-capability-interaction');
+  context.setTimeout = previousSetTimeout;
+  context.clearTimeout = previousClearTimeout;
 }
 
 console.log('Browser progress and provider failures verified');

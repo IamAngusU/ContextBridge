@@ -2,6 +2,37 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.55 - 2026-09-14
+
+### Fixed
+
+- the extension popup only reports a live connection after a recent successful relay heartbeat; stale stored connection flags show a checking state instead
+
+## 0.5.54 - 2026-09-14
+
+### Improved
+
+- the terminal panel restores color-coded idle, active, warning, and GPU-load states plus a left-to-right job activity bar
+- the terminal shows the configured relay separately from its connected worker pool, without implying that a relay-only VPS is a worker
+- Gemini model detection inspects only bounded provider controls and keeps unknown selections honest
+- Gemini's current mode button is recognized even when it omits `aria-haspopup`; the upload menu is never treated as a model picker
+- the local service accepts and bounds the new model-control diagnostics, fixing the 0.5.53 heartbeat rejection
+- non-authentication HTTP 4xx heartbeat errors now report a component compatibility problem and retry with backoff after an update instead of falsely blaming the pairing token
+
+## 0.5.53 - 2026-09-14
+
+### Improved
+
+- the extension began reporting bounded model-control metadata for Gemini diagnostics
+
+## 0.5.52 - 2026-09-14
+
+### Improved
+
+- attached ChatGPT and Gemini tabs request a bounded capability refresh after a real user interacts with model or reasoning controls, so the terminal does not wait for the periodic model scan
+- the compact ChatGPT composer label (for example, `5.6 Hoch`) updates the visible reasoning level without guessing a model variant; confirmed composer selections win over stale buttons on older answer turns, and background scans leave open menus and unsent drafts alone
+- the panel adds vertical breathing room between live sections and provider groups, removing decorative gaps before hiding live state in shorter terminals
+
 ## 0.5.51 - 2026-09-14
 
 ### Improved

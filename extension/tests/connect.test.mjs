@@ -62,6 +62,7 @@ assert.equal(pageInspections, 0, 'a normal heartbeat must not wait for a suspend
 assert.ok(heartbeats.length >= 2);
 
 chrome.scripting.executeScript = async ({ func }) => {
+  if (func.name === 'watchPageCapabilityInteractions') return [{ result: true }];
   if (func.name === 'safeToDiscoverPageCapabilities') return [{ result: false }];
   if (func.name === 'inspectPageCapabilities') return [{ result: { currentModel: 'GPT-5.6 Sol', currentReasoning: 'High' } }];
   if (func.name === 'inspectPageDOM') return [{ result: { prompt_inputs: 1 } }];
@@ -73,6 +74,46 @@ const updatedTab = heartbeats.at(-1).tabs[0];
 assert.equal(updatedTab.current_model, 'GPT-5.6 Sol');
 assert.equal(updatedTab.current_reasoning, 'High');
 assert.equal(updatedTab.dom.prompt_inputs, 1);
+
+// A user-initiated model change forces the authoritative picker scan instead
+// of retaining the old cached model until the normal 30-minute scan.
+chrome.scripting.executeScript = async ({ func }) => {
+  if (func.name === 'safeToDiscoverPageCapabilities') return [{ result: true }];
+  if (func.name === 'discoverPageCapabilities') return [{ result: {
+    currentModel: 'GPT-5.5', currentReasoning: 'Sehr hoch', models: ['GPT-5.5'],
+    reasoningLevels: ['Sehr hoch'], scanDiagnostic: { model: 'composer trigger', reasoning: 'composer trigger' }
+  } }];
+  if (func.name === 'inspectPageCapabilities') return [{ result: {
+    currentModel: 'GPT-5.6 Sol', currentReasoning: 'Mittel'
+  } }];
+  if (func.name === 'inspectPageDOM') return [{ result: { prompt_inputs: 1 } }];
+  throw new Error(`unexpected inspection ${func.name}`);
+};
+await context.refreshTabDiagnostics(7, true);
+assert.equal(state.tabCapabilities[7].currentModel, 'GPT-5.5');
+assert.equal(state.tabCapabilities[7].currentReasoning, 'Sehr hoch');
+assert.equal(heartbeats.at(-1).tabs[0].current_model, 'GPT-5.5');
+
+chrome.scripting.executeScript = async ({ func }) => {
+  if (func.name === 'inspectPageCapabilities') return [{ result: {
+    currentModel: '', currentModelVersion: '5.6', currentReasoning: 'Hoch'
+  } }];
+  if (func.name === 'inspectPageDOM') return [{ result: { prompt_inputs: 1 } }];
+  throw new Error(`unexpected inspection ${func.name}`);
+};
+await context.refreshTabDiagnostics(7);
+assert.equal(state.tabCapabilities[7].currentModel, '', 'a mismatched compact version must invalidate stale model metadata');
+assert.equal(state.tabCapabilities[7].currentReasoning, 'Hoch');
+
+let interactionScans = 0;
+const originalTimeout = context.setTimeout;
+context.setTimeout = (fn) => { fn(); return 1; };
+context.scheduleTabDiagnostics = (_tabId, force) => { if (force) interactionScans += 1; };
+assert.equal((await context.notePageCapabilityInteraction({ tab: { id: 7, url: 'https://chatgpt.com/c/test' } })).ok, true);
+assert.equal(interactionScans, 1);
+assert.equal((await context.notePageCapabilityInteraction({ tab: { id: 7, url: 'https://bugcrowd.com/' } })).ok, false);
+assert.equal(interactionScans, 1, 'another page must not trigger a scan of the attached tab');
+context.setTimeout = originalTimeout;
 
 // A transient outage keeps the user's requested connection but pauses work
 // until a heartbeat succeeds. With automatic reconnect disabled, three
@@ -111,6 +152,29 @@ await context.sendHeartbeatOnce('waiting');
 assert.equal(state.running, false, 'a rejected pairing token must halt automatic retries');
 assert.equal(state.relayConnected, false);
 assert.match(state.connectionError, /pairing token/i);
+
+state.running = true;
+state.relayConnected = true;
+vm.runInContext('stopRequested = false', context);
+context.fetch = async () => ({ status: 400, ok: false });
+await context.sendHeartbeatOnce('waiting');
+assert.equal(state.running, true, 'a version mismatch must retry after a service update');
+assert.equal(state.relayConnected, false);
+assert.match(state.connectionError, /HTTP 400.*retry/i);
+context.fetch = async () => ({ status: 200, ok: true });
+await context.sendHeartbeatOnce('waiting');
+assert.equal(state.relayConnected, true);
+assert.equal(state.connectionError, '');
+
+state.running = false;
+state.relayConnected = false;
+vm.runInContext('stopRequested = false', context);
+context.fetch = async (url) => url.endsWith('/v1/status')
+  ? { status: 200, ok: true, json: async () => ({ ok: true, version: 'v0.test' }) }
+  : { status: 400, ok: false };
+await assert.rejects(context.startPairing(), /HTTP 400.*retry/i,
+  'a first-connect compatibility error must not be mislabeled as a bad pairing token');
+assert.equal(state.running, false);
 
 state.running = true;
 vm.runInContext('stopRequested = false', context);

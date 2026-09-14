@@ -250,6 +250,9 @@ func runCommand(args []string) error {
 		return true
 	})
 	session.Banner(version, fmt.Sprintf("%d components · local bridge%s%s", components, enabledLabel(cfg.Cluster.Relay.Enabled, " · relay"), enabledLabel(cfg.Cluster.Worker.Enabled, " · worker")))
+	if cfg.Cluster.Relay.Enabled || cfg.Cluster.Worker.Enabled {
+		go watchPoolDisplay(ctx, cfg, session)
+	}
 	go func() { errorsCh <- local.Run(ctx) }()
 	if relay != nil {
 		go func() { errorsCh <- relay.Run(ctx) }()

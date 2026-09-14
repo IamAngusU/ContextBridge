@@ -17,6 +17,9 @@ let finishedTabCleanup = null;
 let pairingInFlight = null;
 const diagnosticsInFlight = new Map();
 const tabDOMDiagnostics = new Map();
+const capabilityWatchInstalled = new Set();
+const capabilityInteractionTimers = new Map();
+const capabilityForcePending = new Set();
 let connectionStartedAt = 0;
 let connectionPhase = '';
 let connectionPhaseStartedAt = 0;
@@ -44,6 +47,7 @@ api.alarms?.onAlarm?.addListener((alarm) => {
 api.tabs.onUpdated?.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status !== 'complete') return;
   tabDOMDiagnostics.delete(tabId);
+  capabilityWatchInstalled.delete(tabId);
   scheduleFreshTabCheck(tabId, tab?.url || changeInfo.url || '');
   void settings().then((cfg) => {
     if (cfg.running && configuredTabIDs(cfg).includes(tabId)) return sendHeartbeat('waiting');
@@ -53,6 +57,10 @@ api.tabs.onRemoved?.addListener((tabId) => {
   if (freshTabChecks.has(tabId)) clearTimeout(freshTabChecks.get(tabId));
   freshTabChecks.delete(tabId);
   tabDOMDiagnostics.delete(tabId);
+  capabilityWatchInstalled.delete(tabId);
+  capabilityForcePending.delete(tabId);
+  if (capabilityInteractionTimers.has(tabId)) clearTimeout(capabilityInteractionTimers.get(tabId));
+  capabilityInteractionTimers.delete(tabId);
   void detachClosedTab(tabId);
 });
 
@@ -100,6 +108,8 @@ async function handleMessage(message, sender) {
       return verifyTaughtProfile(Number(message.tabId));
     case 'scan-capabilities':
       return scanPageCapabilities(Number(message.tabId));
+    case 'page-capability-interaction':
+      return notePageCapabilityInteraction(sender);
     case 'remove-profile':
       return removeTaughtProfile(String(message.origin || ''));
     default:
@@ -137,7 +147,8 @@ async function startPairingOnce() {
     if (!heartbeatReady) {
       stopRequested = true;
       await api.storage.local.set({ running: false, relayConnected: false });
-      throw new Error('Local ContextBridge did not accept the browser connection; check the pairing token and service');
+      const reason = (await api.storage.local.get({ connectionError: '' })).connectionError;
+      throw new Error(reason || 'Local ContextBridge did not accept the browser connection; check the service status');
     }
     startHeartbeat();
     poll();
@@ -426,6 +437,22 @@ async function scanPageCapabilities(tabId) {
   const tabCapabilityScans = { ...(cfg.tabCapabilityScans || {}), [tabId]: Date.now() };
   await api.storage.local.set({ tabCapabilities, tabCapabilityScans });
   return { ok: true, capabilities };
+}
+
+async function notePageCapabilityInteraction(sender) {
+  const tabId = Number(sender?.tab?.id || 0);
+  if (!Number.isInteger(tabId) || tabId <= 0) return { ok: false };
+  const cfg = await settings();
+  if (!cfg.running || !configuredTabIDs(cfg).includes(tabId) || busyTabs.has(tabId)) return { ok: false };
+  const tab = await api.tabs.get(tabId).catch(() => null);
+  if (!tab || (sender.tab.url && sender.tab.url !== tab.url)
+      || !['chatgpt', 'gemini'].includes(profileForTab(cfg, tab)?.name)) return { ok: false };
+  if (capabilityInteractionTimers.has(tabId)) clearTimeout(capabilityInteractionTimers.get(tabId));
+  capabilityInteractionTimers.set(tabId, setTimeout(() => {
+    capabilityInteractionTimers.delete(tabId);
+    scheduleTabDiagnostics(tabId, true);
+  }, 900));
+  return { ok: true };
 }
 
 function normalizeTaughtProfile(raw, origin, fallbackLabel) {
@@ -1834,8 +1861,22 @@ function automate(job, profile, jobDeadline, editTarget = null) {
 		}
 		return normalizedWords(normalized).filter((word) => word !== 'gpt' && word !== 'model' && word !== 'modell');
 	};
-	const geminiCurrentMode = () => String(document.querySelector('bard-mode-switcher button[aria-haspopup]')
-		?.getAttribute('aria-label')?.match(/(?:derzeit ausgewählt|currently selected|selected)\s*:\s*(.+)$/i)?.[1] || '').trim();
+	const geminiModeName = /^(?:gemini\s*)?(?:\d+(?:\.\d+)?\s*)?(?:flash|pro|thinking|schnell|erweitert)(?:[ -](?:lite|erweitert|advanced|preview))?$/i;
+	const geminiModePicker = () => document.querySelector('bard-mode-switcher button[aria-haspopup]')
+		|| [...document.querySelectorAll('button, [role="button"]')].filter(isVisible)
+			.filter((element) => !element.closest?.('model-response, user-query, [role="menu"], [role="navigation"], nav'))
+			.map((element) => {
+				const hint = `${element.tagName || ''} ${element.id || ''} ${element.className || ''} ${element.getAttribute('aria-label') || ''} ${element.getAttribute('data-testid') || ''} ${element.parentElement?.tagName || ''} ${element.parentElement?.className || ''}`;
+				const selected = /(?:derzeit ausgewählt|currently selected|selected)\s*:\s*(.+)$/i.exec(element.getAttribute('aria-label') || '')?.[1]?.trim() || '';
+				const semantic = /(?:model|modell|mode|modus)[-_ ]?(?:switcher|selector|picker|menu)|(?:model|modell|mode|modus)auswahl/i.test(hint);
+				return { element, score: (semantic ? 4 : 0) + (geminiModeName.test(selected) ? 4 : 0)
+					+ (geminiModeName.test(visibleText(element)) ? 2 : 0) + (element.getAttribute('aria-haspopup') ? 2 : 0) };
+			}).filter((item) => item.score >= 4).sort((a, b) => b.score - a.score)[0]?.element;
+	const geminiCurrentMode = () => {
+		const picker = geminiModePicker();
+		const selected = picker?.getAttribute('aria-label')?.match(/(?:derzeit ausgewählt|currently selected|selected)\s*:\s*(.+)$/i)?.[1]?.trim() || '';
+		return geminiModeName.test(selected) ? selected : geminiModeName.test(visibleText(picker)) ? visibleText(picker) : '';
+	};
 	const geminiModeFamily = (value) => {
 		const words = normalizedWords(value);
 		if (words.includes('thinking')) return 'thinking';
@@ -1865,7 +1906,8 @@ function automate(job, profile, jobDeadline, editTarget = null) {
 				? requestedTerms.some((term) => normalized.includes(normalizedWords(term).join(' ')))
 				: requestedTerms.every((term) => normalizedWords(label).includes(term));
 		};
-		const triggers = triggerSelectors.flatMap((selector) => { try { return [...document.querySelectorAll(selector)].filter(isVisible); } catch (_) { return []; } });
+		const triggers = kind === 'model' && profile.name === 'gemini' ? [geminiModePicker()].filter(Boolean)
+			: triggerSelectors.flatMap((selector) => { try { return [...document.querySelectorAll(selector)].filter(isVisible); } catch (_) { return []; } });
 		const normalizedValue = (value) => normalizedWords(value).join(' ');
 		const geminiModeLabel = (element) => {
 			const primary = visibleText(element.querySelector?.('.picker-primary-text, .mode-name, .model-name'));
@@ -1874,7 +1916,7 @@ function automate(job, profile, jobDeadline, editTarget = null) {
 			return String(element.getAttribute('aria-label') || '').trim() || String(element.innerText || '').split('\n').map((part) => part.trim()).filter(Boolean)[0] || '';
 		};
 		const current = kind === 'model' && profile.name === 'gemini'
-			? triggers.find((element) => Boolean(element.closest?.('bard-mode-switcher')) && normalizedValue(element.getAttribute('aria-label')?.match(/(?:derzeit ausgewählt|currently selected|selected)\s*:\s*(.+)$/i)?.[1] || '') === normalizedValue(requested))
+			? triggers.find(() => normalizedValue(geminiCurrentMode()) === normalizedValue(requested))
 			: triggers.find((element) => {
 				if (kind !== 'model') return preferenceMatches(element);
 				const semantic = `${element.getAttribute('data-testid') || ''} ${element.getAttribute('aria-label') || ''}`;
@@ -1964,7 +2006,7 @@ function automate(job, profile, jobDeadline, editTarget = null) {
 		}
 		const trigger = triggers.find((element) => {
 			const label = `${visibleText(element)} ${element.getAttribute('aria-label') || ''}`.toLowerCase();
-			return kind === 'model' ? (profile.name === 'gemini' && Boolean(element.closest?.('bard-mode-switcher'))) || /gpt|gemini|model|modell|astra|sol|terra|luna/.test(label) : /reason|denk|effort|thinking|sofort|instant|hoch|high|pro|max/.test(label);
+			return kind === 'model' ? (profile.name === 'gemini' ? element === geminiModePicker() : /gpt|gemini|model|modell|astra|sol|terra|luna/.test(label)) : /reason|denk|effort|thinking|sofort|instant|hoch|high|pro|max/.test(label);
 		});
 		if (!trigger) throw new Error(`The ${kind} selector is not visible in this provider UI`);
 		trigger.click();
@@ -2686,7 +2728,7 @@ function sendHeartbeat(state, connecting = false) {
 }
 
 function capabilityScanInterval(profileName, capabilities) {
-  if (profileName !== 'chatgpt' || capabilities.currentModel) return 30 * 60 * 1000;
+  if (!['chatgpt', 'gemini'].includes(profileName) || capabilities.currentModel) return 30 * 60 * 1000;
   const diagnostic = capabilities.scanDiagnostic || {};
   // A newly created chat can answer before its composer menu finishes
   // mounting. Retry a few times promptly, then return to the normal cadence.
@@ -2720,6 +2762,7 @@ async function sendHeartbeatOnce(state, connecting = false) {
         model_scan: capabilities.scanDiagnostic?.model || '',
         reasoning_scan: capabilities.scanDiagnostic?.reasoning || '',
         last_failure: cfg.tabFailures?.[tabId] || null,
+        dom_status: !connecting && diagnostic?.url === tab.url ? diagnostic.status : 'pending',
         dom: !connecting && diagnostic?.url === tab.url ? diagnostic.dom : null
       });
     } catch (_) {}
@@ -2768,13 +2811,13 @@ async function recordHeartbeatResult(cfg, ok, status, requestId) {
   if (ok) {
     heartbeatFailures = 0;
     nextHeartbeatAt = 0;
-    if (cfg.relayConnected !== true || cfg.connectionError) {
-      await api.storage.local.set({ relayConnected: true, connectionError: '' });
+    if (cfg.relayConnected !== true || cfg.connectionError || Date.now() - Number(cfg.lastHeartbeatAt || 0) >= 20000) {
+      await api.storage.local.set({ relayConnected: true, connectionError: '', lastHeartbeatAt: Date.now() });
     }
     return;
   }
   heartbeatFailures += 1;
-  if (status === 401 || status === 403 || (status >= 400 && status < 500)) {
+  if (status === 401 || status === 403) {
     stopRequested = true;
     stopHeartbeat();
     await api.storage.local.set({ running: false, relayConnected: false,
@@ -2789,27 +2832,44 @@ async function recordHeartbeatResult(cfg, ok, status, requestId) {
     return;
   }
   nextHeartbeatAt = Date.now() + Math.min(60000, 5000 * 2 ** Math.min(heartbeatFailures - 1, 4));
-  if (cfg.relayConnected !== false) await api.storage.local.set({ relayConnected: false });
+  const incompatible = status >= 400 && status < 500;
+  const connectionError = incompatible
+    ? `Local service rejected a status update (HTTP ${status}). Check that the service and extension are compatible; ContextBridge will retry after an update.`
+    : '';
+  if (cfg.relayConnected !== false || cfg.connectionError !== connectionError) {
+    await api.storage.local.set({ relayConnected: false, connectionError });
+  }
 }
 
-function scheduleTabDiagnostics(tabId) {
+function scheduleTabDiagnostics(tabId, forceScan = false) {
+  if (forceScan) capabilityForcePending.add(tabId);
   if (diagnosticsInFlight.has(tabId)) return;
-  const task = refreshTabDiagnostics(tabId).catch(() => {}).finally(() => diagnosticsInFlight.delete(tabId));
+  const forceThisRun = capabilityForcePending.delete(tabId);
+  const task = refreshTabDiagnostics(tabId, forceThisRun).catch(() => {}).finally(() => {
+    diagnosticsInFlight.delete(tabId);
+    if (capabilityForcePending.has(tabId)) scheduleTabDiagnostics(tabId);
+  });
   diagnosticsInFlight.set(tabId, task);
 }
 
-async function refreshTabDiagnostics(tabId) {
+async function refreshTabDiagnostics(tabId, forceScan = false) {
   const cfg = await settings();
   if (!cfg.running || !configuredTabIDs(cfg).includes(tabId)) return;
   const tab = await withDeadline(api.tabs.get(tabId), 2000);
   const profile = profileForTab(cfg, tab);
+  if (['chatgpt', 'gemini'].includes(profile?.name) && !capabilityWatchInstalled.has(tabId)) {
+    try {
+      const installed = await withDeadline(api.scripting.executeScript({ target: { tabId }, func: watchPageCapabilityInteractions }), 4000);
+      if (installed?.[0]?.result === true) capabilityWatchInstalled.add(tabId);
+    } catch (_) {}
+  }
   let capabilities = cfg.tabCapabilities?.[tabId] || {};
   let scannedAt = 0;
   const scanInterval = capabilityScanInterval(profile?.name, capabilities);
-  const needsUpdatedChatGPTScan = profile?.name === 'chatgpt' && !capabilities.currentModel
+  const needsUpdatedModelScan = ['chatgpt', 'gemini'].includes(profile?.name) && !capabilities.currentModel
     && capabilities.scanDiagnostic?.version !== api.runtime.getManifest().version;
   if (['chatgpt', 'gemini'].includes(profile?.name) && !busyTabs.has(tabId)
-      && (needsUpdatedChatGPTScan || Date.now() - Number(cfg.tabCapabilityScans?.[tabId] || 0) > scanInterval)) {
+      && (forceScan || needsUpdatedModelScan || Date.now() - Number(cfg.tabCapabilityScans?.[tabId] || 0) > scanInterval)) {
     try {
       const safe = await withDeadline(api.scripting.executeScript({ target: { tabId }, func: safeToDiscoverPageCapabilities }), 4000);
       if (safe?.[0]?.result === true) {
@@ -2830,21 +2890,29 @@ async function refreshTabDiagnostics(tabId) {
     const validModel = profile?.name === 'gemini'
       ? (value) => Boolean(String(value || '').trim() && String(value).length <= 100)
       : (value) => acceptedModelLabel.test(value);
+    const modelMatchesComposer = (value) => !live.currentModelVersion
+      || String(value || '').match(/\b\d+(?:\.\d+)?\b/)?.[0] === live.currentModelVersion;
     capabilities = {
       ...capabilities,
-      currentModel: live.currentModel || (validModel(capabilities.currentModel || '') ? capabilities.currentModel : ''),
-      currentReasoning: live.currentReasoning || capabilities.currentReasoning || '',
+      currentModel: scannedAt && validModel(capabilities.currentModel || '') && modelMatchesComposer(capabilities.currentModel) ? capabilities.currentModel
+        : (validModel(live.currentModel || '') ? live.currentModel
+          : (validModel(capabilities.currentModel || '') && modelMatchesComposer(capabilities.currentModel) ? capabilities.currentModel : '')),
+      currentReasoning: scannedAt && capabilities.currentReasoning ? capabilities.currentReasoning
+        : (live.currentReasoning || capabilities.currentReasoning || ''),
       models: [...new Set([...(capabilities.models || []), ...(live.models || [])])].filter(validModel),
       reasoningLevels: [...new Set([...(capabilities.reasoningLevels || []), ...(live.reasoningLevels || [])])]
     };
   } catch (_) {}
   // Keep bounded selector-only diagnostics separate from the heartbeat. A slow
   // or suspended AI page must never prevent the service from staying paired.
+  const previousDiagnostic = tabDOMDiagnostics.get(tabId);
   try {
     const snapshot = await withDeadline(api.scripting.executeScript({ target: { tabId }, func: inspectPageDOM, args: [profile?.selectors || {}] }), 4000);
     const current = await withDeadline(api.tabs.get(tabId), 2000);
-    if (current.url === tab.url) tabDOMDiagnostics.set(tabId, { url: tab.url, dom: snapshot?.[0]?.result || null });
-  } catch (_) {}
+    if (current.url === tab.url) tabDOMDiagnostics.set(tabId, { url: tab.url, status: snapshot?.[0]?.result ? 'ready' : 'unavailable', dom: snapshot?.[0]?.result || null });
+  } catch (error) {
+    tabDOMDiagnostics.set(tabId, { url: tab.url, status: /time|deadline|respond/i.test(String(error?.message || '')) ? 'timeout' : 'error', dom: null });
+  }
   const current = await withDeadline(api.tabs.get(tabId), 2000).catch(() => null);
   if (current?.url !== tab.url) return;
   const write = capabilityWrite.then(async () => {
@@ -2858,6 +2926,10 @@ async function refreshTabDiagnostics(tabId) {
   });
   capabilityWrite = write.catch(() => {});
   await write;
+  if ((forceScan && scannedAt) || !previousDiagnostic || previousDiagnostic.url !== tab.url
+      || previousDiagnostic.status !== tabDOMDiagnostics.get(tabId)?.status) {
+    await sendHeartbeat(busyTabs.size ? 'working' : 'waiting');
+  }
 }
 
 function withDeadline(promise, milliseconds) {
@@ -2884,6 +2956,7 @@ async function settings() {
     tabIds: [],
     running: false,
     relayConnected: false,
+    lastHeartbeatAt: 0,
     autoReconnect: true,
     autoAttachFreshTabs: false,
     preserveDrafts: false,
@@ -2913,7 +2986,7 @@ function configuredTabIDs(cfg) {
 }
 
 function safeToDiscoverPageCapabilities() {
-  if ([...document.querySelectorAll('[role="dialog"], [role="alertdialog"]')]
+  if ([...document.querySelectorAll('[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"]')]
     .some((element) => element.offsetWidth || element.offsetHeight || element.getClientRects().length)) return false;
   const composer = document.querySelector('#prompt-textarea, rich-textarea [contenteditable="true"][role="textbox"], div.ql-editor[contenteditable="true"][role="textbox"]');
   if (!composer) return false;
@@ -2926,11 +2999,48 @@ function safeToDiscoverPageCapabilities() {
     .some((element) => element.offsetWidth || element.offsetHeight || element.getClientRects().length);
 }
 
+// Runs only in explicitly attached AI tabs. It sends a content-free hint after
+// a real user changes a model or effort control; the worker then performs its
+// existing bounded, verified scan. Synthetic ContextBridge clicks are ignored.
+function watchPageCapabilityInteractions() {
+  const runtime = (globalThis.browser || globalThis.chrome)?.runtime;
+  if (!runtime?.sendMessage || !document?.addEventListener) return false;
+  if (globalThis.__contextbridgeCapabilityWatch) return true;
+  const relevant = /(?:gpt[\s._-]*\d|gemini|modell|model|denk|reason|effort|thinking|sofort|instant|niedrig|low|mittel|medium|hoch|high|pro|max)/i;
+  let timer = 0;
+  const observe = (event) => {
+    if (event.isTrusted !== true) return;
+    const control = event.target?.closest?.('button, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="option"], [role="slider"], input[type="range"]');
+    if (!control) return;
+    const label = `${control.innerText || control.textContent || ''} ${control.getAttribute?.('aria-label') || ''} ${control.getAttribute?.('data-testid') || ''}`.slice(0, 180);
+    if (!relevant.test(label) && !control.matches?.('[role="slider"], input[type="range"]')) return;
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      try { Promise.resolve(runtime.sendMessage({ type: 'page-capability-interaction' })).catch(() => {}); }
+      catch (_) {}
+    }, 100);
+  };
+  document.addEventListener('click', observe, true);
+  document.addEventListener('change', observe, true);
+  document.addEventListener('pointerup', observe, true);
+  document.addEventListener('keyup', (event) => {
+    if (['Enter', ' ', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) observe(event);
+  }, true);
+  globalThis.__contextbridgeCapabilityWatch = true;
+  return true;
+}
+
 function inspectPageCapabilities() {
   const visible = (element) => Boolean(element && (element.offsetWidth || element.offsetHeight || element.getClientRects().length));
   const text = (element) => String(element?.innerText || element?.textContent || element?.getAttribute?.('aria-label') || '').replace(/\s+/g, ' ').trim().slice(0, 100);
   const unique = (values, limit) => [...new Set(values.filter(Boolean))].slice(0, limit);
-  const controls = [...document.querySelectorAll('button, [role="button"]')].filter(visible);
+  // A previous assistant turn can expose its own "switch model" button. Only
+  // the live composer describes the model for the next job.
+  const composerInput = document.querySelector?.('#prompt-textarea, rich-textarea [contenteditable="true"][role="textbox"], div.ql-editor[contenteditable="true"][role="textbox"]');
+  const composer = composerInput?.closest?.('[data-node-type="input-area"], form')
+    || document.querySelector?.('form[data-type="unified-composer"]') || document.querySelector?.('form');
+  const controls = [...(composer?.querySelectorAll?.('button, [role="button"]')
+    || document.querySelectorAll('button, [role="button"]'))].filter(visible);
   const options = [...document.querySelectorAll('[role="menuitem"], [role="menuitemradio"], [role="option"], [aria-checked], [aria-selected]')].filter(visible);
   const modelPattern = /^(?:gpt[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:astra|sol|terra|luna|pro|mini|nano|codex|thinking|instant))?|gemini(?:[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:pro|flash|lite|thinking|preview|experimental))*)?|astra|sol|terra|luna|\d+(?:\.\d+)?\s+(?:pro|flash|astra|sol|terra|luna))$/i;
   const reasoningPattern = /^(?:instant|sofort|fast|schnell|low|niedrig|medium|mittel|high|hoch|very high|sehr hoch|xhigh|pro|max|maximum)$/i;
@@ -2948,14 +3058,31 @@ function inspectPageCapabilities() {
     const label = `${text(element)} ${element.getAttribute('aria-label') || ''}`;
     return modelPattern.test(text(element)) && !/modelle ergänzen|add models|preismodell|pricing model/i.test(label);
   }));
+  const compactComposerSelection = controls.map(text)
+    .map((value) => value.match(/^(?:gpt[- ]?)?(\d+(?:\.\d+)?)\s+(sehr hoch|very high|hoch|high|mittel|medium|niedrig|low|sofort|instant|fast|schnell|pro|max)$/i))
+    .find(Boolean);
   const modelMenuOpen = controls.some((element) =>
     element.getAttribute('aria-expanded') === 'true'
     && semantic(element, /model[-_ ]?(?:switcher|selector|picker|menu)|(?:choose|select|current|switch)[-_ ]?model|modellauswahl|modellmenü|modellmodus|modell[-_ ]?wechseln/i));
   const selectedModel = modelMenuOpen ? modelOptionLabel(options.find((element) =>
     checked(element) && modelPattern.test(modelOptionLabel(element)))) : '';
-  const currentReasoning = text(controls.find((element) => semantic(element, /reason|denk|effort|thinking/i) || reasoningPattern.test(text(element))));
-  const geminiPicker = document.querySelector?.('bard-mode-switcher button[aria-haspopup]');
-  const geminiCurrent = geminiPicker?.getAttribute('aria-label')?.match(/(?:derzeit ausgewählt|currently selected|selected)\s*:\s*(.+)$/i)?.[1]?.trim().slice(0, 100) || '';
+  const currentReasoning = compactComposerSelection?.[2]
+    || text(controls.find((element) => reasoningPattern.test(text(element))));
+  const geminiModeName = /^(?:gemini\s*)?(?:\d+(?:\.\d+)?\s*)?(?:flash|pro|thinking|schnell|erweitert)(?:[ -](?:lite|erweitert|advanced|preview))?$/i;
+  const geminiPicker = document.querySelector?.('bard-mode-switcher button[aria-haspopup]')
+    || (globalThis.location?.hostname === 'gemini.google.com' ? [...document.querySelectorAll('button, [role="button"]')].filter(visible)
+      .filter((element) => !element.closest?.('model-response, user-query, [role="menu"], [role="navigation"], nav'))
+      .map((element) => {
+        const hint = `${element.tagName || ''} ${element.id || ''} ${element.className || ''} ${element.getAttribute('aria-label') || ''} ${element.getAttribute('data-testid') || ''} ${element.parentElement?.tagName || ''} ${element.parentElement?.className || ''}`;
+        const label = text(element);
+        const selected = /(?:derzeit ausgewählt|currently selected|selected)\s*:\s*(.+)$/i.exec(element.getAttribute('aria-label') || '')?.[1]?.trim() || '';
+        const semantic = /(?:model|modell|mode|modus)[-_ ]?(?:switcher|selector|picker|menu)|(?:model|modell|mode|modus)auswahl/i.test(hint);
+        const score = (semantic ? 4 : 0) + (geminiModeName.test(selected) ? 4 : 0)
+          + (geminiModeName.test(label) ? 2 : 0) + (element.getAttribute('aria-haspopup') ? 2 : 0);
+        return { element, score };
+      }).filter((item) => item.score >= 4).sort((a, b) => b.score - a.score)[0]?.element : null);
+  const geminiSelected = geminiPicker?.getAttribute('aria-label')?.match(/(?:derzeit ausgewählt|currently selected|selected)\s*:\s*(.+)$/i)?.[1]?.trim() || '';
+  const geminiCurrent = (geminiModeName.test(geminiSelected) ? geminiSelected : geminiModeName.test(text(geminiPicker)) ? text(geminiPicker) : '').slice(0, 100);
   const geminiMenu = geminiPicker?.getAttribute('aria-controls') && document.getElementById?.(geminiPicker.getAttribute('aria-controls'));
   const visibleGeminiModels = geminiMenu ? [...geminiMenu.querySelectorAll('button, [role="menuitem"], [role="option"], [role="menuitemradio"]')]
     .filter((item) => visible(item) && !item.disabled && item.getAttribute('aria-disabled') !== 'true')
@@ -2967,6 +3094,7 @@ function inspectPageCapabilities() {
   return {
     currentModel: geminiCurrent || selectedModel || currentModel,
     currentReasoning: geminiCurrent ? '' : currentReasoning,
+    currentModelVersion: geminiCurrent ? '' : (compactComposerSelection?.[1] || ''),
     models: geminiCurrent ? unique(visibleGeminiModels, 50) : unique(options.map(modelOptionLabel).filter((value) => modelPattern.test(value)), 50),
     reasoningLevels: geminiCurrent ? [] : unique(options.map(text).filter((value) => reasoningPattern.test(value)), 20)
   };
@@ -3042,6 +3170,22 @@ function inspectPageDOM(selectors) {
     if (visible(element)) imageProgress = Math.max(imageProgress, Number(element.getAttribute('aria-valuenow')) || 0);
   }
   const relevant = /bild|image|musik|music|file|datei|ordner|folder|upload|attach|tool|werkzeug|auswahl von|selection of|deselect|gpt|gemini|modell|model|denk|reason|effort|hoch|high/i;
+  // Bounded selector diagnostics for provider chrome only. Never include a
+  // prompt, response, or arbitrary button label in heartbeat diagnostics.
+  const modeName = /^(?:(?:gemini|gpt)[\s._-]*)?(?:\d+(?:\.\d+)?[\s._-]*)?(?:flash|pro|advanced|erweitert|schnell|fast|thinking|nachdenken|auto)(?:[\s._-]*(?:flash|pro|advanced|erweitert|preview))?$/i;
+  const modelControls = [...document.querySelectorAll('button, [role="button"], [role="combobox"]')]
+    .filter((element) => visible(element) && !element.closest?.('model-response, user-query, [data-message-author-role="assistant"], [data-message-author-role="user"], nav, [role="navigation"]'))
+    .filter((element) => {
+      const hint = `${element.id || ''} ${element.getAttribute('data-testid') || ''} ${element.getAttribute('data-test-id') || ''} ${element.getAttribute('aria-label') || ''}`;
+      const label = short(element.innerText, 80);
+      return /model|modell|mode|modus|switcher/i.test(hint) || modeName.test(label);
+    }).slice(0, 12).map((element) => {
+      const item = describe(element);
+      const label = short(element.innerText, 80);
+      item.text = modeName.test(label) ? label : '';
+      if (!/model|modell|mode|modus|flash|pro|schnell|erweitert/i.test(item.aria_label)) item.aria_label = '';
+      return item;
+    });
   const inputCharacters = String(inputs[0]?.value || inputs[0]?.innerText || inputs[0]?.textContent || '').trim().length;
   return {
     captured_at: new Date().toISOString(),
@@ -3055,6 +3199,7 @@ function inspectPageDOM(selectors) {
       if (!relevant.test(`${item.text} ${item.aria_label} ${item.test_id}`) && item.has_popup !== 'menu') item.text = '';
       return item;
     }),
+    model_controls: modelControls,
     assistant_turns: responses.length,
     last_response_characters: Math.min(latestText.length, 100000),
     last_response_busy: latestResponseBusy,
@@ -3096,9 +3241,21 @@ async function discoverPageCapabilities() {
     || element.getAttribute('data-selected') === 'true' || ['checked', 'selected'].includes(element.getAttribute('data-state'))
     || Boolean(element.querySelector?.('svg use[href*="#check" i], svg[data-testid*="check" i], [data-state="checked"], [class*="check" i]'));
   const modelControl = (element) => semantic(element, /model[-_ ]?(?:switcher|selector|picker|menu)|(?:choose|select|current|switch)[-_ ]?model|modellauswahl|modellmenü|modellmodus|modell[-_ ]?wechseln/i);
-  const geminiPicker = document.querySelector?.('bard-mode-switcher button[aria-haspopup]');
+  const geminiPage = globalThis.location?.hostname === 'gemini.google.com';
+  const geminiModeName = /^(?:gemini\s*)?(?:\d+(?:\.\d+)?\s*)?(?:flash|pro|thinking|schnell|erweitert)(?:[ -](?:lite|erweitert|advanced|preview))?$/i;
+  const geminiPicker = document.querySelector?.('bard-mode-switcher button[aria-haspopup]')
+    || (geminiPage ? [...document.querySelectorAll('button, [role="button"]')].filter(visible)
+      .filter((element) => !element.closest?.('model-response, user-query, [role="menu"], [role="navigation"], nav'))
+      .map((element) => {
+        const hint = `${element.tagName || ''} ${element.id || ''} ${element.className || ''} ${element.getAttribute('aria-label') || ''} ${element.getAttribute('data-testid') || ''} ${element.parentElement?.tagName || ''} ${element.parentElement?.className || ''}`;
+        const selected = /(?:derzeit ausgewählt|currently selected|selected)\s*:\s*(.+)$/i.exec(element.getAttribute('aria-label') || '')?.[1]?.trim() || '';
+        const semantic = /(?:model|modell|mode|modus)[-_ ]?(?:switcher|selector|picker|menu)|(?:model|modell|mode|modus)auswahl/i.test(hint);
+        return { element, score: (semantic ? 4 : 0) + (geminiModeName.test(selected) ? 4 : 0)
+          + (geminiModeName.test(text(element)) ? 2 : 0) + (element.getAttribute('aria-haspopup') ? 2 : 0) };
+      }).filter((item) => item.score >= 4).sort((a, b) => b.score - a.score)[0]?.element : null);
   if (geminiPicker && visible(geminiPicker)) {
-    const currentModel = geminiPicker.getAttribute('aria-label')?.match(/(?:derzeit ausgewählt|currently selected|selected)\s*:\s*(.+)$/i)?.[1]?.trim().slice(0, 100) || text(geminiPicker);
+    const selected = geminiPicker.getAttribute('aria-label')?.match(/(?:derzeit ausgewählt|currently selected|selected)\s*:\s*(.+)$/i)?.[1]?.trim() || '';
+    const currentModel = (geminiModeName.test(selected) ? selected : geminiModeName.test(text(geminiPicker)) ? text(geminiPicker) : '').slice(0, 100);
     geminiPicker.click();
     await wait(350);
     const controlled = geminiPicker.getAttribute('aria-controls');
@@ -3113,11 +3270,14 @@ async function discoverPageCapabilities() {
     };
     const choices = menu ? [...menu.querySelectorAll('button, [role="menuitem"], [role="option"], [role="menuitemradio"], mat-option')]
       .filter((element) => visible(element) && !element.disabled && element.getAttribute('aria-disabled') !== 'true') : [];
-    const models = unique(choices.map(modelLabel).filter((value) => value && value.length <= 100 && !/^(?:close|schließen|back|zurück|help|hilfe|upgrade|upgraden)$/i.test(value)), 50);
+    const models = unique(choices.map(modelLabel).filter((value) => geminiModeName.test(value)), 50);
     geminiPicker.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
     await wait(150);
-    return { currentModel, currentReasoning: '', models, reasoningLevels: [] };
+    return { currentModel, currentReasoning: '', models, reasoningLevels: [],
+      scanDiagnostic: { model: `other trigger, expanded=${geminiPicker.getAttribute('aria-expanded') === 'true'}, submenu=false, ${choices.length} candidates, open=click`, reasoning: 'no trigger (0 composer menus)' } };
   }
+  if (geminiPage) return { currentModel: '', currentReasoning: '', models: [], reasoningLevels: [],
+    scanDiagnostic: { model: 'no trigger (0 composer menus)', reasoning: 'no trigger (0 composer menus)' } };
   const scan = async (kind) => {
     const pattern = kind === 'model' ? modelPattern : reasoningPattern;
     const composerInput = document.querySelector('#prompt-textarea, rich-textarea [contenteditable="true"][role="textbox"], div.ql-editor[contenteditable="true"][role="textbox"]');

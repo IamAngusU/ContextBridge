@@ -3,6 +3,7 @@ package terminalui
 import (
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -50,12 +51,21 @@ type localModelSelection struct {
 	loaded   bool
 }
 
+// PoolNode is deliberately limited to public display metadata. Keys, tokens,
+// addresses and job payloads from the relay never enter terminal history.
+type PoolNode struct {
+	ID, Name       string
+	Connected      bool
+	Running, Slots int
+}
+
 // ServiceSnapshot is the read-only subset shown by an attached console. It
 // reflects a service status response, not inferred worker or job events.
 type ServiceSnapshot struct {
 	Version          string
 	Queued           int
 	Completed        int
+	ActiveJobs       int
 	BrowserConnected bool
 	ActiveTabs       int
 	BusyTabs         int
@@ -94,6 +104,10 @@ type Session struct {
 	localProviders    []string
 	serviceLines      []string
 	connectionLine    string
+	relayHost         string
+	poolNodes         []PoolNode
+	poolKnown         bool
+	poolError         bool
 	bannerVersion     string
 	bannerComponents  string
 	history           []historyEntry
@@ -107,6 +121,34 @@ type Session struct {
 	observing         bool
 	observedOnline    bool
 	observed          ServiceSnapshot
+}
+
+func (s *Session) SetRelayTarget(rawURL string) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Host == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.relayHost = cleanTerminalLabel(parsed.Host, 100)
+	if s.panelStarted {
+		s.renderPanelLocked()
+	}
+}
+
+// ObservePool updates only a bounded, read-only view of the relay's node list.
+func (s *Session) ObservePool(nodes []PoolNode, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.poolKnown, s.poolError = true, err != nil
+	if err == nil {
+		s.poolNodes = append([]PoolNode(nil), nodes...)
+	} else {
+		s.poolNodes = nil
+	}
+	if s.panelStarted {
+		s.renderPanelLocked()
+	}
 }
 
 type historyEntry struct {
@@ -623,7 +665,8 @@ func (s *Session) animate() {
 		case <-ticker.C:
 			s.mu.Lock()
 			s.frame++
-			if (s.panelStarted && s.frame%8 == 0) || (!s.panelStarted && (s.status != "Idle" || s.frame%8 == 0)) {
+			panelWorking := len(s.jobs) > 0 || (s.observing && s.observedOnline && (s.observed.ActiveJobs > 0 || s.observed.BusyTabs > 0))
+			if (s.panelStarted && (panelWorking && s.frame%2 == 0 || !panelWorking && s.frame%8 == 0)) || (!s.panelStarted && (s.status != "Idle" || s.frame%8 == 0)) {
 				s.drawStatusLocked()
 			}
 			s.mu.Unlock()
@@ -804,9 +847,13 @@ func panelSection(label string, width int) string {
 func (s *Session) panelStatusLocked() string {
 	if s.observing {
 		if !s.observedOnline {
-			return "◇ Dienst offline · erneuter Verbindungsversuch"
+			return "◇ Offline · Dienst offline · erneuter Verbindungsversuch"
 		}
-		return fmt.Sprintf("◇ Dienst %s · Warteschlange %d · Browser %d/%d belegt · Jobs %d · Fehler %d", s.observed.Version,
+		state := "Idle"
+		if s.observed.ActiveJobs > 0 || s.observed.BusyTabs > 0 {
+			state = "Working"
+		}
+		return fmt.Sprintf("◇ %s · Dienst %s · Warteschlange %d · Browser %d/%d belegt · Jobs %d · Fehler %d", state, s.observed.Version,
 			s.observed.Queued, s.observed.BusyTabs, s.observed.ActiveTabs, s.observed.JobsTotal, s.observed.JobsFailed)
 	}
 	if s.status == "" {
@@ -835,6 +882,13 @@ func (s *Session) renderPanelLocked() {
 		}
 	}
 	height = max(8, height)
+	spacious := height >= 26
+	gap := func(rows []string) []string {
+		if spacious {
+			return append(rows, "  |")
+		}
+		return rows
+	}
 	line := func(value string) string { return truncateRunes(value, max(1, width-2)) }
 	rows := []string{
 		panelBorder(width),
@@ -852,13 +906,62 @@ func (s *Session) renderPanelLocked() {
 			rows = append(rows, "  | ·  "+line(value))
 		}
 	}
+	rows = gap(rows)
 	rows = append(rows, panelSection("CONNECTION", width))
 	connection := s.connectionLine
 	if connection == "" {
 		connection = "Verbindung wird geprüft…"
 	}
 	rows = append(rows, "  | ·  "+line(connection))
+	rows[len(rows)-1] = colorPanelConnection(rows[len(rows)-1])
+	rows = gap(rows)
+	if s.relayHost != "" {
+		rows = append(rows, panelSection("RELAY / NODES", width))
+		if s.poolError {
+			rows = append(rows, "  | ◇  "+line("Relay "+s.relayHost+" · Poolstatus nicht abrufbar"))
+		} else if !s.poolKnown {
+			rows = append(rows, "  | ◇  "+line("Relay "+s.relayHost+" · Poolstatus wird geladen…"))
+		} else {
+			nodes := append([]PoolNode(nil), s.poolNodes...)
+			sort.Slice(nodes, func(i, j int) bool {
+				if nodes[i].Connected != nodes[j].Connected {
+					return nodes[i].Connected
+				}
+				return strings.ToLower(nodes[i].Name) < strings.ToLower(nodes[j].Name)
+			})
+			online := 0
+			for _, node := range nodes {
+				if node.Connected {
+					online++
+				}
+			}
+			rows = append(rows, "  | "+ansiCyan+"◇"+ansiReset+"  "+line(fmt.Sprintf("Relay %s · %d/%d Worker online", s.relayHost, online, len(nodes))))
+			if len(nodes) == 0 {
+				rows = append(rows, "  | ·  Keine Worker verbunden")
+			}
+			for index, node := range nodes {
+				if index == 8 {
+					rows = append(rows, "  | ·  "+line(fmt.Sprintf("%d weitere Nodes im Dashboard", len(nodes)-index)))
+					break
+				}
+				state := "offline"
+				if node.Connected {
+					state = "idle"
+					if node.Running > 0 {
+						state = "working"
+					}
+				}
+				self := ""
+				if node.ID != "" && node.ID == s.nodeID {
+					self = " · dieser PC"
+				}
+				rows = append(rows, "  | ·  "+colorPanelState(line(fmt.Sprintf("%s · %s · %d/%d Jobs%s", nodeLabel(node.Name, node.ID, false), state, node.Running, max(1, node.Slots), self)), state))
+			}
+		}
+		rows = gap(rows)
+	}
 	rows = append(rows, panelSection("AI TABS", width))
+	rows = gap(rows)
 	if len(s.browserSelections) == 0 {
 		rows = append(rows, "  | ·  Keine verbundenen AI-Tabs")
 	} else {
@@ -883,6 +986,9 @@ func (s *Session) renderPanelLocked() {
 		for _, id := range ids {
 			selection := s.browserSelections[id]
 			if !strings.EqualFold(lastProfile, selection.profile) {
+				if lastProfile != "" {
+					rows = gap(rows)
+				}
 				lastProfile = selection.profile
 				label := selection.profile
 				switch strings.ToLower(label) {
@@ -903,10 +1009,15 @@ func (s *Session) renderPanelLocked() {
 				parts = append(parts, "Denkstufe: "+selection.reasoning)
 			}
 			parts = append(parts, browserStateLabel(selection.state))
-			rows = append(rows, "  | ◇  "+line(strings.Join(parts, " · ")))
+			label := line(strings.Join(parts, " · "))
+			if selection.model == "" {
+				label = strings.Replace(label, "Modell unbekannt", ansiDim+"Modell unbekannt"+ansiReset, 1)
+			}
+			rows = append(rows, "  | "+ansiCyan+"◇"+ansiReset+"  "+colorPanelState(label, browserStateLabel(selection.state)))
 		}
 	}
 	for _, provider := range s.localProviders {
+		rows = gap(rows)
 		rows = append(rows, panelSection("[Lokal · "+provider+"]", width))
 		models := []localModelSelection{}
 		loaded := false
@@ -934,11 +1045,16 @@ func (s *Session) renderPanelLocked() {
 			}
 		}
 	}
-	status := "  | " + line(s.panelStatusLocked())
+	rows = gap(rows)
+	status := "  | " + colorPanelStatus(line(s.panelStatusLocked()), s)
 	statusDetails := []string{}
+	working := len(s.jobs) > 0 || (s.observing && s.observedOnline && (s.observed.ActiveJobs > 0 || s.observed.BusyTabs > 0))
+	if working {
+		statusDetails = append(statusDetails, "  | "+ansiCyan+travelBar(s.frame, 16)+ansiReset)
+	}
 	if s.observing {
 		if s.observedOnline {
-			statusDetails = append(statusDetails, fmt.Sprintf("  | GPU · %s · %d%%", empty(s.observed.GPU, "unbekannt"), s.observed.GPUUtilization))
+			statusDetails = append(statusDetails, "  | "+colorGPUPercent(fmt.Sprintf("GPU · %s · %d%%", empty(s.observed.GPU, "unbekannt"), s.observed.GPUUtilization), s.observed.GPUUtilization))
 		}
 	} else {
 		indicators := indicatorLabel(s.capabilities)
@@ -947,16 +1063,36 @@ func (s *Session) renderPanelLocked() {
 		}
 		statusDetails = append(statusDetails, "  | "+indicators)
 		if s.hardware != "" {
-			statusDetails = append(statusDetails, "  | "+s.hardware)
+			hardware := s.hardware
+			if len(s.capabilities.GPUs) > 0 {
+				hardware = colorGPUPercent(hardware, s.capabilities.GPUs[0].Utilization)
+			}
+			statusDetails = append(statusDetails, "  | "+hardware)
 		}
 	}
 	maxLiveRows := max(1, height-6-len(statusDetails))
+	// Spacing is decorative. Preserve actual live state first when the window
+	// is short or the pool grows; only then truncate content if necessary.
+	for len(rows) > maxLiveRows {
+		gapIndex := -1
+		for index := len(rows) - 1; index >= 0; index-- {
+			if rows[index] == "  |" {
+				gapIndex = index
+				break
+			}
+		}
+		if gapIndex < 0 {
+			break
+		}
+		rows = append(rows[:gapIndex], rows[gapIndex+1:]...)
+	}
 	if len(rows) > maxLiveRows {
 		hidden := len(rows) - maxLiveRows + 1
 		rows = append(rows[:maxLiveRows-1], fmt.Sprintf("  | … %d weitere Live-Zeilen", hidden))
 	}
 	rows = append(rows, panelSection("STATUS", width), status)
 	rows = append(rows, statusDetails...)
+	rows = gap(rows)
 	availableHistory := max(0, height-len(rows)-1)
 	rows = append(rows, panelSection(fmt.Sprintf("HISTORY · Sitzung · %d Ereignisse", s.historyTotal), width))
 	historyRows := []string{}
@@ -967,7 +1103,8 @@ func (s *Session) renderPanelLocked() {
 		if entry.section != "" {
 			label += "[" + entry.section + "] "
 		}
-		historyRows = append(historyRows, "  | "+line(label+entry.message))
+		historyLine := line(label + entry.message)
+		historyRows = append(historyRows, "  | "+strings.Replace(historyLine, " "+entry.symbol+" ", " "+coloredSymbol(entry.symbol)+" ", 1))
 		for _, detail := range entry.details {
 			historyRows = append(historyRows, "  |   +-> "+line(detail))
 		}
@@ -1148,6 +1285,87 @@ func pulseBar(frame, width int) string {
 		}
 	}
 	return result.String()
+}
+
+// travelBar is the panel's one-way activity cue. It wraps at the right edge
+// instead of bouncing, so an active job is visibly moving left to right.
+func travelBar(frame, width int) string {
+	width = max(4, width)
+	position := (frame / 2) % (width - 2)
+	bar := []rune(strings.Repeat("─", width))
+	for index := position; index < position+3; index++ {
+		bar[index] = '━'
+	}
+	return string(bar)
+}
+
+func colorPanelState(value, state string) string {
+	color := ansiDim
+	switch state {
+	case "idle":
+		color = ansiGreen
+	case "working", "läuft":
+		color = ansiCyan
+	case "kühlt ab":
+		color = ansiYellow
+	case "offline":
+		color = ansiRed
+	}
+	return strings.Replace(value, " · "+state, " · "+color+state+ansiReset, 1)
+}
+
+func colorPanelConnection(value string) string {
+	for _, word := range []string{"Relay connected", "Relay verbunden", "Attached to running service"} {
+		if strings.Contains(value, word) {
+			return strings.Replace(value, word, ansiGreen+word+ansiReset, 1)
+		}
+	}
+	for _, word := range []string{"nicht erreichbar", "unavailable", "rejected"} {
+		if strings.Contains(value, word) {
+			return strings.Replace(value, word, ansiRed+word+ansiReset, 1)
+		}
+	}
+	return value
+}
+
+func colorPanelStatus(value string, s *Session) string {
+	state, color := "Idle", ansiGreen
+	if s.observing {
+		if !s.observedOnline {
+			state, color = "Offline", ansiRed
+		} else if s.observed.ActiveJobs > 0 || s.observed.BusyTabs > 0 {
+			state, color = "Working", ansiCyan
+		}
+	} else if len(s.jobs) > 0 || (s.status != "" && s.status != "Idle") {
+		state, color = s.status, ansiCyan
+		if s.status == "Offline" || s.status == "Waiting for network" {
+			color = ansiYellow
+		}
+	}
+	value = strings.Replace(value, "◇", color+"◇"+ansiReset, 1)
+	if state != "" {
+		value = strings.Replace(value, state, color+state+ansiReset, 1)
+	}
+	return value
+}
+
+func colorGPUPercent(value string, utilization int) string {
+	color := ansiGreen
+	if utilization >= 90 {
+		color = ansiRed
+	} else if utilization >= 70 {
+		color = ansiYellow
+	}
+	percentage := fmt.Sprintf("%d%%", utilization)
+	value = strings.Replace(value, percentage, color+percentage+ansiReset, 1)
+	if strings.Contains(value, "GPU aktiv") {
+		value = strings.Replace(value, "GPU aktiv", color+"GPU aktiv"+ansiReset, 1)
+	} else if strings.Contains(value, "GPU bereit") {
+		value = strings.Replace(value, "GPU bereit", ansiDim+"GPU bereit"+ansiReset, 1)
+	} else if strings.Contains(value, "Zero-GPU") {
+		value = strings.Replace(value, "Zero-GPU", ansiDim+"Zero-GPU"+ansiReset, 1)
+	}
+	return value
 }
 
 func compactDuration(value time.Duration) string {

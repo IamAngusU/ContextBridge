@@ -15,6 +15,31 @@ import (
 	"github.com/IamAngusU/ContextBridge/internal/vectorstore"
 )
 
+func TestModelControlDiagnosticsAreBounded(t *testing.T) {
+	var heartbeat BrowserClientStatus
+	if err := decodeJSON(bytes.NewBufferString(`{"state":"waiting","tabs":[{"id":42,"dom_status":"ready","dom":{"model_controls":[{"tag":"button","text":"Gemini Flash","visible":true}]}}]}`), &heartbeat, 128<<10); err != nil {
+		t.Fatalf("the extension's bounded Gemini heartbeat must be accepted: %v", err)
+	}
+	if heartbeat.Tabs[0].DOMStatus != "ready" || heartbeat.Tabs[0].DOM.ModelControls[0].Text != "Gemini Flash" {
+		t.Fatalf("Gemini model-control data was not decoded: %#v", heartbeat.Tabs)
+	}
+	controls := limitedModelControls([]BrowserDOMControl{{
+		Tag: "button", ID: "model-picker", TestID: "bard-mode-menu-button",
+		AriaLabel: "Modusauswahl öffnen, derzeit ausgewählt: Gemini Flash",
+		Text:      "Gemini Flash", Type: "button", Accept: "private", Visible: true,
+	}, {
+		Tag: "button", ID: "prompt: secret", TestID: "secret private data",
+		AriaLabel: "private prompt", Text: "private prompt", Visible: true,
+	}}, 12)
+	if len(controls) != 2 || controls[0].Text != "Gemini Flash" || controls[0].ID != "model-picker" {
+		t.Fatalf("expected bounded Gemini mode metadata: %#v", controls)
+	}
+	if controls[0].AriaLabel != "" || controls[0].Accept != "" || controls[0].Type != "" ||
+		controls[1].ID != "" || controls[1].TestID != "" || controls[1].Text != "" {
+		t.Fatalf("private page metadata escaped the model-control boundary: %#v", controls)
+	}
+}
+
 func TestBrowserJobRoundTrip(t *testing.T) {
 	cfg := config.Config{
 		Version: 1,

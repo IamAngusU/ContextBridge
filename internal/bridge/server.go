@@ -42,6 +42,8 @@ type Server struct {
 }
 
 var browserScanDiagnosticPattern = regexp.MustCompile(`^(?:no trigger \([0-9]{1,3} composer menus\)|(?:composer|other) trigger, expanded=(?:true|false), submenu=(?:true|false), [0-9]{1,4} candidates(?:, open=(?:already|pointer|mouse|click))?)$`)
+var browserModeControlTextPattern = regexp.MustCompile(`(?i)^(?:(?:gemini|gpt)[ ._-]*)?(?:[0-9]+(?:\.[0-9]+)?[ ._-]*)?(?:flash|pro|advanced|erweitert|schnell|fast|thinking|nachdenken|auto)(?:[ ._-]*(?:lite|flash|pro|advanced|erweitert|preview))?$`)
+var browserModeControlIDPattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]{0,99}$`)
 
 // Idle reports whether replacing this process would interrupt local work.
 func (s *Server) Idle() bool {
@@ -546,6 +548,11 @@ func (s *Server) handleBrowserHeartbeat(w http.ResponseWriter, r *http.Request) 
 		if !browserScanDiagnosticPattern.MatchString(status.Tabs[index].ReasoningScan) {
 			status.Tabs[index].ReasoningScan = ""
 		}
+		switch status.Tabs[index].DOMStatus {
+		case "ready", "pending", "timeout", "unavailable", "error":
+		default:
+			status.Tabs[index].DOMStatus = ""
+		}
 		if failure := status.Tabs[index].LastFailure; failure != nil {
 			failure.Code = limitedValue(failure.Code, 80)
 			if !strings.HasPrefix(failure.Code, "browser_") {
@@ -563,6 +570,7 @@ func (s *Server) handleBrowserHeartbeat(w http.ResponseWriter, r *http.Request) 
 			dom.Submit = limitedDOMControls(dom.Submit, 8)
 			dom.FileInputs = limitedDOMControls(dom.FileInputs, 12)
 			dom.Tools = limitedDOMControls(dom.Tools, 32)
+			dom.ModelControls = limitedModelControls(dom.ModelControls, 12)
 			dom.AssistantTurns = max(0, min(dom.AssistantTurns, 10000))
 			dom.InputCharacters = max(0, min(dom.InputCharacters, 100000))
 			dom.LastResponseCharacters = max(0, min(dom.LastResponseCharacters, 100000))
@@ -677,6 +685,28 @@ func limitedDOMControls(values []BrowserDOMControl, count int) []BrowserDOMContr
 		item.Accept = limitedValue(item.Accept, 120)
 		item.HasPopup = limitedValue(item.HasPopup, 20)
 		item.Expanded = limitedValue(item.Expanded, 10)
+	}
+	return values
+}
+
+// Model-picker diagnostics are deliberately narrower than generic tool
+// diagnostics: no arbitrary page label, prompt, or response can pass through.
+func limitedModelControls(values []BrowserDOMControl, count int) []BrowserDOMControl {
+	values = limitedDOMControls(values, count)
+	for index := range values {
+		item := &values[index]
+		if !browserModeControlIDPattern.MatchString(item.ID) {
+			item.ID = ""
+		}
+		if !browserModeControlIDPattern.MatchString(item.TestID) {
+			item.TestID = ""
+		}
+		if !browserModeControlTextPattern.MatchString(item.Text) {
+			item.Text = ""
+		}
+		item.AriaLabel = ""
+		item.Type = ""
+		item.Accept = ""
 	}
 	return values
 }

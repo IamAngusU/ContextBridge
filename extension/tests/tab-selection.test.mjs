@@ -69,6 +69,7 @@ const context = vm.createContext({
   }
 });
 vm.runInContext(source, context);
+const originalRefreshState = context.refreshState;
 
 const oldChats = Array.from({ length: 20 }, (_, index) => ({ id: index + 1, url: `https://chatgpt.com/c/${index}`, active: false, fresh: false }));
 const activeChat = { id: 25, url: 'https://chatgpt.com/c/current', active: true, fresh: false };
@@ -174,4 +175,14 @@ await listeners.get('pair:click')();
 assert.equal(stored.lastError, '');
 assert.equal(stored.connectionError, startError);
 assert.deepEqual(statuses.at(-1), { state: 'error', message: startError });
+stored.connectionError = '';
+stored.running = true;
+stored.relayConnected = true;
+stored.lastHeartbeatAt = Date.now() - 120000;
+context.refreshState = originalRefreshState;
+await context.refreshState();
+assert.equal(statuses.at(-1).state, 'connecting', `a stale stored flag is not proof of a live relay: ${JSON.stringify(statuses.at(-1))}`);
+stored.lastHeartbeatAt = Date.now();
+await context.refreshState();
+assert.equal(statuses.at(-1).state, 'live');
 console.log('Current AI page auto-detected; one Connect click attaches and starts it');

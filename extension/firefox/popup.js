@@ -31,7 +31,7 @@ async function initialize() {
   await loadProfiles(saved);
   await refreshState();
   await refreshUpdatePreference(saved);
-  setInterval(() => { if (!document.hidden) void refreshLiveTabs(); }, 2500);
+  setInterval(() => { if (!document.hidden) void refreshLiveTabs(true); }, 2500);
 }
 
 async function refreshUpdatePreference(saved = null) {
@@ -610,13 +610,14 @@ async function refreshState() {
   updateActions(currentProfile, saved.useVisualProfile);
   describeSelectedTab();
   $('connect-hint').textContent = saved.running
-    ? `${attachedTabIDs.length} tab${attachedTabIDs.length === 1 ? '' : 's'} connected. Open Manage other tabs to change the pool.`
+    ? `${attachedTabIDs.length} tab${attachedTabIDs.length === 1 ? '' : 's'} attached. Open Manage other tabs to change the pool.`
     : attachedTabIDs.length
       ? `${attachedTabIDs.length} tab${attachedTabIDs.length === 1 ? '' : 's'} ready. Connect starts them without a separate test.`
       : 'Connect will ask to attach this AI page. No separate test is required.';
+  const heartbeatFresh = saved.relayConnected === true && Date.now() - Number(saved.lastHeartbeatAt || 0) < 60000;
   if (connectPending) showConnectionProgress(saved.connectionProgress);
   else if (saved.connectionError) setStatus('error', saved.connectionError);
-  else if (saved.running && saved.relayConnected === false) setStatus('connecting', 'Reconnecting to the local service…');
+  else if (saved.running && !heartbeatFresh) setStatus('connecting', 'Checking the local service connection…');
   else if (saved.running && saved.lastError) setStatus('error', saved.lastError);
   else if (saved.running) setStatus('live', `Connected · ${attachedTabIDs.length} tab${attachedTabIDs.length === 1 ? '' : 's'} attached`);
   else setStatus('idle', 'Not connected');
@@ -726,6 +727,7 @@ async function settings() {
     tabIds: [],
     running: false,
     relayConnected: false,
+    lastHeartbeatAt: 0,
     autoReconnect: true,
     autoAttachFreshTabs: false,
     preserveDrafts: false,

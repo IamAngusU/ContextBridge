@@ -25,11 +25,12 @@ import (
 var errConsoleUnauthorized = errors.New("the local pairing token was rejected; check config.yml")
 
 type consoleStatus struct {
-	Version   string                     `json:"version"`
-	Queued    int                        `json:"queued"`
-	Completed int                        `json:"completed"`
-	Browser   bridge.BrowserClientStatus `json:"browser"`
-	Runtime   struct {
+	Version    string                     `json:"version"`
+	Queued     int                        `json:"queued"`
+	Completed  int                        `json:"completed"`
+	ActiveJobs int                        `json:"active_jobs"`
+	Browser    bridge.BrowserClientStatus `json:"browser"`
+	Runtime    struct {
 		Hardware systeminfo.Snapshot            `json:"hardware"`
 		Engines  map[string]bridge.EngineStatus `json:"engines"`
 	} `json:"runtime"`
@@ -54,6 +55,9 @@ func consoleCommand(args []string) error {
 	session := terminalui.NewWithStyle(os.Stdout, cfg.Terminal.Style)
 	defer session.Close()
 	session.Banner(version, "read-only · exit + Enter / Ctrl+C closes this view")
+	if cfg.Cluster.Relay.Enabled || cfg.Cluster.Worker.Enabled {
+		go watchPoolDisplay(ctx, cfg, session)
+	}
 	exitRequested := consoleExitRequested(os.Stdin)
 	client := &http.Client{Timeout: 5 * time.Second}
 	for {
@@ -136,7 +140,7 @@ func fetchConsoleStatus(ctx context.Context, client *http.Client, cfg config.Con
 
 func toServiceSnapshot(status consoleStatus) terminalui.ServiceSnapshot {
 	snapshot := terminalui.ServiceSnapshot{
-		Version: status.Version, Queued: status.Queued, Completed: status.Completed,
+		Version: status.Version, Queued: status.Queued, Completed: status.Completed, ActiveJobs: status.ActiveJobs,
 		BrowserConnected: status.Browser.Connected, ActiveTabs: status.Browser.ActiveTabs, BusyTabs: status.Browser.BusyTabs,
 		JobsTotal: status.Metrics.JobsTotal, JobsFailed: status.Metrics.JobsFailed,
 	}

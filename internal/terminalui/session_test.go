@@ -51,6 +51,11 @@ func TestPanelBannerAndEventHierarchy(t *testing.T) {
 	if strings.Count(got, "+-- [ChatGPT]") == 0 || !strings.Contains(got, "[JOBS]") {
 		t.Fatalf("provider group or history is missing: %q", got)
 	}
+	for _, section := range []string{"CONNECTION", "AI TABS", "STATUS", "HISTORY"} {
+		if !strings.Contains(got, "\n  |\n  +-- "+section) {
+			t.Fatalf("panel section %s needs a readable vertical gap: %q", section, got)
+		}
+	}
 	for _, line := range strings.Split(got, "\n") {
 		if strings.HasPrefix(line, "  +") || strings.HasPrefix(line, "  |") {
 			plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(line, "")
@@ -396,5 +401,32 @@ func TestPanelClearsStaleSelectionsWhenServiceIsUnavailable(t *testing.T) {
 	live := strings.Split(frames[len(frames)-1], "+-- HISTORY")[0]
 	if strings.Contains(live, "Tab 77") || strings.Contains(live, "[Lokal · ollama]") || !strings.Contains(live, "Dienst offline") {
 		t.Fatalf("offline live panel retained stale selections: %s", live)
+	}
+}
+
+func TestPanelShowsRelayPoolColorsAndMovingJobCue(t *testing.T) {
+	var output bytes.Buffer
+	capabilities := cluster.Capabilities{GPUs: []cluster.GPUCapability{{Name: "RTX", Utilization: 94}}}
+	session := &Session{out: &output, interactive: true, style: "panel", widthFn: func() int { return 140 }, heightFn: func() int { return 44 },
+		status: "Idle", statusSince: time.Now(), nodeID: "node_5a18aecdcb05db6887c355031ad5ca35", capabilities: capabilities,
+		hardware: capabilityLabel(capabilities), browserSelections: map[int]browserSelection{}, localModels: map[string]localModelSelection{}, jobs: map[string]jobState{}}
+	session.Banner("v0.test", "worker")
+	session.SetRelayTarget("https://relay.example.test:8443/secret-path")
+	session.ObservePool([]PoolNode{{ID: session.nodeID, Name: "this-pc", Connected: true, Slots: 4}, {ID: "node_other", Name: "other-pc", Connected: false, Slots: 2}}, nil)
+	latest := strings.Split(output.String(), "\x1b[H\x1b[2J")
+	frame := latest[len(latest)-1]
+	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(frame, "")
+	if !strings.Contains(plain, "Relay relay.example.test:8443 · 1/2 Worker online") || !strings.Contains(plain, "this-pc#d5ca35 · idle · 0/4 Jobs · dieser PC") || strings.Contains(plain, "secret-path") {
+		t.Fatalf("relay/node view is missing or leaked URL path: %s", plain)
+	}
+	if !strings.Contains(frame, ansiGreen+"Idle"+ansiReset) || !strings.Contains(frame, ansiRed+"94%"+ansiReset) || !strings.Contains(frame, ansiRed+"offline"+ansiReset) {
+		t.Fatalf("important panel states lost their colors: %q", frame)
+	}
+	session.jobs["job"] = jobState{phase: "generating", started: time.Now()}
+	session.status = "Working"
+	session.renderPanelLocked()
+	latest = strings.Split(output.String(), "\x1b[H\x1b[2J")
+	if !strings.Contains(latest[len(latest)-1], ansiCyan+travelBar(session.frame, 16)+ansiReset) || travelBar(0, 16) == travelBar(4, 16) {
+		t.Fatal("working panel has no left-to-right activity cue")
 	}
 }
