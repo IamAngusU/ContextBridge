@@ -95,7 +95,7 @@ async function fixture() {
   };
 }
 
-async function exerciseRecoveryAfterSubmit(unsafeDraft) {
+async function exerciseRecoveryAfterSubmit(unsafeDraft, decoratedTurn = false, changingResponse = false) {
   const site = await fixture();
   site.setStopVisible(false);
   site.work.job.output = { mode: 'text' };
@@ -105,7 +105,7 @@ async function exerciseRecoveryAfterSubmit(unsafeDraft) {
     if (request.func !== site.context.automate) return originalExecute(request);
     automations++;
     if (automations === 1) {
-      site.setTurnText('NEW-TURN');
+      site.setTurnText(decoratedTurn ? 'NEW-TURN Copy message' : 'NEW-TURN');
       if (unsafeDraft) site.setDraft('Typed during generation');
       return [{ result: { ok: false, code: 'stalled_response', error: 'Stale Stop', recoverable: true } }];
     }
@@ -117,6 +117,7 @@ async function exerciseRecoveryAfterSubmit(unsafeDraft) {
   site.context.captureTabProgress = async () => ({ text: 'Completed answer', busy: false });
   site.context.reportProgress = async () => {};
   site.context.completeWork = async () => {};
+  if (changingResponse) site.setMutateOnDelay(() => site.setResponseText('Changed during recovery'));
   await site.context.processWork({ useVisualProfile: false, preserveDrafts: false, pendingCompletions: {} }, site.work, 7);
   return { site, automations };
 }
@@ -133,6 +134,20 @@ async function exerciseRecoveryAfterSubmit(unsafeDraft) {
   assert.equal(automations, 2);
   assert.equal(site.reloads(), 1);
   assert.equal(site.storage.pendingCompletions['test-job'].text, 'Recovered answer');
+}
+
+{
+  const { site, automations } = await exerciseRecoveryAfterSubmit(false, true);
+  assert.equal(automations, 2);
+  assert.equal(site.reloads(), 1);
+  assert.equal(site.storage.pendingCompletions['test-job'].text, 'Recovered answer');
+}
+
+{
+  const { site, automations } = await exerciseRecoveryAfterSubmit(false, false, true);
+  assert.equal(automations, 1);
+  assert.equal(site.reloads(), 0);
+  assert.equal(site.storage.pendingCompletions['test-job'].error, 'browser_recovery_unsafe');
 }
 
 {

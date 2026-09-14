@@ -1,14 +1,72 @@
 package terminalui
 
 import (
+	"bytes"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/IamAngusU/ContextBridge/internal/cluster"
 )
+
+func TestCompactDurationKeepsDaysAndHours(t *testing.T) {
+	for _, item := range []struct {
+		duration time.Duration
+		want     string
+	}{
+		{time.Minute + 23*time.Second, "1m23s"},
+		{3*time.Hour + 5*time.Minute, "3h5m"},
+		{2*24*time.Hour + 4*time.Hour, "2d4h"},
+	} {
+		if got := compactDuration(item.duration); got != item.want {
+			t.Fatalf("compactDuration(%s) = %q, want %q", item.duration, got, item.want)
+		}
+	}
+}
+
+func TestStatusFitsCurrentWidthAfterZoom(t *testing.T) {
+	var output bytes.Buffer
+	width := 160
+	cap := cluster.Capabilities{GPUs: []cluster.GPUCapability{{Name: "RTX 3080", Utilization: 12}}, MaxConcurrent: 4,
+		BrowserSessions: []cluster.BrowserSessionCapability{{TabID: 1, Profile: "chatgpt"}, {TabID: 2, Profile: "gemini"}},
+		Tasks:           []string{"generation", "vision"}}
+	session := &Session{out: &output, interactive: true, status: "Idle", statusSince: time.Now().Add(-49 * time.Hour),
+		node: "Angus-PC", nodeID: "node_5a18aecdcb05db6887c355031ad5ca35", slots: 4, capabilities: cap,
+		widthFn: func() int { return width }}
+	session.drawStatusLocked()
+	width = 68
+	session.drawStatusLocked()
+	last := output.String()[strings.LastIndex(output.String(), "\x1b[2K")+len("\x1b[2K"):]
+	visible := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(last, "")
+	if got := utf8.RuneCountInString(visible); got > width-2 {
+		t.Fatalf("zoomed status uses %d columns in a %d-column terminal: %q", got, width, last)
+	}
+	for _, mode := range []string{"TX", "VI", "IM", "AU", "MU", "VD", "FI", "EM"} {
+		if !strings.Contains(last, mode) {
+			t.Fatalf("zoomed status lost the %s indicator: %q", mode, last)
+		}
+	}
+	if !strings.Contains(output.String(), "#") || !strings.Contains(output.String(), "2d1h") {
+		t.Fatalf("status is missing the discriminator or day/hour duration: %q", output.String())
+	}
+}
+
+func TestIndicatorsKeepFixedModeOrderAndGrayUnknowns(t *testing.T) {
+	cap := cluster.Capabilities{Sources: []string{"gemini", "chatgpt"}, Modes: []string{"vision", "text", "music"}}
+	label := indicatorLabel(cap)
+	for _, mode := range []string{"TXT", "VIS", "IMG", "AUD", "MUS", "VID", "FIL", "EMB"} {
+		if !strings.Contains(label, mode) {
+			t.Fatalf("missing mode %s: %q", mode, label)
+		}
+	}
+	if strings.Index(label, "◉GPT") > strings.Index(label, "✦GEM") || strings.Index(label, "TXT") > strings.Index(label, "VIS") || !strings.Contains(label, ansiDim+"IMG") {
+		t.Fatalf("indicator order/colors are unstable: %q", label)
+	}
+}
 
 func TestNonInteractiveSessionDeduplicatesRetryNoise(t *testing.T) {
 	reader, writer, err := os.Pipe()
@@ -75,5 +133,53 @@ func TestWorkerConsoleSeparatesRequestedAndReportedModel(t *testing.T) {
 	}
 	if !strings.Contains(output, "Tab meldet: Pro Erweitert") {
 		t.Fatalf("reported selection missing: %s", output)
+	}
+}
+
+func TestCompletedBrowserJobKeepsMetadataGapBelowSuccess(t *testing.T) {
+	var output bytes.Buffer
+	session := &Session{out: &output, jobs: map[string]jobState{}}
+	session.HandleWorker(cluster.WorkerEvent{Kind: cluster.WorkerJobCompleted, JobID: "job-123456789", ComputeMS: 1500, ReportedProvider: "browser"})
+	got := output.String()
+	if !strings.Contains(got, "✓  Job job-123456789 completed · 1.5s\n     └─ model metadata unavailable · browser selection unverified\n") {
+		t.Fatalf("success and observational metadata must be distinct: %q", got)
+	}
+	if strings.Contains(got, "needs attention") || strings.Contains(got, "browser_model_unavailable") {
+		t.Fatalf("missing model metadata must not become a job failure: %q", got)
+	}
+}
+
+func TestWorkerConsoleDoesNotRepeatTabWhenReasoningTemporarilyDisappears(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := New(writer)
+	capabilities := func(model, reasoning string) cluster.Capabilities {
+		return cluster.Capabilities{BrowserSessions: []cluster.BrowserSessionCapability{{
+			TabID: 1593324977, Profile: "chatgpt", CurrentModel: model, CurrentReasoning: reasoning,
+		}}}
+	}
+	session.HandleWorker(cluster.WorkerEvent{Kind: cluster.WorkerConnected, NodeName: "test-pc", Slots: 1, Capabilities: capabilities("", "Sehr hoch")})
+	for range 4 {
+		session.HandleWorker(cluster.WorkerEvent{Kind: cluster.WorkerCapabilities, Capabilities: capabilities("", "")})
+		session.HandleWorker(cluster.WorkerEvent{Kind: cluster.WorkerCapabilities, Capabilities: capabilities("", "Sehr hoch")})
+	}
+	session.HandleWorker(cluster.WorkerEvent{Kind: cluster.WorkerCapabilities, Capabilities: capabilities("GPT-5.6 Sol", "")})
+	session.HandleWorker(cluster.WorkerEvent{Kind: cluster.WorkerCapabilities, Capabilities: capabilities("", "Sofort")})
+	session.Close()
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := string(raw)
+	if strings.Count(output, "Tab 1593324977") != 3 || strings.Count(output, "Tab 1593324977 aktualisiert") != 2 {
+		t.Fatalf("temporary empty readings should not create tab events: %s", output)
+	}
+	if !strings.Contains(output, "Modell: GPT-5.6 Sol · Denkstufe: Sofort") {
+		t.Fatalf("real model and reasoning changes were not reported: %s", output)
 	}
 }

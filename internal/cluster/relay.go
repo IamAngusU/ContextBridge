@@ -470,6 +470,11 @@ func (r *Relay) handleWorker(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	node := *hello.Node
+	node.Name = cleanLabel(node.Name, 100)
+	if node.Name == "" {
+		conn.Close(websocket.StatusPolicyViolation, "worker name is empty")
+		return
+	}
 	if len(record.Groups) > 0 {
 		node.Capabilities.Groups = intersectFold(node.Capabilities.Groups, record.Groups)
 	}

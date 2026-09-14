@@ -78,6 +78,7 @@ const (
 
 type WorkerEvent struct {
 	Kind              string
+	NodeID            string
 	NodeName          string
 	Slots             int
 	Attempt           int
@@ -284,7 +285,7 @@ func (w *Worker) connect(ctx context.Context, report WorkerReporter) error {
 	if err := write(WireMessage{Type: "hello", Node: &node}); err != nil {
 		return err
 	}
-	report(WorkerEvent{Kind: WorkerConnected, NodeName: node.Name, Slots: capabilities.MaxConcurrent, Capabilities: capabilities})
+	report(WorkerEvent{Kind: WorkerConnected, NodeID: node.ID, NodeName: node.Name, Slots: capabilities.MaxConcurrent, Capabilities: capabilities})
 	heartbeatCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go func() {
@@ -790,6 +791,8 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 			}
 		}
 	}
+	capability.Sources = IndicatorSources(capability)
+	capability.Modes = IndicatorModes(capability)
 	return capability
 }
 

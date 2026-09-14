@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/IamAngusU/ContextBridge/internal/cluster"
 )
@@ -20,6 +21,9 @@ const (
 	ansiYellow = "\x1b[33m"
 	ansiRed    = "\x1b[31m"
 	ansiDim    = "\x1b[2m"
+	ansiOrange = "\x1b[38;5;208m"
+	ansiPurple = "\x1b[35m"
+	ansiBlue   = "\x1b[34m"
 )
 
 type jobState struct {
@@ -33,10 +37,17 @@ type jobState struct {
 	started   time.Time
 }
 
+type browserSelection struct {
+	profile   string
+	model     string
+	reasoning string
+}
+
 // Session renders an animated single-line status in a real terminal and
 // concise transition logs when stdout is redirected to a service log.
 type Session struct {
 	out               io.Writer
+	console           *os.File
 	interactive       bool
 	mu                sync.Mutex
 	partial           string
@@ -46,10 +57,13 @@ type Session struct {
 	retries           int
 	jobs              map[string]jobState
 	node              string
+	nodeID            string
 	slots             int
 	hardware          string
-	browserSelections map[int]string
+	capabilities      cluster.Capabilities
+	browserSelections map[int]browserSelection
 	width             int
+	widthFn           func() int
 	done              chan struct{}
 	closed            chan struct{}
 }
@@ -65,7 +79,7 @@ func New(output *os.File) *Session {
 	if os.Getenv("TERM") == "dumb" || os.Getenv("NO_COLOR") != "" {
 		interactive = false
 	}
-	session := &Session{out: output, interactive: interactive, jobs: map[string]jobState{}, browserSelections: map[int]string{}, width: terminalWidth(output), done: make(chan struct{}), closed: make(chan struct{})}
+	session := &Session{out: output, console: output, interactive: interactive, jobs: map[string]jobState{}, browserSelections: map[int]browserSelection{}, width: terminalWidth(output), widthFn: func() int { return terminalWidth(output) }, done: make(chan struct{}), closed: make(chan struct{})}
 	if interactive {
 		go session.animate()
 	} else {
@@ -117,9 +131,10 @@ func (s *Session) HandleWorker(event cluster.WorkerEvent) {
 			s.writeEventLocked("↻", fmt.Sprintf("Relay unavailable; retrying automatically (%s)", compactError(event.Error)))
 		}
 	case cluster.WorkerConnected:
-		s.node, s.slots = event.NodeName, event.Slots
+		s.node, s.nodeID, s.slots = cleanTerminalLabel(event.NodeName, 100), event.NodeID, event.Slots
+		s.capabilities = event.Capabilities
 		s.hardware = capabilityLabel(event.Capabilities)
-		message := fmt.Sprintf("Relay connected · %s · %d slot", event.NodeName, event.Slots)
+		message := fmt.Sprintf("Relay connected · %s · %d slot", nodeLabel(s.node, s.nodeID, false), event.Slots)
 		if event.Slots != 1 {
 			message += "s"
 		}
@@ -131,6 +146,10 @@ func (s *Session) HandleWorker(event cluster.WorkerEvent) {
 		s.retries = 0
 		s.setStatusLocked("Idle", time.Now())
 	case cluster.WorkerCapabilities:
+		s.capabilities = event.Capabilities
+		if event.Slots > 0 {
+			s.slots = event.Slots
+		}
 		s.hardware = capabilityLabel(event.Capabilities)
 		s.recordBrowserSelectionsLocked(event.Capabilities.BrowserSessions)
 	case cluster.WorkerJobStarted:
@@ -156,9 +175,12 @@ func (s *Session) HandleWorker(event cluster.WorkerEvent) {
 	case cluster.WorkerJobCompleted:
 		delete(s.jobs, event.JobID)
 		message := fmt.Sprintf("Job %s completed · %s", shortID(event.JobID), compactDuration(time.Duration(event.ComputeMS)*time.Millisecond))
+		var detail string
 		if event.ReportedProvider == "browser" {
 			if event.ReportedModel != "" {
 				message += " · Tab meldet: " + cleanTerminalLabel(event.ReportedModel, 80)
+			} else {
+				detail = "model metadata unavailable · browser selection unverified"
 			}
 			if event.ReportedReasoning != "" {
 				message += " · Denkstufe: " + cleanTerminalLabel(event.ReportedReasoning, 40)
@@ -166,7 +188,7 @@ func (s *Session) HandleWorker(event cluster.WorkerEvent) {
 		} else if event.ReportedModel != "" {
 			message += " · verwendet: " + cleanTerminalLabel(event.ReportedProvider, 30) + " · " + cleanTerminalLabel(event.ReportedModel, 80)
 		}
-		s.writeEventLocked("✓", message)
+		s.writeEventWithDetailLocked("✓", message, detail)
 		s.refreshJobStatusLocked()
 	case cluster.WorkerJobFailed:
 		delete(s.jobs, event.JobID)
@@ -193,21 +215,28 @@ func requestedSelection(event cluster.WorkerEvent) string {
 }
 
 func (s *Session) recordBrowserSelectionsLocked(sessions []cluster.BrowserSessionCapability) {
-	current := make(map[int]string, len(sessions))
+	current := make(map[int]browserSelection, len(sessions))
 	for _, tab := range sessions {
 		if tab.TabID <= 0 {
 			continue
 		}
-		parts := []string{cleanTerminalLabel(empty(tab.Profile, "browser"), 30)}
-		if tab.CurrentModel != "" {
-			parts = append(parts, "Modell: "+cleanTerminalLabel(tab.CurrentModel, 80))
-		} else {
-			parts = append(parts, "Modell noch nicht erkannt")
+		selection := browserSelection{
+			profile:   cleanTerminalLabel(empty(tab.Profile, "browser"), 30),
+			model:     cleanTerminalLabel(tab.CurrentModel, 80),
+			reasoning: cleanTerminalLabel(tab.CurrentReasoning, 40),
 		}
-		if tab.CurrentReasoning != "" {
-			parts = append(parts, "Denkstufe: "+cleanTerminalLabel(tab.CurrentReasoning, 40))
+		// An empty reading is not evidence that the user changed the model or
+		// reasoning level. ChatGPT briefly removes controls while rerendering;
+		// logging each missing/returning label creates duplicate tab lines.
+		if previous, ok := s.browserSelections[tab.TabID]; ok && previous.profile == selection.profile {
+			if selection.model == "" {
+				selection.model = previous.model
+			}
+			if selection.reasoning == "" {
+				selection.reasoning = previous.reasoning
+			}
 		}
-		current[tab.TabID] = strings.Join(parts, " · ")
+		current[tab.TabID] = selection
 	}
 	ids := make([]int, 0, len(current))
 	for id := range current {
@@ -216,7 +245,21 @@ func (s *Session) recordBrowserSelectionsLocked(sessions []cluster.BrowserSessio
 	sort.Ints(ids)
 	for _, id := range ids {
 		if s.browserSelections[id] != current[id] {
-			s.writeEventLocked("◇", fmt.Sprintf("Tab %d · %s", id, current[id]))
+			selection := current[id]
+			label := fmt.Sprintf("Tab %d", id)
+			if _, previouslySeen := s.browserSelections[id]; previouslySeen {
+				label += " aktualisiert"
+			}
+			parts := []string{selection.profile}
+			if selection.model != "" {
+				parts = append(parts, "Modell: "+selection.model)
+			} else {
+				parts = append(parts, "Modell noch nicht erkannt")
+			}
+			if selection.reasoning != "" {
+				parts = append(parts, "Denkstufe: "+selection.reasoning)
+			}
+			s.writeEventLocked("◇", fmt.Sprintf("%s · %s", label, strings.Join(parts, " · ")))
 		}
 	}
 	for id := range s.browserSelections {
@@ -262,7 +305,9 @@ func (s *Session) animate() {
 		case <-ticker.C:
 			s.mu.Lock()
 			s.frame++
-			s.drawStatusLocked()
+			if s.status != "Idle" || s.frame%8 == 0 {
+				s.drawStatusLocked()
+			}
 			s.mu.Unlock()
 		}
 	}
@@ -291,45 +336,75 @@ func (s *Session) setStatusLocked(message string, started time.Time) {
 }
 
 func (s *Session) writeEventLocked(symbol, message string) {
+	s.writeEventWithDetailLocked(symbol, message, "")
+}
+
+func (s *Session) writeEventWithDetailLocked(symbol, message, detail string) {
 	if s.interactive {
 		s.clearStatusLocked()
 		fmt.Fprintf(s.out, "  %s  %s\n", coloredSymbol(symbol), message)
+		if detail != "" {
+			fmt.Fprintf(s.out, "     %s└─%s %s\n", ansiYellow, ansiReset, detail)
+		}
 		s.drawStatusLocked()
 		return
 	}
 	fmt.Fprintf(s.out, "%s  %s  %s\n", time.Now().Format("2006/01/02 15:04:05"), symbol, message)
+	if detail != "" {
+		fmt.Fprintf(s.out, "     └─ %s\n", detail)
+	}
 }
 
 func (s *Session) drawStatusLocked() {
 	if !s.interactive || s.status == "" {
 		return
 	}
+	if s.widthFn != nil {
+		if width := s.widthFn(); width > 0 {
+			s.width = width
+		}
+	}
 	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 	elapsed := compactDuration(time.Since(s.statusSince))
+	slots := max(1, s.slots)
+	load := min(100, len(s.jobs)*100/slots)
+	identity := nodeLabel(s.node, s.nodeID, true)
+	compact := s.width > 0 && s.width < 110
+	indicators := indicatorLabel(s.capabilities)
+	if compact {
+		indicators = compactIndicatorLabel(s.capabilities)
+	}
+	var line string
 	if s.status == "Idle" {
-		pool := fmt.Sprintf("0/%d jobs", max(1, s.slots))
-		fmt.Fprintf(s.out, "\r\x1b[2K  %s◇%s  [%sIdle%s %s]  [%s%s%s]  [%s]%s", ansiGreen, ansiReset, ansiGreen, ansiReset, elapsed, ansiDim, pool, ansiReset, empty(s.node, "local"), optionalBracket(s.hardware))
+		if compact {
+			line = fmt.Sprintf("  %s◇%s %s %d/%d·%d%% %s %s %s", ansiGreen, ansiReset, elapsed, len(s.jobs), slots, load, compactGPUState(s.capabilities), indicators, identity)
+		} else {
+			line = fmt.Sprintf("  %s◇%s [%sIdle%s %s] [%s%d/%d jobs · %d%%%s] %s %s%s", ansiGreen, ansiReset, ansiGreen, ansiReset, elapsed, ansiDim, len(s.jobs), slots, load, ansiReset, indicators, identity, optionalBracket(s.hardware))
+		}
+	} else {
+		barWidth := 14
+		if s.width > 0 && s.width < 100 {
+			barWidth = 8
+		}
+		bar := pulseBar(s.frame, barWidth)
+		status := s.status
+		if len(s.jobs) > 0 {
+			status, elapsed = s.visibleJobStatusLocked(40)
+		}
+		if compact {
+			line = fmt.Sprintf("  %s%s%s %d/%d·%d%% %s %s %s %s", ansiCyan, frames[s.frame%len(frames)], ansiReset, len(s.jobs), slots, load, compactGPUState(s.capabilities), indicators, ansiYellow+status+ansiReset, elapsed)
+		} else {
+			line = fmt.Sprintf("  %s%s%s [%s%s%s] [%d/%d jobs · %d%%] %s %s %s %s", ansiCyan, frames[s.frame%len(frames)], ansiReset, ansiCyan, bar, ansiReset, len(s.jobs), slots, load, indicators, ansiYellow+status+ansiReset, elapsed, identity)
+		}
+	}
+	if s.width > 0 {
+		line = clipANSIColumns(line, max(1, s.width-2))
+	}
+	if s.console != nil && drawConsoleStatus(s.console, line) {
 		return
 	}
-	barWidth := 14
-	if s.width > 0 && s.width < 100 {
-		barWidth = 8
-	}
-	bar := pulseBar(s.frame, barWidth)
-	status := s.status
-	// Reserve space for the spinner, pulse bar, slot count, colors and elapsed
-	// time. Keeping the visible text within the console width prevents wrapping.
-	statusLimit := 0
-	if s.width > 0 {
-		fixed := barWidth + 30 + len(fmt.Sprintf("%d/%d", len(s.jobs), max(1, s.slots))) + len(elapsed)
-		statusLimit = max(24, s.width-fixed)
-	}
-	if len(s.jobs) > 0 {
-		status, elapsed = s.visibleJobStatusLocked(statusLimit)
-	} else if statusLimit > 0 {
-		status = truncateRunes(status, statusLimit)
-	}
-	fmt.Fprintf(s.out, "\r\x1b[2K  %s%s%s  [%s%s%s]  [%d/%d jobs]  %s%s%s  %s", ansiCyan, frames[s.frame%len(frames)], ansiReset, ansiCyan, bar, ansiReset, len(s.jobs), max(1, s.slots), ansiYellow, status, ansiReset, elapsed)
+	s.clearStatusLocked()
+	fmt.Fprint(s.out, line)
 }
 
 func (s *Session) visibleJobStatusLocked(limit int) (string, string) {
@@ -388,6 +463,9 @@ func coloredSymbol(symbol string) string {
 
 func (s *Session) clearStatusLocked() {
 	if s.interactive {
+		if s.console != nil && clearConsoleStatus(s.console) {
+			return
+		}
 		fmt.Fprint(s.out, "\r\x1b[2K")
 	}
 }
@@ -415,7 +493,123 @@ func compactDuration(value time.Duration) string {
 	if value < time.Minute {
 		return fmt.Sprintf("%.1fs", value.Seconds())
 	}
-	return value.Round(time.Second).String()
+	seconds := int64(value.Round(time.Second) / time.Second)
+	if seconds < 3600 {
+		return fmt.Sprintf("%dm%ds", seconds/60, seconds%60)
+	}
+	if seconds < 86400 {
+		return fmt.Sprintf("%dh%dm", seconds/3600, seconds%3600/60)
+	}
+	return fmt.Sprintf("%dd%dh", seconds/86400, seconds%86400/3600)
+}
+
+func nodeLabel(name, id string, colored bool) string {
+	name = empty(cleanTerminalLabel(name, 100), "local")
+	discriminator := cluster.NodeDiscriminator(id)
+	if discriminator == "" {
+		if colored {
+			return ansiDim + name + ansiReset
+		}
+		return name
+	}
+	if colored {
+		return ansiDim + name + ansiOrange + "#" + ansiDim + discriminator + ansiReset
+	}
+	return name + "#" + discriminator
+}
+
+func indicatorLabel(cap cluster.Capabilities) string {
+	return buildIndicatorLabel(cap, false)
+}
+
+func compactIndicatorLabel(cap cluster.Capabilities) string {
+	return buildIndicatorLabel(cap, true)
+}
+
+func buildIndicatorLabel(cap cluster.Capabilities, compact bool) string {
+	sources := cap.Sources
+	if len(sources) == 0 {
+		sources = cluster.IndicatorSources(cap)
+	}
+	modes := cap.Modes
+	if len(modes) == 0 {
+		modes = cluster.IndicatorModes(cap)
+	}
+	sourceLabels := map[string]struct{ label, color string }{
+		"chatgpt": {"◉GPT", ansiGreen}, "gemini": {"✦GEM", ansiPurple}, "local": {"▣LOC", ansiCyan},
+	}
+	modeLabels := []struct{ key, label, color string }{
+		{"text", "TXT", ansiGreen}, {"vision", "VIS", ansiCyan}, {"image", "IMG", ansiYellow},
+		{"audio", "AUD", ansiPurple}, {"music", "MUS", ansiPurple}, {"video", "VID", ansiRed},
+		{"files", "FIL", ansiBlue}, {"embedding", "EMB", ansiCyan},
+	}
+	if compact {
+		sourceLabels = map[string]struct{ label, color string }{
+			"chatgpt": {"◉G", ansiGreen}, "gemini": {"✦G", ansiPurple}, "local": {"▣L", ansiCyan},
+		}
+		for index, short := range []string{"TX", "VI", "IM", "AU", "MU", "VD", "FI", "EM"} {
+			modeLabels[index].label = short
+		}
+	}
+	parts := []string{}
+	for _, source := range []string{"chatgpt", "gemini", "local"} {
+		if containsIndicator(sources, source) {
+			item := sourceLabels[source]
+			parts = append(parts, item.color+item.label+ansiReset)
+		}
+	}
+	for _, mode := range modeLabels {
+		color := ansiDim
+		if containsIndicator(modes, mode.key) {
+			color = mode.color
+		}
+		parts = append(parts, color+mode.label+ansiReset)
+	}
+	return strings.Join(parts, " ")
+}
+
+func containsIndicator(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+// clipANSIColumns keeps a transient status within the current viewport after
+// font zoom or terminal resizing. ANSI color codes consume no columns.
+func clipANSIColumns(value string, limit int) string {
+	var result strings.Builder
+	columns := 0
+	for index := 0; index < len(value); {
+		if value[index] == '\x1b' && index+1 < len(value) && value[index+1] == '[' {
+			end := index + 2
+			for end < len(value) && value[end] != 'm' {
+				end++
+			}
+			if end < len(value) {
+				result.WriteString(value[index : end+1])
+				index = end + 1
+				continue
+			}
+		}
+		r, size := utf8.DecodeRuneInString(value[index:])
+		width := 1
+		if unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r) {
+			width = 0
+		} else if r >= 0x1100 && (r <= 0x115F || r >= 0x2329 && r <= 0x232A || r >= 0x2E80 && r <= 0xA4CF || r >= 0xAC00 && r <= 0xD7A3 || r >= 0xF900 && r <= 0xFAFF || r >= 0xFE10 && r <= 0xFE19 || r >= 0xFE30 && r <= 0xFE6F || r >= 0xFF00 && r <= 0xFF60 || r >= 0xFFE0 && r <= 0xFFE6 || r >= 0x1F300 && r <= 0x1FAFF) {
+			width = 2
+		}
+		if columns+width > limit {
+			break
+		}
+		result.WriteRune(r)
+		columns += width
+		index += size
+	}
+	result.WriteString(ansiReset)
+	return result.String()
 }
 
 func compactError(value string) string {
@@ -474,12 +668,28 @@ func capabilityLabel(capability cluster.Capabilities) string {
 	parts := []string{}
 	if len(capability.GPUs) > 0 {
 		gpu := capability.GPUs[0]
-		parts = append(parts, gpu.Name+" · "+humanBytes(gpu.MemoryFree)+" VRAM free")
+		state := "GPU bereit"
+		if gpu.Utilization > 0 {
+			state = "GPU aktiv"
+		}
+		parts = append(parts, fmt.Sprintf("%s · %s · %d%% · %s VRAM frei", cleanTerminalLabel(gpu.Name, 40), state, gpu.Utilization, humanBytes(gpu.MemoryFree)))
+	} else {
+		parts = append(parts, "Zero-GPU")
 	}
 	if capability.MemoryTotal > 0 {
-		parts = append(parts, humanBytes(capability.MemoryFree)+" RAM free")
+		parts = append(parts, humanBytes(capability.MemoryFree)+" RAM frei")
 	}
 	return strings.Join(parts, " · ")
+}
+
+func compactGPUState(capability cluster.Capabilities) string {
+	if len(capability.GPUs) == 0 {
+		return ansiDim + "0GPU" + ansiReset
+	}
+	if capability.GPUs[0].Utilization > 0 {
+		return ansiGreen + "GPU+" + ansiReset
+	}
+	return ansiYellow + "GPU~" + ansiReset
 }
 
 func humanBytes(value uint64) string {

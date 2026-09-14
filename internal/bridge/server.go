@@ -40,6 +40,8 @@ type Server struct {
 	activeJobs      atomic.Int64
 }
 
+var browserScanDiagnosticPattern = regexp.MustCompile(`^(?:no trigger \([0-9]{1,3} composer menus\)|(?:composer|other) trigger, expanded=(?:true|false), submenu=(?:true|false), [0-9]{1,4} candidates(?:, open=(?:already|pointer|mouse|click))?)$`)
+
 // Idle reports whether replacing this process would interrupt local work.
 func (s *Server) Idle() bool {
 	queued, _ := s.store.Stats()
@@ -519,13 +521,21 @@ func (s *Server) handleBrowserHeartbeat(w http.ResponseWriter, r *http.Request) 
 		status.Tabs[index].CurrentReasoning = limitedValue(status.Tabs[index].CurrentReasoning, 100)
 		status.Tabs[index].Models = limitedStrings(status.Tabs[index].Models, 50, 100)
 		status.Tabs[index].ReasoningLevels = limitedStrings(status.Tabs[index].ReasoningLevels, 20, 100)
+		// Diagnostics are generated from fixed labels and counts only. Never
+		// accept arbitrary page text in the browser status feed.
+		if !browserScanDiagnosticPattern.MatchString(status.Tabs[index].ModelScan) {
+			status.Tabs[index].ModelScan = ""
+		}
+		if !browserScanDiagnosticPattern.MatchString(status.Tabs[index].ReasoningScan) {
+			status.Tabs[index].ReasoningScan = ""
+		}
 		if failure := status.Tabs[index].LastFailure; failure != nil {
 			failure.Code = limitedValue(failure.Code, 80)
 			if !strings.HasPrefix(failure.Code, "browser_") {
 				status.Tabs[index].LastFailure = nil
 			} else {
 				switch failure.Reason {
-				case "prompt_not_retained", "send_disabled", "send_missing", "composer_draft", "incompatible_tool", "provider_busy", "other":
+				case "prompt_not_retained", "send_disabled", "send_missing", "composer_draft", "incompatible_tool", "provider_busy", "model_selector_missing", "model_candidates_empty", "model_candidates_empty_pill", "model_candidates_empty_form", "model_choices_empty", "model_choice_missing", "model_choice_disabled", "model_not_retained", "recovery_turn_unverified", "recovery_turn_mismatch", "recovery_draft", "recovery_attachment", "recovery_answer_unfinished", "recovery_input_missing", "recovery_editor_open", "recovery_image_busy", "recovery_response_changed", "other":
 				default:
 					failure.Reason = "other"
 				}

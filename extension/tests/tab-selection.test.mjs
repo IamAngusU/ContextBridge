@@ -45,7 +45,7 @@ const context = vm.createContext({
       set: async (value) => { Object.assign(stored, value); writes.push(value); }
     } },
     tabs: {
-      get: async (id) => ({ id, url: id === 52 ? 'https://gemini.google.com/app/existing' : 'https://chatgpt.com/c/existing' }),
+      get: async (id) => ({ id, url: id === 99 ? 'https://bugcrowd.com/engagements/openai-safety' : id === 52 ? 'https://gemini.google.com/app/existing' : 'https://chatgpt.com/c/existing' }),
       query: async () => [{ id: activePageID, url: activePageID === 52 ? 'https://gemini.google.com/app/existing' : 'https://chatgpt.com/c/existing', title: 'Active AI page' }]
     },
     permissions: { request: async (request) => { permissionRequests.push(request); return true; } }
@@ -77,6 +77,15 @@ assert.equal(context.isFreshChatURL(freshChatGPT.url), true);
 assert.equal(context.isFreshChatURL(freshGemini.url), true);
 assert.deepEqual(Array.from(context.filterTabList([freshChatGPT, freshGemini], 'attached', [27]), (tab) => tab.id), [27]);
 assert.deepEqual(Array.from(context.filterTabList([freshChatGPT, freshGemini], 'available', [27]), (tab) => tab.id), [28]);
+assert.equal(context.preferredTabID(0, [
+  { id: 99, active: true, title: 'Another Opera window' },
+  { id: 25, active: true, title: 'Current ChatGPT window' }
+], 25, [99]), 25);
+assert.equal(context.preferredTabID(99, [{ id: 99 }, { id: 25 }], 25, [25]), 99);
+element('tab').value = '99';
+assert.equal(await context.scanTargetTabID(), 52, 'a stale non-AI selection must scan the active AI tab');
+element('tab').value = '31';
+assert.equal(await context.scanTargetTabID(), 31, 'an explicitly selected AI tab must take precedence');
 assert.equal(context.tabDisplayState(true, 'working'), 'Working');
 assert.equal(context.tabDisplayState(true, 'rate_limited'), 'Cooling down');
 assert.equal(context.tabDisplayState(false, 'working'), 'Available');

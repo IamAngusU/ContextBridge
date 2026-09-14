@@ -85,6 +85,8 @@ type Capabilities struct {
 	BrowserTabs     int                        `json:"browser_tabs,omitempty"`
 	BrowserBusy     int                        `json:"browser_busy_tabs,omitempty"`
 	BrowserSessions []BrowserSessionCapability `json:"browser_sessions,omitempty"`
+	Sources         []string                   `json:"sources,omitempty"`
+	Modes           []string                   `json:"modes,omitempty"`
 	QueueDepth      int                        `json:"queue_depth"`
 }
 

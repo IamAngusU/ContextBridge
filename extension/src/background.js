@@ -349,9 +349,14 @@ async function removeTaughtProfile(origin) {
 async function scanPageCapabilities(tabId) {
   if (!tabId) throw new Error('Select an AI tab first');
   if (busyTabs.has(tabId)) throw new Error('Wait until this tab finishes its current job');
+  const cfg = await settings();
+  const tab = await api.tabs.get(tabId);
+  if (!['chatgpt', 'gemini'].includes(profileForTab(cfg, tab)?.name)) {
+    throw new Error('Scan model choices works only on a ChatGPT or Gemini tab');
+  }
   const results = await api.scripting.executeScript({ target: { tabId }, func: discoverPageCapabilities });
   const capabilities = results?.[0]?.result || {};
-  const cfg = await settings();
+  capabilities.scanDiagnostic = { ...(capabilities.scanDiagnostic || {}), version: api.runtime.getManifest().version };
   const tabCapabilities = { ...(cfg.tabCapabilities || {}), [tabId]: capabilities };
   const tabCapabilityScans = { ...(cfg.tabCapabilityScans || {}), [tabId]: Date.now() };
   await api.storage.local.set({ tabCapabilities, tabCapabilityScans });
@@ -577,19 +582,30 @@ async function processWork(cfg, work, claimedTabId) {
     if (!answer?.ok && answer?.recoverable) {
       failureCode = 'browser_recovery_unsafe';
       await assertRecoveryTab(workSessionKey(work), tabId);
-      await requireSafeReloadState(tabId, effectiveProfile, { prompt: work.job.prompt }, false);
+      const proofResult = await api.scripting.executeScript({ target: { tabId }, func: inspectLatestOwnedTurn,
+        args: [work.job.prompt, effectiveProfile.name] });
+      const recoveryTurn = proofResult?.[0]?.result;
+      if (!recoveryTurn) throw new Error('The submitted ContextBridge turn could not be verified; no reload was performed');
+      await rememberSessionURL(workSessionKey(work), tabId);
+      await rememberOwnedTurn(workSessionKey(work), tabId, recoveryTurn);
+      const expectedTurn = { ownedTurn: recoveryTurn };
+      const firstSafeState = await requireSafeReloadState(tabId, effectiveProfile, expectedTurn, false);
       failureCode = 'browser_recovery_failed';
       progressSequence += 1;
       await reportProgress(cfg, work.job.id, { sequence: progressSequence, text: '', phase: 'recovering', detail: answer.error || 'Recovering browser tab', percent: Number(answer.percent) || 0, busy: true });
+      await delay(2500);
       failureCode = 'browser_recovery_unsafe';
       await assertRecoveryTab(workSessionKey(work), tabId);
-      await requireSafeReloadState(tabId, effectiveProfile, { prompt: work.job.prompt }, false);
+      const secondSafeState = await requireSafeReloadState(tabId, effectiveProfile, expectedTurn, false);
+      if (firstSafeState.fingerprint !== secondSafeState.fingerprint) {
+        throw new Error('Automatic reload skipped: the response changed during verification; the tab was left untouched');
+      }
       failureCode = 'browser_recovery_failed';
       await api.tabs.reload(tabId);
       await waitForTabReady(tabId, effectiveProfile.selectors, 30000);
       await assertRecoveryTab(workSessionKey(work), tabId);
       failureCode = 'browser_recovery_unsafe';
-      await requireSafeReloadState(tabId, effectiveProfile, { prompt: work.job.prompt }, false);
+      await requireSafeReloadState(tabId, effectiveProfile, expectedTurn, false);
       failureCode = 'browser_recovery_failed';
       const resumeJob = { ...work.job, metadata: { ...(work.job.metadata || {}), contextbridge_resume_only: true, contextbridge_baseline_text: baselineText } };
       const resumed = await api.scripting.executeScript({ target: { tabId }, func: automate, args: [resumeJob, effectiveProfile, work.deadline] });
@@ -671,7 +687,23 @@ async function processWork(cfg, work, claimedTabId) {
 function classifyFailureReason(message) {
   const text = String(message || '');
   if (/ChatGPT still shows Stop/i.test(text)) return 'provider_busy';
+  if (/model selector is not visible/i.test(text)) return 'model_selector_missing';
+  if (/Requested model.+is not available in this chat \(0 candidates, 0 model choices, pill trigger/i.test(text)) return 'model_candidates_empty_pill';
+  if (/Requested model.+is not available in this chat \(0 candidates, 0 model choices, form trigger/i.test(text)) return 'model_candidates_empty_form';
+  if (/Requested model.+is not available in this chat \(0 candidates/i.test(text)) return 'model_candidates_empty';
+  if (/Requested model.+is not available in this chat \(\d+ candidates, 0 model choices/i.test(text)) return 'model_choices_empty';
+  if (/Requested model.+is disabled in this chat/i.test(text)) return 'model_choice_disabled';
+  if (/Requested model.+is not available in this chat/i.test(text)) return 'model_choice_missing';
   if (/requested model.+not retained/i.test(text)) return 'model_not_retained';
+  if (/submitted ContextBridge turn could not be verified/i.test(text)) return 'recovery_turn_unverified';
+  if (/Automatic reload skipped: the latest user message/i.test(text)) return 'recovery_turn_mismatch';
+  if (/Automatic reload skipped: an unsent draft/i.test(text)) return 'recovery_draft';
+  if (/Automatic reload skipped: an unsent attachment/i.test(text)) return 'recovery_attachment';
+  if (/Automatic reload skipped: the previous answer has no visible completion controls/i.test(text)) return 'recovery_answer_unfinished';
+  if (/Automatic reload skipped: the prompt editor is unavailable/i.test(text)) return 'recovery_input_missing';
+  if (/Automatic reload skipped: a message editor or dialog is open/i.test(text)) return 'recovery_editor_open';
+  if (/Automatic reload skipped: image generation is still visible/i.test(text)) return 'recovery_image_busy';
+  if (/Automatic reload skipped: the response changed during verification/i.test(text)) return 'recovery_response_changed';
   if (/prompt editor did not retain|prompt editor changed|gemini editor did not accept/i.test(text)) return 'prompt_not_retained';
   if (/send button stayed disabled/i.test(text)) return 'send_disabled';
   if (/send button is not visible/i.test(text)) return 'send_missing';
@@ -1550,7 +1582,87 @@ function automate(job, profile, jobDeadline, editTarget = null) {
 				return (/model[-_ ]?(?:switcher|selector|picker|menu)|modellauswahl|modellmenü/i.test(semantic)
 					|| /^(?:gpt[\s._-]*\d|astra\b|sol\b|terra\b|luna\b)/i.test(visibleText(element))) && preferenceMatches(element);
 			});
-		if (current) return kind === 'model' && profile.name === 'gemini' ? confirmGeminiMode(requested) : (visibleText(current) || requested);
+		// A model label elsewhere in an older ChatGPT turn is not proof of the
+		// current composer selection. Always inspect the composer menu itself.
+		if (current && !(kind === 'model' && profile.name === 'chatgpt')) return kind === 'model' && profile.name === 'gemini' ? confirmGeminiMode(requested) : (visibleText(current) || requested);
+		if (kind === 'model' && profile.name === 'chatgpt') {
+			const composer = first(selectors.input)?.closest?.('[data-node-type="input-area"], form')
+				|| document.querySelector?.('form[data-type="unified-composer"]') || document.querySelector?.('form');
+			const composerMenus = [...(composer?.querySelectorAll?.('button[aria-haspopup="menu"]') || [])]
+				.filter(isVisible).filter((element) => !/composer-plus|add.files|dateien.*hinzufügen/i.test(
+					`${element.id || ''} ${element.getAttribute('data-testid') || ''} ${element.getAttribute('aria-label') || ''}`));
+			const composerPills = [...document.querySelectorAll('button.__composer-pill[aria-haspopup="menu"]')].filter(isVisible);
+			const modelControl = (element) => /reason|denk|effort|thinking|model|modell/i.test(
+				`${visibleText(element)} ${element.getAttribute('aria-label') || ''} ${element.getAttribute('data-testid') || ''}`);
+			const modelTrigger = composerPills.find(modelControl) || (composerPills.length === 1 ? composerPills[0] : null)
+				|| composerMenus.find(modelControl) || (composerMenus.length === 1 ? composerMenus[0] : null);
+			if (!modelTrigger) throw new Error('The model selector is not visible in this ChatGPT composer');
+			const candidateSelector = 'button, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="option"], [data-radix-collection-item], [aria-checked], [aria-selected], li';
+			const alreadyOpen = modelTrigger.getAttribute('aria-expanded') === 'true';
+			const before = new Set([...document.querySelectorAll(candidateSelector)].filter(isVisible));
+			const candidates = () => [...document.querySelectorAll(candidateSelector)]
+				.filter((element) => element !== modelTrigger && isVisible(element) && (alreadyOpen || !before.has(element)));
+			const modelPattern = /^(?:GPT[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:Sol(?: Pro)?|Pro|Terra|Luna|Mini|Nano|Codex))?|Astra|Sol|Terra|Luna)$/i;
+			const modelLabel = (element) => String(element?.innerText || element?.textContent || '')
+				.split('\n').map((line) => line.replace(/\s+/g, ' ').trim())
+				.find((line) => modelPattern.test(line)) || visibleText(element);
+			const modelMatches = (element) => normalizedValue(modelLabel(element)) === normalizedValue(requested);
+			const activate = async (element, opened) => {
+				if (typeof PointerEvent === 'function') {
+					element.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, buttons: 1, pointerType: 'mouse', isPrimary: true }));
+					await wait(100);
+				}
+				if (!opened() && typeof MouseEvent === 'function') {
+					element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0, buttons: 1 }));
+					await wait(100);
+				}
+				if (!opened()) element.click();
+			};
+			const closeMenu = async () => {
+				document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+				await wait(100);
+				if (modelTrigger.getAttribute('aria-expanded') === 'true') await activate(modelTrigger, () => modelTrigger.getAttribute('aria-expanded') !== 'true');
+			};
+			if (!alreadyOpen) await activate(modelTrigger, () => modelTrigger.getAttribute('aria-expanded') === 'true' || candidates().length > 0);
+			let choices = [];
+			for (let attempt = 0; attempt < 12; attempt++) {
+				await wait(150);
+				choices = candidates();
+				if (choices.some(modelMatches)) break;
+			}
+			if (!choices.some(modelMatches)) {
+				const versionAndEffort = /^(?:gpt[- ]?)?\d+(?:\.\d+)?\s+(?:sehr hoch|hoch|mittel|niedrig|sofort|very high|high|medium|low|instant|fast)(?:\s*[›>→])?$/i;
+				const submenu = choices.find((element) => versionAndEffort.test(visibleText(element))
+					|| (element.getAttribute('aria-haspopup') && /^(?:model|modell|modelle)$/i.test(visibleText(element))));
+				if (submenu) {
+					await activate(submenu, () => candidates().some((element) => modelPattern.test(modelLabel(element))));
+					for (let attempt = 0; attempt < 12; attempt++) {
+						await wait(150);
+						choices = candidates();
+						if (choices.some(modelMatches)) break;
+					}
+				}
+			}
+			const matching = choices.filter(modelMatches);
+			const match = matching.find((element) => element.getAttribute('aria-checked') !== null
+				|| element.getAttribute('aria-selected') !== null || /^(?:menuitemradio|menuitem|option)$/.test(element.getAttribute('role') || ''))
+				|| matching[0];
+			if (!match) {
+				await closeMenu();
+				throw new Error(`Requested model "${requested}" is not available in this chat (${choices.length} candidates, ${choices.filter((element) => modelPattern.test(modelLabel(element))).length} model choices, ${composerPills.includes(modelTrigger) ? 'pill' : 'form'} trigger)`);
+			}
+			if (match.disabled || match.getAttribute('aria-disabled') === 'true') {
+				await closeMenu();
+				throw new Error(`Requested model "${requested}" is disabled in this chat`);
+			}
+			const choice = match.closest?.('[role="menuitemradio"], [role="option"], [aria-checked]') || match;
+			const selected = choice.getAttribute('aria-checked') === 'true' || choice.getAttribute('aria-selected') === 'true'
+				|| choice.getAttribute('data-state') === 'checked'
+				|| Boolean(choice.querySelector?.('svg use[href*="#check" i], svg[data-testid*="check" i], [data-state="checked"]'));
+			if (selected) await closeMenu();
+			else { choice.click(); await wait(350); }
+			return modelLabel(match);
+		}
 		const trigger = triggers.find((element) => {
 			const label = `${visibleText(element)} ${element.getAttribute('aria-label') || ''}`.toLowerCase();
 			return kind === 'model' ? (profile.name === 'gemini' && Boolean(element.closest?.('bard-mode-switcher'))) || /gpt|gemini|model|modell|astra|sol|terra|luna/.test(label) : /reason|denk|effort|thinking|sofort|instant|hoch|high|pro|max/.test(label);
@@ -2214,6 +2326,17 @@ function sendHeartbeat(state) {
   return heartbeatInFlight;
 }
 
+function capabilityScanInterval(profileName, capabilities) {
+  if (profileName !== 'chatgpt' || capabilities.currentModel) return 30 * 60 * 1000;
+  const diagnostic = capabilities.scanDiagnostic || {};
+  // A newly created chat can answer before its composer menu finishes
+  // mounting. Retry a few times promptly, then return to the normal cadence.
+  if (String(diagnostic.model || '').startsWith('no trigger') && Number(diagnostic.noTriggerAttempts || 0) < 3) {
+    return 15 * 1000;
+  }
+  return 5 * 60 * 1000;
+}
+
 async function sendHeartbeatOnce(state) {
   const cfg = await settings();
   if (!cfg.token) return;
@@ -2224,13 +2347,21 @@ async function sendHeartbeatOnce(state) {
       const profile = profileForTab(cfg, tab);
       let capabilities = cfg.tabCapabilities?.[tabId] || {};
       let dom = null;
-      if (profile?.name === 'gemini' && !busyTabs.has(tabId)
-          && Date.now() - Number(cfg.tabCapabilityScans?.[tabId] || 0) > 30 * 60 * 1000) {
+      const scanInterval = capabilityScanInterval(profile?.name, capabilities);
+      const needsUpdatedChatGPTScan = profile?.name === 'chatgpt' && !capabilities.currentModel
+        && capabilities.scanDiagnostic?.version !== api.runtime.getManifest().version;
+      if (['chatgpt', 'gemini'].includes(profile?.name) && !busyTabs.has(tabId)
+          && (needsUpdatedChatGPTScan || Date.now() - Number(cfg.tabCapabilityScans?.[tabId] || 0) > scanInterval)) {
         try {
           const safe = await api.scripting.executeScript({ target: { tabId }, func: safeToDiscoverPageCapabilities });
           if (safe?.[0]?.result === true) {
             const scanned = await api.scripting.executeScript({ target: { tabId }, func: discoverPageCapabilities });
+            const previousAttempts = Number(capabilities.scanDiagnostic?.noTriggerAttempts || 0);
             capabilities = scanned?.[0]?.result || capabilities;
+            capabilities.scanDiagnostic = { ...(capabilities.scanDiagnostic || {}), version: api.runtime.getManifest().version };
+            if (String(capabilities.scanDiagnostic.model || '').startsWith('no trigger')) {
+              capabilities.scanDiagnostic.noTriggerAttempts = Math.min(3, previousAttempts + 1);
+            }
             const latest = await api.storage.local.get({ tabCapabilities: {}, tabCapabilityScans: {} });
             await api.storage.local.set({
               tabCapabilities: { ...latest.tabCapabilities, [tabId]: capabilities },
@@ -2267,6 +2398,8 @@ async function sendHeartbeatOnce(state) {
         state: busyTabs.has(tabId) ? 'working' : (Number(cfg.tabCooldowns?.[tabId] || 0) > Date.now() ? 'rate_limited' : 'waiting'),
         current_model: capabilities.currentModel || '', current_reasoning: capabilities.currentReasoning || '',
         models: capabilities.models || [], reasoning_levels: capabilities.reasoningLevels || [],
+        model_scan: capabilities.scanDiagnostic?.model || '',
+        reasoning_scan: capabilities.scanDiagnostic?.reasoning || '',
         last_failure: cfg.tabFailures?.[tabId] || null, dom
       });
     } catch (_) {}
@@ -2328,8 +2461,13 @@ function configuredTabIDs(cfg) {
 }
 
 function safeToDiscoverPageCapabilities() {
-  const composer = document.querySelector('rich-textarea [contenteditable="true"][role="textbox"], div.ql-editor[contenteditable="true"][role="textbox"]');
-  if (!composer || String(composer.innerText || composer.textContent || '').trim()) return false;
+  const composer = document.querySelector('#prompt-textarea, rich-textarea [contenteditable="true"][role="textbox"], div.ql-editor[contenteditable="true"][role="textbox"]');
+  if (!composer) return false;
+  // A private draft is not modified by opening and closing the model menu.
+  // Do not interrupt somebody who currently has the editor focused, though.
+  if (String(composer.innerText || composer.textContent || '').trim()
+      && (document.activeElement === composer || composer.contains?.(document.activeElement))
+      && document.hasFocus?.() !== false) return false;
   return ![...document.querySelectorAll('[aria-busy="true"], button[data-testid*="stop" i], button[aria-label*="stop" i]')]
     .some((element) => element.offsetWidth || element.offsetHeight || element.getClientRects().length);
 }
@@ -2339,15 +2477,28 @@ function inspectPageCapabilities() {
   const text = (element) => String(element?.innerText || element?.textContent || element?.getAttribute?.('aria-label') || '').replace(/\s+/g, ' ').trim().slice(0, 100);
   const unique = (values, limit) => [...new Set(values.filter(Boolean))].slice(0, limit);
   const controls = [...document.querySelectorAll('button, [role="button"]')].filter(visible);
-  const options = [...document.querySelectorAll('[role="menuitem"], [role="option"], [aria-checked], [aria-selected]')].filter(visible);
+  const options = [...document.querySelectorAll('[role="menuitem"], [role="menuitemradio"], [role="option"], [aria-checked], [aria-selected]')].filter(visible);
   const modelPattern = /^(?:gpt[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:astra|sol|terra|luna|pro|mini|nano|codex|thinking|instant))?|gemini(?:[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:pro|flash|lite|thinking|preview|experimental))*)?|astra|sol|terra|luna|\d+(?:\.\d+)?\s+(?:pro|flash|astra|sol|terra|luna))$/i;
   const reasoningPattern = /^(?:instant|sofort|fast|schnell|low|niedrig|medium|mittel|high|hoch|very high|sehr hoch|xhigh|pro|max|maximum)$/i;
   const semantic = (element, pattern) => pattern.test(`${element.getAttribute('data-testid') || ''} ${element.getAttribute('aria-label') || ''}`);
+  const modelOptionLabel = (element) => {
+    const lines = String(element?.innerText || element?.textContent || '').split('\n').map((line) => line.replace(/\s+/g, ' ').trim());
+    return lines.find((line) => modelPattern.test(line)) || text(element);
+  };
+  const checked = (element) => element.getAttribute('aria-checked') === 'true'
+    || element.getAttribute('aria-selected') === 'true' || element.getAttribute('aria-current') === 'true'
+    || element.getAttribute('data-selected') === 'true' || ['checked', 'selected'].includes(element.getAttribute('data-state'))
+    || Boolean(element.querySelector?.('svg use[href*="#check" i], svg[data-testid*="check" i], [data-state="checked"], [class*="check" i]'));
   const modelControl = (element) => semantic(element, /model[-_ ]?(?:switcher|selector|picker|menu)|(?:choose|select|current)[-_ ]?model|modellauswahl|modellmenü|modellmodus/i);
   const currentModel = text(controls.find((element) => {
     const label = `${text(element)} ${element.getAttribute('aria-label') || ''}`;
     return modelPattern.test(text(element)) && !/modelle ergänzen|add models|preismodell|pricing model/i.test(label);
   }));
+  const modelMenuOpen = controls.some((element) =>
+    element.getAttribute('aria-expanded') === 'true'
+    && semantic(element, /model[-_ ]?(?:switcher|selector|picker|menu)|(?:choose|select|current|switch)[-_ ]?model|modellauswahl|modellmenü|modellmodus|modell[-_ ]?wechseln/i));
+  const selectedModel = modelMenuOpen ? modelOptionLabel(options.find((element) =>
+    checked(element) && modelPattern.test(modelOptionLabel(element)))) : '';
   const currentReasoning = text(controls.find((element) => semantic(element, /reason|denk|effort|thinking/i) || reasoningPattern.test(text(element))));
   const geminiPicker = document.querySelector?.('bard-mode-switcher button[aria-haspopup]');
   const geminiCurrent = geminiPicker?.getAttribute('aria-label')?.match(/(?:derzeit ausgewählt|currently selected|selected)\s*:\s*(.+)$/i)?.[1]?.trim().slice(0, 100) || '';
@@ -2360,9 +2511,9 @@ function inspectPageCapabilities() {
       return primary ? `${primary} ${secondary}`.trim() : text(item);
     }) : [];
   return {
-    currentModel: geminiCurrent || currentModel,
+    currentModel: geminiCurrent || selectedModel || currentModel,
     currentReasoning: geminiCurrent ? '' : currentReasoning,
-    models: geminiCurrent ? unique(visibleGeminiModels, 50) : unique(options.map(text).filter((value) => modelPattern.test(value)), 50),
+    models: geminiCurrent ? unique(visibleGeminiModels, 50) : unique(options.map(modelOptionLabel).filter((value) => modelPattern.test(value)), 50),
     reasoningLevels: geminiCurrent ? [] : unique(options.map(text).filter((value) => reasoningPattern.test(value)), 20)
   };
 }
@@ -2436,7 +2587,7 @@ function inspectPageDOM(selectors) {
   for (const element of document.querySelectorAll('[data-testid="image-gen-loading-progress"], [role="progressbar"][aria-valuenow]')) {
     if (visible(element)) imageProgress = Math.max(imageProgress, Number(element.getAttribute('aria-valuenow')) || 0);
   }
-  const relevant = /bild|image|musik|music|file|datei|ordner|folder|upload|attach|tool|werkzeug|auswahl von|selection of|deselect/i;
+  const relevant = /bild|image|musik|music|file|datei|ordner|folder|upload|attach|tool|werkzeug|auswahl von|selection of|deselect|gpt|gemini|modell|model|denk|reason|effort|hoch|high/i;
   const inputCharacters = String(inputs[0]?.value || inputs[0]?.innerText || inputs[0]?.textContent || '').trim().length;
   return {
     captured_at: new Date().toISOString(),
@@ -2447,7 +2598,7 @@ function inspectPageDOM(selectors) {
     file_inputs: fileInputs.map((element) => describe(element)),
     tools: tools.slice(0, 32).map((element) => {
       const item = describe(element, true);
-      if (!relevant.test(`${item.text} ${item.aria_label} ${item.test_id}`)) item.text = '';
+      if (!relevant.test(`${item.text} ${item.aria_label} ${item.test_id}`) && item.has_popup !== 'menu') item.text = '';
       return item;
     }),
     assistant_turns: responses.length,
@@ -2467,10 +2618,30 @@ async function discoverPageCapabilities() {
   const text = (element) => String(element?.innerText || element?.textContent || element?.getAttribute?.('aria-label') || '').replace(/\s+/g, ' ').trim().slice(0, 100);
   const unique = (values, limit) => [...new Set(values.filter(Boolean))].slice(0, limit);
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const pointerDown = (element) => {
+    if (typeof PointerEvent !== 'function') return false;
+    element.dispatchEvent(new PointerEvent('pointerdown', {
+      bubbles: true, cancelable: true, button: 0, buttons: 1, pointerType: 'mouse', isPrimary: true
+    }));
+    return true;
+  };
+  const mouseDown = (element) => {
+    if (typeof MouseEvent !== 'function') return false;
+    element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0, buttons: 1 }));
+    return true;
+  };
   const modelPattern = /^(?:gpt[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:astra|sol|terra|luna|pro|mini|nano|codex|thinking|instant))?|gemini(?:[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:pro|flash|lite|thinking|preview|experimental))*)?|astra|sol|terra|luna|\d+(?:\.\d+)?\s+(?:pro|flash|astra|sol|terra|luna))$/i;
   const reasoningPattern = /^(?:instant|sofort|fast|schnell|low|niedrig|medium|mittel|high|hoch|very high|sehr hoch|xhigh|pro|max|maximum)$/i;
   const semantic = (element, pattern) => pattern.test(`${element.getAttribute('data-testid') || ''} ${element.getAttribute('aria-label') || ''}`);
-  const modelControl = (element) => semantic(element, /model[-_ ]?(?:switcher|selector|picker|menu)|(?:choose|select|current)[-_ ]?model|modellauswahl|modellmenü|modellmodus/i);
+  const modelOptionLabel = (element) => {
+    const lines = String(element?.innerText || element?.textContent || '').split('\n').map((line) => line.replace(/\s+/g, ' ').trim());
+    return lines.find((line) => modelPattern.test(line)) || text(element);
+  };
+  const checked = (element) => element.getAttribute('aria-checked') === 'true'
+    || element.getAttribute('aria-selected') === 'true' || element.getAttribute('aria-current') === 'true'
+    || element.getAttribute('data-selected') === 'true' || ['checked', 'selected'].includes(element.getAttribute('data-state'))
+    || Boolean(element.querySelector?.('svg use[href*="#check" i], svg[data-testid*="check" i], [data-state="checked"], [class*="check" i]'));
+  const modelControl = (element) => semantic(element, /model[-_ ]?(?:switcher|selector|picker|menu)|(?:choose|select|current|switch)[-_ ]?model|modellauswahl|modellmenü|modellmodus|modell[-_ ]?wechseln/i);
   const geminiPicker = document.querySelector?.('bard-mode-switcher button[aria-haspopup]');
   if (geminiPicker && visible(geminiPicker)) {
     const currentModel = geminiPicker.getAttribute('aria-label')?.match(/(?:derzeit ausgewählt|currently selected|selected)\s*:\s*(.+)$/i)?.[1]?.trim().slice(0, 100) || text(geminiPicker);
@@ -2495,24 +2666,103 @@ async function discoverPageCapabilities() {
   }
   const scan = async (kind) => {
     const pattern = kind === 'model' ? modelPattern : reasoningPattern;
+    const composerInput = document.querySelector('#prompt-textarea, rich-textarea [contenteditable="true"][role="textbox"], div.ql-editor[contenteditable="true"][role="textbox"]');
+    const composer = composerInput?.closest?.('[data-node-type="input-area"], form')
+      || document.querySelector('form[data-type="unified-composer"]') || document.querySelector('form');
+    const composerMenus = [...(composer?.querySelectorAll?.('button[aria-haspopup="menu"]') || [])]
+      .filter(visible).filter((element) => !/composer-plus|add.files|dateien.*hinzufügen/i.test(
+        `${element.id || ''} ${element.getAttribute('data-testid') || ''} ${element.getAttribute('aria-label') || ''}`));
+    const composerPills = [...document.querySelectorAll('button.__composer-pill[aria-haspopup="menu"]')].filter(visible);
     const triggers = [...document.querySelectorAll('button, [role="button"]')].filter(visible).filter((element) => {
       const label = `${text(element)} ${element.getAttribute('aria-label') || ''}`;
       if (/modelle ergänzen|add models|preismodell|pricing model/i.test(label)) return false;
       if (kind === 'model') return modelControl(element) || modelPattern.test(text(element));
       return semantic(element, /reason|denk|effort|thinking/i) || reasoningPattern.test(text(element));
     });
-    if (!triggers.length) return { current: '', values: [] };
-    const current = modelPattern.test(text(triggers[0])) ? text(triggers[0]) : '';
-    triggers[0].click();
-    await wait(350);
-    const values = unique([...document.querySelectorAll('[role="menuitem"], [role="option"], [data-radix-collection-item], [aria-checked], [aria-selected]')].filter(visible).map(text).filter((value) => pattern.test(value)), kind === 'model' ? 50 : 20);
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
-    await wait(150);
-    return { current, values };
+    // ChatGPT's current composer can expose only the reasoning pill. Its menu
+    // also contains the model choices; "Modell wechseln" on an older answer
+    // would inspect that answer instead of the model for the next prompt.
+    const composerTrigger = composerPills.find((element) =>
+      reasoningPattern.test(text(element)) || /^(?:denkaufwand|reasoning|effort)$/i.test(text(element))
+      || semantic(element, /reason|denk|effort|thinking|model|modell/i))
+      || (composerPills.length === 1 ? composerPills[0] : null)
+      || composerMenus.find((element) =>
+        reasoningPattern.test(text(element)) || /denkaufwand|reason|effort|model|modell/i.test(
+          `${text(element)} ${element.getAttribute('aria-label') || ''}`))
+      || (composerMenus.length === 1 ? composerMenus[0] : null);
+    const trigger = (kind === 'model' && composerTrigger)
+      || (kind === 'reasoning' && composerTrigger)
+      || triggers.find((element) => kind === 'model' && modelControl(element)) || triggers[0];
+    if (!trigger) return { current: '', values: [], diagnostic: `no trigger (${composerMenus.length} composer menus)` };
+    let current = pattern.test(text(trigger)) ? text(trigger) : '';
+    const alreadyOpen = trigger.getAttribute('aria-expanded') === 'true';
+    const candidateSelector = 'button, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="option"], [data-radix-collection-item], [aria-checked], [aria-selected], li';
+    const visibleBefore = new Set([...document.querySelectorAll(candidateSelector)].filter(visible));
+    const label = kind === 'model' ? modelOptionLabel : text;
+    const menuCandidates = () => [...document.querySelectorAll(candidateSelector)]
+      .filter((element) => element !== trigger && visible(element) && (alreadyOpen || !visibleBefore.has(element)));
+    let openMethod = alreadyOpen ? 'already' : '';
+    if (!alreadyOpen) {
+      // Radix dropdown triggers respond to pointerdown, not a synthetic click.
+      // Fall back to click for sites with an ordinary click handler.
+      if (pointerDown(trigger)) { openMethod = 'pointer'; await wait(100); }
+      if (trigger.getAttribute('aria-expanded') !== 'true' && menuCandidates().length === 0 && mouseDown(trigger)) {
+        openMethod = 'mouse';
+        await wait(100);
+      }
+      if (trigger.getAttribute('aria-expanded') !== 'true' && menuCandidates().length === 0) {
+        openMethod = 'click';
+        trigger.click();
+      }
+    }
+    let choices = [];
+    // Radix and ChatGPT's composer menus can render asynchronously. Capture
+    // only exact model/effort labels, not messages or arbitrary page content.
+    for (let attempt = 0; attempt < 12; attempt++) {
+      if (attempt || !alreadyOpen) await wait(150);
+      choices = menuCandidates();
+      if (choices.some((element) => pattern.test(label(element)))) break;
+    }
+    let submenuOpened = false;
+    if (kind === 'model' && !choices.some((element) => modelPattern.test(modelOptionLabel(element)))) {
+      // In the current ChatGPT UI the first popup contains a "5.6 Sehr hoch >"
+      // header and a reasoning slider. That header opens the model list. Only
+      // click a newly exposed navigation control, never a model choice.
+      const versionAndEffort = /^(?:gpt[- ]?)?\d+(?:\.\d+)?\s+(?:sehr hoch|hoch|mittel|niedrig|sofort|very high|high|medium|low|instant|fast)(?:\s*[›>→])?$/i;
+      const submenu = choices.find((element) => !modelPattern.test(modelOptionLabel(element))
+        && (versionAndEffort.test(text(element))
+          || (element.getAttribute('aria-haspopup') && /^(?:model|modell|modelle)$/i.test(text(element)))));
+      if (submenu) {
+        if (pointerDown(submenu)) await wait(100);
+        if (!menuCandidates().some((element) => modelPattern.test(modelOptionLabel(element))) && mouseDown(submenu)) await wait(100);
+        if (!menuCandidates().some((element) => modelPattern.test(modelOptionLabel(element)))) submenu.click();
+        submenuOpened = true;
+        for (let attempt = 0; attempt < 12; attempt++) {
+          await wait(150);
+          choices = menuCandidates();
+          if (choices.some((element) => modelPattern.test(modelOptionLabel(element)))) break;
+        }
+      }
+    }
+    const menuExpanded = trigger.getAttribute('aria-expanded') === 'true';
+    const selected = choices.find((element) => checked(element) && pattern.test(label(element)));
+    if (selected) current = label(selected);
+    const values = unique(choices.map(label).filter((value) => pattern.test(value)), kind === 'model' ? 50 : 20);
+    if (!alreadyOpen) {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+      await wait(100);
+      if (trigger.getAttribute('aria-expanded') === 'true' && pointerDown(trigger)) await wait(100);
+      if (trigger.getAttribute('aria-expanded') === 'true') trigger.click();
+    }
+    return { current, values, diagnostic: `${composerTrigger === trigger ? 'composer' : 'other'} trigger, expanded=${menuExpanded}, submenu=${submenuOpened}, ${choices.length} candidates, open=${openMethod}` };
   };
   const models = await scan('model');
   const reasoning = await scan('reasoning');
-  return { currentModel: models.current, currentReasoning: reasoning.current, models: models.values, reasoningLevels: reasoning.values };
+  return {
+    currentModel: models.current, currentReasoning: reasoning.current,
+    models: models.values, reasoningLevels: reasoning.values,
+    scanDiagnostic: { model: models.diagnostic, reasoning: reasoning.diagnostic }
+  };
 }
 
 function tabSummary(tab) {

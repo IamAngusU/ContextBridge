@@ -28,6 +28,8 @@ state.running = true;
 
 await context.maybeAutoAttachFreshTab(tab.id);
 assert.deepEqual(Array.from(state.tabIds), [41]);
+await context.maybeAutoAttachFreshTab(tab.id);
+assert.deepEqual(Array.from(state.tabIds), [41], 'reloading the same tab must not attach it twice');
 
 state.tabId = 0;
 state.tabIds = [];

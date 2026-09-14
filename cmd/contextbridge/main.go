@@ -121,7 +121,7 @@ Usage:
   contextbridge runtime install [--config path] llama.cpp
   contextbridge relay [--config path]
   contextbridge pair [--config path] [--relay URL] [--identity path] [--name NAME]
-  contextbridge worker [--config path] [--relay URL] [--identity path] [--slots N] [--providers LIST] [--models LIST] [--tasks LIST] [--topmost]
+  contextbridge worker [--config path] [--relay URL] [--identity path] [--name NAME] [--slots N] [--providers LIST] [--models LIST] [--tasks LIST] [--topmost]
   contextbridge cluster status|submit|chat|login|token|pairing [options]
   contextbridge update status|check|apply|enable|disable|auto [options]
   contextbridge version`)
@@ -1005,6 +1005,7 @@ func workerCommand(args []string) error {
 	flags := flag.NewFlagSet("worker", flag.ContinueOnError)
 	path := flags.String("config", defaultConfigPath(), "config path")
 	relayURL := flags.String("relay", "", "relay URL for this worker session")
+	workerName := flags.String("name", "", "session-only display name for this worker")
 	identityFile := flags.String("identity", "", "identity file paired to this relay")
 	slots := flags.Int("slots", 0, "session-only worker job limit; 1-64")
 	providers := flags.String("providers", "", "comma-separated providers this relay may use")
@@ -1019,12 +1020,20 @@ func workerCommand(args []string) error {
 	if *slots < 0 || *slots > 64 {
 		return errors.New("--slots must be between 1 and 64")
 	}
+	if *workerName != "" {
+		if strings.TrimSpace(*workerName) != *workerName || len([]rune(*workerName)) > 100 || strings.IndexFunc(*workerName, func(r rune) bool { return !unicode.IsPrint(r) }) >= 0 {
+			return errors.New("--name must be a printable name of at most 100 characters")
+		}
+	}
 	cfg, err := config.Load(*path)
 	if err != nil {
 		return err
 	}
 	if *slots > 0 {
 		cfg.Cluster.Worker.MaxConcurrent = *slots
+	}
+	if *workerName != "" {
+		cfg.Cluster.Worker.NodeName = *workerName
 	}
 	if *relayURL != "" {
 		cfg.Cluster.Worker.RelayURL = strings.TrimRight(*relayURL, "/")

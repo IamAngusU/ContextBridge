@@ -197,6 +197,15 @@ async function currentPageTab() {
   return tabs.find((tab) => tab.id) || null;
 }
 
+async function scanTargetTabID() {
+  const selected = primaryTabID();
+  const selectedTab = selected ? await api.tabs.get(selected).catch(() => null) : null;
+  if (selectedTab?.id && globalThis.ContextBridgeProfiles?.forURL(selectedTab.url || '')) return selectedTab.id;
+  const current = await currentPageTab();
+  if (current?.id && globalThis.ContextBridgeProfiles?.forURL(current.url || '')) return current.id;
+  throw new Error('Open a ChatGPT or Gemini tab before scanning model choices');
+}
+
 $('detach-all').addEventListener('click', async () => {
   await blockAutoAttach(attachedTabIDs, true);
   await setAttachedTabIDs([]);
@@ -289,11 +298,12 @@ $('verify').addEventListener('click', async () => {
 
 $('scan-capabilities').addEventListener('click', async () => {
   try {
-    const result = await api.runtime.sendMessage({ type: 'scan-capabilities', tabId: primaryTabID() });
+    const result = await api.runtime.sendMessage({ type: 'scan-capabilities', tabId: await scanTargetTabID() });
     if (!result?.ok) throw new Error(result?.error || 'Could not inspect model choices');
     const models = result.capabilities?.models || [];
     const levels = result.capabilities?.reasoningLevels || [];
-    setStatus('live', `${models.length} model choice${models.length === 1 ? '' : 's'} · ${levels.length} reasoning level${levels.length === 1 ? '' : 's'}`);
+    const diagnostic = models.length ? '' : ` · ${result.capabilities?.scanDiagnostic?.model || 'no scan detail'}`;
+    setStatus('live', `${models.length} model choice${models.length === 1 ? '' : 's'} · ${levels.length} reasoning level${levels.length === 1 ? '' : 's'}${diagnostic}`);
   } catch (error) {
     setStatus('error', error.message || String(error));
   }
@@ -415,7 +425,8 @@ async function loadTabs(selected, allWindows) {
     runtimeTabs = new Map((status?.tabs || []).map((tab) => [tab.id, tab]));
   } catch (_) {}
   liveTabState = runtimeTabs;
-  const focusedID = Number(selected) || eligible.find((tab) => tab.active)?.id || attachedTabIDs[0] || 0;
+  const page = await currentPageTab();
+  const focusedID = preferredTabID(selected, eligible, page?.id, attachedTabIDs);
   const desired = eligible.map((tab) => {
     const host = safeHost(tab.url);
     const windowLabel = allWindows ? `W${tab.windowId}  ` : '';
@@ -478,6 +489,11 @@ async function updateCurrentPageAction() {
 function filterTabList(tabs, filter, attachedIDs) {
   return tabs.filter((tab) => tab.id && /^https?:/i.test(tab.url || ''))
     .filter((tab) => filter === 'all' || (filter === 'attached') === attachedIDs.includes(tab.id));
+}
+
+function preferredTabID(selected, eligible, currentWindowTabID, attachedIDs) {
+  return Number(selected) || eligible.find((tab) => tab.id === currentWindowTabID)?.id
+    || eligible.find((tab) => tab.active)?.id || attachedIDs[0] || 0;
 }
 
 function tabDisplayState(attached, liveState) {

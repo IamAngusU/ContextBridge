@@ -13,9 +13,24 @@ const chrome = {
 };
 const context = vm.createContext({ chrome, console, URL, TextEncoder, setTimeout, clearTimeout, setInterval, clearInterval, Date, Promise });
 vm.runInContext(source, context);
+chrome.tabs.get = async (id) => ({ id, url: 'https://bugcrowd.com/engagements/openai-safety' });
+await assert.rejects(context.scanPageCapabilities(99), /only on a ChatGPT or Gemini tab/);
+assert.equal(context.capabilityScanInterval('chatgpt', { currentModel: '', scanDiagnostic: { model: 'no trigger (0 composer menus)', noTriggerAttempts: 1 } }), 15000);
+assert.equal(context.capabilityScanInterval('chatgpt', { currentModel: '', scanDiagnostic: { model: 'no trigger (0 composer menus)', noTriggerAttempts: 3 } }), 300000);
+assert.equal(context.capabilityScanInterval('chatgpt', { currentModel: 'GPT-5.6 Sol' }), 1800000);
 assert.equal(context.classifyFailureReason('Prompt editor did not retain the submitted text'), 'prompt_not_retained');
 assert.equal(context.classifyFailureReason('Send button stayed disabled after filling the prompt'), 'send_disabled');
 assert.equal(context.classifyFailureReason('ChatGPT still shows Stop; the draft was left untouched'), 'provider_busy');
+assert.equal(context.classifyFailureReason('The model selector is not visible in this ChatGPT composer'), 'model_selector_missing');
+assert.equal(context.classifyFailureReason('Requested model "GPT-5.5" is not available in this chat (0 candidates, 0 model choices, pill trigger)'), 'model_candidates_empty_pill');
+assert.equal(context.classifyFailureReason('Requested model "GPT-5.5" is not available in this chat (0 candidates, 0 model choices, form trigger)'), 'model_candidates_empty_form');
+assert.equal(context.classifyFailureReason('Requested model "GPT-5.5" is not available in this chat (0 candidates, 0 model choices)'), 'model_candidates_empty');
+assert.equal(context.classifyFailureReason('Requested model "GPT-5.5" is not available in this chat (7 candidates, 0 model choices)'), 'model_choices_empty');
+assert.equal(context.classifyFailureReason('Requested model "GPT-5.5" is disabled in this chat'), 'model_choice_disabled');
+assert.equal(context.classifyFailureReason('Requested model "GPT-5.5" is not available in this chat'), 'model_choice_missing');
+assert.equal(context.classifyFailureReason('The submitted ContextBridge turn could not be verified; no reload was performed'), 'recovery_turn_unverified');
+assert.equal(context.classifyFailureReason('Automatic reload skipped: the latest user message is not the expected ContextBridge turn; the tab was left untouched'), 'recovery_turn_mismatch');
+assert.equal(context.classifyFailureReason('Automatic reload skipped: an unsent draft is present; the tab was left untouched'), 'recovery_draft');
 assert.equal(context.classifyFailureReason('A provider error containing private text'), 'other');
 assert.equal(context.isNewAssistantTurn({ response_count: 2 }, { response_count: 2, text: 'Old music player clock changed', active_generation: true }), false);
 assert.equal(context.isNewAssistantTurn({ response_count: 2 }, { response_count: 3, text: 'Fresh answer', active_generation: true }), true);
@@ -230,6 +245,188 @@ const element = (text = '', attributes = {}) => ({
 }
 
 {
+  // ChatGPT can show only an icon labelled "Modell wechseln" while the
+  // selected full name is exposed inside its model menu.
+  let menuOpen = false;
+  const modelControl = {
+    ...element('', { 'aria-label': 'Modell wechseln' }),
+    click() { menuOpen = !menuOpen; },
+    getAttribute(name) { return name === 'aria-expanded' ? String(menuOpen) : name === 'aria-label' ? 'Modell wechseln' : null; }
+  };
+  const selected = element('GPT-5.6 Sol\nSchnell', { 'aria-checked': 'true' });
+  const other = element('GPT-5.5', { 'aria-checked': 'false' });
+  const composer = element('');
+  context.KeyboardEvent = class {};
+  context.document = {
+    querySelector: (selector) => selector.startsWith('#prompt-textarea') ? composer : null,
+    querySelectorAll(selector) {
+      if (selector === 'button, [role="button"]') return [modelControl];
+      if (selector.includes('menuitemradio')) return menuOpen ? [selected, other] : [];
+      return [];
+    },
+    dispatchEvent() { menuOpen = false; }
+  };
+  assert.equal(context.safeToDiscoverPageCapabilities(), true);
+  assert.equal(context.inspectPageCapabilities().currentModel, '');
+  menuOpen = true;
+  assert.equal(context.inspectPageCapabilities().currentModel, 'GPT-5.6 Sol');
+  menuOpen = false;
+  const capabilities = await context.discoverPageCapabilities();
+  assert.equal(capabilities.currentModel, 'GPT-5.6 Sol');
+  assert.deepEqual(Array.from(capabilities.models), ['GPT-5.6 Sol', 'GPT-5.5']);
+  assert.equal(menuOpen, false);
+}
+
+{
+  // The older answer's "Modell wechseln" button must not win over the
+  // current composer pill, whose menu contains the next prompt's model.
+  let menuOpen = false;
+  let olderAnswerClicks = 0;
+  const olderAnswerControl = {
+    ...element('', { 'aria-label': 'Modell wechseln' }),
+    click() { olderAnswerClicks++; }
+  };
+  const composerPill = {
+    ...element('Sehr hoch'),
+    click() { menuOpen = !menuOpen; },
+    getAttribute(name) { return name === 'aria-expanded' ? String(menuOpen) : null; }
+  };
+  const selectedModel = element('GPT-5.6 Sol\nSchnell', { 'aria-checked': 'true' });
+  const otherModel = element('GPT-5.5');
+  const lowEffort = element('Niedrig');
+  const highEffort = element('Sehr hoch', { 'aria-checked': 'true' });
+  context.document = {
+    querySelector: () => null,
+    querySelectorAll(selector) {
+      if (selector === 'button.__composer-pill[aria-haspopup="menu"]') return [composerPill];
+      if (selector === 'button, [role="button"]') return [olderAnswerControl, composerPill];
+      if (selector.includes('[data-radix-collection-item]')) {
+        return menuOpen ? [composerPill, selectedModel, otherModel, lowEffort, highEffort] : [composerPill];
+      }
+      return [];
+    },
+    dispatchEvent() { menuOpen = false; }
+  };
+  const capabilities = await context.discoverPageCapabilities();
+  assert.equal(olderAnswerClicks, 0);
+  assert.equal(menuOpen, false);
+  assert.equal(capabilities.currentModel, 'GPT-5.6 Sol');
+  assert.equal(capabilities.currentReasoning, 'Sehr hoch');
+  assert.deepEqual(Array.from(capabilities.models), ['GPT-5.6 Sol', 'GPT-5.5']);
+  assert.deepEqual(Array.from(capabilities.reasoningLevels), ['Niedrig', 'Sehr hoch']);
+  assert.match(capabilities.scanDiagnostic.model, /composer trigger/);
+  composerPill.innerText = 'Denkaufwand';
+  composerPill.textContent = 'Denkaufwand';
+  const genericPillCapabilities = await context.discoverPageCapabilities();
+  assert.equal(genericPillCapabilities.currentModel, 'GPT-5.6 Sol');
+  assert.equal(olderAnswerClicks, 0);
+}
+
+{
+  // Live ChatGPT exposes an unlabeled Radix popup button beside the composer
+  // plus button; neither the old answer action nor the CSS pill is present.
+  let menuOpen = false;
+  const plus = element('', { 'data-testid': 'composer-plus-btn', 'aria-label': 'Dateien und mehr hinzufügen' });
+  plus.id = 'composer-plus-btn';
+  const modelMenu = {
+    ...element(''),
+    click() { menuOpen = !menuOpen; },
+    getAttribute(name) { return name === 'aria-expanded' ? String(menuOpen) : null; }
+  };
+  const form = { querySelectorAll: () => [plus, modelMenu] };
+  const input = { ...element(), closest: () => form };
+  const selectedModel = element('GPT-5.6 Sol', { 'aria-checked': 'true' });
+  const otherModel = element('GPT-5.5');
+  context.document = {
+    querySelector(selector) { return selector.startsWith('#prompt-textarea') ? input : null; },
+    querySelectorAll(selector) {
+      if (selector === 'button.__composer-pill[aria-haspopup="menu"]') return [];
+      if (selector === 'button, [role="button"]') return [plus, modelMenu];
+      if (selector.includes('[data-radix-collection-item]')) return menuOpen ? [modelMenu, selectedModel, otherModel] : [modelMenu];
+      return [];
+    },
+    dispatchEvent() { menuOpen = false; }
+  };
+  const capabilities = await context.discoverPageCapabilities();
+  assert.equal(capabilities.currentModel, 'GPT-5.6 Sol');
+  assert.deepEqual(Array.from(capabilities.models), ['GPT-5.6 Sol', 'GPT-5.5']);
+  assert.match(capabilities.scanDiagnostic.model, /composer trigger/);
+  assert.equal(menuOpen, false);
+}
+
+{
+  // The current ChatGPT/Radix trigger opens on pointerdown. A .click() alone
+  // leaves aria-expanded false and exposes no new model candidates.
+  let menuOpen = false;
+  let pointerPresses = 0;
+  const modelMenu = {
+    ...element('5.6 Sehr hoch', { 'aria-haspopup': 'menu' }),
+    dispatchEvent(event) { if (event.type === 'pointerdown') { pointerPresses++; menuOpen = !menuOpen; } },
+    click() { throw new Error('The pointer-opened menu must not be clicked again'); },
+    getAttribute(name) { return name === 'aria-expanded' ? String(menuOpen) : name === 'aria-haspopup' ? 'menu' : null; }
+  };
+  const selectedModel = element('GPT-5.6 Sol', { 'aria-checked': 'true' });
+  const input = { ...element(''), closest: () => ({ querySelectorAll: () => [modelMenu] }) };
+  context.PointerEvent = class { constructor(type) { this.type = type; } };
+  context.document = {
+    querySelector(selector) { return selector.startsWith('#prompt-textarea') ? input : null; },
+    querySelectorAll(selector) {
+      if (selector === 'button.__composer-pill[aria-haspopup="menu"]') return [];
+      if (selector === 'button, [role="button"]') return [modelMenu];
+      if (selector.includes('[data-radix-collection-item]')) return menuOpen ? [modelMenu, selectedModel] : [modelMenu];
+      return [];
+    },
+    dispatchEvent() { menuOpen = false; }
+  };
+  const capabilities = await context.discoverPageCapabilities();
+  assert.deepEqual(Array.from(capabilities.models), ['GPT-5.6 Sol']);
+  assert.equal(pointerPresses, 2);
+  assert.equal(menuOpen, false);
+  delete context.PointerEvent;
+}
+
+{
+  // ChatGPT can put only a model/effort navigation header in the first popup;
+  // the actual model choices appear in its second-level menu.
+  let menuOpen = false;
+  let modelSubmenuOpen = false;
+  let modelChanges = 0;
+  const privateDraft = 'Private unsent draft';
+  const input = { ...element(privateDraft), closest: () => ({ querySelectorAll: () => [composerPill] }) };
+  const composerPill = {
+    ...element('Sehr hoch'),
+    click() { menuOpen = !menuOpen; if (!menuOpen) modelSubmenuOpen = false; },
+    getAttribute(name) { return name === 'aria-expanded' ? String(menuOpen) : name === 'aria-haspopup' ? 'menu' : null; }
+  };
+  const submenuHeader = {
+    ...element('5.6 Sehr hoch', { 'aria-haspopup': 'menu' }),
+    click() { modelSubmenuOpen = true; }
+  };
+  const selectedModel = { ...element('GPT-5.6 Sol', { 'aria-checked': 'true' }), click() { modelChanges++; } };
+  const otherModel = { ...element('GPT-5.5'), click() { modelChanges++; } };
+  const lowEffort = element('Niedrig');
+  context.document = {
+    querySelector(selector) { return selector.startsWith('#prompt-textarea') ? input : null; },
+    querySelectorAll(selector) {
+      if (selector === 'button.__composer-pill[aria-haspopup="menu"]') return [composerPill];
+      if (selector === 'button, [role="button"]') return [composerPill];
+      if (selector.includes('[data-radix-collection-item]')) {
+        return menuOpen ? [composerPill, submenuHeader, lowEffort, ...(modelSubmenuOpen ? [selectedModel, otherModel] : [])] : [composerPill];
+      }
+      return [];
+    },
+    dispatchEvent() { menuOpen = false; modelSubmenuOpen = false; }
+  };
+  const capabilities = await context.discoverPageCapabilities();
+  assert.equal(capabilities.currentModel, 'GPT-5.6 Sol');
+  assert.deepEqual(Array.from(capabilities.models), ['GPT-5.6 Sol', 'GPT-5.5']);
+  assert.match(capabilities.scanDiagnostic.model, /submenu=true/);
+  assert.equal(input.innerText, privateDraft);
+  assert.equal(modelChanges, 0);
+  assert.equal(menuOpen, false);
+}
+
+{
   const input = element('');
   context.document = {
     querySelector(selector) {
@@ -278,7 +475,118 @@ const element = (text = '', attributes = {}) => ({
   };
   assert.equal(context.safeToDiscoverPageCapabilities(), true);
   composer.innerText = 'Unsent private draft';
+  context.document.activeElement = composer;
   assert.equal(context.safeToDiscoverPageCapabilities(), false);
+  context.document.hasFocus = () => false;
+  assert.equal(context.safeToDiscoverPageCapabilities(), true);
+  context.document.activeElement = null;
+  assert.equal(context.safeToDiscoverPageCapabilities(), true);
+}
+
+{
+  // An explicit ChatGPT model is checked in the current composer menu. The
+  // Radix trigger and its model submenu both open on pointerdown, and an
+  // already-selected model must not be clicked or the prompt sent.
+  let menuOpen = false;
+  let submenuOpen = false;
+  let modelClicks = 0;
+  const trigger = {
+    ...element('Mittel', { 'aria-haspopup': 'menu' }),
+    dispatchEvent(event) { if (event.type === 'pointerdown') menuOpen = !menuOpen; },
+    getAttribute(name) { return name === 'aria-expanded' ? String(menuOpen) : name === 'aria-haspopup' ? 'menu' : null; },
+    click() { throw new Error('Pointer-based composer trigger was clicked'); }
+  };
+  const submenu = {
+    ...element('5.6 Mittel', { 'aria-haspopup': 'menu' }),
+    dispatchEvent(event) { if (event.type === 'pointerdown') submenuOpen = true; },
+    click() { throw new Error('Pointer-based model submenu was clicked'); }
+  };
+  const chosen = { ...element('GPT-5.6 Sol', { 'aria-checked': 'true' }), click() { modelClicks++; } };
+  const input = { ...element(''), closest: () => ({ querySelectorAll: () => [trigger] }), focus() { throw new Error('Model menu path reached'); } };
+  context.PointerEvent = class { constructor(type) { this.type = type; } };
+  context.KeyboardEvent = class { constructor(type) { this.type = type; } };
+  context.document = {
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === 'button[aria-haspopup="menu"]') return [trigger];
+      if (selector.includes('[data-radix-collection-item]')) return menuOpen ? [trigger, submenu, ...(submenuOpen ? [chosen] : [])] : [trigger];
+      return [];
+    },
+    dispatchEvent() { menuOpen = false; submenuOpen = false; }
+  };
+  const result = await context.automate({ prompt: 'not sent', model: 'GPT-5.6 Sol', output: { mode: 'text' } },
+    { name: 'chatgpt', selectors: { input: ['#input'], response: [], submit: [] } },
+    new Date(Date.now() + 12000).toISOString());
+  assert.equal(result.error, 'Model menu path reached');
+  assert.equal(modelClicks, 0);
+  const unavailable = await context.automate({ prompt: 'must not send', model: 'GPT-5.5', output: { mode: 'text' } },
+    { name: 'chatgpt', selectors: { input: ['#input'], response: [], submit: [] } },
+    new Date(Date.now() + 12000).toISOString());
+  assert.match(unavailable.error, /Requested model "GPT-5.5" is not available/);
+  assert.equal(modelClicks, 0);
+  delete context.PointerEvent;
+}
+
+{
+  // ChatGPT can render the input outside its composer form. A GPT-5.5 label
+  // in an older answer must not short-circuit a request to change this form.
+  let menuOpen = false;
+  let switched = false;
+  const trigger = {
+    ...element('Mittel', { 'aria-haspopup': 'menu' }),
+    dispatchEvent(event) { if (event.type === 'pointerdown') menuOpen = !menuOpen; },
+    getAttribute(name) { return name === 'aria-expanded' ? String(menuOpen) : name === 'aria-haspopup' ? 'menu' : null; }
+  };
+  const selected = element('GPT-5.6 Sol', { 'aria-checked': 'true' });
+  const target = { ...element('GPT-5.5', { 'aria-checked': 'false' }), click() { switched = true; } };
+  const oldAnswerModel = element('GPT-5.5');
+  const unrelatedMenu = { ...element('Share', { 'aria-haspopup': 'menu' }), dispatchEvent() { throw new Error('Unrelated menu opened'); }, click() { throw new Error('Unrelated menu clicked'); } };
+  const composer = { querySelectorAll: () => [unrelatedMenu, trigger] };
+  const input = { ...element(''), closest: () => null, focus() { throw new Error('Switched composer was used'); } };
+  context.PointerEvent = class { constructor(type) { this.type = type; } };
+  context.document = {
+    querySelector(selector) { return selector === 'form' ? composer : null; },
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === 'button.__composer-pill[aria-haspopup="menu"]') return [trigger];
+      if (selector === 'button[aria-haspopup="menu"]') return [trigger, oldAnswerModel];
+      if (selector.includes('[data-radix-collection-item]')) return menuOpen ? [trigger, selected, target] : [trigger];
+      return [];
+    },
+    dispatchEvent() { menuOpen = false; }
+  };
+  const result = await context.automate({ prompt: 'not sent', model: 'GPT-5.5', output: { mode: 'text' } },
+    { name: 'chatgpt', selectors: { input: ['#input'], response: [], submit: [] } },
+    new Date(Date.now() + 12000).toISOString());
+  assert.equal(switched, true);
+  assert.equal(result.error, 'Switched composer was used');
+  delete context.PointerEvent;
+}
+
+{
+  // A capability scan may leave the composer Radix menu open briefly. The
+  // selector must use its existing options without toggling it closed.
+  let switched = false;
+  const trigger = {
+    ...element('Mittel', { 'aria-haspopup': 'menu', 'aria-expanded': 'true' }),
+    dispatchEvent() { throw new Error('Already-open menu was toggled'); },
+    click() { throw new Error('Already-open menu was clicked'); }
+  };
+  const target = { ...element('GPT-5.5', { 'aria-checked': 'false' }), click() { switched = true; } };
+  const input = { ...element(''), closest: () => ({ querySelectorAll: () => [trigger] }), focus() { throw new Error('Model choice was clicked'); } };
+  context.document = {
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === 'button[aria-haspopup="menu"]') return [trigger];
+      if (selector.includes('[data-radix-collection-item]')) return [trigger, target];
+      return [];
+    }
+  };
+  const result = await context.automate({ prompt: 'not sent', model: 'GPT-5.5', output: { mode: 'text' } },
+    { name: 'chatgpt', selectors: { input: ['#input'], response: [], submit: [] } },
+    new Date(Date.now() + 12000).toISOString());
+  assert.equal(switched, true);
+  assert.equal(result.error, 'Model choice was clicked');
 }
 
 {

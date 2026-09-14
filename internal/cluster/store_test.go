@@ -9,6 +9,23 @@ import (
 	"time"
 )
 
+func TestNodesWithSameDisplayNameRemainDistinct(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "cluster.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for _, id := range []string{"node_alpha123", "node_beta456"} {
+		if err := store.UpsertNode(Node{ID: id, Name: "Shared PC"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	nodes, err := store.ListNodes()
+	if err != nil || len(nodes) != 2 || nodes[0].ID == nodes[1].ID {
+		t.Fatalf("same-name nodes collided: %#v, %v", nodes, err)
+	}
+}
+
 func TestStorePersistsQueueAndOneTimePairing(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cluster.db")
 	store, err := OpenStore(path)

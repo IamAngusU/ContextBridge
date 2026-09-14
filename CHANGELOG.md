@@ -2,6 +2,103 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.38 - 2026-09-14
+
+### Improved
+
+- keep a completed browser job authoritative in terminal output while showing an unverified model selection as a separate indented metadata note (`└─`), not as a job failure
+
+### Fixed
+
+- verify and retain the exact submitted turn by ID and digest before a guarded stall reload, even when ChatGPT adds UI text around the prompt; recheck an unchanged response fingerprint before reloading
+- report bounded recovery guard reasons without exposing chat or draft content
+
+## 0.5.37 - 2026-09-14
+
+### Fixed
+
+- use the same ChatGPT composer pill for model selection as for the successful capability scan, even when unrelated menu buttons appear earlier in the form
+
+## 0.5.36 - 2026-09-14
+
+### Fixed
+
+- select ChatGPT models from a composer menu that is already open, rather than toggling it closed; report bounded, text-free diagnostics when a requested choice is missing
+
+## 0.5.35 - 2026-09-14
+
+### Fixed
+
+- find ChatGPT's current composer menu even when the prompt input sits outside its form; never mistake a model label on an older answer for the current selection
+
+## 0.5.34 - 2026-09-14
+
+### Fixed
+
+- apply an explicit ChatGPT model preference through the current composer's pointer-driven model submenu, checking the exact visible model before sending; an unavailable model still fails closed
+
+## 0.5.33 - 2026-09-14
+
+### Fixed
+
+- retry ChatGPT model discovery promptly up to three times when a fresh tab is scanned before its composer menu appears, then back off to the normal five-minute cadence
+
+## 0.5.32 - 2026-09-14
+
+### Fixed
+
+- support composer model menus that open on pointerdown or mousedown before falling back to an ordinary click; report which activation path was used
+- reject model scans of non-AI tabs in the background worker as well as in the popup
+
+## 0.5.31 - 2026-09-14
+
+### Fixed
+
+- prefer the active tab of the Opera window that opened the extension popup, even when the extension can list active tabs from other windows; an explicit tab-list selection still wins
+- when Scan model choices has a stale non-AI selection, scan the active ChatGPT or Gemini page instead of requesting permission for an unrelated site such as Bugcrowd
+- report bounded, selector-only model-scan diagnostics in the local browser status so failed auto-detection can be investigated without copying page or chat contents
+
+## 0.5.30 - 2026-09-14
+
+### Fixed
+
+- follow the current ChatGPT composer's model-and-effort submenu header when the first popup contains only a reasoning slider; scan only controls newly exposed by that popup and never select a model or alter the private draft
+- retry a still-unknown ChatGPT model immediately after an extension update instead of carrying over the previous version's five-minute scan delay
+
+## 0.5.29 - 2026-09-14
+
+### Fixed
+
+- write the transient Windows status directly into its existing console row and leave the cursor anchored; zooming, narrowing, or reading scrollback no longer relies on carriage-return/erase redraws that can multiply fragments
+- redraw an idle timer only once per second instead of every animation frame
+- allow a safe ChatGPT model scan of an unfocused background tab even when its editor still retains focus internally and contains a private unsent draft
+
+## 0.5.28 - 2026-09-14
+
+### Fixed
+
+- identify the unlabeled ChatGPT composer menu beside the file-attachment button and scan its asynchronously rendered model/effort choices; retry missing ChatGPT models every five minutes without modifying a private draft or interrupting a focused editor
+- recalculate terminal width on every status redraw, keeping the animated line inside the current viewport after CMD zoom instead of adding wrapped lines
+
+### Added
+
+- stable provider and modality indicators in the terminal and cluster dashboard, with unadvertised modalities gray and no assumed media support
+- node-load percentage, explicit GPU ready/active/Zero-GPU state, day/hour idle duration, and a display-only node discriminator; `worker --name` offers a session-only rename while `cluster.worker.node_name` remains persistent
+
+## 0.5.27 - 2026-09-14
+
+### Fixed
+
+- scan the current ChatGPT composer menu (including its "Denkaufwand" pill) for model choices instead of the "Modell wechseln" action on an older answer
+- wait for asynchronously rendered menu choices and include plain button entries; a zero-result scan now shows a bounded trigger diagnostic without collecting chat content
+
+## 0.5.26 - 2026-09-14
+
+### Fixed
+
+- do not print a new tab line when an unchanged ChatGPT tab temporarily stops exposing its model or reasoning control; real selection changes are labeled as updates
+- detect ChatGPT's icon-only "Modell wechseln" control and read the selected model from its menu when a safe idle scan is possible, without touching a draft or active response
+
 ## 0.5.25 - 2026-09-13
 
 ### Fixed

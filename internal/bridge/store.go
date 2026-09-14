@@ -73,6 +73,8 @@ type BrowserTabStatus struct {
 	CurrentReasoning string              `json:"current_reasoning,omitempty"`
 	Models           []string            `json:"models,omitempty"`
 	ReasoningLevels  []string            `json:"reasoning_levels,omitempty"`
+	ModelScan        string              `json:"model_scan,omitempty"`
+	ReasoningScan    string              `json:"reasoning_scan,omitempty"`
 	LastFailure      *BrowserTabFailure  `json:"last_failure,omitempty"`
 	DOM              *BrowserDOMSnapshot `json:"dom,omitempty"`
 }
