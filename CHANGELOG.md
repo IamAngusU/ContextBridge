@@ -2,6 +2,16 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.42 - 2026-09-14
+
+### Added
+
+- selectable `terminal.style: panel|classic` for interactive output; the new default adds a responsive ASCII banner with author/repository link, horizontal event sections, and subordinate job metadata
+
+### Preserved
+
+- the earlier classic presentation remains available, with the same live status data; redirected/service logs keep their timestamped format
+
 ## 0.5.41 - 2026-09-14
 
 ### Added

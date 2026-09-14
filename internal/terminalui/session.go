@@ -49,6 +49,9 @@ type Session struct {
 	out               io.Writer
 	console           *os.File
 	interactive       bool
+	style             string
+	section           string
+	nextSection       string
 	mu                sync.Mutex
 	partial           string
 	status            string
@@ -69,6 +72,12 @@ type Session struct {
 }
 
 func New(output *os.File) *Session {
+	return NewWithStyle(output, "classic")
+}
+
+// NewWithStyle selects the interactive presentation. Redirected logs keep
+// their stable, timestamped format regardless of the configured style.
+func NewWithStyle(output *os.File, style string) *Session {
 	interactive := false
 	if info, err := output.Stat(); err == nil {
 		interactive = info.Mode()&os.ModeCharDevice != 0
@@ -79,7 +88,7 @@ func New(output *os.File) *Session {
 	if os.Getenv("TERM") == "dumb" || os.Getenv("NO_COLOR") != "" {
 		interactive = false
 	}
-	session := &Session{out: output, console: output, interactive: interactive, jobs: map[string]jobState{}, browserSelections: map[int]browserSelection{}, width: terminalWidth(output), widthFn: func() int { return terminalWidth(output) }, done: make(chan struct{}), closed: make(chan struct{})}
+	session := &Session{out: output, console: output, interactive: interactive, style: style, jobs: map[string]jobState{}, browserSelections: map[int]browserSelection{}, width: terminalWidth(output), widthFn: func() int { return terminalWidth(output) }, done: make(chan struct{}), closed: make(chan struct{})}
 	if interactive {
 		go session.animate()
 	} else {
@@ -92,6 +101,16 @@ func (s *Session) Banner(version, components string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.interactive {
+		if s.panelEnabledLocked() && s.panelWidthLocked() >= 58 {
+			width := s.panelWidthLocked()
+			fmt.Fprint(s.out, "\n", panelBorder(width), "\n")
+			fmt.Fprintln(s.out, panelRow("ContextBridge  "+cleanTerminalLabel(version, 24), width))
+			fmt.Fprintln(s.out, panelRow(cleanTerminalLabel(components, 90), width))
+			fmt.Fprintln(s.out, panelRow("by IamAngusU", width))
+			fmt.Fprintln(s.out, panelRow("https://github.com/IamAngusU/ContextBridge", width))
+			fmt.Fprint(s.out, panelBorder(width), "\n\n")
+			return
+		}
 		fmt.Fprintf(s.out, "\n  ContextBridge  %s\n  %s\n\n", version, components)
 		return
 	}
@@ -110,6 +129,7 @@ func (s *Session) Write(data []byte) (int, error) {
 		line := strings.TrimSpace(s.partial[:index])
 		s.partial = s.partial[index+1:]
 		if line != "" {
+			s.nextSection = "SERVICE"
 			s.writeEventLocked("·", line)
 		}
 	}
@@ -141,6 +161,7 @@ func (s *Session) HandleWorker(event cluster.WorkerEvent) {
 		if s.retries > 0 {
 			message += fmt.Sprintf(" · recovered after %d retries", s.retries)
 		}
+		s.nextSection = "CONNECTION"
 		s.writeEventLocked("✓", message)
 		s.recordBrowserSelectionsLocked(event.Capabilities.BrowserSessions)
 		s.retries = 0
@@ -159,7 +180,12 @@ func (s *Session) HandleWorker(event cluster.WorkerEvent) {
 		if selection != "" {
 			message += " · " + selection
 		}
-		s.writeEventLocked("→", message)
+		s.nextSection = "JOBS"
+		if s.panelEnabledLocked() && selection != "" {
+			s.writeEventWithDetailsLocked("→", fmt.Sprintf("Job %s · %s", shortID(event.JobID), empty(event.Task, "generation")), []string{"requested · " + selection})
+		} else {
+			s.writeEventLocked("→", message)
+		}
 		s.refreshJobStatusLocked()
 	case cluster.WorkerJobProgress:
 		job := s.jobs[event.JobID]
@@ -188,10 +214,29 @@ func (s *Session) HandleWorker(event cluster.WorkerEvent) {
 		} else if event.ReportedModel != "" {
 			message += " · verwendet: " + cleanTerminalLabel(event.ReportedProvider, 30) + " · " + cleanTerminalLabel(event.ReportedModel, 80)
 		}
-		s.writeEventWithDetailLocked("✓", message, detail)
+		s.nextSection = "JOBS"
+		if s.panelEnabledLocked() {
+			details := []string{}
+			if event.ReportedProvider != "" {
+				details = append(details, "route · "+cleanTerminalLabel(event.ReportedProvider, 30))
+			}
+			if event.ReportedModel != "" {
+				details = append(details, "model · "+cleanTerminalLabel(event.ReportedModel, 80))
+			}
+			if event.ReportedReasoning != "" {
+				details = append(details, "reasoning · "+cleanTerminalLabel(event.ReportedReasoning, 40))
+			}
+			if detail != "" {
+				details = append(details, detail)
+			}
+			s.writeEventWithDetailsLocked("✓", fmt.Sprintf("Job %s completed · %s", shortID(event.JobID), compactDuration(time.Duration(event.ComputeMS)*time.Millisecond)), details)
+		} else {
+			s.writeEventWithDetailLocked("✓", message, detail)
+		}
 		s.refreshJobStatusLocked()
 	case cluster.WorkerJobFailed:
 		delete(s.jobs, event.JobID)
+		s.nextSection = "JOBS"
 		s.writeEventLocked("!", fmt.Sprintf("Job %s needs attention · %s", shortID(event.JobID), compactError(event.Error)))
 		s.refreshJobStatusLocked()
 	}
@@ -259,11 +304,13 @@ func (s *Session) recordBrowserSelectionsLocked(sessions []cluster.BrowserSessio
 			if selection.reasoning != "" {
 				parts = append(parts, "Denkstufe: "+selection.reasoning)
 			}
+			s.nextSection = "AI TABS"
 			s.writeEventLocked("◇", fmt.Sprintf("%s · %s", label, strings.Join(parts, " · ")))
 		}
 	}
 	for id := range s.browserSelections {
 		if _, ok := current[id]; !ok {
+			s.nextSection = "AI TABS"
 			s.writeEventLocked("◇", fmt.Sprintf("Tab %d getrennt", id))
 		}
 	}
@@ -340,18 +387,103 @@ func (s *Session) writeEventLocked(symbol, message string) {
 }
 
 func (s *Session) writeEventWithDetailLocked(symbol, message, detail string) {
+	if detail == "" {
+		s.writeEventWithDetailsLocked(symbol, message, nil)
+		return
+	}
+	s.writeEventWithDetailsLocked(symbol, message, []string{detail})
+}
+
+func (s *Session) writeEventWithDetailsLocked(symbol, message string, details []string) {
 	if s.interactive {
 		s.clearStatusLocked()
-		fmt.Fprintf(s.out, "  %s  %s\n", coloredSymbol(symbol), message)
-		if detail != "" {
-			fmt.Fprintf(s.out, "     %s└─%s %s\n", ansiYellow, ansiReset, detail)
+		if s.panelEnabledLocked() {
+			s.writePanelSectionLocked()
+			width := s.panelWidthLocked()
+			writePanelText(s.out, "  | "+coloredSymbol(symbol)+"  ", "  |    ", message, max(12, width-8))
+			for _, detail := range details {
+				writePanelText(s.out, "  |   "+ansiYellow+"+->"+ansiReset+" ", "  |       ", detail, max(8, width-12))
+			}
+		} else {
+			if s.style == "panel" {
+				s.section = ""
+			}
+			fmt.Fprintf(s.out, "  %s  %s\n", coloredSymbol(symbol), message)
+			for _, detail := range details {
+				fmt.Fprintf(s.out, "     %s└─%s %s\n", ansiYellow, ansiReset, detail)
+			}
 		}
 		s.drawStatusLocked()
 		return
 	}
 	fmt.Fprintf(s.out, "%s  %s  %s\n", time.Now().Format("2006/01/02 15:04:05"), symbol, message)
-	if detail != "" {
+	for _, detail := range details {
 		fmt.Fprintf(s.out, "     └─ %s\n", detail)
+	}
+}
+
+func (s *Session) panelEnabledLocked() bool {
+	return s.interactive && s.style == "panel" && s.panelWidthLocked() >= 24
+}
+
+func (s *Session) panelWidthLocked() int {
+	if s.widthFn != nil {
+		if width := s.widthFn(); width > 0 {
+			s.width = width
+		}
+	}
+	width := s.width
+	if width <= 0 {
+		width = 80
+	}
+	return max(12, min(78, width-2))
+}
+
+func panelBorder(width int) string {
+	return "  +" + strings.Repeat("-", max(0, width-4)) + "+"
+}
+
+func panelRow(value string, width int) string {
+	value = truncateRunes(value, max(1, width-6))
+	return "  | " + value + strings.Repeat(" ", max(0, width-6-utf8.RuneCountInString(value))) + " |"
+}
+
+func (s *Session) writePanelSectionLocked() {
+	section := s.nextSection
+	s.nextSection = ""
+	if section == "" {
+		section = empty(s.section, "EVENTS")
+	}
+	if section == s.section {
+		return
+	}
+	s.section = section
+	width := s.panelWidthLocked()
+	label := "+-- " + section + " "
+	fmt.Fprintln(s.out, "  "+label+strings.Repeat("-", max(0, width-3-len(label)))+"+")
+}
+
+func writePanelText(out io.Writer, firstPrefix, nextPrefix, value string, width int) {
+	value = strings.Join(strings.Fields(cleanTerminalLabel(value, 0)), " ")
+	remaining := []rune(value)
+	prefix := firstPrefix
+	for len(remaining) > width {
+		cut := width
+		for index := width; index > width/2; index-- {
+			if remaining[index] == ' ' {
+				cut = index
+				break
+			}
+		}
+		fmt.Fprintln(out, prefix+strings.TrimSpace(string(remaining[:cut])))
+		remaining = remaining[cut:]
+		for len(remaining) > 0 && remaining[0] == ' ' {
+			remaining = remaining[1:]
+		}
+		prefix = nextPrefix
+	}
+	if len(remaining) > 0 || value == "" {
+		fmt.Fprintln(out, prefix+string(remaining))
 	}
 }
 

@@ -12,6 +12,9 @@ storage:
 runtime:
   hardware_refresh_seconds: 10
 
+terminal:
+  style: panel # panel or classic; applies to interactive terminals only
+
 updates:
   enabled: null # off by default; enable from the dashboard, extension, or CLI
   channel: stable

@@ -20,6 +20,7 @@ type Config struct {
 	Server          Server                    `yaml:"server"`
 	Storage         Storage                   `yaml:"storage"`
 	Runtime         Runtime                   `yaml:"runtime"`
+	Terminal        Terminal                  `yaml:"terminal"`
 	Updates         updater.Settings          `yaml:"updates" json:"updates"`
 	Routes          map[string]Route          `yaml:"routes"`
 	Providers       Providers                 `yaml:"providers"`
@@ -44,6 +45,10 @@ type Storage struct {
 
 type Runtime struct {
 	HardwareRefreshSeconds int `yaml:"hardware_refresh_seconds"`
+}
+
+type Terminal struct {
+	Style string `yaml:"style"`
 }
 
 type Route struct {
@@ -204,6 +209,9 @@ func Save(path string, cfg Config) error {
 func (c Config) Validate() error {
 	if c.Version != 1 {
 		return fmt.Errorf("unsupported config version %d", c.Version)
+	}
+	if c.Terminal.Style != "" && c.Terminal.Style != "classic" && c.Terminal.Style != "panel" {
+		return errors.New("terminal.style must be classic or panel")
 	}
 	if c.Cluster.Worker.MaxConcurrent > 64 {
 		return errors.New("cluster.worker.max_concurrent must not exceed 64")
@@ -406,6 +414,9 @@ func applyDefaults(cfg *Config, base string) {
 	if cfg.Runtime.HardwareRefreshSeconds <= 0 {
 		cfg.Runtime.HardwareRefreshSeconds = 10
 	}
+	if cfg.Terminal.Style == "" {
+		cfg.Terminal.Style = "panel"
+	}
 	if cfg.RAG.Backend == "" {
 		cfg.RAG.Backend = "local"
 	}
@@ -563,6 +574,9 @@ storage:
 
 runtime:
   hardware_refresh_seconds: 10
+
+terminal:
+  style: panel # panel or classic; applies to interactive terminals only
 
 updates:
   enabled: null # off by default; enable from the dashboard, extension, or CLI

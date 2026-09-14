@@ -28,6 +28,72 @@ func TestCompactDurationKeepsDaysAndHours(t *testing.T) {
 	}
 }
 
+func TestPanelBannerAndEventHierarchy(t *testing.T) {
+	var output bytes.Buffer
+	session := &Session{out: &output, interactive: true, style: "panel", widthFn: func() int { return 90 },
+		jobs: map[string]jobState{}, browserSelections: map[int]browserSelection{}}
+	session.Banner("v0.test", "2 components · local bridge · worker")
+	capabilities := cluster.Capabilities{BrowserSessions: []cluster.BrowserSessionCapability{{TabID: 42, Profile: "chatgpt", CurrentModel: "GPT-5.6 Sol"}}}
+	session.HandleWorker(cluster.WorkerEvent{Kind: cluster.WorkerConnected, NodeName: "test-pc", Slots: 2, Capabilities: capabilities})
+	session.HandleWorker(cluster.WorkerEvent{Kind: cluster.WorkerJobStarted, JobID: "job-42", Task: "generation", Provider: "browser", Profile: "chatgpt", Model: "GPT-5.6 Sol"})
+	session.HandleWorker(cluster.WorkerEvent{Kind: cluster.WorkerJobCompleted, JobID: "job-42", ComputeMS: 1500, ReportedProvider: "browser", ReportedModel: "GPT-5.6 Sol"})
+	got := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(output.String(), "")
+	for _, label := range []string{
+		"by IamAngusU", "https://github.com/IamAngusU/ContextBridge",
+		"+-- CONNECTION", "+-- AI TABS", "+-- JOBS", "+-> requested · browser · chatgpt",
+		"+-> route · browser", "+-> model · GPT-5.6 Sol",
+	} {
+		if !strings.Contains(got, label) {
+			t.Fatalf("panel output is missing %q: %q", label, got)
+		}
+	}
+	if strings.Count(got, "+-- JOBS") != 1 {
+		t.Fatalf("job section was printed more than once: %q", got)
+	}
+	for _, line := range strings.Split(got, "\n") {
+		if strings.HasPrefix(line, "  +") || strings.HasPrefix(line, "  |") {
+			plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(line, "")
+			if utf8.RuneCountInString(plain) > 88 {
+				t.Fatalf("panel line overflows: %q", line)
+			}
+		}
+	}
+}
+
+func TestPanelFallsBackWhenTerminalTooNarrow(t *testing.T) {
+	var output bytes.Buffer
+	session := &Session{out: &output, interactive: true, style: "panel", widthFn: func() int { return 20 }}
+	session.Banner("v0.test", "local bridge")
+	session.writeEventLocked("✓", "connected")
+	if strings.Contains(output.String(), "+--") || !strings.Contains(output.String(), "ContextBridge  v0.test") {
+		t.Fatalf("narrow terminal did not use the classic fallback: %q", output.String())
+	}
+}
+
+func TestPanelDoesNotChangeRedirectedLogShape(t *testing.T) {
+	var output bytes.Buffer
+	session := &Session{out: &output, style: "panel"}
+	session.Banner("v0.test", "worker")
+	session.writeEventLocked("✓", "connected")
+	if !strings.HasPrefix(output.String(), "ContextBridge v0.test · worker\n") || strings.Contains(output.String(), "+--") {
+		t.Fatalf("redirected panel output changed: %q", output.String())
+	}
+}
+
+func TestClassicInteractiveOutputIsPreserved(t *testing.T) {
+	var output bytes.Buffer
+	session := &Session{out: &output, interactive: true, style: "classic"}
+	session.Banner("v0.test", "worker")
+	session.writeEventWithDetailLocked("✓", "completed", "model metadata unavailable")
+	got := output.String()
+	if !strings.Contains(got, "\n  ContextBridge  v0.test\n  worker\n\n") ||
+		!strings.Contains(got, "  "+ansiGreen+"✓"+ansiReset+"  completed\n") ||
+		!strings.Contains(got, "     "+ansiYellow+"└─"+ansiReset+" model metadata unavailable\n") ||
+		strings.Contains(got, "+--") {
+		t.Fatalf("classic interactive output changed: %q", got)
+	}
+}
+
 func TestStatusFitsCurrentWidthAfterZoom(t *testing.T) {
 	var output bytes.Buffer
 	width := 160

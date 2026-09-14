@@ -158,7 +158,7 @@ func serveCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	session := terminalui.New(os.Stdout)
+	session := terminalui.NewWithStyle(os.Stdout, cfg.Terminal.Style)
 	defer session.Close()
 	logger := log.New(session, "", 0)
 	server, err := bridge.NewServer(cfg, logger)
@@ -208,7 +208,7 @@ func runCommand(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	errorsCh := make(chan error, 3)
-	session := terminalui.New(os.Stdout)
+	session := terminalui.NewWithStyle(os.Stdout, cfg.Terminal.Style)
 	defer session.Close()
 	logger := log.New(session, "", 0)
 	local, err := bridge.NewServer(cfg, logger)
@@ -1126,7 +1126,7 @@ func workerCommand(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	session := terminalui.New(os.Stdout)
+	session := terminalui.NewWithStyle(os.Stdout, cfg.Terminal.Style)
 	defer session.Close()
 	logger := log.New(session, "", 0)
 	if !*noUpdates {

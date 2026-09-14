@@ -34,8 +34,34 @@ func TestDefaultConfigLoads(t *testing.T) {
 	if cfg.Updates.DefaultEnabled() || cfg.Updates.Channel != "stable" {
 		t.Fatal("automatic stable updates should be disabled by default")
 	}
+	if cfg.Terminal.Style != "panel" {
+		t.Fatalf("unexpected terminal style: %q", cfg.Terminal.Style)
+	}
 	if _, err := os.Stat(cfg.Storage.Inbox); !os.IsNotExist(err) {
 		t.Fatal("loading config should not create the inbox")
+	}
+}
+
+func TestTerminalStyleIsSelectableAndValidated(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := Default(path); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Terminal.Style = "classic"
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := Load(path)
+	if err != nil || reloaded.Terminal.Style != "classic" {
+		t.Fatalf("classic style did not survive round-trip: %q, %v", reloaded.Terminal.Style, err)
+	}
+	reloaded.Terminal.Style = "unknown"
+	if err := reloaded.Validate(); err == nil {
+		t.Fatal("unsupported terminal style was accepted")
 	}
 }
 
