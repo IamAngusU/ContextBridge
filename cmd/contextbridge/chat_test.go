@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestChatE2EEToggle(t *testing.T) {
 	state := &chatState{}
@@ -63,5 +66,33 @@ func TestChatImageSeriesRequirement(t *testing.T) {
 	}
 	if _, message := state.command("/image off"); message == "" || state.requireImage || state.minImages != 0 {
 		t.Fatal("image off did not clear series requirement")
+	}
+}
+
+func TestChatFreshBrowserSessionMetadata(t *testing.T) {
+	state := &chatState{newChat: true}
+	if got := state.jobMetadata(); got["contextbridge_new_chat"] != true || got["contextbridge_new_chat_per_job"] != nil {
+		t.Fatalf("unexpected new-session metadata: %#v", got)
+	}
+	state.newChatPerJob = true
+	if got := state.jobMetadata(); got["contextbridge_new_chat"] != true || got["contextbridge_new_chat_per_job"] != true {
+		t.Fatalf("unexpected per-job metadata: %#v", got)
+	}
+	state.requireMusic = true
+	if got := state.jobMetadata(); got["contextbridge_music_tool"] != true || got["contextbridge_new_chat_per_job"] != true {
+		t.Fatalf("music and new-chat metadata were not preserved together: %#v", got)
+	}
+	state.foregroundNewChat = true
+	if got := state.jobMetadata(); got["contextbridge_foreground_new_chat"] != true {
+		t.Fatalf("foreground new-chat metadata was not set: %#v", got)
+	}
+}
+
+func TestChatFreshSessionRejectsNonBrowserProvider(t *testing.T) {
+	for _, option := range []string{"--new-chat", "--new-chat-per-job"} {
+		err := clusterChatCommand([]string{"--provider", "ollama", option, "--prompt", "unused"})
+		if err == nil || !strings.Contains(err.Error(), "require --provider browser") {
+			t.Fatalf("%s must reject a non-browser provider: %v", option, err)
+		}
 	}
 }

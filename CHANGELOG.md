@@ -2,6 +2,69 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.64 - 2026-09-14
+
+### Fixed
+
+- Automatically created image-upload chats open visibly so Opera does not indefinitely suspend the upload in an inactive Gemini tab; ordinary text chats remain in the background
+- A delayed browser script refuses to click Send after its job deadline
+
+### Added
+
+- `cluster chat --foreground-new-chat` explicitly shows any newly created chat, useful for demos and providers that throttle background work
+
+## 0.5.63 - 2026-09-14
+
+### Fixed
+
+- Gemini image jobs can verify an image-only user turn when Gemini omits the prompt text from its DOM, using the confirmed upload preview, exact retained draft, Send click, one new turn, and its following answer; mismatched visible text and unsafe recovery still fail closed
+
+## 0.5.62 - 2026-09-14
+
+### Added
+
+- Bounded Gemini turn and response-order diagnostics to identify image-job ownership failures without exposing prompts or answers
+
+## 0.5.61 - 2026-09-14
+
+### Added
+
+- `cluster chat --new-chat` and `--new-chat-per-job` request fresh browser conversations directly from the terminal, including the VPS, without reassigning an occupied tab
+
+## 0.5.60 - 2026-09-14
+
+### Fixed
+
+- Gemini OCR image jobs accept the matched user-turn proof from the upload-and-response observer when Gemini omits the older stable turn ID; edit and reload still require their stronger ownership proof
+- attached-image jobs hold provisional assistant text until the paired user turn and final answer are verified
+
+## 0.5.59 - 2026-09-14
+
+### Fixed
+
+- Gemini image jobs now require the exact prompt in a new user turn and associate the captured answer with that turn; an upload-only or unrelated answer cannot complete the job
+- image jobs fail closed if the completed user turn cannot be verified for session ownership
+- follow-up jobs retain a fresh-chat session when its URL changes after completion, but only after checking the stored ContextBridge-owned turn
+
+## 0.5.58 - 2026-09-14
+
+### Fixed
+
+- Gemini image jobs use an already mounted Files input before looking for an upload trigger; a menu with hidden file fields no longer fails merely because its visible button is outside the expected selector path
+
+## 0.5.57 - 2026-09-14
+
+### Fixed
+
+- Gemini image uploads with document-only advisory file-picker filters now require a newly visible image preview before the prompt is entered or sent
+
+## 0.5.56 - 2026-09-14
+
+### Fixed
+
+- Gemini image and carried-file jobs open the Uploads & Tools menu before locating its lazily mounted file input; compatible extension-based `accept` lists now work, and an existing unsent attachment is never replaced
+- missing upload controls and already occupied composers produce distinct failure diagnostics without sending the prompt
+
 ## 0.5.55 - 2026-09-14
 
 ### Fixed

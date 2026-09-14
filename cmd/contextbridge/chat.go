@@ -42,6 +42,9 @@ func clusterChatCommand(args []string) error {
 	minImages := flags.Int("min-images", 0, "require this many verified image files in one browser response (0-12)")
 	requireMusic := flags.Bool("music", false, "select Gemini's music tool and require a verified audio/video file")
 	attachImage := flags.String("attach-image", "", "attach one local PNG, JPEG, WebP, or GIF image to each turn")
+	newChat := flags.Bool("new-chat", false, "open a fresh browser chat for this session")
+	newChatPerJob := flags.Bool("new-chat-per-job", false, "open a fresh browser chat for every turn")
+	foregroundNewChat := flags.Bool("foreground-new-chat", false, "show a newly opened browser chat while starting this turn")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -59,6 +62,12 @@ func clusterChatCommand(args []string) error {
 	}
 	if *requireMusic && (*requireImage || *minImages > 0) {
 		return errors.New("--music cannot be combined with --image or --min-images")
+	}
+	if (*newChat || *newChatPerJob) && !strings.EqualFold(*provider, "browser") {
+		return errors.New("--new-chat and --new-chat-per-job require --provider browser")
+	}
+	if *foregroundNewChat && (!strings.EqualFold(*provider, "browser") || (!*newChat && !*newChatPerJob)) {
+		return errors.New("--foreground-new-chat requires --provider browser and --new-chat or --new-chat-per-job")
 	}
 	if *requireImage && *minImages < 1 {
 		*minImages = 1
@@ -102,12 +111,12 @@ func clusterChatCommand(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	state := &chatState{relayURL: clusterBaseURL(cfg), token: *token, provider: *provider, group: *group, model: *model, profile: *profile, reasoning: *reasoning, e2ee: *e2ee, sessionID: *sessionID, artifactDir: *artifactDir, minArtifacts: *minArtifacts, minImages: *minImages, requireImage: *minImages > 0, requireMusic: *requireMusic, imageBase64: imageBase64, imageMediaType: imageMediaType}
+	state := &chatState{relayURL: clusterBaseURL(cfg), token: *token, provider: *provider, group: *group, model: *model, profile: *profile, reasoning: *reasoning, e2ee: *e2ee, sessionID: *sessionID, artifactDir: *artifactDir, minArtifacts: *minArtifacts, minImages: *minImages, requireImage: *minImages > 0, requireMusic: *requireMusic, imageBase64: imageBase64, imageMediaType: imageMediaType, newChat: *newChat || *newChatPerJob, newChatPerJob: *newChatPerJob, foregroundNewChat: *foregroundNewChat}
 
 	if strings.TrimSpace(*prompt) != "" {
 		return state.turn(ctx, strings.TrimSpace(*prompt))
 	}
-	fmt.Printf("\n  ContextBridge Chat · %s\n  session %s · follow-ups stay in the same browser conversation\n  /model, /reasoning, /profile, /image, /min-images, /music, /min-artifacts and /e2ee change this session · /settings shows it · /exit closes it\n\n", *provider, *sessionID)
+	fmt.Printf("\n  ContextBridge Chat · %s\n  session %s · follow-ups stay in the same browser conversation unless --new-chat-per-job is set\n  /model, /reasoning, /profile, /image, /min-images, /music, /min-artifacts and /e2ee change this session · /settings shows it · /exit closes it\n\n", *provider, *sessionID)
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 64<<10), 1<<20)
 	for {
@@ -228,7 +237,7 @@ func (s *chatState) command(line string) (bool, string) {
 		}
 		return true, fmt.Sprintf("  ✓ E2EE: %t", s.e2ee)
 	case "/settings":
-		return true, fmt.Sprintf("  session %s · provider %s · profile %s · model %s · reasoning %s · required images %d · music required %t · required files %d · E2EE %t", s.sessionID, s.provider, emptyChatSetting(s.profile), emptyChatSetting(s.model), emptyChatSetting(s.reasoning), s.minImages, s.requireMusic, s.minArtifacts, s.e2ee)
+		return true, fmt.Sprintf("  session %s · provider %s · profile %s · model %s · reasoning %s · required images %d · music required %t · required files %d · new chat %t · per job %t · E2EE %t", s.sessionID, s.provider, emptyChatSetting(s.profile), emptyChatSetting(s.model), emptyChatSetting(s.reasoning), s.minImages, s.requireMusic, s.minArtifacts, s.newChat, s.newChatPerJob, s.e2ee)
 	default:
 		return false, ""
 	}
@@ -242,23 +251,46 @@ func emptyChatSetting(value string) string {
 }
 
 type chatState struct {
-	relayURL       string
-	token          string
-	provider       string
-	group          string
-	model          string
-	profile        string
-	reasoning      string
-	e2ee           bool
-	sessionID      string
-	artifactDir    string
-	minArtifacts   int
-	minImages      int
-	requireImage   bool
-	requireMusic   bool
-	imageBase64    string
-	imageMediaType string
-	nodeID         string
+	relayURL          string
+	token             string
+	provider          string
+	group             string
+	model             string
+	profile           string
+	reasoning         string
+	e2ee              bool
+	sessionID         string
+	artifactDir       string
+	minArtifacts      int
+	minImages         int
+	requireImage      bool
+	requireMusic      bool
+	imageBase64       string
+	imageMediaType    string
+	newChat           bool
+	newChatPerJob     bool
+	foregroundNewChat bool
+	nodeID            string
+}
+
+func (s *chatState) jobMetadata() map[string]interface{} {
+	metadata := map[string]interface{}{}
+	if s.requireMusic {
+		metadata["contextbridge_music_tool"] = true
+	}
+	if s.newChat || s.newChatPerJob {
+		metadata["contextbridge_new_chat"] = true
+	}
+	if s.newChatPerJob {
+		metadata["contextbridge_new_chat_per_job"] = true
+	}
+	if s.foregroundNewChat {
+		metadata["contextbridge_foreground_new_chat"] = true
+	}
+	if len(metadata) == 0 {
+		return nil
+	}
+	return metadata
 }
 
 func (s *chatState) turn(ctx context.Context, prompt string) error {
@@ -291,16 +323,14 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 		minimumImages = max(1, s.minImages)
 	}
 	minimumMedia := 0
-	var metadata map[string]interface{}
 	if s.requireMusic {
 		minimumMedia = 1
-		metadata = map[string]interface{}{"contextbridge_music_tool": true}
 	}
 	payload, err := json.Marshal(bridge.Job{
 		Source: "terminal-chat", Task: "generation", Prompt: prompt,
 		SessionID: s.sessionID, BrowserProfile: s.profile, Model: s.model, Reasoning: s.reasoning,
 		ImageBase64: s.imageBase64, ImageMediaType: s.imageMediaType,
-		Metadata: metadata,
+		Metadata: s.jobMetadata(),
 		Output:   bridge.OutputSpec{Mode: "text", MaxBytes: 1 << 20, Artifacts: s.artifactDir != "", MaxArtifactBytes: 12 << 20, MinArtifacts: minimum, MinImages: minimumImages, MinMedia: minimumMedia},
 	})
 	if err != nil {

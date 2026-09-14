@@ -559,7 +559,7 @@ func (s *Server) handleBrowserHeartbeat(w http.ResponseWriter, r *http.Request) 
 				status.Tabs[index].LastFailure = nil
 			} else {
 				switch failure.Reason {
-				case "prompt_not_retained", "send_disabled", "send_missing", "composer_draft", "incompatible_tool", "provider_busy", "model_selector_missing", "model_candidates_empty", "model_candidates_empty_pill", "model_candidates_empty_form", "model_choices_empty", "model_choice_missing", "model_choice_disabled", "model_not_retained", "recovery_turn_unverified", "recovery_turn_mismatch", "recovery_draft", "recovery_attachment", "recovery_answer_unfinished", "recovery_input_missing", "recovery_editor_open", "recovery_image_busy", "recovery_response_changed", "other":
+				case "prompt_not_retained", "send_disabled", "send_missing", "composer_draft", "incompatible_tool", "provider_busy", "model_selector_missing", "model_candidates_empty", "model_candidates_empty_pill", "model_candidates_empty_form", "model_choices_empty", "model_choice_missing", "model_choice_disabled", "model_not_retained", "recovery_turn_unverified", "recovery_turn_mismatch", "recovery_draft", "recovery_attachment", "recovery_answer_unfinished", "recovery_input_missing", "recovery_editor_open", "recovery_image_busy", "recovery_response_changed", "upload_input_missing", "upload_preview_missing", "attachment_busy", "submitted_prompt_unverified", "other":
 				default:
 					failure.Reason = "other"
 				}
@@ -572,6 +572,8 @@ func (s *Server) handleBrowserHeartbeat(w http.ResponseWriter, r *http.Request) 
 			dom.Tools = limitedDOMControls(dom.Tools, 32)
 			dom.ModelControls = limitedModelControls(dom.ModelControls, 12)
 			dom.AssistantTurns = max(0, min(dom.AssistantTurns, 10000))
+			dom.GeminiUserTurns = max(0, min(dom.GeminiUserTurns, 10000))
+			dom.GeminiLastUserTurnCharacters = max(0, min(dom.GeminiLastUserTurnCharacters, 100000))
 			dom.InputCharacters = max(0, min(dom.InputCharacters, 100000))
 			dom.LastResponseCharacters = max(0, min(dom.LastResponseCharacters, 100000))
 			allowedBusy := map[string]bool{"aria_busy": true, "streaming_attribute": true, "streaming_class": true, "image_loading": true, "stop_button": true}

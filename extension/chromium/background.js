@@ -660,6 +660,7 @@ async function processWork(cfg, work, claimedTabId) {
 		const newAssistantTurn = isNewAssistantTurn(initial, snapshot)
 		  || Boolean(editTarget && isEditAssistantTurn(initial, snapshot, text, baselineText));
 		const textChanged = Boolean(newAssistantTurn && snapshot.active_generation && text && text !== baselineText && text !== latestProgressText && !modeMismatch
+		  && !work.job.image_base64
 		  && Number(work.job.output?.min_images || 0) === 0);
 		const progressState = `${Boolean(snapshot.busy)}|${Number(snapshot.percent) || 0}|${snapshot.detail || ''}|${modeMismatch}`;
         if (textChanged || progressState !== latestProgressState) {
@@ -766,7 +767,12 @@ async function processWork(cfg, work, claimedTabId) {
     try {
       const owned = await api.scripting.executeScript({ target: { tabId }, func: inspectLatestOwnedTurn, args: [work.job.prompt, effectiveProfile.name] });
       submittedTurn = owned?.[0]?.result || null;
-    } catch (_) { /* A result can succeed while this optional edit proof is unavailable. */ }
+    } catch (_) { /* Some text-only providers lack a stable turn identifier. */ }
+    if (effectiveProfile.name === 'gemini' && work.job.image_base64 && !submittedTurn && answer.submitted_prompt_verified !== true) {
+      failureCode = 'browser_submit_unavailable';
+      failureReason = 'submitted_prompt_unverified';
+      throw new Error('Gemini did not expose a verifiable user turn containing the image-job prompt; the answer was not accepted');
+    }
     if (answer.artifacts?.length) {
       progressSequence += 1;
       await reportProgress(cfg, work.job.id, {
@@ -857,6 +863,10 @@ function classifyFailureReason(message) {
   if (/prompt editor did not retain|prompt editor changed|gemini editor did not accept/i.test(text)) return 'prompt_not_retained';
   if (/send button stayed disabled/i.test(text)) return 'send_disabled';
   if (/send button is not visible/i.test(text)) return 'send_missing';
+  if (/compatible (?:image upload|file) input/i.test(text)) return 'upload_input_missing';
+  if (/did not show the uploaded image/i.test(text)) return 'upload_preview_missing';
+  if (/did not show the image-job prompt|did not expose a verifiable user turn containing the image-job prompt/i.test(text)) return 'submitted_prompt_unverified';
+  if (/unsent attachment is already present/i.test(text)) return 'attachment_busy';
   if (/prompt editor contains another draft/i.test(text)) return 'composer_draft';
   if (/incompatible selected tool/i.test(text)) return 'incompatible_tool';
   return 'other';
@@ -934,6 +944,26 @@ async function resolveWorkTab(_cfg, work, claimedTabId) {
       if (configuredTabIDs(cfg).includes(mapped)) {
         const tab = await compatible(mapped);
         if (tab && (!binding.url || tab.url === binding.url)) return mapped;
+        // A fresh chat may gain its permanent conversation URL only after the
+        // first job has completed. Keep that exact tab bound, but only after
+        // the latest user turn still matches ContextBridge's stored proof.
+        if (tab && binding.ownedTurn?.id && binding.url && isFreshChatURL(binding.url)
+            && tab.url && !isFreshChatURL(tab.url)) {
+          try {
+            const before = new URL(binding.url);
+            const after = new URL(tab.url);
+            const profile = profileForTab(cfg, tab);
+            if (before.origin === after.origin && profile?.selectors && profile.name === binding.ownedTurn.provider) {
+              const proof = await api.scripting.executeScript({ target: { tabId: mapped }, func: inspectRecoveryState,
+                args: [profile.selectors, profile.name, { ownedTurn: binding.ownedTurn }] });
+              if (proof?.[0]?.result?.owned_turn_matches) {
+                bindings[key] = { ...binding, url: tab.url };
+                await api.storage.local.set({ sessionBindings: bindings });
+                return mapped;
+              }
+            }
+          } catch (_) { /* Never reclaim an uncertain conversation. */ }
+        }
       }
       // The user may manually switch back to a known conversation, including
       // after closing its original tab. Match the exact saved URL, never title
@@ -997,7 +1027,7 @@ async function createFreshSessionTab(cfg, work, claimedTabId) {
   if (!url) throw new Error('Automatic new chats are supported only for ChatGPT and Gemini');
   if (configuredTabIDs(cfg).length >= 16) throw new Error('The 16-tab safety limit is reached; close or detach a session tab first');
   if (!await api.permissions.contains({ origins: [new URL(url).origin + '/*'] })) throw new Error('Page access for the new AI chat is not granted');
-  const created = await api.tabs.create({ url, active: work?.job?.metadata?.contextbridge_foreground_new_chat === true });
+  const created = await api.tabs.create({ url, active: foregroundFreshChatForJob(work?.job) });
   await waitForTabReady(created.id, work.profile?.selectors || {}, 30000);
   if (!await checkFreshTab(created.id)) throw new Error('The new AI chat was not confirmed empty; no prompt was sent');
   const tabIds = [...configuredTabIDs(cfg), created.id];
@@ -1005,6 +1035,13 @@ async function createFreshSessionTab(cfg, work, claimedTabId) {
   void poll();
   void sendHeartbeat('waiting');
   return api.tabs.get(created.id);
+}
+
+function foregroundFreshChatForJob(job) {
+  // Inactive Opera tabs can suspend Gemini's image-upload callback indefinitely.
+  // Bring only a newly created upload chat to the foreground; ordinary text
+  // jobs remain in the background and manually attached tabs are untouched.
+  return job?.metadata?.contextbridge_foreground_new_chat === true || Boolean(job?.image_base64);
 }
 
 async function rememberSessionURL(key, tabId) {
@@ -1837,7 +1874,7 @@ function automate(job, profile, jobDeadline, editTarget = null) {
     }
     throw new Error('Gemini kept an incompatible selected tool after clearing it');
   };
-  const addFile = (element, encoded, mediaType, name) => {
+	const addFile = (element, encoded, mediaType, name) => {
     const bytes = Uint8Array.from(atob(encoded), (char) => char.charCodeAt(0));
     const extension = (mediaType || 'image/png').split('/')[1]?.replace(/[^a-z0-9]/gi, '') || 'png';
     const safeName = String(name || `contextbridge.${extension}`).split(/[\\/]/).pop().slice(0, 180) || `contextbridge.${extension}`;
@@ -1846,8 +1883,54 @@ function automate(job, profile, jobDeadline, editTarget = null) {
     transfer.items.add(file);
     element.files = transfer.files;
     element.dispatchEvent(new Event('input', { bubbles: true }));
-    element.dispatchEvent(new Event('change', { bubbles: true }));
-  };
+		element.dispatchEvent(new Event('change', { bubbles: true }));
+	};
+	const compatibleFileInput = (element, mediaType, name) => {
+		if (element?.type !== 'file') return false;
+		const accept = String(element.accept || '').toLowerCase().trim();
+		if (!accept || accept === '*' || accept === '*/*') return true;
+		const mime = String(mediaType || '').toLowerCase().split(';')[0];
+		const extension = String(name || '').toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] || '';
+		return accept.split(',').some((part) => {
+			const token = part.trim();
+			return token === '*' || token === '*/*' || token === mime
+				|| (mime.includes('/') && token === `${mime.split('/')[0]}/*`)
+				|| (extension && token === `.${extension}`)
+				|| (extension === 'jpg' && token === '.jpeg')
+				|| (extension === 'jpeg' && token === '.jpg');
+		});
+	};
+	const uploadInput = async (mediaType, name) => {
+		const fields = () => (selectors.file_input || []).flatMap((selector) => {
+			try { return [...document.querySelectorAll(selector)]; } catch (_) { return []; }
+		}).filter((element) => element?.type === 'file' && !element.webkitdirectory);
+		const findCompatible = () => fields().find((element) => compatibleFileInput(element, mediaType, name));
+		let field = findCompatible();
+		if (field || profile.name !== 'gemini') return field;
+		const image = String(mediaType || '').startsWith('image/');
+		if (image && fields().length) return fields()[0];
+		// Gemini mounts its hidden file fields only while Uploads & Tools is open.
+		// An already-open menu must not be toggled closed.
+		const trigger = [...document.querySelectorAll('button')].find((element) => isVisible(element)
+			&& /uploads?\s*(?:&|and|und)\s*tools?|hochladen/i.test(String(element.getAttribute('aria-label') || '')));
+		if (!trigger) return null;
+		if (trigger.getAttribute('aria-expanded') !== 'true') trigger.click();
+		for (let attempt = 0; attempt < 20 && !field; attempt += 1) {
+			await wait(150);
+			field = findCompatible();
+		}
+		// The Files picker in Gemini also handles images, but some builds list
+		// document extensions only in its advisory HTML accept attribute.
+		// Use that picker only for images and require a new composer preview below.
+		return field || (image ? fields()[0] || null : null);
+	};
+	const composerAttachmentEvidence = () => {
+		const composer = first(selectors.input)?.closest?.('form, [data-node-type="input-area"]');
+		if (!composer) return { count: 0, named: false, attached: false };
+		const attached = Boolean(composer.querySelector('[data-testid*="attachment" i], [data-test-id*="attachment" i], [data-testid*="file-thumbnail" i], .attachment-chip, .file-chip, file-preview'));
+		const nodes = [...composer.querySelectorAll('img, [data-testid*="attachment" i], [data-test-id*="attachment" i], [data-testid*="file-thumbnail" i], .attachment-chip, .file-chip, file-preview')];
+		return { count: nodes.length, named: /contextbridge-image\.(?:png|jpe?g|webp|gif)/i.test(String(composer.innerText || '')), attached };
+	};
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 	const normalizedWords = (value) => String(value || '').toLowerCase().normalize('NFKD').replace(/[^a-z0-9äöüß]+/g, ' ').trim().split(/\s+/).filter(Boolean);
 	const preferenceTerms = (kind, value) => {
@@ -2249,7 +2332,7 @@ function automate(job, profile, jobDeadline, editTarget = null) {
       if (!input) throw new Error('Prompt input was not found');
       const before = all(selectors.response);
       const beforeIdentities = new Set(before.map(responseIdentity).filter(Boolean));
-      const beforeUserTurns = document.querySelectorAll('[data-turn="user"]').length;
+      const beforeUserTurns = document.querySelectorAll(profile.name === 'gemini' ? 'user-query' : '[data-turn="user"]').length;
       const previousElement = before.length ? before[before.length - 1] : null;
       // An explicitly supplied empty baseline is meaningful: on resume the
       // finished answer may already be visible. Falling back to that answer
@@ -2259,6 +2342,9 @@ function automate(job, profile, jobDeadline, editTarget = null) {
         : (before.length ? responseText(before[before.length - 1]) : '');
       const previousIdentity = responseIdentity(previousElement);
       const resumeOnly = Boolean(job.metadata?.contextbridge_resume_only);
+	  let confirmedGeminiImageUpload = false;
+	  let retainedSubmittedPrompt = false;
+	  let clickedSendForThisPrompt = false;
 	  const initialFailure = providerError(null, false, beforeUserTurns);
 	  if (initialFailure?.blocking) {
 	    resolve({ ok: false, error: initialFailure.message, code: initialFailure.code, retryable: initialFailure.retryable });
@@ -2304,24 +2390,32 @@ function automate(job, profile, jobDeadline, editTarget = null) {
 		if (!input) throw new Error('Prompt input disappeared after selecting the music tool');
 	  }
       if (!resumeOnly && !editTarget && job.image_base64) {
-        const fileInput = (selectors.file_input || []).flatMap((selector) => {
-          try { return [...document.querySelectorAll(selector)]; } catch (_) { return []; }
-        }).find((element) => element.type === 'file' && (!element.accept || /image|\*/i.test(element.accept)));
-        if (!fileInput) throw new Error('This job has an image, but no image input was taught');
-        addFile(fileInput, job.image_base64, job.image_media_type, 'contextbridge-image.png');
-        await wait(1000);
+        const mediaType = String(job.image_media_type || 'image/png');
+        const name = `contextbridge-image.${extensionFor(mediaType)}`;
+        const fileInput = await uploadInput(mediaType, name);
+        if (!fileInput) throw new Error('No compatible image upload input appeared; the prompt was not sent');
+        if (fileInput.files?.length) throw new Error('An unsent attachment is already present; the prompt was not sent');
+        const beforeAttachment = profile.name === 'gemini' ? composerAttachmentEvidence() : null;
+        if (beforeAttachment?.attached || beforeAttachment?.named) throw new Error('An unsent attachment is already present; the prompt was not sent');
+        addFile(fileInput, job.image_base64, mediaType, name);
+        if (profile.name === 'gemini') {
+          let confirmed = false;
+          for (let attempt = 0; attempt < 60; attempt += 1) {
+            await wait(200);
+            const current = composerAttachmentEvidence();
+            if (current.named || current.count > beforeAttachment.count) { confirmed = true; break; }
+          }
+          if (!confirmed) throw new Error('Gemini did not show the uploaded image in its composer; the prompt was not sent');
+          confirmedGeminiImageUpload = true;
+        } else await wait(1000);
       }
       if (!resumeOnly && !editTarget && job.metadata?.contextbridge_input_file) {
         const attachment = job.metadata.contextbridge_input_file;
         if (job.image_base64) throw new Error('Only one carried artifact may be attached to a follow-up');
         if (!attachment.data_base64 || String(attachment.data_base64).length > 12 * 1024 * 1024) throw new Error('Carried file bytes are missing or too large');
-        const fileInput = (selectors.file_input || []).flatMap((selector) => {
-          try { return [...document.querySelectorAll(selector)]; } catch (_) { return []; }
-        }).find((element) => element.type === 'file' && (!element.accept || element.accept === '*' || element.accept.split(',').some((accepted) => {
-          const type = String(attachment.media_type || '');
-          return accepted.trim() === type || accepted.trim() === `${type.split('/')[0]}/*`;
-        })));
+        const fileInput = await uploadInput(attachment.media_type, attachment.name);
         if (!fileInput) throw new Error('No compatible file input was found; the next prompt was not sent');
+        if (fileInput.files?.length) throw new Error('An unsent attachment is already present; the prompt was not sent');
         addFile(fileInput, attachment.data_base64, attachment.media_type, attachment.name);
         await wait(1000);
       }
@@ -2356,6 +2450,7 @@ function automate(job, profile, jobDeadline, editTarget = null) {
             await wait(150);
           }
           if (!retained) throw new Error('Prompt editor did not retain the submitted text');
+          retainedSubmittedPrompt = true;
           input.setAttribute?.('data-contextbridge-owned-job', String(job.id || ''));
           let submit = sendControl();
           for (let attempt = 0; (!submit || submit.disabled || submit.getAttribute('aria-disabled') === 'true') && attempt < 20; attempt += 1) {
@@ -2363,7 +2458,12 @@ function automate(job, profile, jobDeadline, editTarget = null) {
             submit = sendControl();
           }
           if (submit && !submit.disabled && submit.getAttribute('aria-disabled') !== 'true') {
+            const sendDeadline = Date.parse(jobDeadline || '');
+            if (Number.isFinite(sendDeadline) && Date.now() >= sendDeadline) {
+              throw new Error('Browser job deadline expired before Send; no prompt was submitted');
+            }
             submit.click();
+            clickedSendForThisPrompt = true;
           } else if (submit) {
             throw new Error('Send button stayed disabled after filling the prompt');
           } else {
@@ -2394,10 +2494,43 @@ function automate(job, profile, jobDeadline, editTarget = null) {
       let lastReadyImages = 0;
       let readyImagesSince = 0;
       const submittedAt = Date.now();
+      const needsGeminiImageProof = profile.name === 'gemini' && Boolean(job.image_base64);
+      const normalizedPrompt = String(job.prompt || '').normalize('NFKC').replace(/\s+/g, ' ').trim();
+      const submittedGeminiTurn = () => {
+        const turns = [...document.querySelectorAll('user-query')];
+        if (!resumeOnly && turns.length !== beforeUserTurns + 1) return null;
+        const turn = turns.at(-1);
+        const content = turn?.querySelector?.('[id^="user-query-content-"]') || turn;
+        const text = String(content?.textContent || '').normalize('NFKC').replace(/\s+/g, ' ').trim();
+        if (normalizedPrompt && text.includes(normalizedPrompt)) return turn;
+        // Gemini currently renders image-only user turns without the prompt
+        // text in DOM. Accept that shape only after this same automation has
+        // verified the attachment preview, retained the exact editor text,
+        // clicked Send, and observed exactly one new turn. The response must
+        // still follow that turn; resume/reload never uses this weaker proof.
+        return needsGeminiImageProof && !resumeOnly && !text
+          && confirmedGeminiImageUpload && retainedSubmittedPrompt && clickedSendForThisPrompt ? turn : null;
+      };
       while (Date.now() < deadline) {
         await wait(650);
         const responses = all(selectors.response);
-        const latestElement = responses.length ? responses[responses.length - 1] : null;
+        let latestElement = responses.length ? responses[responses.length - 1] : null;
+        if (needsGeminiImageProof) {
+          const turn = submittedGeminiTurn();
+          if (!turn) {
+            if (Date.now() - submittedAt >= 15000) {
+              resolve({ ok: false, error: 'Gemini did not show the image-job prompt in a new user turn; no assistant answer was accepted', code: 'browser_submit_unavailable' });
+              return;
+            }
+            continue;
+          }
+          const scope = turn.closest?.('.conversation-container');
+          const candidates = scope ? [...scope.querySelectorAll('model-response')] : responses;
+          const afterTurn = candidates.filter((element) =>
+            typeof turn.compareDocumentPosition === 'function' && Boolean(turn.compareDocumentPosition(element) & 4));
+          latestElement = afterTurn.at(-1) || null;
+          if (!latestElement) continue;
+        }
         const latest = responseText(latestElement);
 		const readyImages = latestElement
 			? [...latestElement.querySelectorAll('img')].filter((image) => image.complete && image.naturalWidth >= 128 && image.naturalHeight >= 128).length : 0;
@@ -2516,7 +2649,8 @@ function automate(job, profile, jobDeadline, editTarget = null) {
 		  const artifacts = await collectArtifacts(latestElement, job.output || {});
 		  const confirmedModel = profile.name === 'gemini' && (selectedModel || job.model) && !['auto', 'default'].includes(String(selectedModel || job.model).toLowerCase())
 			? confirmGeminiMode(selectedModel || job.model) : selectedModel;
-		  resolve({ ok: true, text: latest, artifacts, selected_model: confirmedModel, selected_reasoning: selectedReasoning });
+		  resolve({ ok: true, text: latest, artifacts, selected_model: confirmedModel, selected_reasoning: selectedReasoning,
+		    submitted_prompt_verified: needsGeminiImageProof && Boolean(submittedGeminiTurn()) });
           return;
         }
       }
@@ -2527,13 +2661,16 @@ function automate(job, profile, jobDeadline, editTarget = null) {
       const code = /requested model|model selector/i.test(message)
 		? 'browser_model_unavailable'
 		: (/ChatGPT still shows Stop/i.test(message) ? 'browser_provider_busy'
-		: (/edit mode|previous ContextBridge message|previous message|Edit dialog|Edit update button|message is already being edited|provider still shows Stop|unsent attachment/i.test(message) ? 'browser_edit_unavailable'
+		: (/edit mode|previous ContextBridge message|previous message|Edit dialog|Edit update button|message is already being edited|provider still shows Stop|prompt editor contains an unsent attachment/i.test(message) ? 'browser_edit_unavailable'
 		: (/requested reasoning|reasoning selector/i.test(message) ? 'browser_reasoning_unavailable'
-			: (/send button stayed disabled|send button is not visible|prompt editor did not retain|prompt editor changed|gemini editor did not accept|incompatible selected tool/i.test(message) ? 'browser_submit_unavailable'
+		: (/deadline expired before Send/i.test(message) ? 'browser_timeout'
+		: (/send button stayed disabled|send button is not visible|prompt editor did not retain|prompt editor changed|gemini editor did not accept|incompatible selected tool/i.test(message) ? 'browser_submit_unavailable'
 			: (/prompt editor contains another draft/i.test(message) ? 'browser_composer_busy'
 			: (/image creation is rate limited/i.test(message) ? 'browser_rate_limited'
+			: (/compatible (?:image upload|file) input|did not show the uploaded image/i.test(message) ? 'browser_upload_unavailable'
+			: (/unsent attachment is already present/i.test(message) ? 'browser_composer_busy'
 			: (/image creation tool|image tool menu/i.test(message) ? 'browser_image_tool_unavailable'
-				: (/music creation tool/i.test(message) ? 'browser_music_tool_unavailable' : 'browser_automation_error'))))))));
+				: (/music creation tool/i.test(message) ? 'browser_music_tool_unavailable' : 'browser_automation_error')))))))))));
       resolve({ ok: false, error: message, code });
     }
   });
@@ -3149,6 +3286,13 @@ function inspectPageDOM(selectors) {
   }
   const responses = bySelectors(selectors.response, 10000);
   const latest = responses.at(-1);
+  const geminiTurns = [...document.querySelectorAll('user-query')];
+  const lastGeminiTurn = geminiTurns.at(-1);
+  const lastGeminiContent = lastGeminiTurn?.querySelector?.('[id^="user-query-content-"]');
+  const lastGeminiText = String(lastGeminiContent?.textContent || lastGeminiTurn?.textContent || '').trim();
+  const geminiResponseAfterTurn = Boolean(lastGeminiTurn && latest
+    && typeof lastGeminiTurn.compareDocumentPosition === 'function'
+    && (lastGeminiTurn.compareDocumentPosition(latest) & 4));
   const busySelectors = [
     ['aria_busy', '[aria-busy="true"]'],
     ['streaming_attribute', '[data-is-streaming="true"]'],
@@ -3201,6 +3345,10 @@ function inspectPageDOM(selectors) {
     }),
     model_controls: modelControls,
     assistant_turns: responses.length,
+    gemini_user_turns: Math.min(geminiTurns.length, 10000),
+    gemini_last_user_turn_characters: Math.min(lastGeminiText.length, 100000),
+    gemini_last_user_turn_has_content_id: Boolean(lastGeminiContent?.id),
+    gemini_response_after_last_user_turn: geminiResponseAfterTurn,
     last_response_characters: Math.min(latestText.length, 100000),
     last_response_busy: latestResponseBusy,
     busy_indicators: busyIndicators,

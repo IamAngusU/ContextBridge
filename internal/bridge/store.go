@@ -103,23 +103,27 @@ type BrowserTabFailure struct {
 // BrowserDOMSnapshot contains selector diagnostics only. It deliberately never
 // carries the prompt value, chat text, file contents, cookies, or full HTML.
 type BrowserDOMSnapshot struct {
-	CapturedAt               time.Time           `json:"captured_at"`
-	Inputs                   []BrowserDOMControl `json:"inputs,omitempty"`
-	InputHasText             bool                `json:"input_has_text,omitempty"`
-	InputCharacters          int                 `json:"input_characters,omitempty"`
-	Submit                   []BrowserDOMControl `json:"submit,omitempty"`
-	FileInputs               []BrowserDOMControl `json:"file_inputs,omitempty"`
-	Tools                    []BrowserDOMControl `json:"tools,omitempty"`
-	ModelControls            []BrowserDOMControl `json:"model_controls,omitempty"`
-	AssistantTurns           int                 `json:"assistant_turns"`
-	LastResponseCharacters   int                 `json:"last_response_characters,omitempty"`
-	LastResponseBusy         bool                `json:"last_response_busy,omitempty"`
-	BusyIndicators           []string            `json:"busy_indicators,omitempty"`
-	StopButtonDisabled       bool                `json:"stop_button_disabled,omitempty"`
-	StopButtonSpinning       bool                `json:"stop_button_spinning,omitempty"`
-	LastResponseImages       int                 `json:"last_response_images"`
-	LastResponseLoadedImages int                 `json:"last_response_loaded_images,omitempty"`
-	ImageProgress            int                 `json:"image_progress,omitempty"`
+	CapturedAt                      time.Time           `json:"captured_at"`
+	Inputs                          []BrowserDOMControl `json:"inputs,omitempty"`
+	InputHasText                    bool                `json:"input_has_text,omitempty"`
+	InputCharacters                 int                 `json:"input_characters,omitempty"`
+	Submit                          []BrowserDOMControl `json:"submit,omitempty"`
+	FileInputs                      []BrowserDOMControl `json:"file_inputs,omitempty"`
+	Tools                           []BrowserDOMControl `json:"tools,omitempty"`
+	ModelControls                   []BrowserDOMControl `json:"model_controls,omitempty"`
+	AssistantTurns                  int                 `json:"assistant_turns"`
+	GeminiUserTurns                 int                 `json:"gemini_user_turns,omitempty"`
+	GeminiLastUserTurnCharacters    int                 `json:"gemini_last_user_turn_characters,omitempty"`
+	GeminiLastUserTurnHasContentID  bool                `json:"gemini_last_user_turn_has_content_id,omitempty"`
+	GeminiResponseAfterLastUserTurn bool                `json:"gemini_response_after_last_user_turn,omitempty"`
+	LastResponseCharacters          int                 `json:"last_response_characters,omitempty"`
+	LastResponseBusy                bool                `json:"last_response_busy,omitempty"`
+	BusyIndicators                  []string            `json:"busy_indicators,omitempty"`
+	StopButtonDisabled              bool                `json:"stop_button_disabled,omitempty"`
+	StopButtonSpinning              bool                `json:"stop_button_spinning,omitempty"`
+	LastResponseImages              int                 `json:"last_response_images"`
+	LastResponseLoadedImages        int                 `json:"last_response_loaded_images,omitempty"`
+	ImageProgress                   int                 `json:"image_progress,omitempty"`
 }
 
 type BrowserDOMControl struct {

@@ -221,7 +221,7 @@ func TestBrowserHeartbeatAndDashboardStatus(t *testing.T) {
 	httpServer := httptest.NewServer(server.Handler())
 	defer httpServer.Close()
 
-	heartbeat := []byte(`{"state":"waiting","origin":"https://example.test","tab_title":"Test tab","profile_label":"Visual test","selectors_ready":true,"extension_version":"0.2.0","browser":"firefox","tabs":[{"id":42,"title":"Test tab","model_scan":"composer trigger, expanded=true, submenu=false, 10 candidates, open=pointer","reasoning_scan":"private page text","last_failure":{"code":"browser_submit_unavailable","reason":"raw private page content"},"dom":{"inputs":[{"tag":"div","id":"prompt","visible":true}],"input_has_text":true,"input_characters":999999,"last_response_characters":999999,"busy_indicators":["aria_busy","stop_button","aria_busy","streaming_attribute","image_loading","one too many"],"stop_button_disabled":true,"stop_button_spinning":true,"file_inputs":[{"tag":"input","id":"upload-photos","type":"file","accept":"image/*","visible":false}],"assistant_turns":3,"last_response_images":2,"last_response_loaded_images":999999}}]}`)
+	heartbeat := []byte(`{"state":"waiting","origin":"https://example.test","tab_title":"Test tab","profile_label":"Visual test","selectors_ready":true,"extension_version":"0.2.0","browser":"firefox","tabs":[{"id":42,"title":"Test tab","model_scan":"composer trigger, expanded=true, submenu=false, 10 candidates, open=pointer","reasoning_scan":"private page text","last_failure":{"code":"browser_submit_unavailable","reason":"raw private page content"},"dom":{"inputs":[{"tag":"div","id":"prompt","visible":true}],"input_has_text":true,"input_characters":999999,"last_response_characters":999999,"gemini_user_turns":999999,"gemini_last_user_turn_characters":999999,"gemini_last_user_turn_has_content_id":true,"gemini_response_after_last_user_turn":true,"busy_indicators":["aria_busy","stop_button","aria_busy","streaming_attribute","image_loading","one too many"],"stop_button_disabled":true,"stop_button_spinning":true,"file_inputs":[{"tag":"input","id":"upload-photos","type":"file","accept":"image/*","visible":false}],"assistant_turns":3,"last_response_images":2,"last_response_loaded_images":999999}}]}`)
 	req, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/browser/heartbeat", bytes.NewReader(heartbeat))
 	req.Header.Set("Authorization", "Bearer "+cfg.Server.Token)
 	req.Header.Set("Content-Type", "application/json")
@@ -259,8 +259,39 @@ func TestBrowserHeartbeatAndDashboardStatus(t *testing.T) {
 	if status.Browser.Tabs[0].ModelScan != "composer trigger, expanded=true, submenu=false, 10 candidates, open=pointer" || status.Browser.Tabs[0].ReasoningScan != "" {
 		t.Fatalf("model scan diagnostics were not safely bounded: %#v", status.Browser.Tabs[0])
 	}
-	if dom := status.Browser.Tabs[0].DOM; dom.LastResponseCharacters != 100000 || dom.LastResponseLoadedImages != 100 || len(dom.BusyIndicators) != 4 || dom.BusyIndicators[0] != "aria_busy" || !dom.StopButtonDisabled || !dom.StopButtonSpinning {
+	if dom := status.Browser.Tabs[0].DOM; dom.LastResponseCharacters != 100000 || dom.GeminiUserTurns != 10000 || dom.GeminiLastUserTurnCharacters != 100000 || !dom.GeminiLastUserTurnHasContentID || !dom.GeminiResponseAfterLastUserTurn || dom.LastResponseLoadedImages != 100 || len(dom.BusyIndicators) != 4 || dom.BusyIndicators[0] != "aria_busy" || !dom.StopButtonDisabled || !dom.StopButtonSpinning {
 		t.Fatalf("busy diagnostics were not safely bounded: %#v", dom)
+	}
+	for _, reason := range []string{"upload_input_missing", "upload_preview_missing", "attachment_busy", "submitted_prompt_unverified"} {
+		updated := bytes.Replace(heartbeat, []byte(`"raw private page content"`), []byte(`"`+reason+`"`), 1)
+		req, _ = http.NewRequest(http.MethodPost, httpServer.URL+"/v1/browser/heartbeat", bytes.NewReader(updated))
+		req.Header.Set("Authorization", "Bearer "+cfg.Server.Token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err = http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("upload diagnostic heartbeat returned %s", resp.Status)
+		}
+		req, _ = http.NewRequest(http.MethodGet, httpServer.URL+"/v1/status", nil)
+		req.Header.Set("Authorization", "Bearer "+cfg.Server.Token)
+		resp, err = http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var updatedStatus struct {
+			Browser BrowserClientStatus `json:"browser"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&updatedStatus); err != nil {
+			resp.Body.Close()
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if updatedStatus.Browser.Tabs[0].LastFailure.Reason != reason {
+			t.Fatalf("bounded upload reason %q was not retained: %#v", reason, updatedStatus.Browser.Tabs[0].LastFailure)
+		}
 	}
 
 	resp, err = http.Get(httpServer.URL + "/")

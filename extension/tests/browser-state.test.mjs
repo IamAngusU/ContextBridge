@@ -57,6 +57,9 @@ assert.equal(context.capabilityScanInterval('chatgpt', { currentModel: 'GPT-5.6 
 }
 assert.equal(context.classifyFailureReason('Prompt editor did not retain the submitted text'), 'prompt_not_retained');
 assert.equal(context.classifyFailureReason('Send button stayed disabled after filling the prompt'), 'send_disabled');
+assert.equal(context.classifyFailureReason('No compatible image upload input appeared; the prompt was not sent'), 'upload_input_missing');
+assert.equal(context.classifyFailureReason('An unsent attachment is already present; the prompt was not sent'), 'attachment_busy');
+assert.equal(context.classifyFailureReason('Gemini did not show the image-job prompt in a new user turn; no assistant answer was accepted'), 'submitted_prompt_unverified');
 assert.equal(context.classifyFailureReason('ChatGPT still shows Stop; the draft was left untouched'), 'provider_busy');
 assert.equal(context.classifyFailureReason('The model selector is not visible in this ChatGPT composer'), 'model_selector_missing');
 assert.equal(context.classifyFailureReason('Requested model "GPT-5.5" is not available in this chat (0 candidates, 0 model choices, pill trigger)'), 'model_candidates_empty_pill');
@@ -70,6 +73,9 @@ assert.equal(context.classifyFailureReason('Automatic reload skipped: the latest
 assert.equal(context.classifyFailureReason('Automatic reload skipped: an unsent draft is present; the tab was left untouched'), 'recovery_draft');
 assert.equal(context.classifyFailureReason('A provider error containing private text'), 'other');
 assert.equal(context.shouldForegroundStalledTab({ autoCreated: true }, { name: 'chatgpt' }, { ok: false, recoverable: true, code: 'stalled_response' }), true);
+assert.equal(context.foregroundFreshChatForJob({ image_base64: 'iVBORw0KGgo=' }), true, 'fresh image-upload chats should wake their provider UI');
+assert.equal(context.foregroundFreshChatForJob({ prompt: 'text only' }), false, 'text-only chats should stay in the background');
+assert.equal(context.foregroundFreshChatForJob({ metadata: { contextbridge_foreground_new_chat: true } }), true, 'explicit foreground request should be honored');
 assert.equal(context.shouldForegroundStalledTab({ autoCreated: false }, { name: 'chatgpt' }, { ok: false, recoverable: true, code: 'stalled_response' }), false);
 assert.equal(context.shouldForegroundStalledTab({ autoCreated: true }, { name: 'gemini' }, { ok: false, recoverable: true, code: 'stalled_response' }), false);
 assert.equal(context.shouldForegroundStalledTab({ autoCreated: true }, { name: 'chatgpt' }, { ok: false, recoverable: false, code: 'browser_timeout' }), false);
@@ -1106,6 +1112,259 @@ const element = (text = '', attributes = {}) => ({
 }
 
 {
+  context.atob = (value) => Buffer.from(value, 'base64').toString('binary');
+  context.File = class { constructor(parts, name, options) { this.parts = parts; this.name = name; this.type = options.type; } };
+  context.DataTransfer = class {
+    constructor() { this.files = []; this.items = { add: (file) => { this.files.push(file); } }; }
+  };
+  context.Event = class { constructor(type) { this.type = type; } };
+  let menuOpen = false;
+  let triggerVisible = true;
+  let triggerClicks = 0;
+  let preview = false;
+  const uploaded = [];
+  const composer = { innerText: '', querySelector: () => null,
+    querySelectorAll: (selector) => selector.startsWith('img,') && preview ? [element()] : [] };
+  const input = { ...element(), closest: () => composer, focus() { throw new Error('Upload completed before prompt entry'); } };
+  const trigger = { ...element('Uploads & Tools'), click() { menuOpen = true; triggerClicks += 1; },
+    getAttribute: (name) => name === 'aria-expanded' ? String(menuOpen) : (name === 'aria-label' ? 'Uploads & Tools' : null) };
+  const field = { type: 'file', accept: '.txt,.pdf,.doc', files: [], dispatchEvent(event) {
+    uploaded.push(event.type); if (event.type === 'change') preview = true;
+  } };
+  context.document = {
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === 'input[type="file"]') return menuOpen ? [field] : [];
+      if (selector === 'button') return triggerVisible ? [trigger] : [];
+      return [];
+    }
+  };
+  const job = { prompt: 'Describe the image', image_base64: Buffer.from([137, 80, 78, 71]).toString('base64'),
+    image_media_type: 'image/png', output: { mode: 'text' } };
+  const profile = { name: 'gemini', selectors: { input: ['#input'], file_input: ['input[type="file"]'], response: [], submit: [] } };
+  const firstUpload = await context.automate(job, profile, new Date(Date.now() + 5000).toISOString());
+  assert.equal(firstUpload.error, 'Upload completed before prompt entry');
+  assert.equal(triggerClicks, 1, 'Gemini upload opens its own menu when the file field is not mounted');
+  assert.equal(field.files[0].name, 'contextbridge-image.png');
+  assert.deepEqual(uploaded, ['input', 'change']);
+  field.files = [];
+  preview = false;
+  triggerVisible = false;
+  uploaded.length = 0;
+  const secondUpload = await context.automate(job, profile, new Date(Date.now() + 5000).toISOString());
+  assert.equal(secondUpload.error, 'Upload completed before prompt entry');
+  assert.equal(triggerClicks, 1, 'a mounted upload field must work even if its menu trigger is not currently found');
+  field.files = [{ name: 'user-attachment.png' }];
+  const existing = await context.automate(job, profile, new Date(Date.now() + 5000).toISOString());
+  assert.match(existing.error, /unsent attachment is already present/);
+  assert.equal(existing.code, 'browser_composer_busy');
+  assert.deepEqual(uploaded, ['input', 'change'], 'an existing attachment must not be replaced');
+}
+
+{
+  // An image picker can change the page and produce an unrelated answer.
+  // Without a new user turn containing the actual prompt, that answer is not
+  // proof that the image and text were submitted together.
+  const originalDate = context.Date;
+  let clockOffset = 0;
+  let sent = false;
+  let preview = false;
+  let userTurnReads = 0;
+  context.Date = class extends Date { static now() { return Date.now() + clockOffset; } };
+  context.HTMLTextAreaElement = class {
+    constructor() { this.value = ''; this.offsetWidth = 1; this.offsetHeight = 1; }
+    getClientRects() { return [1]; }
+    focus() {}
+    dispatchEvent() {}
+    setAttribute() {}
+  };
+  context.HTMLInputElement = class {};
+  context.InputEvent = class {};
+  const composer = {
+    innerText: '',
+    querySelector: () => null,
+    querySelectorAll(selector) { return selector.startsWith('img,') && preview ? [element()] : []; }
+  };
+  const input = new context.HTMLTextAreaElement();
+  input.closest = () => composer;
+  const field = { type: 'file', accept: '.txt,.pdf', files: [], dispatchEvent(event) {
+    if (event.type === 'change') preview = true;
+  } };
+  const send = { ...element('', { 'aria-label': 'Nachricht senden' }), click() { sent = true; } };
+  const unrelated = element('Clean typography, minimal layout, and a strong personal branding connection to angusu.de.');
+  context.document = {
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === '#send') return [send];
+      if (selector === '#response') return sent ? [unrelated] : [];
+      if (selector === 'input[type="file"]') return [field];
+      if (selector === 'user-query') {
+        userTurnReads += 1;
+        if (sent && userTurnReads > 1) clockOffset = 16000;
+        return [];
+      }
+      return [];
+    }
+  };
+  try {
+    const result = await context.automate({ id: 'image-and-text', prompt: 'Read this image, then identify the owner of angusu.de.',
+      image_base64: Buffer.from([137, 80, 78, 71]).toString('base64'), image_media_type: 'image/png', output: { mode: 'text' } },
+    { name: 'gemini', selectors: { input: ['#input'], file_input: ['input[type="file"]'], response: ['#response'], submit: ['#send'] } },
+    new Date(Date.now() + 60000).toISOString());
+    assert.equal(sent, true);
+    assert.equal(result.ok, false, 'an unrelated answer must never complete the image job');
+    assert.equal(result.code, 'browser_submit_unavailable');
+  } finally {
+    context.Date = originalDate;
+  }
+}
+
+{
+  let sent = false;
+  let preview = false;
+  let fakeNow = Date.now();
+  const realDate = context.Date;
+  const realSetTimeout = context.setTimeout;
+  context.Date = class extends Date { static now() { return fakeNow; } };
+  context.setTimeout = (callback, milliseconds) => realSetTimeout(() => { fakeNow += milliseconds; callback(); }, 1);
+  class TextArea {
+    constructor() { this.value = ''; this.offsetWidth = 1; this.offsetHeight = 1; }
+    getClientRects() { return [1]; }
+    focus() {}
+    dispatchEvent() {}
+    setAttribute() {}
+  }
+  context.HTMLTextAreaElement = TextArea;
+  context.HTMLInputElement = class {};
+  context.InputEvent = class {};
+  const prompt = 'Read the two lines in this image.';
+  const input = new TextArea();
+  const composer = { innerText: '', querySelector: () => null,
+    querySelectorAll: (selector) => selector.startsWith('img,') && preview ? [element()] : [] };
+  input.closest = () => composer;
+  const field = { type: 'file', accept: 'image/*', files: [], dispatchEvent(event) {
+    if (event.type === 'change') preview = true;
+  } };
+  const send = { ...element('', { 'aria-label': 'Nachricht senden' }), click() { sent = true; input.value = ''; } };
+  const answer = element('IamAngusU\nContextBridge');
+  const unrelated = element('Unrelated earlier answer');
+  const content = { id: 'user-query-content-2', textContent: prompt };
+  const scope = { querySelectorAll: (selector) => selector === 'model-response' ? [answer, unrelated] : [] };
+  const turn = { querySelector: () => content, closest: () => scope,
+    compareDocumentPosition: (candidate) => candidate === answer ? 4 : 2 };
+  context.document = {
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === '#send') return sent ? [] : [send];
+      if (selector === 'input[type="file"]') return [field];
+      if (selector === 'user-query') return sent ? [turn] : [];
+      if (selector === '#response') return sent ? [answer, unrelated] : [];
+      return [];
+    }
+  };
+  try {
+    const result = await context.automate({ id: 'paired-image-and-prompt', prompt,
+      image_base64: Buffer.from([137, 80, 78, 71]).toString('base64'), image_media_type: 'image/png', output: { mode: 'text' } },
+    { name: 'gemini', selectors: { input: ['#input'], file_input: ['input[type="file"]'], response: ['#response'], submit: ['#send'] } },
+    new Date(Date.now() + 60000).toISOString());
+    assert.equal(result.ok, true);
+    assert.equal(result.text, 'IamAngusU\nContextBridge', 'the answer must follow the verified prompt, not an unrelated response');
+    assert.equal(result.submitted_prompt_verified, true, 'a paired Gemini image response is its own submission proof');
+  } finally {
+    context.Date = realDate;
+    context.setTimeout = realSetTimeout;
+  }
+}
+
+for (const [renderedUserText, shouldPass] of [['', true], ['A different visible user prompt', false]]) {
+  // Gemini can render an uploaded image turn with no readable prompt text.
+  // The fallback is limited to an exact retained composer draft, confirmed
+  // attachment preview, one clicked Send, and one new paired user turn.
+  let sent = false;
+  let preview = false;
+  let fakeNow = Date.now();
+  const realDate = context.Date;
+  const realSetTimeout = context.setTimeout;
+  context.Date = class extends Date { static now() { return fakeNow; } };
+  context.setTimeout = (callback, milliseconds) => realSetTimeout(() => { fakeNow += milliseconds; callback(); }, 1);
+  class TextArea {
+    constructor() { this.value = ''; this.offsetWidth = 1; this.offsetHeight = 1; }
+    getClientRects() { return [1]; }
+    focus() {}
+    dispatchEvent() {}
+    setAttribute() {}
+  }
+  context.HTMLTextAreaElement = TextArea;
+  context.HTMLInputElement = class {};
+  context.InputEvent = class {};
+  const input = new TextArea();
+  const composer = { innerText: '', querySelector: () => null,
+    querySelectorAll: (selector) => selector.startsWith('img,') && preview ? [element()] : [] };
+  input.closest = () => composer;
+  const field = { type: 'file', accept: 'image/*', files: [], dispatchEvent(event) {
+    if (event.type === 'change') preview = true;
+  } };
+  const send = { ...element('', { 'aria-label': 'Nachricht senden' }), click() { sent = true; input.value = ''; } };
+  const answer = element('IamAngusU\nContextBridge');
+  const scope = { querySelectorAll: (selector) => selector === 'model-response' ? [answer] : [] };
+  const turn = { textContent: renderedUserText, querySelector: () => null, closest: () => scope,
+    compareDocumentPosition: () => 4 };
+  context.document = {
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === '#send') return sent ? [] : [send];
+      if (selector === 'input[type="file"]') return [field];
+      if (selector === 'user-query') return sent ? [turn] : [];
+      if (selector === '#response') return sent ? [answer] : [];
+      return [];
+    }
+  };
+  try {
+    const result = await context.automate({ id: 'image-turn-without-text', prompt: 'Read the two lines in this image.',
+      image_base64: Buffer.from([137, 80, 78, 71]).toString('base64'), image_media_type: 'image/png', output: { mode: 'text' } },
+    { name: 'gemini', selectors: { input: ['#input'], file_input: ['input[type="file"]'], response: ['#response'], submit: ['#send'] } },
+    new Date(Date.now() + 60000).toISOString());
+    assert.equal(sent, true);
+    assert.equal(result.ok, shouldPass, 'a blank Gemini image turn is acceptable only with the full submission chain');
+    if (shouldPass) {
+      assert.equal(result.text, 'IamAngusU\nContextBridge');
+      assert.equal(result.submitted_prompt_verified, true);
+    } else assert.equal(result.code, 'browser_submit_unavailable');
+  } finally {
+    context.Date = realDate;
+    context.setTimeout = realSetTimeout;
+  }
+}
+
+{
+  let sent = false;
+  class TextArea {
+    constructor() { this.value = ''; this.offsetWidth = 1; this.offsetHeight = 1; }
+    getClientRects() { return [1]; }
+    focus() {}
+    dispatchEvent() {}
+    setAttribute() {}
+  }
+  context.HTMLTextAreaElement = TextArea;
+  context.InputEvent = class {};
+  const input = new TextArea();
+  input.closest = () => null;
+  const send = { ...element('', { 'aria-label': 'Nachricht senden' }), click() { sent = true; } };
+  context.document = {
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === '#send') return [send];
+      return [];
+    }
+  };
+  const result = await context.automate({ prompt: 'Do not send after the deadline', output: { mode: 'text' } },
+    { name: 'gemini', selectors: { input: ['#input'], response: [], submit: ['#send'] } },
+    new Date(Date.now() - 1000).toISOString());
+  assert.equal(sent, false, 'a delayed background script must never send after the job deadline');
+  assert.equal(result.code, 'browser_timeout');
+}
+
+{
   const removeMusic = element('', { 'aria-label': 'Auswahl von „Musik“ aufheben' });
   const composer = { querySelectorAll: () => [removeMusic] };
   const input = { ...element(), tagName: 'DIV', closest: () => composer };
@@ -1645,6 +1904,42 @@ for (const disabled of [true, false]) {
   assert.equal(hints[0].type, 'page-capability-interaction');
   context.setTimeout = previousSetTimeout;
   context.clearTimeout = previousClearTimeout;
+}
+
+{
+  const originalSettings = context.settings;
+  const originalProfileForTab = context.profileForTab;
+  const originalTabGet = chrome.tabs.get;
+  const originalExecute = chrome.scripting.executeScript;
+  const originalStorageSet = chrome.storage.local.set;
+  const work = { profile: { name: 'gemini' }, job: { session_id: 'late-url', contextbridge_session_key: 'late-url' } };
+  const key = context.workSessionKey(work);
+  const permanentURL = 'https://gemini.google.com/app/owned-conversation';
+  const cfg = { tabIds: [42], sessionBindingsMigrated: true, sessionBindings: {
+    [key]: { tabId: 42, url: 'https://gemini.google.com/app', ownedTurn: { id: 'user-query-content-1', digest: 'a'.repeat(64), provider: 'gemini' } }
+  } };
+  let proofMatches = true;
+  let proofChecks = 0;
+  context.settings = async () => cfg;
+  context.profileForTab = () => ({ name: 'gemini', selectors: { input: ['#input'], response: ['model-response'] } });
+  chrome.tabs.get = async () => ({ id: 42, url: permanentURL });
+  chrome.scripting.executeScript = async () => { proofChecks += 1; return [{ result: { owned_turn_matches: proofMatches } }]; };
+  chrome.storage.local.set = async (value) => Object.assign(cfg, value);
+  try {
+    assert.equal(await context.resolveWorkTab(cfg, work, 42), 42);
+    assert.equal(cfg.sessionBindings[key].url, permanentURL);
+    assert.equal(proofChecks, 1, 'late URL binding must be checked against the owned user turn');
+    cfg.sessionBindings[key].url = 'https://gemini.google.com/app';
+    proofMatches = false;
+    await assert.rejects(context.resolveWorkTab(cfg, work, 42), /session tab moved or closed/i);
+    assert.equal(cfg.sessionBindings[key].url, 'https://gemini.google.com/app', 'uncertain ownership must not change the binding');
+  } finally {
+    context.settings = originalSettings;
+    context.profileForTab = originalProfileForTab;
+    chrome.tabs.get = originalTabGet;
+    chrome.scripting.executeScript = originalExecute;
+    chrome.storage.local.set = originalStorageSet;
+  }
 }
 
 console.log('Browser progress and provider failures verified');

@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "ContextBridge",
   "short_name": "ContextBridge",
-  "version": "0.5.55",
+  "version": "0.5.64",
   "description": "Connect auto-detected or visually taught AI tabs to your local ContextBridge service.",
   "permissions": ["storage", "activeTab", "scripting", "alarms"],
   "optional_permissions": ["tabs"],
