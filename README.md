@@ -68,6 +68,7 @@ The installer verifies the matching published release checksum, creates a privat
 On Windows, the installer also creates **ContextBridge → Terminal** and **ContextBridge → Dashboard** shortcuts in the user's Start menu. Terminal attaches read-only to the already running service; closing that window does not stop the service or interrupt jobs. Developers can use `contextbridge console` for the same live view, `contextbridge status` for a one-time snapshot, and `contextbridge doctor` for actionable setup checks. `contextbridge run` is only for starting the service itself; do not launch a second copy merely to see its terminal output.
 
 Browser Connect confirms the local service and selected tabs first. Page-control and model scans continue in the background, so an idle or suspended AI page does not hold the Connect button indefinitely; a tab still has to become ready before a job can send to it.
+The popup's **Reconnect automatically after an update or connection loss** option is on by default. It restores the user's existing attached-tab connection after a browser or extension restart and retries temporary service outages with bounded backoff; it never attaches new personal chats or reloads a provider page. **Disconnect** always stays disconnected until clicked again. A rejected pairing token or access permission fails closed and needs a manual fix.
 
 ## Automatic Updates
 

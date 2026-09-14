@@ -11,7 +11,7 @@ api.storage.onChanged?.addListener((changes, area) => {
   if (area !== 'local') return;
   if (changes.tabIds) attachedTabIDs = [...new Set((changes.tabIds.newValue || []).map(Number).filter(Boolean))];
   if (changes.connectionProgress && connectPending) showConnectionProgress(changes.connectionProgress.newValue);
-  if (changes.tabIds || changes.tabCapabilities || changes.tabCooldowns || changes.tabFailures || changes.lastError || changes.connectionError || changes.running) void refreshLiveTabs(Boolean(changes.tabIds || changes.running || changes.connectionError));
+  if (changes.tabIds || changes.tabCapabilities || changes.tabCooldowns || changes.tabFailures || changes.lastError || changes.connectionError || changes.running || changes.relayConnected) void refreshLiveTabs(Boolean(changes.tabIds || changes.running || changes.connectionError || changes.relayConnected));
 });
 
 async function initialize() {
@@ -20,6 +20,7 @@ async function initialize() {
   $('url').value = saved.bridgeUrl;
   $('token').value = saved.token;
   $('visual-mode').checked = saved.useVisualProfile;
+  $('auto-reconnect').checked = saved.autoReconnect;
   $('auto-attach-fresh').checked = saved.autoAttachFreshTabs;
   $('preserve-drafts').checked = saved.preserveDrafts;
   $('auto-close-finished').checked = saved.autoCloseFinishedChats;
@@ -220,6 +221,9 @@ $('detach-all').addEventListener('click', async () => {
 $('auto-attach-fresh').addEventListener('change', async () => {
   await api.storage.local.set({ autoAttachFreshTabs: $('auto-attach-fresh').checked });
   if ($('auto-attach-fresh').checked) await api.runtime.sendMessage({ type: 'discover-fresh-tabs' });
+});
+$('auto-reconnect').addEventListener('change', async () => {
+  await api.storage.local.set({ autoReconnect: $('auto-reconnect').checked });
 });
 $('preserve-drafts').addEventListener('change', async () => {
   await api.storage.local.set({ preserveDrafts: $('preserve-drafts').checked });
@@ -612,6 +616,7 @@ async function refreshState() {
       : 'Connect will ask to attach this AI page. No separate test is required.';
   if (connectPending) showConnectionProgress(saved.connectionProgress);
   else if (saved.connectionError) setStatus('error', saved.connectionError);
+  else if (saved.running && saved.relayConnected === false) setStatus('connecting', 'Reconnecting to the local service…');
   else if (saved.running && saved.lastError) setStatus('error', saved.lastError);
   else if (saved.running) setStatus('live', `Connected · ${attachedTabIDs.length} tab${attachedTabIDs.length === 1 ? '' : 's'} attached`);
   else setStatus('idle', 'Not connected');
@@ -720,6 +725,8 @@ async function settings() {
     tabId: 0,
     tabIds: [],
     running: false,
+    relayConnected: false,
+    autoReconnect: true,
     autoAttachFreshTabs: false,
     preserveDrafts: false,
     autoCloseFinishedChats: false,

@@ -2,6 +2,17 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.47 - 2026-09-14
+
+### Added
+
+- a browser-popup toggle for automatic reconnect after extension/browser restarts and temporary local-service loss; deliberate Disconnect stays off, rejected pairing requires a manual fix, and temporary retries back off
+
+### Fixed
+
+- recurring Chromium worker alarms are no longer reset on every wake, and the local service tolerates a delayed alarm for 90 seconds before declaring an idle browser offline
+- browser job pollers pause during a known relay outage rather than repeatedly polling an unavailable service; the popup distinguishes reconnecting from connected
+
 ## 0.5.46 - 2026-09-14
 
 ### Fixed

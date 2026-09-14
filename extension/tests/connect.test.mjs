@@ -6,7 +6,7 @@ const source = fs.readFileSync(new URL('../src/background.js', import.meta.url),
 const listener = { addListener() {} };
 const state = {
   bridgeUrl: 'http://127.0.0.1:32145', token: 'test-token', tabId: 7, tabIds: [7],
-  running: false, useVisualProfile: true, taughtProfiles: {}, tabCapabilities: {}, tabCapabilityScans: {}
+  running: false, autoReconnect: true, useVisualProfile: true, taughtProfiles: {}, tabCapabilities: {}, tabCapabilityScans: {}
 };
 let pageInspections = 0;
 let serviceChecks = 0;
@@ -52,6 +52,7 @@ assert.equal((await first).ok, true);
 assert.equal(serviceChecks, 1);
 assert.equal(pageInspections, 0, 'page DOM or model-picker inspection must not gate Connect');
 assert.equal(state.running, true);
+assert.equal(state.relayConnected, true);
 assert.equal(heartbeats[0].active_tabs, 1);
 assert.equal(heartbeats[0].tabs[0].profile, 'chatgpt');
 assert.equal(state.connectionProgress, null);
@@ -72,3 +73,50 @@ const updatedTab = heartbeats.at(-1).tabs[0];
 assert.equal(updatedTab.current_model, 'GPT-5.6 Sol');
 assert.equal(updatedTab.current_reasoning, 'High');
 assert.equal(updatedTab.dom.prompt_inputs, 1);
+
+// A transient outage keeps the user's requested connection but pauses work
+// until a heartbeat succeeds. With automatic reconnect disabled, three
+// failures end that intent and require a fresh deliberate Connect.
+context.fetch = async () => { throw new Error('service offline'); };
+await context.sendHeartbeatOnce('waiting');
+await context.sendHeartbeatOnce('waiting');
+assert.equal(state.running, true);
+assert.equal(state.relayConnected, false);
+context.fetch = async (url) => url.endsWith('/v1/browser/heartbeat')
+  ? { status: 200, ok: true } : { status: 200, ok: true, json: async () => ({ ok: true }) };
+await context.sendHeartbeatOnce('waiting');
+assert.equal(state.relayConnected, true);
+state.autoReconnect = false;
+context.fetch = async () => { throw new Error('service offline'); };
+await context.sendHeartbeatOnce('waiting');
+await context.sendHeartbeatOnce('waiting');
+assert.equal(state.running, true);
+await context.sendHeartbeatOnce('waiting');
+assert.equal(state.running, false);
+assert.equal(state.relayConnected, false);
+assert.match(state.connectionError, /Automatic reconnect is off/);
+
+state.running = true;
+state.relayConnected = true;
+await context.resume(true);
+assert.equal(state.running, false, 'an extension update must honor the disabled automatic reconnect preference');
+assert.match(state.connectionError, /Automatic reconnect is off/);
+
+state.autoReconnect = true;
+state.running = true;
+state.relayConnected = true;
+vm.runInContext('stopRequested = false', context);
+context.fetch = async () => ({ status: 401, ok: false });
+await context.sendHeartbeatOnce('waiting');
+assert.equal(state.running, false, 'a rejected pairing token must halt automatic retries');
+assert.equal(state.relayConnected, false);
+assert.match(state.connectionError, /pairing token/i);
+
+state.running = true;
+vm.runInContext('stopRequested = false', context);
+context.fetch = async () => ({ status: 200, ok: true });
+await context.stopPairing();
+await context.resume(true);
+assert.equal(state.running, false, 'a deliberate Disconnect must survive an extension update');
+
+assert.match(fs.readFileSync(new URL('../src/popup.html', import.meta.url), 'utf8'), /id="auto-reconnect"/);

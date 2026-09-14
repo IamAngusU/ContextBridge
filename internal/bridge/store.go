@@ -11,6 +11,12 @@ import (
 	"time"
 )
 
+// Chromium may suspend an extension worker between alarm wakeups. The alarm
+// can arrive later than its requested 30 seconds, so a 45-second lease made a
+// healthy idle relay flicker offline. Explicit paused heartbeats still remove
+// it immediately.
+const browserHeartbeatGracePeriod = 90 * time.Second
+
 type Store struct {
 	dir       string
 	mu        sync.Mutex
@@ -502,7 +508,7 @@ func (s *Store) RecordBrowserHeartbeat(status BrowserClientStatus) {
 	defer s.mu.Unlock()
 	status.Connected = status.State != "paused"
 	status.LastSeen = time.Now().UTC()
-	wasConnected := s.browser.Connected && time.Since(s.browser.LastSeen) < 45*time.Second
+	wasConnected := s.browser.Connected && time.Since(s.browser.LastSeen) < browserHeartbeatGracePeriod
 	s.browser = status
 	if status.Connected && !wasConnected {
 		s.addActivityLocked("browser", "Browser extension connected", "")
@@ -513,7 +519,7 @@ func (s *Store) BrowserStatus() BrowserClientStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	status := s.browser
-	status.Connected = status.Connected && time.Since(status.LastSeen) < 45*time.Second
+	status.Connected = status.Connected && time.Since(status.LastSeen) < browserHeartbeatGracePeriod
 	return status
 }
 

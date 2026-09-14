@@ -25,6 +25,8 @@ context.crypto = webcrypto;
   assert.equal(typeof alarmListener, 'function', 'a suspended worker must have an alarm wake listener');
   context.startHeartbeat();
   assert.ok(alarmCalls.some(([action, name, minutes]) => action === 'create' && name === 'contextbridge-heartbeat' && minutes === 0.5));
+  context.startHeartbeat();
+  assert.equal(alarmCalls.filter(([action]) => action === 'create').length, 1, 'restarting an active worker must not postpone the alarm');
   context.stopHeartbeat();
   assert.ok(alarmCalls.some(([action, name]) => action === 'clear' && name === 'contextbridge-heartbeat'));
   const originalResume = context.resume;

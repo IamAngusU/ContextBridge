@@ -32,6 +32,8 @@
       <button id="pair" class="primary full" type="button">Connect</button>
       <button id="stop" class="secondary full" type="button" hidden>Disconnect</button>
       <small class="field-hint" id="connect-hint">If no tab is attached yet, Connect asks to use the current AI page. No separate test is required.</small>
+      <label class="mode"><input id="auto-reconnect" type="checkbox" checked><span>Reconnect automatically after an update or connection loss</span></label>
+      <small class="field-hint">A deliberate Disconnect stays disconnected. Temporary failures retry without reloading a chat page; rejected permissions or pairing require a manual fix.</small>
       <label class="mode"><input id="auto-update" type="checkbox" disabled><span>Automatically install verified updates</span></label>
       <small class="field-hint" id="auto-update-state">Off by default. Connect to change this PC's setting.</small>
       <label class="session-mode">New browser session<select id="session-mode"><option value="manual">Use an unassigned attached tab</option><option value="new_chat">Open a new chat per session</option><option value="new_chat_per_job">Open a new chat per job</option></select></label>

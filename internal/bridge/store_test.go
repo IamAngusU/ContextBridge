@@ -2,7 +2,25 @@ package bridge
 
 import (
 	"testing"
+	"time"
 )
+
+func TestBrowserHeartbeatAllowsDelayedWorkerWakeButNotStaleOrPaused(t *testing.T) {
+	store := &Store{browser: BrowserClientStatus{Connected: true, State: "waiting", LastSeen: time.Now().Add(-75 * time.Second)}}
+	if !store.BrowserStatus().Connected {
+		t.Fatal("a delayed but healthy MV3 alarm should not make the relay flicker offline")
+	}
+	store.browser.LastSeen = time.Now().Add(-95 * time.Second)
+	if store.BrowserStatus().Connected {
+		t.Fatal("a genuinely stale browser relay must be reported offline")
+	}
+	store.browser.LastSeen = time.Now()
+	store.browser.Connected = false
+	store.browser.State = "paused"
+	if store.BrowserStatus().Connected {
+		t.Fatal("a deliberate disconnect must be immediate")
+	}
+}
 
 func TestMetricsPersistProviderModelAndFlags(t *testing.T) {
 	directory := t.TempDir()

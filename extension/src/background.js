@@ -7,7 +7,12 @@ const api = globalThis.browser || globalThis.chrome;
 let stopRequested = false;
 let heartbeatTimer = 0;
 let heartbeatInFlight = null;
+let heartbeatFailures = 0;
+let nextHeartbeatAt = 0;
+let heartbeatRequestId = 0;
+let lastAppliedHeartbeatId = 0;
 const HEARTBEAT_ALARM = 'contextbridge-heartbeat';
+let heartbeatAlarmRegistered = false;
 let finishedTabCleanup = null;
 let pairingInFlight = null;
 const diagnosticsInFlight = new Map();
@@ -23,13 +28,18 @@ let sessionWrite = Promise.resolve();
 let capabilityWrite = Promise.resolve();
 const acceptedModelLabel = /^(?:gpt[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:astra|sol|terra|luna|pro|mini|nano|codex|thinking|instant))?|gemini(?:[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:pro|flash|lite|thinking|preview|experimental))*)?|astra|sol|terra|luna|\d+(?:\.\d+)?\s+(?:pro|flash|astra|sol|terra|luna))$/i;
 
-api.runtime.onInstalled.addListener(() => resume());
-api.runtime.onStartup.addListener(() => resume());
+api.runtime.onInstalled.addListener(() => resume(true));
+api.runtime.onStartup.addListener(() => resume(true));
 // Chromium MV3 may suspend the service worker despite an interval or a
 // pending long poll. An alarm wakes a fresh worker so it can re-register the
 // tabs and restart pollers without requiring the user to reopen the popup.
 api.alarms?.onAlarm?.addListener((alarm) => {
-  if (alarm.name === HEARTBEAT_ALARM) void resume();
+  if (alarm.name === HEARTBEAT_ALARM) {
+    // The recurring alarm survives worker suspension. Do not recreate it on
+    // each wake: that pushes the next signal back and creates offline gaps.
+    heartbeatAlarmRegistered = true;
+    void resume();
+  }
 });
 api.tabs.onUpdated?.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status !== 'complete') return;
@@ -122,11 +132,11 @@ async function startPairingOnce() {
     if (!ready.ok) throw new Error(ready.error || 'Local ContextBridge service is unavailable');
 
     stopRequested = false;
-    await api.storage.local.set({ running: true, teachingTabId: 0, lastError: '' });
+    await api.storage.local.set({ running: true, relayConnected: false, teachingTabId: 0, lastError: '' });
     const heartbeatReady = await sendHeartbeat('waiting', true);
     if (!heartbeatReady) {
       stopRequested = true;
-      await api.storage.local.set({ running: false });
+      await api.storage.local.set({ running: false, relayConnected: false });
       throw new Error('Local ContextBridge did not accept the browser connection; check the pairing token and service');
     }
     startHeartbeat();
@@ -150,15 +160,24 @@ async function reportConnectionProgress(phase, done, total) {
 async function stopPairing() {
   stopRequested = true;
   stopHeartbeat();
-  await api.storage.local.set({ running: false, teachingTabId: 0 });
+  await api.storage.local.set({ running: false, relayConnected: false, teachingTabId: 0 });
   await sendHeartbeat('paused');
   return { ok: true };
 }
 
-async function resume() {
-  const { running } = await api.storage.local.get({ running: false });
+async function resume(afterExtensionOrBrowserRestart = false) {
+  const { running, autoReconnect } = await api.storage.local.get({ running: false, autoReconnect: true });
   if (!running) {
+    stopHeartbeat();
     await api.storage.local.set({ connectionProgress: null });
+    return;
+  }
+  if (afterExtensionOrBrowserRestart && !autoReconnect) {
+    stopRequested = true;
+    stopHeartbeat();
+    await api.storage.local.set({ running: false, relayConnected: false, connectionProgress: null,
+      connectionError: 'Automatic reconnect is off. Click Connect when you are ready.' });
+    await sendHeartbeat('paused');
     return;
   }
   stopRequested = false;
@@ -457,6 +476,10 @@ async function pollTab(tabId) {
   while (!stopRequested) {
       const cfg = await settings();
       if (!cfg.running || !cfg.token || !configuredTabIDs(cfg).includes(tabId)) break;
+      if (cfg.relayConnected === false) {
+        await delay(2000);
+        continue;
+      }
       if (Number(cfg.tabCooldowns?.[tabId] || 0) > Date.now()) {
         await delay(2000);
         continue;
@@ -2588,18 +2611,24 @@ function matches(url, pattern) {
 function startHeartbeat() {
   if (heartbeatTimer) clearInterval(heartbeatTimer);
   heartbeatTimer = setInterval(() => sendHeartbeat('waiting'), 5000);
-  try { Promise.resolve(api.alarms?.create?.(HEARTBEAT_ALARM, { periodInMinutes: 0.5 })).catch(() => {}); } catch (_) {}
+  if (!heartbeatAlarmRegistered && api.alarms?.create) {
+    heartbeatAlarmRegistered = true;
+    try { Promise.resolve(api.alarms.create(HEARTBEAT_ALARM, { periodInMinutes: 0.5 })).catch(() => { heartbeatAlarmRegistered = false; }); }
+    catch (_) { heartbeatAlarmRegistered = false; }
+  }
 }
 
 function stopHeartbeat() {
   if (heartbeatTimer) clearInterval(heartbeatTimer);
   heartbeatTimer = 0;
+  heartbeatAlarmRegistered = false;
   try { Promise.resolve(api.alarms?.clear?.(HEARTBEAT_ALARM)).catch(() => {}); } catch (_) {}
 }
 
 function sendHeartbeat(state, connecting = false) {
   // A Connect click must not queue behind an older, slow diagnostic heartbeat.
   if (connecting) return sendHeartbeatOnce(state, true);
+  if (state !== 'paused' && Date.now() < nextHeartbeatAt) return false;
   if (state === 'paused' && heartbeatInFlight) return heartbeatInFlight.finally(() => sendHeartbeatOnce('paused'));
   if (heartbeatInFlight) return heartbeatInFlight;
   heartbeatInFlight = sendHeartbeatOnce(state, connecting).finally(() => { heartbeatInFlight = null; });
@@ -2618,6 +2647,7 @@ function capabilityScanInterval(profileName, capabilities) {
 }
 
 async function sendHeartbeatOnce(state, connecting = false) {
+  const requestId = ++heartbeatRequestId;
   const cfg = await settings();
   if (!cfg.token) return false;
   if (stopRequested && state !== 'paused' && !connecting) return false;
@@ -2668,6 +2698,7 @@ async function sendHeartbeatOnce(state, connecting = false) {
         tabs
       })
     }, 5000);
+    if (state !== 'paused') await recordHeartbeatResult(cfg, response.ok, response.status, requestId);
     if (response.ok && state !== 'paused' && !finishedTabCleanup) {
       finishedTabCleanup = closeFinishedOwnedTabs().catch(() => {}).finally(() => { finishedTabCleanup = null; });
     }
@@ -2675,7 +2706,40 @@ async function sendHeartbeatOnce(state, connecting = false) {
       for (const tabId of tabIds) scheduleTabDiagnostics(tabId);
     }
     return response.ok;
-  } catch (_) { return false; }
+  } catch (_) {
+    if (state !== 'paused') await recordHeartbeatResult(cfg, false, 0, requestId);
+    return false;
+  }
+}
+
+async function recordHeartbeatResult(cfg, ok, status, requestId) {
+  if (stopRequested || requestId < lastAppliedHeartbeatId) return;
+  lastAppliedHeartbeatId = requestId;
+  if (ok) {
+    heartbeatFailures = 0;
+    nextHeartbeatAt = 0;
+    if (cfg.relayConnected !== true || cfg.connectionError) {
+      await api.storage.local.set({ relayConnected: true, connectionError: '' });
+    }
+    return;
+  }
+  heartbeatFailures += 1;
+  if (status === 401 || status === 403 || (status >= 400 && status < 500)) {
+    stopRequested = true;
+    stopHeartbeat();
+    await api.storage.local.set({ running: false, relayConnected: false,
+      connectionError: 'The local service rejected this connection. Check the pairing token or access permissions, then click Connect.' });
+    return;
+  }
+  if (!cfg.autoReconnect && heartbeatFailures >= 3) {
+    stopRequested = true;
+    stopHeartbeat();
+    await api.storage.local.set({ running: false, relayConnected: false,
+      connectionError: 'Connection lost. Automatic reconnect is off; click Connect to retry.' });
+    return;
+  }
+  nextHeartbeatAt = Date.now() + Math.min(60000, 5000 * 2 ** Math.min(heartbeatFailures - 1, 4));
+  if (cfg.relayConnected !== false) await api.storage.local.set({ relayConnected: false });
 }
 
 function scheduleTabDiagnostics(tabId) {
@@ -2769,6 +2833,8 @@ async function settings() {
     tabId: 0,
     tabIds: [],
     running: false,
+    relayConnected: false,
+    autoReconnect: true,
     autoAttachFreshTabs: false,
     preserveDrafts: false,
     autoCloseFinishedChats: false,
@@ -2786,6 +2852,7 @@ async function settings() {
     tabFailures: {},
     tabCooldowns: {},
     pendingCompletions: {},
+    connectionError: '',
     lastError: ''
   });
 }
