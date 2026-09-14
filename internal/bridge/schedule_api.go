@@ -20,6 +20,7 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
 			Job      Job              `json:"job"`
 			Timing   ScheduleTiming   `json:"timing"`
 			Fallback ScheduleFallback `json:"fallback"`
+			Steps    []ScheduleStep   `json:"steps"`
 			Enabled  *bool            `json:"enabled"`
 		}
 		if err := decodeJSON(r.Body, &input, 12<<20); err != nil {
@@ -89,6 +90,75 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
+		if strings.Contains(input.Job.Prompt, "{{previous.") {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "first step cannot use a previous-result variable"})
+			return
+		}
+		if len(input.Steps) > 4 {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "at most four follow-up steps"})
+			return
+		}
+		for index := range input.Steps {
+			step := &input.Steps[index]
+			if step.Job.Route == "" {
+				step.Job.Route = input.Job.Route
+			}
+			if step.Job.Provider == "" {
+				step.Job.Provider = input.Job.Provider
+			}
+			if step.Job.Model == "" {
+				step.Job.Model = input.Job.Model
+			}
+			if step.Job.Reasoning == "" {
+				step.Job.Reasoning = input.Job.Reasoning
+			}
+			if len(step.Name) > 100 || strings.IndexFunc(step.Name, unicode.IsControl) >= 0 || step.Job.ID != "" || step.Job.SessionID != "" {
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "invalid follow-up name, id, or session"})
+				return
+			}
+			if step.UsePreviousArtifact != "" && step.UsePreviousArtifact != "image" && step.UsePreviousArtifact != "file" {
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "use_previous_artifact must be image or file"})
+				return
+			}
+			if err := s.validateRoute(step.Job.Route); err != nil {
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+				return
+			}
+			stepRoute := s.cfg.Route(step.Job.Route)
+			if step.Job.Provider != "" {
+				allowed := strings.EqualFold(step.Job.Provider, stepRoute.Provider)
+				for _, candidate := range stepRoute.Fallback {
+					allowed = allowed || strings.EqualFold(step.Job.Provider, candidate)
+				}
+				if !allowed {
+					writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "follow-up provider is not allowed for its route"})
+					return
+				}
+			}
+			if step.UsePreviousArtifact != "" {
+				previousOutput := input.Job.Output
+				if index > 0 {
+					previousOutput = input.Steps[index-1].Job.Output
+				}
+				if !previousOutput.Artifacts {
+					writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "previous step must request output.artifacts for artifact handoff"})
+					return
+				}
+				provider := stepRoute.Provider
+				if step.Job.Provider != "" {
+					provider = step.Job.Provider
+				}
+				engine, ok := s.cfg.Engine(provider)
+				if !ok || engine.Type != "browser" {
+					writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "artifact handoff needs a browser provider"})
+					return
+				}
+			}
+			if err := validateJob(step.Job); err != nil {
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "follow-up: " + err.Error()})
+				return
+			}
+		}
 		now := time.Now().UTC()
 		input.Timing.Type = strings.ToLower(strings.TrimSpace(input.Timing.Type))
 		if len(input.Timing.Type) > 16 || len(input.Timing.Timezone) > 100 || len(input.Timing.Time) > 5 || len(input.Timing.Cron) > 200 || len(input.Timing.Days) > 7 {
@@ -113,7 +183,7 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
 		if input.Enabled != nil {
 			enabled = *input.Enabled
 		}
-		item := Schedule{ID: id.ID, Name: strings.TrimSpace(input.Name), Job: input.Job, Timing: input.Timing, Fallback: input.Fallback, Enabled: enabled, NextRun: next, CreatedAt: now, UpdatedAt: now}
+		item := Schedule{ID: id.ID, Name: strings.TrimSpace(input.Name), Job: input.Job, Timing: input.Timing, Fallback: input.Fallback, Steps: input.Steps, Enabled: enabled, NextRun: next, CreatedAt: now, UpdatedAt: now}
 		item, err = s.schedules.add(item)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "schedule could not be saved"})

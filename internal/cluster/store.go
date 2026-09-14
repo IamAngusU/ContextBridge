@@ -792,6 +792,7 @@ func (s *Store) ListEvents(limit int) ([]Event, error) {
 
 func (s *Store) Overview() (Overview, error) {
 	overview := Overview{JobsByState: map[string]uint64{}, GeneratedAt: time.Now().UTC()}
+	_, overview.UTCOffsetSeconds = time.Now().Zone()
 	nodes, err := s.ListNodes()
 	if err != nil {
 		return overview, err

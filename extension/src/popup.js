@@ -4,6 +4,7 @@ let currentTab = null;
 let currentProfile = null;
 let attachedTabIDs = [];
 let liveTabState = new Map();
+let connectPending = false;
 
 document.addEventListener('DOMContentLoaded', initialize);
 api.storage.onChanged?.addListener((changes, area) => {
@@ -310,6 +311,12 @@ $('scan-capabilities').addEventListener('click', async () => {
 });
 
 $('pair').addEventListener('click', async () => {
+  if (connectPending) return;
+  connectPending = true;
+  $('pair').disabled = true;
+  $('pair').setAttribute('aria-busy', 'true');
+  $('pair').textContent = 'Connecting…';
+  setStatus('connecting', 'Connecting to the local service…');
   try {
     await api.storage.local.set({ connectionError: '', lastError: '' });
     let tabs = await Promise.all(selectedTabIDs().map((tabId) => api.tabs.get(tabId)));
@@ -338,6 +345,11 @@ $('pair').addEventListener('click', async () => {
     const message = error.message || String(error);
     await api.storage.local.set({ connectionError: message });
     setStatus('error', message);
+  } finally {
+    connectPending = false;
+    $('pair').removeAttribute('aria-busy');
+    $('pair').disabled = false;
+    renderRunning((await settings()).running);
   }
 });
 
@@ -592,7 +604,8 @@ async function refreshState() {
     : attachedTabIDs.length
       ? `${attachedTabIDs.length} tab${attachedTabIDs.length === 1 ? '' : 's'} ready. Connect starts them without a separate test.`
       : 'Connect will ask to attach this AI page. No separate test is required.';
-  if (saved.connectionError) setStatus('error', saved.connectionError);
+  if (connectPending) setStatus('connecting', 'Connecting to the local service…');
+  else if (saved.connectionError) setStatus('error', saved.connectionError);
   else if (saved.running && saved.lastError) setStatus('error', saved.lastError);
   else if (saved.running) setStatus('live', `Connected · ${attachedTabIDs.length} tab${attachedTabIDs.length === 1 ? '' : 's'} attached`);
   else setStatus('idle', 'Not connected');
@@ -614,7 +627,7 @@ function renderRunning(running) {
   $('stop').hidden = !running;
   $('teach').disabled = running;
   $('scan-capabilities').disabled = !primaryTabID();
-  $('pair').textContent = attachedTabIDs.length ? 'Connect attached tabs' : 'Connect this AI page';
+  if (!connectPending) $('pair').textContent = attachedTabIDs.length ? 'Connect attached tabs' : 'Connect this AI page';
 }
 
 function updateActions(profile, visualMode) {
@@ -624,7 +637,7 @@ function updateActions(profile, visualMode) {
   $('export-profile').disabled = !hasProfile;
   // Keep Connect clickable so it can attach the current recognized page and
   // surface actionable setup errors instead of appearing permanently disabled.
-  $('pair').disabled = false;
+  $('pair').disabled = connectPending;
   $('scan-capabilities').disabled = !primaryTabID();
 }
 

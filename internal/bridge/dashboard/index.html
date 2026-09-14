@@ -37,7 +37,7 @@
         <aside class="hardware-panel">
           <p class="eyebrow">Hardware capabilities</p>
           <h2 id="cpu-name">Detecting hardware</h2>
-          <dl><div><dt>System</dt><dd id="system-detail">Detecting</dd></div><div><dt>Uptime</dt><dd id="uptime-detail">Unknown</dd></div><div><dt>Memory</dt><dd id="memory-detail">Unknown</dd></div><div><dt>GPU</dt><dd id="gpu-detail">Not detected</dd></div><div><dt>Backends</dt><dd id="backend-detail">Detecting</dd></div></dl>
+          <dl><div><dt>System</dt><dd id="system-detail">Detecting</dd></div><div><dt>Clock</dt><dd id="server-clock">Waiting for service time</dd></div><div><dt>Uptime</dt><dd id="uptime-detail">Unknown</dd></div><div><dt>Memory</dt><dd id="memory-detail">Unknown</dd></div><div><dt>GPU</dt><dd id="gpu-detail">Not detected</dd></div><div><dt>Backends</dt><dd id="backend-detail">Detecting</dd></div></dl>
         </aside>
       </section>
 
@@ -74,7 +74,7 @@
 
       <section class="content-band schedule-band">
         <div class="section-heading"><div><p class="eyebrow">Durable local queue</p><h2>Schedules and wake-ups</h2></div><span id="schedule-count" class="refresh-time">No schedules</span></div>
-        <p class="schedule-note">Due jobs wait for a free slot or connected browser. Interrupted sends are never replayed automatically. Fallback choices are tried only before sending, when a provider menu explicitly says the requested choice is unavailable. Scheduled browser chats open in the foreground by default and may switch your active browser tab.</p>
+        <p class="schedule-note">Schedules use the local service clock shown above. Pause stops future launches, not a job already sent. Due jobs wait for resources; interrupted sends are never replayed automatically. Browser alternatives are tried only before sending when a menu explicitly shows the choice unavailable.</p>
         <div id="schedule-list" class="schedule-list"></div>
         <form id="schedule-form" class="schedule-form">
           <h3>Add schedule</h3>
@@ -95,6 +95,8 @@
             <label data-frequency="daily weekdays weekly cron" hidden>Timezone<input name="timezone" placeholder="Europe/Berlin"></label>
           </div>
           <label class="schedule-prompt">Prompt<textarea name="prompt" maxlength="20000" rows="4" required></textarea></label>
+          <label class="schedule-prompt">Optional follow-up prompt<textarea name="follow-up-prompt" maxlength="20000" rows="3" placeholder="Use {{previous.text}} to include the previous answer."></textarea></label>
+          <div class="schedule-fields"><label>Carry previous artifact into follow-up<select name="follow-up-artifact"><option value="">None</option><option value="image">First verified image</option><option value="file">First verified file</option></select></label></div>
           <label class="schedule-check"><input name="new-chat" type="checkbox"> Open a new browser chat for each run (attached-tab limit applies)</label>
           <label class="schedule-check"><input name="foreground" type="checkbox" checked> Open new browser chats in the foreground</label>
           <div class="schedule-actions"><button type="submit">Create schedule</button><span id="schedule-message" role="status"></span></div>

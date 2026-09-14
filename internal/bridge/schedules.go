@@ -25,6 +25,8 @@ type Schedule struct {
 	Job           Job              `json:"job"`
 	Timing        ScheduleTiming   `json:"timing"`
 	Fallback      ScheduleFallback `json:"fallback,omitempty"`
+	Steps         []ScheduleStep   `json:"steps,omitempty"`
+	History       []ScheduleRun    `json:"history,omitempty"`
 	Enabled       bool             `json:"enabled"`
 	NextRun       time.Time        `json:"next_run,omitempty"`
 	CurrentRunID  string           `json:"current_run_id,omitempty"`
@@ -55,6 +57,32 @@ type ScheduleFallback struct {
 	Reasoning []string `json:"reasoning,omitempty"`
 }
 
+// Steps run only after the preceding step has a saved, successful result.
+// The base Schedule.Job is step 1; these are additional steps.
+type ScheduleStep struct {
+	Name                string `json:"name,omitempty"`
+	Job                 Job    `json:"job"`
+	UsePreviousArtifact string `json:"use_previous_artifact,omitempty"` // image or file
+}
+
+type ScheduleRun struct {
+	ID        string            `json:"id"`
+	StartedAt time.Time         `json:"started_at"`
+	EndedAt   time.Time         `json:"ended_at,omitempty"`
+	Outcome   string            `json:"outcome"`
+	Error     string            `json:"error,omitempty"`
+	Steps     []ScheduleStepRun `json:"steps,omitempty"`
+}
+
+type ScheduleStepRun struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	StartedAt time.Time `json:"started_at"`
+	EndedAt   time.Time `json:"ended_at,omitempty"`
+	Outcome   string    `json:"outcome"`
+	Error     string    `json:"error,omitempty"`
+}
+
 type scheduleStore struct {
 	mu    sync.Mutex
 	path  string
@@ -76,6 +104,18 @@ func newScheduleStore(dir string) (*scheduleStore, error) {
 	}
 	for _, item := range saved {
 		if item.CurrentRunID != "" {
+			for index := range item.History {
+				if item.History[index].ID == item.CurrentRunID {
+					item.History[index].Outcome = "interrupted"
+					item.History[index].EndedAt = time.Now().UTC()
+					for step := range item.History[index].Steps {
+						if item.History[index].Steps[step].Outcome == "running" {
+							item.History[index].Steps[step].Outcome = "interrupted"
+							item.History[index].Steps[step].EndedAt = item.History[index].EndedAt
+						}
+					}
+				}
+			}
 			item.LastRunID, item.LastOutcome, item.LastError = item.CurrentRunID, "interrupted", "service_restarted_during_run; inspect the provider tab before retrying"
 			item.CurrentRunID = ""
 		}
@@ -232,6 +272,10 @@ func (ss *scheduleStore) claim(id string, now time.Time, manual bool) (Schedule,
 		}
 	}
 	item.CurrentRunID, item.WaitingReason, item.UpdatedAt = job.ID, "", now.UTC()
+	item.History = append(item.History, ScheduleRun{ID: job.ID, StartedAt: now.UTC(), Outcome: "running"})
+	if len(item.History) > 50 {
+		item.History = append([]ScheduleRun(nil), item.History[len(item.History)-50:]...)
+	}
 	ss.items[id] = item
 	if err := ss.persistLocked(); err != nil {
 		ss.items[id] = original
@@ -258,11 +302,20 @@ func (ss *scheduleStore) status() []map[string]interface{} {
 	items := ss.list()
 	result := make([]map[string]interface{}, 0, len(items))
 	for _, item := range items {
+		history := make([]map[string]interface{}, 0, min(len(item.History), 10))
+		for i := len(item.History) - 1; i >= 0 && len(history) < 10; i-- {
+			run := item.History[i]
+			steps := make([]map[string]interface{}, 0, len(run.Steps))
+			for _, step := range run.Steps {
+				steps = append(steps, map[string]interface{}{"id": step.ID, "name": step.Name, "started_at": step.StartedAt, "ended_at": step.EndedAt, "outcome": step.Outcome})
+			}
+			history = append(history, map[string]interface{}{"id": run.ID, "started_at": run.StartedAt, "ended_at": run.EndedAt, "outcome": run.Outcome, "steps": steps})
+		}
 		result = append(result, map[string]interface{}{
 			"id": item.ID, "name": item.Name, "timing": item.Timing, "enabled": item.Enabled,
 			"next_run": item.NextRun, "current_run_id": item.CurrentRunID, "last_run_id": item.LastRunID,
 			"last_run": item.LastRun, "last_outcome": item.LastOutcome,
-			"waiting_reason": item.WaitingReason, "runs": item.Runs,
+			"waiting_reason": item.WaitingReason, "runs": item.Runs, "history": history, "step_count": len(item.Steps) + 1,
 			"route": item.Job.Route, "provider": item.Job.Provider, "model": item.Job.Model, "reasoning": item.Job.Reasoning,
 		})
 	}
@@ -279,6 +332,39 @@ func (ss *scheduleStore) finish(id, runID, outcome, detail string) {
 	item.CurrentRunID, item.LastRunID, item.LastRun = "", runID, time.Now().UTC()
 	item.LastOutcome, item.LastError, item.UpdatedAt = outcome, detail, item.LastRun
 	item.Runs++
+	for index := range item.History {
+		if item.History[index].ID == runID {
+			item.History[index].Outcome = outcome
+			item.History[index].EndedAt = item.LastRun
+			item.History[index].Error = detail
+		}
+	}
+	ss.items[id] = item
+	_ = ss.persistLocked()
+}
+
+func (ss *scheduleStore) recordStep(id, runID string, step ScheduleStepRun) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	item, ok := ss.items[id]
+	if !ok || item.CurrentRunID != runID {
+		return
+	}
+	for i := range item.History {
+		if item.History[i].ID != runID {
+			continue
+		}
+		found := false
+		for j := range item.History[i].Steps {
+			if item.History[i].Steps[j].ID == step.ID {
+				item.History[i].Steps[j] = step
+				found = true
+			}
+		}
+		if !found {
+			item.History[i].Steps = append(item.History[i].Steps, step)
+		}
+	}
 	ss.items[id] = item
 	_ = ss.persistLocked()
 }
@@ -534,24 +620,13 @@ func (s *Server) scheduleReadiness(job Job) string {
 }
 
 func (s *Server) executeSchedule(ctx context.Context, id string, job Job) {
-	output, err := s.Process(ctx, job)
-	if err != nil {
-		s.schedules.finish(id, job.ID, "failed", err.Error())
-		s.store.AddActivity("scheduled", "Scheduled job failed before completion", job.ID)
+	item, ok := s.schedules.get(id)
+	if !ok {
 		return
 	}
-	if output.Error != "" {
-		s.schedules.finish(id, job.ID, "failed", output.Error)
-		s.store.AddActivity("scheduled", "Scheduled job failed", job.ID)
-		return
-	}
-	if output.Decision != nil && output.Decision.Verdict == "review" {
-		s.schedules.finish(id, job.ID, "review", strings.Join(output.Decision.Flags, ","))
-		s.store.AddActivity("scheduled", "Scheduled review job needs attention", job.ID)
-		return
-	}
-	s.schedules.finish(id, job.ID, "completed", "")
-	s.store.AddActivity("scheduled", "Scheduled job completed", job.ID)
+	outcome, detail := s.runScheduleSteps(ctx, id, job, item.Steps)
+	s.schedules.finish(id, job.ID, outcome, detail)
+	s.store.AddActivity("scheduled", "Scheduled job "+outcome, job.ID)
 }
 
 func (s *Server) runSchedules(ctx context.Context) {

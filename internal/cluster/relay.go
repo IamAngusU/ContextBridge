@@ -481,6 +481,9 @@ func (r *Relay) handleWorker(w http.ResponseWriter, req *http.Request) {
 	node.Connected = true
 	node.State = "online"
 	node.LastSeen = time.Now().UTC()
+	if !node.Capabilities.ClockTime.IsZero() {
+		node.ClockOffsetMS = node.Capabilities.ClockTime.Sub(node.LastSeen).Milliseconds()
+	}
 	if node.PublicKey == "" {
 		if saved, loadErr := r.store.GetNode(node.ID); loadErr == nil {
 			node.PublicKey = saved.PublicKey
@@ -525,6 +528,9 @@ func (r *Relay) handleWorker(w http.ResponseWriter, req *http.Request) {
 			node.Connected = true
 			node.State = "online"
 			node.LastSeen = time.Now().UTC()
+			if !node.Capabilities.ClockTime.IsZero() {
+				node.ClockOffsetMS = node.Capabilities.ClockTime.Sub(node.LastSeen).Milliseconds()
+			}
 			_ = r.store.UpsertNode(node)
 		case "started":
 			_, _ = r.store.MarkRunning(message.JobID, node.ID)

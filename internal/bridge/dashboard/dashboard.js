@@ -1,6 +1,8 @@
 const $ = (id) => document.getElementById(id);
 let token = '';
 let timer = 0;
+let serviceClock = null;
+setInterval(() => { updateServiceClock(); updateScheduleCountdowns(); }, 1000);
 
 initialize();
 
@@ -54,21 +56,49 @@ async function checkHealth() {
 async function refresh() {
   clearInterval(timer);
   try {
+    const requestStarted = Date.now();
     const response = await fetch('/v1/status', {
       headers: { Authorization: `Bearer ${token}` },
       cache: 'no-store'
     });
     if (!response.ok) throw new Error(response.status === 401 ? 'The pairing token is not valid.' : `Status request failed: ${response.status}`);
     const data = await response.json();
+    const requestEnded = Date.now();
+    const serviceAt = Date.parse(data.server_time || '');
+    if (Number.isFinite(serviceAt)) serviceClock = {at:serviceAt, received:performance.now(), offset:data.server_utc_offset_seconds || 0,
+      delta:serviceAt-(requestStarted+requestEnded)/2, uncertainty:(requestEnded-requestStarted)/2};
     $('auth-error').textContent = '';
     $('auth-band').hidden = true;
     $('workspace').hidden = false;
     render(data);
+    updateServiceClock();
     timer = setInterval(refresh, 3000);
   } catch (error) {
     $('workspace').hidden = true;
     $('auth-band').hidden = false;
     $('auth-error').textContent = error.message || String(error);
+  }
+}
+
+function offsetLabel(seconds) {
+  const amount=Math.abs(seconds), sign=seconds<0?'-':'+';
+  return `UTC${sign}${String(Math.floor(amount/3600)).padStart(2,'0')}:${String(Math.floor(amount%3600/60)).padStart(2,'0')}`;
+}
+function signedDelay(ms) { return `${ms>=0?'+':'−'}${Math.abs(ms)<1000?Math.round(Math.abs(ms))+' ms':(Math.abs(ms)/1000).toFixed(1)+' s'}`; }
+function updateServiceClock() {
+  if (!serviceClock) return;
+  const now=serviceClock.at+performance.now()-serviceClock.received;
+  const local=new Date(now+serviceClock.offset*1000).toISOString().slice(11,19);
+  $('server-clock').textContent=`${local} ${offsetLabel(serviceClock.offset)} · ${signedDelay(serviceClock.delta)} vs this browser (±${Math.round(serviceClock.uncertainty)} ms)`;
+}
+function remainingLabel(ms) {
+  const seconds=Math.max(0,Math.ceil(ms/1000)), days=Math.floor(seconds/86400),hours=Math.floor(seconds%86400/3600),minutes=Math.floor(seconds%3600/60),remainder=seconds%60;
+  return days?`${days}d ${hours}h ${minutes}m`:hours?`${hours}h ${minutes}m ${remainder}s`:`${minutes}m ${remainder}s`;
+}
+function updateScheduleCountdowns() {
+  for (const element of document.querySelectorAll('[data-next-run]')) {
+    const next=Date.parse(element.dataset.nextRun);
+    element.textContent=Number.isFinite(next) ? (next<=Date.now()?'due · waiting for resources':`in ${remainingLabel(next-Date.now())}`) : '';
   }
 }
 
@@ -299,8 +329,13 @@ async function createSchedule(event) {
   for (const name of ['provider','model','reasoning']) { const value=String(values.get(name) || '').trim(); if (value) job[name]=value; }
   job.metadata={contextbridge_foreground_new_chat:values.has('foreground')};
   if (values.has('new-chat')) job.metadata.contextbridge_new_chat_per_run=true;
+  const followUp=String(values.get('follow-up-prompt') || '').trim();
+  const carry=String(values.get('follow-up-artifact') || '');
+  if (carry && !followUp) { $('schedule-message').textContent='Add a follow-up prompt to carry an artifact.'; return; }
+  if (carry) { job.output.artifacts=true; if (carry==='image') job.output.min_images=1; else job.output.min_artifacts=1; }
+  const steps=followUp?[{name:'Follow-up',job:{route:job.route,prompt:followUp,output:{mode:'text'},...(job.provider?{provider:job.provider}:{}),...(job.model?{model:job.model}:{}),...(job.reasoning?{reasoning:job.reasoning}:{})},...(carry?{use_previous_artifact:carry}:{})}]:[];
   const payload={name:String(values.get('name') || '').trim(),job,timing,
-    fallback:{models:alternatives('model-fallbacks'),reasoning:alternatives('reasoning-fallbacks')}};
+    fallback:{models:alternatives('model-fallbacks'),reasoning:alternatives('reasoning-fallbacks')},steps};
   $('schedule-message').textContent='Saving…';
   try {
     const response=await fetch('/v1/schedules',{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify(payload)});
@@ -320,13 +355,26 @@ function renderSchedules(items) {
     row.className='schedule-row'; title.textContent=item.name || item.id;
     const next=item.enabled && meaningfulTimestamp(item.next_run) ? `next ${new Date(item.next_run).toLocaleString()}` : 'paused / finished';
     const last=item.last_outcome ? ` · last ${item.last_outcome}${item.last_error ? ` (${item.last_error})` : ''}` : '';
-    state.textContent=`${item.timing?.type || 'once'} · ${item.route || 'default'} · ${item.provider || 'route provider'} · ${item.model || 'auto model'} · ${item.reasoning || 'default reasoning'} · ${item.current_run_id ? 'running' : item.waiting_reason || next}${last}`;
+    state.textContent=`${item.timing?.type || 'once'} · ${item.route || 'default'} · ${item.provider || 'route provider'} · ${item.model || 'auto model'} · ${item.reasoning || 'default reasoning'} · ${item.step_count || 1} step(s) · ${item.current_run_id ? 'running' : item.waiting_reason || next}${last}`;
     detail.append(title,state);
+    if (item.enabled && meaningfulTimestamp(item.next_run)) { const countdown=document.createElement('small'); countdown.dataset.nextRun=item.next_run; detail.append(countdown); }
+    if (item.history?.length) {
+      const history=document.createElement('details'), summary=document.createElement('summary'), list=document.createElement('ol');
+      summary.textContent=`History · ${item.history.length} recent run(s)`; history.append(summary);
+      for (const run of item.history) {
+        const entry=document.createElement('li'), link=document.createElement('span');
+        link.textContent=`${new Date(run.started_at).toLocaleString()} · ${run.outcome} · ${run.id}`; entry.append(link);
+        for (const step of run.steps || []) { const sub=document.createElement('small'); sub.textContent=`${step.name} · ${step.outcome} · ${step.id}`; entry.append(sub); }
+        list.append(entry);
+      }
+      history.append(list); detail.append(history);
+    }
     for (const [action,label] of [[item.enabled?'pause':'resume',item.enabled?'Pause':'Resume'],['run','Run now'],['delete','Delete']]) {
       const button=document.createElement('button'); button.type='button'; button.className='outline'; button.dataset.action=action; button.dataset.id=item.id; button.textContent=label; controls.append(button);
     }
     row.append(detail,controls); list.append(row);
   }
+  updateScheduleCountdowns();
 }
 
 async function scheduleAction(event) {

@@ -21,11 +21,15 @@ const runtimeMessages = [];
 const permissionRequests = [];
 let updatesEnabled = false;
 let startError = '';
+let pendingStart = null;
 let activePageID = 52;
 const element = (id) => {
   if (!elements.has(id)) elements.set(id, {
     value: id === 'tab' ? '31' : '',
     classList: { toggle() {} },
+    attributes: new Map(),
+    setAttribute(name, value) { this.attributes.set(name, value); },
+    removeAttribute(name) { this.attributes.delete(name); },
     addEventListener(type, listener) { listeners.set(`${id}:${type}`, listener); }
   });
   return elements.get(id);
@@ -38,6 +42,7 @@ const context = vm.createContext({
   chrome: {
     runtime: { onMessage: { addListener() {} }, sendMessage: async (message) => {
       runtimeMessages.push(message.type);
+      if (message.type === 'start' && pendingStart) await pendingStart;
       return message.type === 'start' && startError ? { ok: false, error: startError } : { ok: true };
     } },
     storage: { onChanged: { addListener() {} }, local: {
@@ -124,6 +129,18 @@ assert.equal(permissionRequests.length - requestsBeforeConnect, 1);
 assert.deepEqual(Array.from(permissionRequests.at(-1).origins), ['https://gemini.google.com/*', 'https://contribution.usercontent.google.com/*', 'http://127.0.0.1/*']);
 assert.ok(runtimeMessages.includes('start'));
 assert.ok(!runtimeMessages.includes('test'));
+let releaseStart;
+pendingStart = new Promise((resolve) => { releaseStart = resolve; });
+const startsBeforePending = runtimeMessages.filter((name) => name === 'start').length;
+const pendingConnect = listeners.get('pair:click')();
+assert.equal(element('pair').disabled, true);
+assert.equal(element('pair').attributes.get('aria-busy'), 'true');
+await listeners.get('pair:click')();
+releaseStart();
+await pendingConnect;
+pendingStart = null;
+assert.equal(runtimeMessages.filter((name) => name === 'start').length, startsBeforePending + 1, 'duplicate Connect click started a second attempt');
+assert.equal(element('pair').attributes.has('aria-busy'), false);
 assert.equal(element('edit-last-message-row').hidden, false);
 element('edit-last-message').checked = true;
 await listeners.get('edit-last-message:change')();

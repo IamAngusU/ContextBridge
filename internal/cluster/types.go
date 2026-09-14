@@ -62,47 +62,50 @@ type BrowserSessionCapability struct {
 }
 
 type Capabilities struct {
-	OS              string                     `json:"os"`
-	OSVersion       string                     `json:"os_version,omitempty"`
-	Architecture    string                     `json:"architecture"`
-	CPU             string                     `json:"cpu"`
-	CPUCores        int                        `json:"cpu_cores"`
-	CPUFrequency    int                        `json:"cpu_frequency_mhz,omitempty"`
-	CPUUtilization  int                        `json:"cpu_utilization_percent,omitempty"`
-	UptimeSeconds   uint64                     `json:"uptime_seconds,omitempty"`
-	AgentVersion    string                     `json:"agent_version,omitempty"`
-	MemoryTotal     uint64                     `json:"memory_total_bytes"`
-	MemoryFree      uint64                     `json:"memory_free_bytes"`
-	MemoryType      string                     `json:"memory_type,omitempty"`
-	GPUs            []GPUCapability            `json:"gpus,omitempty"`
-	Models          []ModelCapability          `json:"models,omitempty"`
-	Providers       []string                   `json:"providers,omitempty"`
-	Tasks           []string                   `json:"tasks,omitempty"`
-	Tags            []string                   `json:"tags,omitempty"`
-	Groups          []string                   `json:"groups,omitempty"`
-	MaxConcurrent   int                        `json:"max_concurrent"`
-	Running         int                        `json:"running"`
-	BrowserTabs     int                        `json:"browser_tabs,omitempty"`
-	BrowserBusy     int                        `json:"browser_busy_tabs,omitempty"`
-	BrowserSessions []BrowserSessionCapability `json:"browser_sessions,omitempty"`
-	Sources         []string                   `json:"sources,omitempty"`
-	Modes           []string                   `json:"modes,omitempty"`
-	QueueDepth      int                        `json:"queue_depth"`
+	ClockTime        time.Time                  `json:"clock_time,omitempty"`
+	UTCOffsetSeconds int                        `json:"utc_offset_seconds,omitempty"`
+	OS               string                     `json:"os"`
+	OSVersion        string                     `json:"os_version,omitempty"`
+	Architecture     string                     `json:"architecture"`
+	CPU              string                     `json:"cpu"`
+	CPUCores         int                        `json:"cpu_cores"`
+	CPUFrequency     int                        `json:"cpu_frequency_mhz,omitempty"`
+	CPUUtilization   int                        `json:"cpu_utilization_percent,omitempty"`
+	UptimeSeconds    uint64                     `json:"uptime_seconds,omitempty"`
+	AgentVersion     string                     `json:"agent_version,omitempty"`
+	MemoryTotal      uint64                     `json:"memory_total_bytes"`
+	MemoryFree       uint64                     `json:"memory_free_bytes"`
+	MemoryType       string                     `json:"memory_type,omitempty"`
+	GPUs             []GPUCapability            `json:"gpus,omitempty"`
+	Models           []ModelCapability          `json:"models,omitempty"`
+	Providers        []string                   `json:"providers,omitempty"`
+	Tasks            []string                   `json:"tasks,omitempty"`
+	Tags             []string                   `json:"tags,omitempty"`
+	Groups           []string                   `json:"groups,omitempty"`
+	MaxConcurrent    int                        `json:"max_concurrent"`
+	Running          int                        `json:"running"`
+	BrowserTabs      int                        `json:"browser_tabs,omitempty"`
+	BrowserBusy      int                        `json:"browser_busy_tabs,omitempty"`
+	BrowserSessions  []BrowserSessionCapability `json:"browser_sessions,omitempty"`
+	Sources          []string                   `json:"sources,omitempty"`
+	Modes            []string                   `json:"modes,omitempty"`
+	QueueDepth       int                        `json:"queue_depth"`
 }
 
 type Node struct {
-	ID           string       `json:"id"`
-	Name         string       `json:"name"`
-	PublicKey    string       `json:"public_key,omitempty"`
-	Capabilities Capabilities `json:"capabilities"`
-	State        string       `json:"state"`
-	Connected    bool         `json:"connected"`
-	LastSeen     time.Time    `json:"last_seen"`
-	ConnectedAt  time.Time    `json:"connected_at,omitempty"`
-	JobsTotal    uint64       `json:"jobs_total"`
-	JobsFailed   uint64       `json:"jobs_failed"`
-	ComputeMS    uint64       `json:"compute_ms"`
-	CostUSD      float64      `json:"cost_usd"`
+	ID            string       `json:"id"`
+	Name          string       `json:"name"`
+	PublicKey     string       `json:"public_key,omitempty"`
+	Capabilities  Capabilities `json:"capabilities"`
+	State         string       `json:"state"`
+	Connected     bool         `json:"connected"`
+	LastSeen      time.Time    `json:"last_seen"`
+	ClockOffsetMS int64        `json:"clock_offset_ms,omitempty"`
+	ConnectedAt   time.Time    `json:"connected_at,omitempty"`
+	JobsTotal     uint64       `json:"jobs_total"`
+	JobsFailed    uint64       `json:"jobs_failed"`
+	ComputeMS     uint64       `json:"compute_ms"`
+	CostUSD       float64      `json:"cost_usd"`
 }
 
 type Usage struct {
@@ -298,9 +301,10 @@ type PipelineRun struct {
 }
 
 type Overview struct {
-	NodesOnline int               `json:"nodes_online"`
-	NodesTotal  int               `json:"nodes_total"`
-	JobsByState map[string]uint64 `json:"jobs_by_state"`
-	Usage       Usage             `json:"usage"`
-	GeneratedAt time.Time         `json:"generated_at"`
+	NodesOnline      int               `json:"nodes_online"`
+	NodesTotal       int               `json:"nodes_total"`
+	JobsByState      map[string]uint64 `json:"jobs_by_state"`
+	Usage            Usage             `json:"usage"`
+	GeneratedAt      time.Time         `json:"generated_at"`
+	UTCOffsetSeconds int               `json:"utc_offset_seconds"`
 }

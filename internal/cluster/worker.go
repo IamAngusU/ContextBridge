@@ -793,6 +793,9 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 	}
 	capability.Sources = IndicatorSources(capability)
 	capability.Modes = IndicatorModes(capability)
+	now := time.Now()
+	_, capability.UTCOffsetSeconds = now.Zone()
+	capability.ClockTime = now.UTC()
 	return capability
 }
 

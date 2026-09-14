@@ -2,6 +2,9 @@ package bridge
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log"
@@ -81,6 +84,64 @@ func TestScheduleClaimRestartNeverReplays(t *testing.T) {
 	if _, _, err := reopened.claim("safe", now, false); err == nil {
 		t.Fatal("interrupted occurrence was replayed")
 	}
+	if len(loaded.History) != 1 || loaded.History[0].Outcome != "interrupted" {
+		t.Fatalf("interrupted run was not retained in history: %+v", loaded.History)
+	}
+}
+
+func TestSchedulePromptAndVerifiedArtifact(t *testing.T) {
+	previous := Output{Text: "alpha", JSON: json.RawMessage(`{"answer":"alpha"}`)}
+	result, context, err := schedulePrompt("Reply to {{previous.text}} using {{previous.json}}", previous)
+	if err != nil || strings.Contains(result, "alpha") || !strings.Contains(result, "previous_result.text") || !strings.Contains(context, `"text":"alpha"`) {
+		t.Fatalf("untrusted output entered trusted prompt: %q, %q: %v", result, context, err)
+	}
+	for _, template := range []string{"{{previous.missing}}", "{{previous.artifact_names}}"} {
+		if _, _, err := schedulePrompt(template, previous); err == nil {
+			t.Fatalf("accepted unavailable variable %q", template)
+		}
+	}
+	bytes := []byte("%PDF-1.7\nverified bytes\n")
+	digest := sha256.Sum256(bytes)
+	artifact := Artifact{Name: "result.pdf", MediaType: "application/pdf", DataBase64: base64.StdEncoding.EncodeToString(bytes), SHA256: hex.EncodeToString(digest[:])}
+	previous.Artifacts = []Artifact{artifact}
+	if got, err := verifiedPreviousArtifact(previous, "file"); err != nil || got.Name != artifact.Name {
+		t.Fatalf("verified artifact not accepted: %+v, %v", got, err)
+	}
+	previous.Artifacts[0].SHA256 = strings.Repeat("0", 64)
+	if _, err := verifiedPreviousArtifact(previous, "file"); err == nil {
+		t.Fatal("tampered artifact was handed to the next step")
+	}
+	previous.Artifacts[0].SHA256 = artifact.SHA256
+	previous.Artifacts[0].DataBase64 = ""
+	previous.Artifacts[0].URL = "https://example.invalid/result.pdf"
+	if _, err := verifiedPreviousArtifact(previous, "file"); err == nil {
+		t.Fatal("URL-only artifact was handed to the next step")
+	}
+}
+
+func TestScheduleFileHandoffRequiresVerifiedBytes(t *testing.T) {
+	cfg := config.Config{Storage: config.Storage{Directory: t.TempDir(), Inbox: t.TempDir()}, Routes: map[string]config.Route{"default": {Provider: "browser", BrowserProfile: "chatgpt", TimeoutSeconds: 5}}}
+	server, err := NewServer(cfg, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("%PDF-1.7\nverified bytes\n")
+	digest := sha256.Sum256(data)
+	previous := Output{Artifacts: []Artifact{{Name: "result.pdf", MediaType: "application/pdf", DataBase64: base64.StdEncoding.EncodeToString(data), SHA256: hex.EncodeToString(digest[:])}}}
+	base := Job{ID: "schedule-test-run", Route: "default", SessionID: "schedule-test", Metadata: map[string]interface{}{"contextbridge_foreground_new_chat": true}}
+	step := ScheduleStep{Job: Job{Route: "default", Prompt: "Inspect the carried document.", Output: OutputSpec{Mode: "text"}}, UsePreviousArtifact: "file"}
+	job, err := server.nextScheduleStep(base, step, 1, previous)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, ok := job.Metadata["contextbridge_input_file"].(map[string]string)
+	if !ok || file["data_base64"] != previous.Artifacts[0].DataBase64 || job.SessionID != base.SessionID {
+		t.Fatalf("verified artifact not carried safely: %+v", job)
+	}
+	previous.Artifacts[0].SHA256 = "wrong"
+	if _, err := server.nextScheduleStep(base, step, 1, previous); err == nil {
+		t.Fatal("unverified file was accepted for upload")
+	}
 }
 
 func TestScheduleAPIAndStatusRedaction(t *testing.T) {
@@ -102,7 +163,8 @@ func TestScheduleAPIAndStatusRedaction(t *testing.T) {
 		return resp
 	}
 	secret := "a private scheduled prompt"
-	input := map[string]interface{}{"name": "test schedule", "job": map[string]interface{}{"prompt": secret, "route": "default", "output": map[string]interface{}{"mode": "text"}}, "timing": map[string]interface{}{"type": "interval", "interval_seconds": 60}}
+	stepSecret := "a private follow-up prompt"
+	input := map[string]interface{}{"name": "test schedule", "job": map[string]interface{}{"prompt": secret, "route": "default", "output": map[string]interface{}{"mode": "text"}}, "steps": []interface{}{map[string]interface{}{"job": map[string]interface{}{"prompt": stepSecret + " {{previous.text}}", "output": map[string]interface{}{"mode": "text"}}}}, "timing": map[string]interface{}{"type": "interval", "interval_seconds": 60}}
 	raw, _ := json.Marshal(input)
 	resp := request("POST", "/v1/schedules", raw)
 	defer resp.Body.Close()
@@ -117,8 +179,8 @@ func TestScheduleAPIAndStatusRedaction(t *testing.T) {
 	resp = request("GET", "/v1/status", nil)
 	statusRaw, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if strings.Contains(string(statusRaw), secret) {
-		t.Fatal("prompt leaked into routine status")
+	if strings.Contains(string(statusRaw), secret) || strings.Contains(string(statusRaw), stepSecret) {
+		t.Fatal("prompt or follow-up leaked into routine status")
 	}
 	resp = request("POST", "/v1/schedules/"+item.ID+"/pause", nil)
 	resp.Body.Close()
@@ -205,4 +267,59 @@ func TestDueScheduleDispatchesOnceAndPersistsResult(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("due schedule did not complete")
+}
+
+func TestScheduleWorkflowUsesSavedPreviousResultAndHistory(t *testing.T) {
+	var prompts []string
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var input struct {
+			Prompt string `json:"prompt"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Errorf("provider request: %v", err)
+			return
+		}
+		prompts = append(prompts, input.Prompt)
+		w.Header().Set("Content-Type", "application/json")
+		if len(prompts) == 1 {
+			_, _ = w.Write([]byte(`{"response":"CB40-FIRST"}`))
+		} else {
+			_, _ = w.Write([]byte(`{"response":"CB40-SECOND"}`))
+		}
+	}))
+	defer provider.Close()
+	dir := t.TempDir()
+	cfg := config.Config{Storage: config.Storage{Directory: dir, Inbox: t.TempDir()}, Routes: map[string]config.Route{"default": {Provider: "ollama", TimeoutSeconds: 5, Model: "test-model"}}, Providers: config.Providers{Ollama: config.OllamaProvider{URL: provider.URL, Timeout: 5}}}
+	server, err := NewServer(cfg, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	item := Schedule{ID: "workflow", Name: "workflow", Job: Job{Prompt: "first", Route: "default", Output: OutputSpec{Mode: "text"}},
+		Steps:  []ScheduleStep{{Name: "use answer", Job: Job{Prompt: "follow {{previous.text}}", Route: "default", Output: OutputSpec{Mode: "text"}}}},
+		Timing: ScheduleTiming{Type: "interval", IntervalSeconds: 3600}, Enabled: true, NextRun: now.Add(-time.Second), CreatedAt: now.Add(-time.Hour), UpdatedAt: now}
+	if _, err := server.schedules.add(item); err != nil {
+		t.Fatal(err)
+	}
+	server.dispatchSchedules(t.Context())
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		loaded, _ := server.schedules.get("workflow")
+		if loaded.Runs == 1 {
+			if loaded.LastOutcome != "completed" || len(loaded.History) != 1 || len(loaded.History[0].Steps) != 2 || len(prompts) != 2 || !strings.Contains(prompts[1], "follow previous_result.text in submitted_content") || !strings.Contains(prompts[1], `"text":"CB40-FIRST"`) || strings.Index(prompts[1], "CB40-FIRST") < strings.Index(prompts[1], "<submitted_content>") {
+				t.Fatalf("incorrect workflow: schedule=%+v prompts=%q", loaded, prompts)
+			}
+			reopened, err := newScheduleStore(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			saved, _ := reopened.get("workflow")
+			if saved.LastOutcome != "completed" || len(saved.History) != 1 || len(saved.History[0].Steps) != 2 {
+				t.Fatalf("workflow history lost on restart: %+v", saved)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("workflow did not finish")
 }

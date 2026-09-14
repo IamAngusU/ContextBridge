@@ -190,6 +190,7 @@ func (s *Server) processJob(ctx context.Context, job Job) Output {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	serverNow := time.Now()
 	queued, completed := s.store.Stats()
 	browser := s.store.BrowserStatus()
 	writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -201,6 +202,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		"idle":        s.Idle(),
 		"completed":   completed,
 		"browser":     browser.Connected,
+		"server_time": serverNow.UTC(),
 	})
 }
 
@@ -221,19 +223,23 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	ollama, _ := s.cfg.Engine("ollama")
+	serverNow := time.Now()
+	_, utcOffset := serverNow.Zone()
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"ok":        true,
-		"service":   "contextbridge",
-		"version":   Version,
-		"listen":    s.cfg.Server.Listen,
-		"queued":    queued,
-		"completed": completed,
-		"browser":   s.store.BrowserStatus(),
-		"tunnel":    s.store.TunnelStatus(),
-		"runtime":   runtimeStatus,
-		"metrics":   s.store.Metrics(),
-		"schedules": s.schedules.status(),
-		"updates":   updateStatus(s.updates),
+		"ok":                        true,
+		"service":                   "contextbridge",
+		"version":                   Version,
+		"server_time":               serverNow.UTC(),
+		"server_utc_offset_seconds": utcOffset,
+		"listen":                    s.cfg.Server.Listen,
+		"queued":                    queued,
+		"completed":                 completed,
+		"browser":                   s.store.BrowserStatus(),
+		"tunnel":                    s.store.TunnelStatus(),
+		"runtime":                   runtimeStatus,
+		"metrics":                   s.store.Metrics(),
+		"schedules":                 s.schedules.status(),
+		"updates":                   updateStatus(s.updates),
 		"rag": map[string]interface{}{
 			"enabled": s.rag != nil, "backend": s.cfg.RAG.Backend,
 			"documents": ragCount(s.rag), "embedding_route": s.cfg.RAG.EmbeddingRoute,

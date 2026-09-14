@@ -739,7 +739,7 @@ function classifyFailureReason(message) {
 }
 
 function supportsTabEditJob(job) {
-  return !job?.image_base64 && !job?.metadata?.contextbridge_image_tool && !job?.metadata?.contextbridge_music_tool
+  return !job?.image_base64 && !job?.metadata?.contextbridge_input_file && !job?.metadata?.contextbridge_image_tool && !job?.metadata?.contextbridge_music_tool
     && !job?.output?.artifacts && Number(job?.output?.min_artifacts || 0) === 0
     && Number(job?.output?.min_images || 0) === 0 && Number(job?.output?.min_media || 0) === 0;
 }
@@ -1539,10 +1539,11 @@ function automate(job, profile, jobDeadline, editTarget = null) {
     }
     throw new Error('Gemini kept an incompatible selected tool after clearing it');
   };
-  const addImage = (element, encoded, mediaType) => {
+  const addFile = (element, encoded, mediaType, name) => {
     const bytes = Uint8Array.from(atob(encoded), (char) => char.charCodeAt(0));
     const extension = (mediaType || 'image/png').split('/')[1]?.replace(/[^a-z0-9]/gi, '') || 'png';
-    const file = new File([bytes], `contextbridge.${extension}`, { type: mediaType || 'image/png' });
+    const safeName = String(name || `contextbridge.${extension}`).split(/[\\/]/).pop().slice(0, 180) || `contextbridge.${extension}`;
+    const file = new File([bytes], safeName, { type: mediaType || 'image/png' });
     const transfer = new DataTransfer();
     transfer.items.add(file);
     element.files = transfer.files;
@@ -1984,7 +1985,21 @@ function automate(job, profile, jobDeadline, editTarget = null) {
           try { return [...document.querySelectorAll(selector)]; } catch (_) { return []; }
         }).find((element) => element.type === 'file' && (!element.accept || /image|\*/i.test(element.accept)));
         if (!fileInput) throw new Error('This job has an image, but no image input was taught');
-        addImage(fileInput, job.image_base64, job.image_media_type);
+        addFile(fileInput, job.image_base64, job.image_media_type, 'contextbridge-image.png');
+        await wait(1000);
+      }
+      if (!resumeOnly && !editTarget && job.metadata?.contextbridge_input_file) {
+        const attachment = job.metadata.contextbridge_input_file;
+        if (job.image_base64) throw new Error('Only one carried artifact may be attached to a follow-up');
+        if (!attachment.data_base64 || String(attachment.data_base64).length > 12 * 1024 * 1024) throw new Error('Carried file bytes are missing or too large');
+        const fileInput = (selectors.file_input || []).flatMap((selector) => {
+          try { return [...document.querySelectorAll(selector)]; } catch (_) { return []; }
+        }).find((element) => element.type === 'file' && (!element.accept || element.accept === '*' || element.accept.split(',').some((accepted) => {
+          const type = String(attachment.media_type || '');
+          return accepted.trim() === type || accepted.trim() === `${type.split('/')[0]}/*`;
+        })));
+        if (!fileInput) throw new Error('No compatible file input was found; the next prompt was not sent');
+        addFile(fileInput, attachment.data_base64, attachment.media_type, attachment.name);
         await wait(1000);
       }
       if (!resumeOnly) {

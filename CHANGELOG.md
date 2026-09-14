@@ -2,6 +2,19 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.40 - 2026-09-14
+
+### Added
+
+- service, relay, and worker clocks with UTC offsets and signed approximate skew in dashboards and CLI
+- bounded schedule history, step outcomes, and live next-run countdown in the local dashboard
+- sequential scheduled follow-ups using prior text, JSON, or verified image/file bytes, with untrusted prior output kept outside trusted instructions
+
+### Improved
+
+- extension Connect button now shows a pending animation and blocks duplicate clicks until the attempt finishes
+- workflow steps fail before sending when previous data, a verified artifact, or a compatible browser upload control is unavailable; interrupted steps are retained without automatic replay
+
 ## 0.5.39 - 2026-09-14
 
 ### Added

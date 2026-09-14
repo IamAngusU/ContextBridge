@@ -627,12 +627,14 @@ func statusCommand(args []string) error {
 	}
 	req, _ := http.NewRequest(http.MethodGet, baseURL(cfg)+"/v1/status", nil)
 	req.Header.Set("Authorization", "Bearer "+cfg.Server.Token)
+	clockRequestStarted := time.Now()
 	resp, err := (&http.Client{Timeout: 8 * time.Second}).Do(req)
 	if err != nil {
 		return fmt.Errorf("service is not reachable: %w", err)
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 24<<20))
+	clockRequestEnded := time.Now()
 	if err != nil {
 		return err
 	}
@@ -644,15 +646,17 @@ func statusCommand(args []string) error {
 		return err
 	}
 	var status struct {
-		Version   string                     `json:"version"`
-		Listen    string                     `json:"listen"`
-		Queued    int                        `json:"queued"`
-		Completed int                        `json:"completed"`
-		Tunnel    bridge.TunnelStatus        `json:"tunnel"`
-		Browser   bridge.BrowserClientStatus `json:"browser"`
-		Runtime   bridge.RuntimeStatus       `json:"runtime"`
-		Metrics   bridge.Metrics             `json:"metrics"`
-		Schedules []struct {
+		Version                string                     `json:"version"`
+		Listen                 string                     `json:"listen"`
+		ServerTime             time.Time                  `json:"server_time"`
+		ServerUTCOffsetSeconds int                        `json:"server_utc_offset_seconds"`
+		Queued                 int                        `json:"queued"`
+		Completed              int                        `json:"completed"`
+		Tunnel                 bridge.TunnelStatus        `json:"tunnel"`
+		Browser                bridge.BrowserClientStatus `json:"browser"`
+		Runtime                bridge.RuntimeStatus       `json:"runtime"`
+		Metrics                bridge.Metrics             `json:"metrics"`
+		Schedules              []struct {
 			Enabled       bool   `json:"enabled"`
 			CurrentRunID  string `json:"current_run_id"`
 			WaitingReason string `json:"waiting_reason"`
@@ -663,6 +667,11 @@ func statusCommand(args []string) error {
 	}
 	fmt.Printf("ContextBridge %s\n", status.Version)
 	fmt.Printf("Service: online at http://%s\n", status.Listen)
+	if !status.ServerTime.IsZero() {
+		serviceZone := time.FixedZone("service", status.ServerUTCOffsetSeconds)
+		midpoint := clockRequestStarted.Add(clockRequestEnded.Sub(clockRequestStarted) / 2)
+		fmt.Printf("Clock: %s %s · %s vs this PC (approximately ±%s)\n", status.ServerTime.In(serviceZone).Format("15:04:05"), formatUTCOffset(status.ServerUTCOffsetSeconds), formatSignedClockDelta(status.ServerTime.Sub(midpoint)), formatClockDuration(clockRequestEnded.Sub(clockRequestStarted)/2))
+	}
 	if status.Tunnel.Connected {
 		fmt.Printf("Tunnel: connected to %s\n", status.Tunnel.Target)
 	} else {
@@ -1335,9 +1344,11 @@ func clusterStatusCommand(args []string) error {
 	}
 	token := clusterClientToken(cfg, "")
 	var overview cluster.Overview
+	clockRequestStarted := time.Now()
 	if err := clusterGET(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/overview", token, &overview); err != nil {
 		return err
 	}
+	clockRequestEnded := time.Now()
 	var nodes []cluster.Node
 	if err := clusterGET(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/nodes", token, &nodes); err != nil {
 		return err
@@ -1353,6 +1364,11 @@ func clusterStatusCommand(args []string) error {
 		}
 	}
 	fmt.Printf("Pool  [%d/%d PCs online]  [%d/%d slots busy]  [%d queued]\n", overview.NodesOnline, overview.NodesTotal, running, totalSlots, overview.JobsByState[cluster.JobQueued])
+	if !overview.GeneratedAt.IsZero() {
+		zone := time.FixedZone("relay", overview.UTCOffsetSeconds)
+		midpoint := clockRequestStarted.Add(clockRequestEnded.Sub(clockRequestStarted) / 2)
+		fmt.Printf("Relay clock  [%s %s]  [%s vs this PC · approximately ±%s]\n", overview.GeneratedAt.In(zone).Format("15:04:05"), formatUTCOffset(overview.UTCOffsetSeconds), formatSignedClockDelta(overview.GeneratedAt.Sub(midpoint)), formatClockDuration(clockRequestEnded.Sub(clockRequestStarted)/2))
+	}
 	for _, node := range nodes {
 		state := "offline"
 		if node.Connected {
@@ -1379,6 +1395,10 @@ func clusterStatusCommand(args []string) error {
 			system += " · uptime " + formatUptime(node.Capabilities.UptimeSeconds)
 		}
 		fmt.Printf("      System  [%s]\n", system)
+		if !node.Capabilities.ClockTime.IsZero() {
+			zone := time.FixedZone("node", node.Capabilities.UTCOffsetSeconds)
+			fmt.Printf("      Clock  [%s %s]  [%s vs relay at last heartbeat · approximate]\n", node.Capabilities.ClockTime.In(zone).Format("15:04:05"), formatUTCOffset(node.Capabilities.UTCOffsetSeconds), formatSignedClockDelta(time.Duration(node.ClockOffsetMS)*time.Millisecond))
+		}
 		for _, gpu := range node.Capabilities.GPUs {
 			fmt.Printf("      GPU  [%s · %s/%s free · %d%% · %d°C]\n", gpu.Name, formatBytes(gpu.MemoryFree), formatBytes(gpu.MemoryTotal), gpu.Utilization, gpu.Temperature)
 		}
@@ -1395,6 +1415,34 @@ func clusterStatusCommand(args []string) error {
 	}
 	fmt.Printf("Jobs  [%d completed]  [%d failed]  [%.2f compute hours]\n", overview.JobsByState[cluster.JobCompleted], overview.JobsByState[cluster.JobFailed], float64(overview.Usage.ComputeMS)/3600000)
 	return nil
+}
+
+func formatUTCOffset(seconds int) string {
+	sign := "+"
+	if seconds < 0 {
+		sign = "-"
+		seconds = -seconds
+	}
+	return fmt.Sprintf("UTC%s%02d:%02d", sign, seconds/3600, seconds%3600/60)
+}
+
+func formatClockDuration(duration time.Duration) string {
+	if duration < 0 {
+		duration = -duration
+	}
+	if duration < time.Second {
+		return fmt.Sprintf("%d ms", duration.Milliseconds())
+	}
+	return fmt.Sprintf("%.1f s", duration.Seconds())
+}
+
+func formatSignedClockDelta(duration time.Duration) string {
+	sign := "+"
+	if duration < 0 {
+		sign = "-"
+		duration = -duration
+	}
+	return sign + formatClockDuration(duration)
 }
 
 func formatUptime(seconds uint64) string {
