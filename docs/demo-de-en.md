@@ -1,4 +1,6 @@
-# Live demo: Windows browser, VPS commands
+# Technical live-demo runbook: Windows browser, VPS commands
+
+For a short recording, use the separate [2–3 minute video script](demo-video-de-en.md). This document is the complete technical runbook, including optional research and fact-check segments.
 
 This script uses the managed Windows service, an Opera extension, and a VPS relay. Run the Linux commands in **one VPS shell** so `DEMO_DIR`, `DEMO_ID`, and `IMAGE_FILE` remain available. `--new-chat` gives each demo segment its own ContextBridge-owned chat. Do not attach a personal conversation for this demo.
 
