@@ -117,6 +117,7 @@ func toServiceSnapshot(status consoleStatus) terminalui.ServiceSnapshot {
 		if engine.State != "online" {
 			continue
 		}
+		snapshot.LocalProviders = append(snapshot.LocalProviders, provider)
 		for _, model := range engine.Models {
 			snapshot.LocalModels = append(snapshot.LocalModels, cluster.ModelCapability{
 				Provider: provider, Name: model.Name, Loaded: model.Loaded, Size: model.Size, VRAM: model.VRAM,

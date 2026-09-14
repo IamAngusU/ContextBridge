@@ -56,6 +56,14 @@ func terminalWidth(output *os.File) int {
 	return int(info.Window.Right-info.Window.Left) + 1
 }
 
+func terminalHeight(output *os.File) int {
+	var info windows.ConsoleScreenBufferInfo
+	if windows.GetConsoleScreenBufferInfo(windows.Handle(output.Fd()), &info) != nil {
+		return 0
+	}
+	return int(info.Window.Bottom-info.Window.Top) + 1
+}
+
 // A native in-place write avoids the scrollback growth that some Windows
 // consoles cause when VT carriage-return/erase sequences meet font zoom or a
 // reflowed viewport. WriteConsoleOutputW does not move the cursor at all.

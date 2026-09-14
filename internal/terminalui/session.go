@@ -61,6 +61,7 @@ type ServiceSnapshot struct {
 	BusyTabs         int
 	Tabs             []cluster.BrowserSessionCapability
 	LocalModels      []cluster.ModelCapability
+	LocalProviders   []string
 	JobsTotal        uint64
 	JobsFailed       uint64
 	GPU              string
@@ -90,13 +91,30 @@ type Session struct {
 	capabilities      cluster.Capabilities
 	browserSelections map[int]browserSelection
 	localModels       map[string]localModelSelection
+	localProviders    []string
+	serviceLines      []string
+	connectionLine    string
+	bannerVersion     string
+	bannerComponents  string
+	history           []historyEntry
+	historyTotal      int
+	panelStarted      bool
 	width             int
 	widthFn           func() int
+	heightFn          func() int
 	done              chan struct{}
 	closed            chan struct{}
 	observing         bool
 	observedOnline    bool
 	observed          ServiceSnapshot
+}
+
+type historyEntry struct {
+	when    time.Time
+	section string
+	symbol  string
+	message string
+	details []string
 }
 
 func New(output *os.File) *Session {
@@ -116,7 +134,7 @@ func NewWithStyle(output *os.File, style string) *Session {
 	if os.Getenv("TERM") == "dumb" || os.Getenv("NO_COLOR") != "" {
 		interactive = false
 	}
-	session := &Session{out: output, console: output, interactive: interactive, style: style, jobs: map[string]jobState{}, browserSelections: map[int]browserSelection{}, localModels: map[string]localModelSelection{}, width: terminalWidth(output), widthFn: func() int { return terminalWidth(output) }, done: make(chan struct{}), closed: make(chan struct{})}
+	session := &Session{out: output, console: output, interactive: interactive, style: style, jobs: map[string]jobState{}, browserSelections: map[int]browserSelection{}, localModels: map[string]localModelSelection{}, width: terminalWidth(output), widthFn: func() int { return terminalWidth(output) }, heightFn: func() int { return terminalHeight(output) }, done: make(chan struct{}), closed: make(chan struct{})}
 	if interactive {
 		go session.animate()
 	} else {
@@ -130,13 +148,8 @@ func (s *Session) Banner(version, components string) {
 	defer s.mu.Unlock()
 	if s.interactive {
 		if s.panelEnabledLocked() && s.panelWidthLocked() >= 58 {
-			width := s.panelWidthLocked()
-			fmt.Fprint(s.out, "\n", panelBorder(width), "\n")
-			fmt.Fprintln(s.out, panelRow("ContextBridge  "+cleanTerminalLabel(version, 24), width))
-			fmt.Fprintln(s.out, panelRow(cleanTerminalLabel(components, 90), width))
-			fmt.Fprintln(s.out, panelRow("by IamAngusU", width))
-			fmt.Fprintln(s.out, panelRow("https://github.com/IamAngusU/ContextBridge", width))
-			fmt.Fprint(s.out, panelBorder(width), "\n\n")
+			s.bannerVersion, s.bannerComponents = version, components
+			s.renderPanelLocked()
 			return
 		}
 		fmt.Fprintf(s.out, "\n  ContextBridge  %s\n  %s\n\n", version, components)
@@ -157,6 +170,7 @@ func (s *Session) Write(data []byte) (int, error) {
 		line := strings.TrimSpace(s.partial[:index])
 		s.partial = s.partial[index+1:]
 		if line != "" {
+			s.recordServiceLineLocked(line)
 			s.nextSection = "SERVICE"
 			s.writeEventLocked("·", line)
 		}
@@ -169,11 +183,26 @@ func (s *Session) HandleWorker(event cluster.WorkerEvent) {
 	defer s.mu.Unlock()
 	switch event.Kind {
 	case cluster.WorkerConnecting:
+		if s.panelStarted {
+			s.connectionLine = "Verbinde mit Relay…"
+		}
 		if s.status == "" {
 			s.setStatusLocked("Connecting to relay", time.Now())
 		}
 	case cluster.WorkerRetrying:
 		s.retries = event.Attempt
+		if s.panelStarted {
+			s.connectionLine = "Relay nicht erreichbar · automatischer Wiederholungsversuch"
+			s.browserSelections = map[int]browserSelection{}
+			s.localProviders = nil
+			s.localModels = map[string]localModelSelection{}
+			s.capabilities = cluster.Capabilities{}
+			s.hardware = ""
+			if event.Attempt == 1 || event.Attempt%10 == 0 {
+				s.nextSection = "CONNECTION"
+				s.writeEventLocked("↻", fmt.Sprintf("Relay nicht erreichbar · Versuch %d · %s", event.Attempt, compactError(event.Error)))
+			}
+		}
 		s.setStatusLocked(fmt.Sprintf("Waiting for network · retry %d in %s", event.Attempt, compactDuration(event.RetryIn)), time.Now())
 		if !s.interactive && (event.Attempt == 1 || event.Attempt%10 == 0) {
 			s.writeEventLocked("↻", fmt.Sprintf("Relay unavailable; retrying automatically (%s)", compactError(event.Error)))
@@ -192,7 +221,7 @@ func (s *Session) HandleWorker(event cluster.WorkerEvent) {
 		s.nextSection = "CONNECTION"
 		s.writeEventLocked("✓", message)
 		s.recordBrowserSelectionsLocked(event.Capabilities.BrowserSessions)
-		s.recordLocalModelsLocked(event.Capabilities.Models)
+		s.recordLocalModelsLocked(event.Capabilities.Models, event.Capabilities.Providers)
 		s.retries = 0
 		s.setStatusLocked("Idle", time.Now())
 	case cluster.WorkerCapabilities:
@@ -202,7 +231,7 @@ func (s *Session) HandleWorker(event cluster.WorkerEvent) {
 		}
 		s.hardware = capabilityLabel(event.Capabilities)
 		s.recordBrowserSelectionsLocked(event.Capabilities.BrowserSessions)
-		s.recordLocalModelsLocked(event.Capabilities.Models)
+		s.recordLocalModelsLocked(event.Capabilities.Models, event.Capabilities.Providers)
 	case cluster.WorkerJobStarted:
 		selection := requestedSelection(event)
 		s.jobs[event.JobID] = jobState{task: event.Task, phase: "starting", selection: selection, started: time.Now()}
@@ -297,7 +326,7 @@ func (s *Session) ObserveService(snapshot ServiceSnapshot) {
 	} else if len(s.browserSelections) > 0 {
 		s.browserSelections = map[int]browserSelection{}
 	}
-	s.recordLocalModelsLocked(snapshot.LocalModels)
+	s.recordLocalModelsLocked(snapshot.LocalModels, snapshot.LocalProviders)
 	if wasOnline {
 		if snapshot.Completed > previous.Completed {
 			s.nextSection = "ACTIVITY"
@@ -323,6 +352,12 @@ func (s *Session) ObserveServiceUnavailable(reason string) {
 		s.writeEventLocked("!", "Service unavailable · "+cleanTerminalLabel(reason, 120))
 	}
 	s.observing, s.observedOnline = true, false
+	if s.panelStarted {
+		s.connectionLine = "Dienst nicht erreichbar · automatischer Wiederholungsversuch"
+		s.browserSelections = map[int]browserSelection{}
+		s.localProviders = nil
+		s.localModels = map[string]localModelSelection{}
+	}
 	s.setStatusLocked("Offline", time.Now())
 }
 
@@ -416,6 +451,9 @@ func (s *Session) recordBrowserSelectionsLocked(sessions []cluster.BrowserSessio
 		}
 	}
 	s.browserSelections = current
+	if s.panelStarted {
+		s.renderPanelLocked()
+	}
 }
 
 func providerRank(profile string) int {
@@ -455,9 +493,16 @@ func browserStateLabel(state string) string {
 	}
 }
 
-func (s *Session) recordLocalModelsLocked(models []cluster.ModelCapability) {
+func (s *Session) recordLocalModelsLocked(models []cluster.ModelCapability, providers []string) {
 	current := map[string]localModelSelection{}
 	loaded := false
+	online := map[string]string{}
+	for _, provider := range providers {
+		provider = cleanTerminalLabel(provider, 40)
+		if provider != "" && !strings.EqualFold(provider, "browser") {
+			online[strings.ToLower(provider)] = provider
+		}
+	}
 	for _, model := range models {
 		provider := cleanTerminalLabel(model.Provider, 40)
 		name := cleanTerminalLabel(model.Name, 100)
@@ -468,13 +513,34 @@ func (s *Session) recordLocalModelsLocked(models []cluster.ModelCapability) {
 		selection := localModelSelection{provider: provider, name: name, loaded: model.Loaded || current[key].loaded}
 		current[key] = selection
 		loaded = loaded || selection.loaded
-	}
-	if !loaded {
-		if len(s.localModels) > 0 {
-			s.nextSection = "LOCAL MODELS"
-			s.writeEventLocked("◇", "Kein lokales Modell mehr geladen")
+		if selection.loaded {
+			online[strings.ToLower(provider)] = provider
 		}
-		s.localModels = map[string]localModelSelection{}
+	}
+	providerNames := make([]string, 0, len(online))
+	for _, provider := range online {
+		providerNames = append(providerNames, provider)
+	}
+	sort.Slice(providerNames, func(i, j int) bool { return strings.ToLower(providerNames[i]) < strings.ToLower(providerNames[j]) })
+	previousProviders := strings.Join(s.localProviders, "\x00")
+	s.localProviders = providerNames
+	if !loaded {
+		wasLoaded := false
+		for _, previous := range s.localModels {
+			wasLoaded = wasLoaded || previous.loaded
+		}
+		if wasLoaded || previousProviders != strings.Join(providerNames, "\x00") {
+			s.nextSection = "LOCAL MODELS"
+			if len(providerNames) == 0 {
+				s.writeEventLocked("◇", "Kein lokaler Provider erreichbar")
+			} else {
+				s.writeEventLocked("◇", strings.Join(providerNames, ", ")+" erreichbar · kein Modell geladen")
+			}
+		}
+		s.localModels = current
+		if s.panelStarted {
+			s.renderPanelLocked()
+		}
 		return
 	}
 	keys := make([]string, 0, len(current))
@@ -510,6 +576,9 @@ func (s *Session) recordLocalModelsLocked(models []cluster.ModelCapability) {
 		}
 	}
 	s.localModels = current
+	if s.panelStarted {
+		s.renderPanelLocked()
+	}
 }
 
 func cleanTerminalLabel(value string, limit int) string {
@@ -526,7 +595,6 @@ func (s *Session) Close() {
 	s.mu.Lock()
 	if s.interactive {
 		close(s.done)
-		s.clearStatusLocked()
 	}
 	if strings.TrimSpace(s.partial) != "" {
 		s.writeEventLocked("·", strings.TrimSpace(s.partial))
@@ -534,6 +602,14 @@ func (s *Session) Close() {
 	}
 	s.mu.Unlock()
 	<-s.closed
+	s.mu.Lock()
+	if s.panelStarted {
+		fmt.Fprint(s.out, "\x1b[?25h\x1b[?1049l")
+		s.panelStarted = false
+	} else if s.interactive {
+		s.clearStatusLocked()
+	}
+	s.mu.Unlock()
 }
 
 func (s *Session) animate() {
@@ -547,7 +623,7 @@ func (s *Session) animate() {
 		case <-ticker.C:
 			s.mu.Lock()
 			s.frame++
-			if s.status != "Idle" || s.frame%8 == 0 {
+			if (s.panelStarted && s.frame%8 == 0) || (!s.panelStarted && (s.status != "Idle" || s.frame%8 == 0)) {
 				s.drawStatusLocked()
 			}
 			s.mu.Unlock()
@@ -591,6 +667,18 @@ func (s *Session) writeEventWithDetailLocked(symbol, message, detail string) {
 
 func (s *Session) writeEventWithDetailsLocked(symbol, message string, details []string) {
 	if s.interactive {
+		if !s.panelStarted && s.panelEnabledLocked() {
+			s.renderPanelLocked()
+		}
+		if s.panelStarted {
+			if s.nextSection == "CONNECTION" {
+				s.connectionLine = message
+			}
+			s.addHistoryLocked(symbol, message, details)
+			s.nextSection = ""
+			s.renderPanelLocked()
+			return
+		}
 		s.clearStatusLocked()
 		if s.panelEnabledLocked() {
 			s.writePanelSectionLocked()
@@ -631,7 +719,7 @@ func (s *Session) panelWidthLocked() int {
 	if width <= 0 {
 		width = 80
 	}
-	return max(12, min(78, width-2))
+	return max(12, min(180, width-2))
 }
 
 func panelBorder(width int) string {
@@ -682,8 +770,231 @@ func writePanelText(out io.Writer, firstPrefix, nextPrefix, value string, width 
 	}
 }
 
+func (s *Session) recordServiceLineLocked(line string) {
+	key := line
+	if index := strings.IndexAny(key, ": "); index >= 0 {
+		key = key[:index]
+	}
+	for index, previous := range s.serviceLines {
+		if strings.HasPrefix(previous, key) {
+			s.serviceLines[index] = line
+			return
+		}
+	}
+	s.serviceLines = append(s.serviceLines, line)
+	if len(s.serviceLines) > 8 {
+		s.serviceLines = s.serviceLines[len(s.serviceLines)-8:]
+	}
+}
+
+func (s *Session) addHistoryLocked(symbol, message string, details []string) {
+	copyDetails := append([]string(nil), details...)
+	s.history = append(s.history, historyEntry{when: time.Now(), section: s.nextSection, symbol: symbol, message: message, details: copyDetails})
+	s.historyTotal++
+	if len(s.history) > 10000 {
+		s.history = s.history[len(s.history)-10000:]
+	}
+}
+
+func panelSection(label string, width int) string {
+	prefix := "  +-- " + label + " "
+	return prefix + strings.Repeat("-", max(0, width-utf8.RuneCountInString(prefix)-1)) + "+"
+}
+
+func (s *Session) panelStatusLocked() string {
+	if s.observing {
+		if !s.observedOnline {
+			return "◇ Dienst offline · erneuter Verbindungsversuch"
+		}
+		return fmt.Sprintf("◇ Dienst %s · Warteschlange %d · Browser %d/%d belegt · Jobs %d · Fehler %d", s.observed.Version,
+			s.observed.Queued, s.observed.BusyTabs, s.observed.ActiveTabs, s.observed.JobsTotal, s.observed.JobsFailed)
+	}
+	if s.status == "" {
+		return "◇ Starte…"
+	}
+	status := s.status
+	if len(s.jobs) > 0 {
+		status, _ = s.visibleJobStatusLocked(70)
+	}
+	slots := max(1, s.slots)
+	return fmt.Sprintf("◇ %s %s · %d/%d Jobs · %d%% · %s", status, compactDuration(time.Since(s.statusSince)),
+		len(s.jobs), slots, min(100, len(s.jobs)*100/slots), nodeLabel(s.node, s.nodeID, false))
+}
+
+// The panel uses the alternate screen so old snapshots never become logs on
+// zoom or resize. Session events remain in memory and are shown below HISTORY.
+func (s *Session) renderPanelLocked() {
+	if !s.interactive || s.style != "panel" {
+		return
+	}
+	width := s.panelWidthLocked()
+	height := 40
+	if s.heightFn != nil {
+		if actual := s.heightFn(); actual > 0 {
+			height = actual
+		}
+	}
+	height = max(8, height)
+	line := func(value string) string { return truncateRunes(value, max(1, width-2)) }
+	rows := []string{
+		panelBorder(width),
+		panelRow("ContextBridge  "+cleanTerminalLabel(s.bannerVersion, 24), width),
+		panelRow(cleanTerminalLabel(s.bannerComponents, 120), width),
+		panelRow("by IamAngusU · https://github.com/IamAngusU/ContextBridge", width),
+		panelBorder(width),
+		"",
+		panelSection("SERVICE", width),
+	}
+	if len(s.serviceLines) == 0 {
+		rows = append(rows, "  | ·  Dienststatus wird geladen…")
+	} else {
+		for _, value := range s.serviceLines {
+			rows = append(rows, "  | ·  "+line(value))
+		}
+	}
+	rows = append(rows, panelSection("CONNECTION", width))
+	connection := s.connectionLine
+	if connection == "" {
+		connection = "Verbindung wird geprüft…"
+	}
+	rows = append(rows, "  | ·  "+line(connection))
+	rows = append(rows, panelSection("AI TABS", width))
+	if len(s.browserSelections) == 0 {
+		rows = append(rows, "  | ·  Keine verbundenen AI-Tabs")
+	} else {
+		ids := make([]int, 0, len(s.browserSelections))
+		for id := range s.browserSelections {
+			ids = append(ids, id)
+		}
+		sort.Slice(ids, func(i, j int) bool {
+			left, right := s.browserSelections[ids[i]], s.browserSelections[ids[j]]
+			if providerRank(left.profile) != providerRank(right.profile) {
+				return providerRank(left.profile) < providerRank(right.profile)
+			}
+			if !strings.EqualFold(left.profile, right.profile) {
+				return strings.ToLower(left.profile) < strings.ToLower(right.profile)
+			}
+			if browserStateRank(left.state) != browserStateRank(right.state) {
+				return browserStateRank(left.state) < browserStateRank(right.state)
+			}
+			return ids[i] < ids[j]
+		})
+		lastProfile := ""
+		for _, id := range ids {
+			selection := s.browserSelections[id]
+			if !strings.EqualFold(lastProfile, selection.profile) {
+				lastProfile = selection.profile
+				label := selection.profile
+				switch strings.ToLower(label) {
+				case "chatgpt":
+					label = "ChatGPT"
+				case "gemini":
+					label = "Gemini"
+				}
+				rows = append(rows, panelSection("["+label+"]", width))
+			}
+			parts := []string{fmt.Sprintf("Tab %d", id)}
+			if selection.model != "" {
+				parts = append(parts, "Modell: "+selection.model)
+			} else {
+				parts = append(parts, "Modell unbekannt")
+			}
+			if selection.reasoning != "" {
+				parts = append(parts, "Denkstufe: "+selection.reasoning)
+			}
+			parts = append(parts, browserStateLabel(selection.state))
+			rows = append(rows, "  | ◇  "+line(strings.Join(parts, " · ")))
+		}
+	}
+	for _, provider := range s.localProviders {
+		rows = append(rows, panelSection("[Lokal · "+provider+"]", width))
+		models := []localModelSelection{}
+		loaded := false
+		for _, model := range s.localModels {
+			if strings.EqualFold(model.provider, provider) {
+				models = append(models, model)
+				loaded = loaded || model.loaded
+			}
+		}
+		sort.Slice(models, func(i, j int) bool {
+			if models[i].loaded != models[j].loaded {
+				return models[i].loaded
+			}
+			return strings.ToLower(models[i].name) < strings.ToLower(models[j].name)
+		})
+		if !loaded {
+			rows = append(rows, "  | ◇  erreichbar · kein Modell geladen")
+		} else {
+			for _, model := range models {
+				state := "bereit · nicht geladen"
+				if model.loaded {
+					state = "geladen"
+				}
+				rows = append(rows, "  | ◇  "+line(model.name+" · "+state))
+			}
+		}
+	}
+	status := "  | " + line(s.panelStatusLocked())
+	statusDetails := []string{}
+	if s.observing {
+		if s.observedOnline {
+			statusDetails = append(statusDetails, fmt.Sprintf("  | GPU · %s · %d%%", empty(s.observed.GPU, "unbekannt"), s.observed.GPUUtilization))
+		}
+	} else {
+		indicators := indicatorLabel(s.capabilities)
+		if width < 130 {
+			indicators = compactIndicatorLabel(s.capabilities)
+		}
+		statusDetails = append(statusDetails, "  | "+indicators)
+		if s.hardware != "" {
+			statusDetails = append(statusDetails, "  | "+s.hardware)
+		}
+	}
+	maxLiveRows := max(1, height-6-len(statusDetails))
+	if len(rows) > maxLiveRows {
+		hidden := len(rows) - maxLiveRows + 1
+		rows = append(rows[:maxLiveRows-1], fmt.Sprintf("  | … %d weitere Live-Zeilen", hidden))
+	}
+	rows = append(rows, panelSection("STATUS", width), status)
+	rows = append(rows, statusDetails...)
+	availableHistory := max(0, height-len(rows)-1)
+	rows = append(rows, panelSection(fmt.Sprintf("HISTORY · Sitzung · %d Ereignisse", s.historyTotal), width))
+	historyRows := []string{}
+	// At most one event per visible row is needed; details can only add rows.
+	firstHistoryEvent := max(0, len(s.history)-max(1, availableHistory))
+	for _, entry := range s.history[firstHistoryEvent:] {
+		label := entry.when.Format("15:04:05") + " " + entry.symbol + " "
+		if entry.section != "" {
+			label += "[" + entry.section + "] "
+		}
+		historyRows = append(historyRows, "  | "+line(label+entry.message))
+		for _, detail := range entry.details {
+			historyRows = append(historyRows, "  |   +-> "+line(detail))
+		}
+	}
+	if len(historyRows) == 0 {
+		historyRows = append(historyRows, "  | ·  Noch keine Ereignisse")
+	}
+	if len(historyRows) > availableHistory {
+		historyRows = historyRows[len(historyRows)-availableHistory:]
+	}
+	rows = append(rows, historyRows...)
+	for index, value := range rows {
+		rows[index] = clipANSIColumns(value, max(1, width))
+	}
+	if !s.panelStarted {
+		fmt.Fprint(s.out, "\x1b[?1049h\x1b[?25l")
+		s.panelStarted = true
+	}
+	fmt.Fprint(s.out, "\x1b[H\x1b[2J", strings.Join(rows, "\n"))
+}
+
 func (s *Session) drawStatusLocked() {
 	if !s.interactive || s.status == "" {
+		return
+	}
+	if s.panelStarted {
+		s.renderPanelLocked()
 		return
 	}
 	if s.widthFn != nil {

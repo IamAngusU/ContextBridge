@@ -37,18 +37,19 @@ func TestPanelBannerAndEventHierarchy(t *testing.T) {
 	session.HandleWorker(cluster.WorkerEvent{Kind: cluster.WorkerConnected, NodeName: "test-pc", Slots: 2, Capabilities: capabilities})
 	session.HandleWorker(cluster.WorkerEvent{Kind: cluster.WorkerJobStarted, JobID: "job-42", Task: "generation", Provider: "browser", Profile: "chatgpt", Model: "GPT-5.6 Sol"})
 	session.HandleWorker(cluster.WorkerEvent{Kind: cluster.WorkerJobCompleted, JobID: "job-42", ComputeMS: 1500, ReportedProvider: "browser", ReportedModel: "GPT-5.6 Sol"})
-	got := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(output.String(), "")
+	frames := strings.Split(output.String(), "\x1b[H\x1b[2J")
+	got := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(frames[len(frames)-1], "")
 	for _, label := range []string{
 		"by IamAngusU", "https://github.com/IamAngusU/ContextBridge",
-		"+-- CONNECTION", "+-- AI TABS", "+-- JOBS", "+-> requested · browser · chatgpt",
+		"+-- CONNECTION", "+-- AI TABS", "+-- [ChatGPT]", "+-- HISTORY", "+-> requested · browser · chatgpt",
 		"+-> route · browser", "+-> model · GPT-5.6 Sol",
 	} {
 		if !strings.Contains(got, label) {
 			t.Fatalf("panel output is missing %q: %q", label, got)
 		}
 	}
-	if strings.Count(got, "+-- JOBS") != 1 {
-		t.Fatalf("job section was printed more than once: %q", got)
+	if strings.Count(got, "+-- [ChatGPT]") == 0 || !strings.Contains(got, "[JOBS]") {
+		t.Fatalf("provider group or history is missing: %q", got)
 	}
 	for _, line := range strings.Split(got, "\n") {
 		if strings.HasPrefix(line, "  +") || strings.HasPrefix(line, "  |") {
@@ -70,12 +71,13 @@ func TestAttachedConsoleOnlyLogsObservedChanges(t *testing.T) {
 	session.ObserveService(snapshot)
 	snapshot.Completed, snapshot.JobsTotal = 1, 1
 	session.ObserveService(snapshot)
-	got := output.String()
-	if strings.Count(got, "Attached to running service") != 1 || strings.Count(got, "Tab 7") != 1 ||
-		strings.Count(got, "Completed total 1 (+1 since last check)") != 1 || !strings.Contains(got, "+-- ACTIVITY") {
+	frames := strings.Split(output.String(), "\x1b[H\x1b[2J")
+	got := frames[len(frames)-1]
+	if len(session.history) != 4 || strings.Count(got, "Attached to running service") < 1 ||
+		!strings.Contains(got, "Completed total 1 (+1 since last check)") || !strings.Contains(got, "[ACTIVITY]") {
 		t.Fatalf("attached console emitted duplicate or missing events: %q", got)
 	}
-	if !strings.Contains(got, "[queue 0] [browser 0/1 busy]") {
+	if !strings.Contains(got, "Warteschlange 0 · Browser 0/1 belegt") {
 		t.Fatalf("attached console live status is missing: %q", got)
 	}
 }
@@ -310,7 +312,7 @@ func TestBrowserTabsGroupProvidersAndPutWorkingBeforeIdle(t *testing.T) {
 	}
 }
 
-func TestLocalModelsAppearOnlyWhileOneIsLoaded(t *testing.T) {
+func TestLocalProviderRemainsVisibleWithoutLoadedModel(t *testing.T) {
 	var output bytes.Buffer
 	session := &Session{out: &output, interactive: true, style: "panel", widthFn: func() int { return 90 },
 		localModels: map[string]localModelSelection{}}
@@ -319,23 +321,80 @@ func TestLocalModelsAppearOnlyWhileOneIsLoaded(t *testing.T) {
 		{Provider: "browser", Name: "GPT-5.6 Sol", Loaded: true},
 		{Provider: "ollama", Name: "loaded-model"},
 	}
-	session.recordLocalModelsLocked(models)
-	if output.Len() != 0 {
-		t.Fatalf("unloaded or browser models should not open the local section: %s", output.String())
+	session.Banner("v0.test", "worker")
+	session.recordLocalModelsLocked(models, []string{"ollama"})
+	if !strings.Contains(output.String(), "erreichbar · kein Modell geladen") {
+		t.Fatalf("online provider without loaded models should be visible: %s", output.String())
 	}
 	models[2].Loaded = true
-	session.recordLocalModelsLocked(models)
+	session.recordLocalModelsLocked(models, []string{"ollama"})
 	got := output.String()
-	if !strings.Contains(got, "+-- LOCAL MODELS") || strings.Index(got, "loaded-model · geladen") > strings.Index(got, "ready-model · bereit · nicht geladen") {
-		t.Fatalf("loaded local models must precede idle local models: %s", got)
+	if !strings.Contains(got, "+-- [Lokal · ollama]") || !strings.Contains(got, "loaded-model · geladen") ||
+		strings.Index(got, "loaded-model · geladen") > strings.Index(got, "ready-model · bereit · nicht geladen") {
+		t.Fatalf("loaded local model not shown: %s", got)
 	}
-	session.recordLocalModelsLocked(models)
-	if output.String() != got {
+	previous := len(session.history)
+	session.recordLocalModelsLocked(models, []string{"ollama"})
+	if len(session.history) != previous {
 		t.Fatalf("unchanged local model state was repeated: %s", output.String())
 	}
 	models[2].Loaded = false
-	session.recordLocalModelsLocked(models)
-	if strings.Count(output.String(), "Kein lokales Modell mehr geladen") != 1 {
+	session.recordLocalModelsLocked(models, []string{"ollama"})
+	if !strings.Contains(output.String(), "ollama erreichbar · kein Modell geladen") {
 		t.Fatalf("unload transition should be reported once: %s", output.String())
+	}
+}
+
+func TestPanelLiveGroupsResizeAndHistoryStaySeparate(t *testing.T) {
+	var output bytes.Buffer
+	width := 150
+	session := &Session{out: &output, interactive: true, style: "panel", widthFn: func() int { return width }, heightFn: func() int { return 30 },
+		browserSelections: map[int]browserSelection{}, localModels: map[string]localModelSelection{}, jobs: map[string]jobState{}}
+	session.Banner("v0.test", "worker")
+	session.recordBrowserSelectionsLocked([]cluster.BrowserSessionCapability{
+		{TabID: 11, Profile: "gemini", State: "waiting", CurrentModel: "Flash"},
+		{TabID: 12, Profile: "chatgpt", State: "waiting", CurrentModel: "GPT-5.6 Sol"},
+		{TabID: 13, Profile: "chatgpt", State: "working", CurrentModel: "GPT-5.6 Sol"},
+	})
+	session.recordLocalModelsLocked(nil, []string{"ollama"})
+	width = 70
+	session.renderPanelLocked()
+	frames := strings.Split(output.String(), "\x1b[H\x1b[2J")
+	latest := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(frames[len(frames)-1], "")
+	historyIndex := strings.Index(latest, "+-- HISTORY")
+	if historyIndex < 0 {
+		t.Fatalf("session history is missing: %s", latest)
+	}
+	live := latest[:historyIndex]
+	for _, label := range []string{"+-- [ChatGPT]", "Tab 13", "Tab 12", "+-- [Gemini]", "Tab 11", "+-- [Lokal · ollama]", "erreichbar · kein Modell geladen"} {
+		if !strings.Contains(live, label) {
+			t.Fatalf("live area missing %q: %s", label, latest)
+		}
+	}
+	if strings.Index(live, "Tab 13") > strings.Index(live, "Tab 12") || strings.Index(live, "+-- [ChatGPT]") > strings.Index(live, "+-- [Gemini]") {
+		t.Fatalf("provider/activity order is wrong: %s", latest)
+	}
+	for _, row := range strings.Split(latest, "\n") {
+		if utf8.RuneCountInString(row) > width {
+			t.Fatalf("resized panel row exceeds %d columns: %q", width, row)
+		}
+	}
+	if !strings.Contains(latest[historyIndex:], "[AI TABS]") {
+		t.Fatalf("history lost tab transitions: %s", latest)
+	}
+}
+
+func TestPanelClearsStaleSelectionsWhenServiceIsUnavailable(t *testing.T) {
+	var output bytes.Buffer
+	session := &Session{out: &output, interactive: true, style: "panel", widthFn: func() int { return 120 }, heightFn: func() int { return 32 },
+		browserSelections: map[int]browserSelection{}, localModels: map[string]localModelSelection{}, jobs: map[string]jobState{}}
+	session.Banner("v0.test", "console")
+	session.ObserveService(ServiceSnapshot{Version: "v0.test", BrowserConnected: true, ActiveTabs: 1,
+		Tabs: []cluster.BrowserSessionCapability{{TabID: 77, Profile: "chatgpt", CurrentModel: "GPT-5.6 Sol"}}, LocalProviders: []string{"ollama"}})
+	session.ObserveServiceUnavailable("service offline")
+	frames := strings.Split(output.String(), "\x1b[H\x1b[2J")
+	live := strings.Split(frames[len(frames)-1], "+-- HISTORY")[0]
+	if strings.Contains(live, "Tab 77") || strings.Contains(live, "[Lokal · ollama]") || !strings.Contains(live, "Dienst offline") {
+		t.Fatalf("offline live panel retained stale selections: %s", live)
 	}
 }

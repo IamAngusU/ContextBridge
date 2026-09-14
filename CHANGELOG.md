@@ -2,6 +2,15 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.50 - 2026-09-14
+
+### Improved
+
+- the interactive panel is now an in-place live overview with separate ChatGPT, Gemini, other-browser, and local-provider groups; it adapts up to 180 columns instead of wrapping at 78
+- session events appear below a HISTORY divider rather than accumulating stale live snapshots above the status line; resizing and zooming redraw the current panel without duplicating terminal rows
+- reachable Ollama remains visible even when none of its installed models is loaded; loaded models still precede available unloaded models when present
+- classic terminal output and redirected logs retain their previous format
+
 ## 0.5.49 - 2026-09-14
 
 ### Improved

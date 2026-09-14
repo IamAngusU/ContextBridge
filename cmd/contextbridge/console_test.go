@@ -31,8 +31,15 @@ func TestFetchConsoleStatusUsesReadOnlyAuthenticatedRequest(t *testing.T) {
 	}
 	snapshot := toServiceSnapshot(status)
 	if snapshot.Version != "v0.test" || snapshot.Queued != 2 || !snapshot.BrowserConnected || snapshot.Tabs[0].CurrentModel != "GPT-5.6 Sol" || snapshot.Tabs[0].State != "working" || snapshot.GPU != "RTX" ||
-		len(snapshot.LocalModels) != 1 || snapshot.LocalModels[0].Name != "qwen3:8b" || !snapshot.LocalModels[0].Loaded {
+		len(snapshot.LocalProviders) != 1 || snapshot.LocalProviders[0] != "ollama" || len(snapshot.LocalModels) != 1 || snapshot.LocalModels[0].Name != "qwen3:8b" || !snapshot.LocalModels[0].Loaded {
 		t.Fatalf("console snapshot lost status data: %#v", snapshot)
+	}
+	engine := status.Runtime.Engines["ollama"]
+	engine.Models = nil
+	status.Runtime.Engines["ollama"] = engine
+	withoutLoadedModel := toServiceSnapshot(status)
+	if len(withoutLoadedModel.LocalProviders) != 1 || len(withoutLoadedModel.LocalModels) != 0 {
+		t.Fatalf("online Ollama disappeared when no model was loaded: %#v", withoutLoadedModel)
 	}
 }
 
