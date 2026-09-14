@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -51,9 +53,15 @@ func consoleCommand(args []string) error {
 	defer stop()
 	session := terminalui.NewWithStyle(os.Stdout, cfg.Terminal.Style)
 	defer session.Close()
-	session.Banner(version, "attached console · read-only · Ctrl+C closes view")
+	session.Banner(version, "read-only · exit + Enter / Ctrl+C closes this view")
+	exitRequested := consoleExitRequested(os.Stdin)
 	client := &http.Client{Timeout: 5 * time.Second}
 	for {
+		select {
+		case <-exitRequested:
+			return nil
+		default:
+		}
 		status, err := fetchConsoleStatus(ctx, client, cfg)
 		if errors.Is(err, errConsoleUnauthorized) {
 			return err
@@ -69,8 +77,33 @@ func consoleCommand(args []string) error {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-exitRequested:
+			return nil
 		case <-time.After(3 * time.Second):
 		}
+	}
+}
+
+func consoleExitRequested(input io.Reader) <-chan struct{} {
+	exit := make(chan struct{})
+	go func() {
+		scanner := bufio.NewScanner(input)
+		for scanner.Scan() {
+			if isConsoleExitCommand(scanner.Text()) {
+				close(exit)
+				return
+			}
+		}
+	}()
+	return exit
+}
+
+func isConsoleExitCommand(command string) bool {
+	switch strings.ToLower(strings.TrimSpace(command)) {
+	case "exit", "quit", "q", ":q":
+		return true
+	default:
+		return false
 	}
 }
 

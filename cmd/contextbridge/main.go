@@ -114,7 +114,7 @@ Usage:
   contextbridge init [--config path]
   contextbridge serve [--config path]
   contextbridge run [--config path] [--slots N] [--topmost]
-  contextbridge console [--config path] # read-only view of the running service
+  contextbridge console [--config path] # read-only view; type exit + Enter to close
   contextbridge submit --file job.json [--config path]
   contextbridge schedule add --file schedule.json [--config path]
   contextbridge schedule list|show|pause|resume|run|delete [ID] [--config path]

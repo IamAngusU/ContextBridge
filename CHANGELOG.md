@@ -2,6 +2,13 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.51 - 2026-09-14
+
+### Improved
+
+- the read-only attached console now accepts `exit`, `quit`, `q`, or `:q` followed by Enter; leaving that view never stops the managed service
+- installation and command-line docs clarify the user PATH, the difference between `console` and foreground `run`, and how to close each kind of window safely
+
 ## 0.5.50 - 2026-09-14
 
 ### Improved

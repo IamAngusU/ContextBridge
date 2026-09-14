@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/IamAngusU/ContextBridge/internal/config"
 )
@@ -50,6 +51,24 @@ func TestFetchConsoleStatusRejectsWrongToken(t *testing.T) {
 	_, err := fetchConsoleStatus(context.Background(), server.Client(), cfg)
 	if !errors.Is(err, errConsoleUnauthorized) {
 		t.Fatalf("wrong token should not retry indefinitely: %v", err)
+	}
+}
+
+func TestConsoleExitCommandsOnlyCloseTheReadOnlyView(t *testing.T) {
+	for _, command := range []string{"exit", "QUIT", " q ", ":q"} {
+		if !isConsoleExitCommand(command) {
+			t.Fatalf("%q not recognized as an exit command", command)
+		}
+		select {
+		case <-consoleExitRequested(strings.NewReader(command + "\n")):
+		case <-time.After(time.Second):
+			t.Fatalf("%q did not close the console view", command)
+		}
+	}
+	for _, command := range []string{"", "status", "restart", "exit now"} {
+		if isConsoleExitCommand(command) {
+			t.Fatalf("unrelated input %q closed the console view", command)
+		}
 	}
 }
 
