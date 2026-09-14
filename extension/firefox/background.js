@@ -7,6 +7,10 @@ const api = globalThis.browser || globalThis.chrome;
 let stopRequested = false;
 let heartbeatTimer = 0;
 let heartbeatInFlight = null;
+let finishedTabCleanup = null;
+let connectionStartedAt = 0;
+let connectionPhase = '';
+let connectionPhaseStartedAt = 0;
 const pollers = new Map();
 const busyTabs = new Set();
 const freshTabChecks = new Map();
@@ -85,26 +89,42 @@ async function startPairing() {
   if (!cfg.token) throw new Error('Enter the pairing token once in Advanced settings');
   const tabIds = configuredTabIDs(cfg);
   if (!tabIds.length) throw new Error('Select at least one AI tab first');
-  for (const tabId of tabIds) {
-    const tab = await api.tabs.get(tabId);
-    if (!tab?.url || !/^https?:/i.test(tab.url)) throw new Error('One selected tab is not a supported web page');
-    if (cfg.useVisualProfile && !profileForTab(cfg, tab)) throw new Error(`Detect or customize ${tab.title || 'the selected page'} before starting the bridge`);
-  }
-  const ready = await testBridge();
-  if (!ready.ok) throw new Error(ready.error || 'Local ContextBridge service is unavailable');
+  connectionStartedAt = Date.now();
+  await reportConnectionProgress('Checking selected tabs', 0, tabIds.length);
+  try {
+    for (let index = 0; index < tabIds.length; index += 1) {
+      const tab = await api.tabs.get(tabIds[index]);
+      if (!tab?.url || !/^https?:/i.test(tab.url)) throw new Error('One selected tab is not a supported web page');
+      if (cfg.useVisualProfile && !profileForTab(cfg, tab)) throw new Error(`Detect or customize ${tab.title || 'the selected page'} before starting the bridge`);
+      await reportConnectionProgress('Checking selected tabs', index + 1, tabIds.length);
+    }
+    await reportConnectionProgress('Contacting local service', 0, 1);
+    const ready = await testBridge();
+    if (!ready.ok) throw new Error(ready.error || 'Local ContextBridge service is unavailable');
 
-  stopRequested = false;
-  await api.storage.local.set({ running: true, teachingTabId: 0, lastError: '' });
-  const heartbeatReady = await sendHeartbeat('waiting');
-  if (!heartbeatReady) {
-    stopRequested = true;
-    await api.storage.local.set({ running: false });
-    throw new Error('Local ContextBridge did not accept the browser connection; check the pairing token and service');
+    stopRequested = false;
+    await api.storage.local.set({ running: true, teachingTabId: 0, lastError: '' });
+    const heartbeatReady = await sendHeartbeat('waiting', true);
+    if (!heartbeatReady) {
+      stopRequested = true;
+      await api.storage.local.set({ running: false });
+      throw new Error('Local ContextBridge did not accept the browser connection; check the pairing token and service');
+    }
+    startHeartbeat();
+    poll();
+    void discoverFreshTabs();
+    return { ok: true };
+  } finally {
+    connectionStartedAt = 0;
+    await api.storage.local.set({ connectionProgress: null });
   }
-  startHeartbeat();
-  poll();
-  void discoverFreshTabs();
-  return { ok: true };
+}
+
+async function reportConnectionProgress(phase, done, total) {
+  if (phase !== connectionPhase) { connectionPhase = phase; connectionPhaseStartedAt = Date.now(); }
+  const elapsed = connectionPhaseStartedAt ? Date.now() - connectionPhaseStartedAt : 0;
+  const etaSeconds = done > 0 && done < total ? Math.ceil(elapsed * (total - done) / done / 1000) : null;
+  await api.storage.local.set({ connectionProgress: { phase, done, total, etaSeconds } });
 }
 
 async function stopPairing() {
@@ -213,11 +233,13 @@ async function detachClosedTab(tabId) {
     const sessionBindings = { ...latest.sessionBindings };
     for (const [key, binding] of Object.entries(sessionBindings)) {
       if (Number(binding?.tabId) !== tabId) continue;
+      if (binding.autoCreated && binding.perJob && binding.closeEligibleAt) { delete sessionBindings[key]; continue; }
       if (binding.url && !isFreshChatURL(binding.url) && !binding.legacy) sessionBindings[key] = { ...binding, tabId: 0 };
       else delete sessionBindings[key];
     }
     await api.storage.local.set({ sessionBindings });
   });
+  await removeOwnedDraft(tabId);
   if (!configuredTabIDs(cfg).includes(tabId)) {
     await api.storage.local.set({ autoAttachBlockedTabIds, tabCapabilities, tabCapabilityScans, tabFailures, tabEditModes });
     return;
@@ -453,6 +475,10 @@ async function pollTab(tabId) {
 }
 
 async function processWork(cfg, work, claimedTabId) {
+  if (work?.job?.metadata?.contextbridge_new_chat_per_job === true
+      || (cfg.sessionMode === 'new_chat_per_job' && work?.job?.metadata?.contextbridge_new_chat_per_job !== false)) {
+    work.job.metadata = { ...(work.job.metadata || {}), contextbridge_new_chat_per_job: true, contextbridge_new_chat: true };
+  }
   let decision;
   let tab;
   let effectiveProfile = work.profile || {};
@@ -508,7 +534,7 @@ async function processWork(cfg, work, claimedTabId) {
       tab = await api.tabs.get(tabId);
       await assertSessionTab(workSessionKey(work), tabId);
     }
-    if (cfg.preserveDrafts) {
+    if (cfg.preserveDrafts || cfg.ownedDrafts?.[tabId]) {
       try {
         await preserveAndClearDraft(cfg, tabId, tab, effectiveProfile, work.job);
       } catch (error) {
@@ -564,6 +590,7 @@ async function processWork(cfg, work, claimedTabId) {
     progressTimer = setInterval(sample, 800);
     let answer;
     try {
+      if (!editTarget) await markOwnedDraft(tabId, tab, work.job);
       const results = await api.scripting.executeScript({ target: { tabId }, func: automate, args: [work.job, effectiveProfile, work.deadline, editTarget] });
       answer = results?.[0]?.result;
     } catch (error) {
@@ -642,6 +669,7 @@ async function processWork(cfg, work, claimedTabId) {
       }
       throw new Error(answer?.error || 'No browser response was captured');
     }
+    if (!editTarget) await releaseOwnedDraftIfEmpty(tabId, effectiveProfile);
     try {
       const owned = await api.scripting.executeScript({ target: { tabId }, func: inspectLatestOwnedTurn, args: [work.job.prompt, effectiveProfile.name] });
       submittedTurn = owned?.[0]?.result || null;
@@ -701,7 +729,10 @@ async function processWork(cfg, work, claimedTabId) {
 
   const pendingCompletions = { ...cfg.pendingCompletions, [work.job.id]: decision };
   await api.storage.local.set({ pendingCompletions });
-  await completeWork(await settings(), work.job.id, decision);
+  const acknowledged = await completeWork(await settings(), work.job.id, decision);
+  if (acknowledged && jobCompleted && !decision?.error && decision?.verdict !== 'review') {
+    try { await markFinishedTabForClose(work, tabId, decision); } catch (_) { /* Completion is authoritative; tab cleanup is optional. */ }
+  }
   await sendHeartbeat('waiting');
 }
 
@@ -753,9 +784,10 @@ async function coolDownTab(tabId, duration) {
 function workSessionKey(work) {
   const session = String(work?.job?.contextbridge_session_key || work?.job?.session_id || 'local-default').trim().slice(0, 200);
   const profile = String(work?.profile?.name || work?.job?.browser_profile || '').trim().slice(0, 50);
+  const job = work?.job?.metadata?.contextbridge_new_chat_per_job === true ? String(work?.job?.id || '').slice(0, 100) : '';
   // One terminal session can explicitly switch providers, but ChatGPT and
   // Gemini must never be treated as the same browser conversation.
-  return JSON.stringify([session, profile]);
+  return job ? JSON.stringify([session, profile, job]) : JSON.stringify([session, profile]);
 }
 
 function serializeSessionWrite(operation) {
@@ -846,7 +878,8 @@ async function resolveWorkTab(_cfg, work, claimedTabId) {
     if (isFreshChatURL(tab.url) && !await checkFreshTab(tab.id)) {
       throw new Error('The new AI chat is not empty; no prompt was sent');
     }
-    bindings[key] = { tabId: tab.id, url: tab.url || '', label: String(work?.job?.session_id || 'default').slice(0, 80), autoCreated };
+    bindings[key] = { tabId: tab.id, url: tab.url || '', label: String(work?.job?.session_id || 'default').slice(0, 80),
+      autoCreated, perJob: work?.job?.metadata?.contextbridge_new_chat_per_job === true };
     await api.storage.local.set({ sessionBindings: bindings });
     return tab.id;
   });
@@ -1173,14 +1206,96 @@ async function completeWork(cfg, jobId, decision) {
   const pendingCompletions = { ...latest.pendingCompletions };
   delete pendingCompletions[jobId];
   await api.storage.local.set({ pendingCompletions });
+  return response.ok;
+}
+
+async function markFinishedTabForClose(work, tabId, decision) {
+  const byJob = work?.job?.metadata?.contextbridge_close_tab_after_job === true;
+  const perJob = work?.job?.metadata?.contextbridge_new_chat_per_job === true;
+  const cfg = await settings();
+  if (!byJob && !(perJob && cfg.autoCloseFinishedChats)) return;
+  if ((decision.artifacts || []).some((artifact) => artifact?.url && !artifact?.data_base64)) return;
+  await serializeSessionWrite(async () => {
+    const latest = await settings();
+    const key = workSessionKey(work);
+    const bindings = { ...latest.sessionBindings };
+    const binding = bindings[key];
+    if (!binding?.autoCreated || !binding.ownedTurn?.id || Number(binding.tabId) !== tabId) return;
+    bindings[key] = { ...binding, closeEligibleAt: Date.now() + 2 * 60 * 1000, closeRequestedByJob: byJob };
+    await api.storage.local.set({ sessionBindings: bindings });
+  });
+}
+
+async function closeFinishedOwnedTabs() {
+  const cfg = await settings();
+  if (!cfg.running) return;
+  for (const [key, binding] of Object.entries(cfg.sessionBindings || {})) {
+    const tabId = Number(binding?.tabId);
+    if (!binding?.autoCreated || !binding?.ownedTurn?.id || !tabId
+        || Number(binding.closeEligibleAt || 0) > Date.now() || !binding.closeEligibleAt
+        || (!binding.closeRequestedByJob && !cfg.autoCloseFinishedChats)
+        || busyTabs.has(tabId) || cfg.ownedDrafts?.[tabId]) continue;
+    try {
+      const tab = await api.tabs.get(tabId);
+      if (!tab || tab.active || tab.url !== binding.url || !configuredTabIDs(cfg).includes(tabId)) continue;
+      const profile = profileForTab(cfg, tab);
+      if (!profile?.selectors) continue;
+      const first = await api.scripting.executeScript({ target: { tabId }, func: inspectOwnedDraft,
+        args: [profile.selectors, profile.name] });
+      if (!safeToCloseOwnedTab(first?.[0]?.result)) continue;
+      await delay(500);
+      const latest = await settings();
+      const currentBinding = latest.sessionBindings?.[key];
+      const currentTab = await api.tabs.get(tabId);
+      if (currentBinding?.url !== binding.url || Number(currentBinding?.tabId) !== tabId
+          || currentTab.active || currentTab.url !== binding.url || busyTabs.has(tabId) || latest.ownedDrafts?.[tabId]) continue;
+      const second = await api.scripting.executeScript({ target: { tabId }, func: inspectOwnedDraft,
+        args: [profile.selectors, profile.name] });
+      if (!safeToCloseOwnedTab(second?.[0]?.result) || (await api.tabs.get(tabId)).active) continue;
+      await api.tabs.remove(tabId);
+    } catch (_) { /* Never force-close on an uncertain page state. */ }
+  }
+}
+
+function safeToCloseOwnedTab(state) {
+  return Boolean(state?.empty && !state.provider_busy && !state.has_attachments && !state.focused);
 }
 
 async function preserveAndClearDraft(cfg, tabId, tab, profile, job) {
   const selectors = profile.selectors || {};
+  const owned = cfg.ownedDrafts?.[tabId];
+  if (owned) {
+    if (!owned.nonce || !owned.digest || !owned.jobId) throw new Error('The ContextBridge draft ownership record is incomplete; no draft was saved or cleared');
+    const probe = await api.scripting.executeScript({ target: { tabId }, func: inspectOwnedDraft, args: [selectors, profile.name, owned.nonce] });
+    const current = probe?.[0]?.result;
+    if (!current || current.unavailable) throw new Error('The ContextBridge draft could not be inspected; it was not saved as a user draft or cleared');
+    if (current.empty && !current.provider_busy && !current.has_attachments) {
+      const forgotten = await api.scripting.executeScript({ target: { tabId }, func: forgetEmptyOwnedDraft, args: [selectors] });
+      if (forgotten?.[0]?.result === true) await removeOwnedDraft(tabId);
+      return;
+    }
+    const matching = owned.origin === new URL(tab.url).origin && owned.digest === current?.digest;
+    if (matching) {
+      if (current.owner_job !== owned.jobId) throw new Error('The draft matches a ContextBridge prompt, but its page ownership marker is missing; it was not saved or cleared');
+      if (current.provider_busy || current.has_attachments || current.focused) {
+        throw new Error('A ContextBridge prompt is still in the editor, but the page is busy or being edited; it was not saved as a user draft or cleared');
+      }
+      const cleared = await api.scripting.executeScript({ target: { tabId }, func: clearCurrentDraft,
+        args: [selectors, '', profile.name, owned.digest, owned.nonce] });
+      if (!cleared?.[0]?.result) throw new Error('The ContextBridge prompt changed before clearing; it was not saved as a user draft');
+      await removeOwnedDraft(tabId);
+      return;
+    }
+    if (current.owner_job) throw new Error('The ContextBridge-marked editor changed; it was not saved as a user draft or cleared');
+    await removeOwnedDraft(tabId);
+    if (current?.empty) return;
+  }
   const captured = await api.scripting.executeScript({ target: { tabId }, func: captureCurrentDraft, args: [selectors, profile.name] });
   const draft = captured?.[0]?.result;
+  if (draft?.owner_job) throw new Error('A ContextBridge-marked editor has no matching ownership record; it was not saved as a user draft');
   if (draft?.provider_busy) throw new Error('ChatGPT still shows Stop; the previous generation may be active and the existing draft was left untouched');
   if (draft?.has_attachments) throw new Error('An existing file attachment cannot be preserved as text history; editor was left untouched');
+  if (!cfg.preserveDrafts) return;
   if (!draft?.text && !draft?.too_large) return;
   if (draft.too_large) throw new Error('Existing draft exceeds the 16 KiB local history limit; editor was left untouched');
   const response = await fetch(`${cfg.bridgeUrl}/v1/browser/drafts`, {
@@ -1193,6 +1308,67 @@ async function preserveAndClearDraft(cfg, tabId, tab, profile, job) {
   if (!response.ok) throw new Error('Could not save the existing draft locally; editor was left untouched');
   const cleared = await api.scripting.executeScript({ target: { tabId }, func: clearCurrentDraft, args: [selectors, draft.text, profile.name] });
   if (!cleared?.[0]?.result) throw new Error('The draft changed while being saved or the editor rejected clearing; job was not sent');
+}
+
+async function sha256Text(value) {
+  const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(value || '')));
+  return [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function markOwnedDraft(tabId, tab, job) {
+  const nonce = [...crypto.getRandomValues(new Uint8Array(16))].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  const digest = await sha256Text(`${nonce}\u0000${job.prompt || ''}`);
+  await serializeSessionWrite(async () => {
+    const latest = await settings();
+    const ownedDrafts = { ...latest.ownedDrafts, [tabId]: {
+      jobId: String(job.id || ''), origin: new URL(tab.url).origin, digest, nonce, at: Date.now()
+    } };
+    await api.storage.local.set({ ownedDrafts });
+  });
+}
+
+async function removeOwnedDraft(tabId) {
+  await serializeSessionWrite(async () => {
+    const latest = await settings();
+    const ownedDrafts = { ...latest.ownedDrafts };
+    delete ownedDrafts[tabId];
+    await api.storage.local.set({ ownedDrafts });
+  });
+}
+
+async function releaseOwnedDraftIfEmpty(tabId, profile) {
+  try {
+    const result = await api.scripting.executeScript({ target: { tabId }, func: forgetEmptyOwnedDraft,
+      args: [profile.selectors || {}, profile.name] });
+    if (result?.[0]?.result === true) await removeOwnedDraft(tabId);
+  } catch (_) { /* Keep ownership proof if the page is unavailable. */ }
+}
+
+function forgetEmptyOwnedDraft(selectors) {
+  const input = (selectors?.input || []).flatMap((selector) => {
+    try { return [...document.querySelectorAll(selector)]; } catch (_) { return []; }
+  }).find((element) => element && (element.offsetWidth || element.offsetHeight || element.getClientRects().length));
+  if (!input || String(typeof input.value === 'string' ? input.value : (input.innerText || input.textContent || '')).trim()) return false;
+  input.removeAttribute?.('data-contextbridge-owned-job');
+  return true;
+}
+
+async function inspectOwnedDraft(selectors, profileName = '', nonce = '') {
+  const busy = profileName === 'chatgpt' && [...document.querySelectorAll('button[data-testid="stop-button"], button[aria-label="Antwort stoppen"], button[aria-label="Stop generating"]')]
+    .some((element) => element.offsetWidth || element.offsetHeight || element.getClientRects().length);
+  const input = (selectors?.input || []).flatMap((selector) => {
+    try { return [...document.querySelectorAll(selector)]; } catch (_) { return []; }
+  }).find((element) => element && (element.offsetWidth || element.offsetHeight || element.getClientRects().length));
+  if (!input) return { empty: false, unavailable: true, provider_busy: busy };
+  const scope = input.closest?.('form, [data-node-type="input-area"]');
+  const hasAttachments = Boolean(scope && ([...scope.querySelectorAll('input[type="file"]')].some((field) => field.files?.length)
+    || scope.querySelector('[data-testid*="attachment-chip" i], [data-testid*="attached-file" i], [data-testid*="file-thumbnail" i], [data-test-id*="attachment" i]')));
+  const value = String(typeof input.value === 'string' ? input.value : (input.innerText || input.textContent || ''));
+  const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${nonce}\u0000${value}`));
+  return { digest: [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, '0')).join(''),
+    empty: !value.trim(), has_attachments: hasAttachments, provider_busy: busy,
+    owner_job: String(input.getAttribute?.('data-contextbridge-owned-job') || ''),
+    focused: Boolean(document.hasFocus?.() && (document.activeElement === input || input.contains?.(document.activeElement))) };
 }
 
 function captureCurrentDraft(selectors, profileName = '') {
@@ -1209,11 +1385,11 @@ function captureCurrentDraft(selectors, profileName = '') {
   }
   const text = String(typeof input.value === 'string' ? input.value : (input.innerText || input.textContent || ''));
   if (!text.trim()) return { text: '' };
-  if (new TextEncoder().encode(text).length > 16 * 1024) return { too_large: true };
-  return { text };
+  if (new TextEncoder().encode(text).length > 16 * 1024) return { too_large: true, owner_job: String(input.getAttribute?.('data-contextbridge-owned-job') || '') };
+  return { text, owner_job: String(input.getAttribute?.('data-contextbridge-owned-job') || '') };
 }
 
-async function clearCurrentDraft(selectors, expected, profileName = '') {
+async function clearCurrentDraft(selectors, expected, profileName = '', expectedDigest = '', nonce = '') {
   // A generation can start after capture but before the saved draft is cleared.
   if (profileName === 'chatgpt' && [...document.querySelectorAll('button[data-testid="stop-button"], button[aria-label="Antwort stoppen"], button[aria-label="Stop generating"]')]
     .some((element) => element.offsetWidth || element.offsetHeight || element.getClientRects().length)) return false;
@@ -1225,10 +1401,13 @@ async function clearCurrentDraft(selectors, expected, profileName = '') {
   if (scope && ([...scope.querySelectorAll('input[type="file"]')].some((field) => field.files?.length)
     || scope.querySelector('[data-testid*="attachment-chip" i], [data-testid*="attached-file" i], [data-testid*="file-thumbnail" i], [data-test-id*="attachment" i]'))) return false;
   const current = () => String(typeof input.value === 'string' ? input.value : (input.innerText || input.textContent || ''));
-  if (!current().trim()) return true;
-  if (current() !== expected) return false;
+  const matches = async () => expectedDigest
+    ? [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${nonce}\u0000${current()}`)))].map((byte) => byte.toString(16).padStart(2, '0')).join('') === expectedDigest
+    : current() === expected;
+  if (!current().trim()) { input.removeAttribute?.('data-contextbridge-owned-job'); return true; }
+  if (!await matches()) return false;
   input.focus();
-  if (input.isConnected === false || current() !== expected) return false;
+  if (input.isConnected === false || !await matches()) return false;
   if (typeof input.value === 'string') {
     const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value')?.set;
     if (setter) setter.call(input, '');
@@ -1248,7 +1427,9 @@ async function clearCurrentDraft(selectors, expected, profileName = '') {
   const latest = (selectors?.input || []).flatMap((selector) => {
     try { return [...document.querySelectorAll(selector)]; } catch (_) { return []; }
   }).find((element) => element && (element.offsetWidth || element.offsetHeight || element.getClientRects().length));
-  return Boolean(latest && !String(typeof latest.value === 'string' ? latest.value : (latest.innerText || latest.textContent || '')).trim());
+  const empty = Boolean(latest && !String(typeof latest.value === 'string' ? latest.value : (latest.innerText || latest.textContent || '')).trim());
+  if (empty) latest.removeAttribute?.('data-contextbridge-owned-job');
+  return empty;
 }
 
 async function hydrateArtifactReferences(artifacts, pageURL, spec) {
@@ -2033,6 +2214,7 @@ function automate(job, profile, jobDeadline, editTarget = null) {
             await wait(150);
           }
           if (!retained) throw new Error('Prompt editor did not retain the submitted text');
+          input.setAttribute?.('data-contextbridge-owned-job', String(job.id || ''));
           let submit = sendControl();
           for (let attempt = 0; (!submit || submit.disabled || submit.getAttribute('aria-disabled') === 'true') && attempt < 20; attempt += 1) {
             await wait(150);
@@ -2375,9 +2557,9 @@ function stopHeartbeat() {
   heartbeatTimer = 0;
 }
 
-function sendHeartbeat(state) {
-  if (heartbeatInFlight) return heartbeatInFlight;
-  heartbeatInFlight = sendHeartbeatOnce(state).finally(() => { heartbeatInFlight = null; });
+function sendHeartbeat(state, connecting = false) {
+  if (heartbeatInFlight) return connecting ? heartbeatInFlight.then(() => sendHeartbeat(state, true)) : heartbeatInFlight;
+  heartbeatInFlight = sendHeartbeatOnce(state, connecting).finally(() => { heartbeatInFlight = null; });
   return heartbeatInFlight;
 }
 
@@ -2392,11 +2574,13 @@ function capabilityScanInterval(profileName, capabilities) {
   return 5 * 60 * 1000;
 }
 
-async function sendHeartbeatOnce(state) {
+async function sendHeartbeatOnce(state, connecting = false) {
   const cfg = await settings();
   if (!cfg.token) return;
   const tabs = [];
-  for (const tabId of configuredTabIDs(cfg)) {
+  const tabIds = configuredTabIDs(cfg);
+  if (connecting) await reportConnectionProgress('Inspecting AI tabs', 0, tabIds.length);
+  for (const [index, tabId] of tabIds.entries()) {
     try {
       const tab = await api.tabs.get(tabId);
       const profile = profileForTab(cfg, tab);
@@ -2458,10 +2642,12 @@ async function sendHeartbeatOnce(state) {
         last_failure: cfg.tabFailures?.[tabId] || null, dom
       });
     } catch (_) {}
+    if (connecting) await reportConnectionProgress('Inspecting AI tabs', index + 1, tabIds.length);
   }
   const tab = tabs[0] || null;
   const profile = tab ? (cfg.taughtProfiles[tab.origin] || globalThis.ContextBridgeProfiles?.forURL(tab.origin)) : null;
   const effectiveState = busyTabs.size ? 'working' : state;
+  if (connecting) await reportConnectionProgress('Registering with local service', 0, 1);
   try {
     const response = await fetch(`${cfg.bridgeUrl}/v1/browser/heartbeat`, {
       method: 'POST',
@@ -2479,6 +2665,9 @@ async function sendHeartbeatOnce(state) {
         tabs
       })
     });
+    if (response.ok && state !== 'paused' && !finishedTabCleanup) {
+      finishedTabCleanup = closeFinishedOwnedTabs().catch(() => {}).finally(() => { finishedTabCleanup = null; });
+    }
     return response.ok;
   } catch (_) { return false; }
 }
@@ -2493,6 +2682,8 @@ async function settings() {
     running: false,
     autoAttachFreshTabs: false,
     preserveDrafts: false,
+    autoCloseFinishedChats: false,
+    ownedDrafts: {},
     autoAttachBlockedTabIds: [],
     useVisualProfile: true,
     taughtProfiles: {},

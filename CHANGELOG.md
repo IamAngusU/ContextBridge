@@ -2,6 +2,17 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.41 - 2026-09-14
+
+### Added
+
+- Connect progress shows inspected tabs out of the selected total and a measured ETA when available
+- a global or per-job fresh-chat mode, plus opt-in idle cleanup limited to completed ContextBridge-created per-job tabs
+
+### Fixed
+
+- a leftover ContextBridge prompt is identified by a locally salted SHA-256 fingerprint and a page ownership marker, never archived as a user's unsent draft; ambiguous active or attached editors remain untouched
+
 ## 0.5.40 - 2026-09-14
 
 ### Added

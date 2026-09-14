@@ -20,8 +20,10 @@ const chrome = {
       const tab = { id: 3, url };
       tabs.set(3, tab);
       return { ...tab };
-    }
+    },
+    remove: async (id) => { tabs.delete(id); }
   },
+  scripting: { executeScript: async () => [{ result: { empty: true, provider_busy: false, has_attachments: false, focused: false } }] },
   storage: { local: {
     get: async (defaults) => ({ ...defaults, ...state }),
     set: async (value) => { Object.assign(state, value); }
@@ -30,7 +32,7 @@ const chrome = {
 };
 const context = vm.createContext({
   chrome, console, URL, setTimeout, clearTimeout, setInterval, clearInterval, Date, Promise,
-  ContextBridgeProfiles: { forURL: (url) => url.startsWith('https://chatgpt.com/') ? { name: 'chatgpt' } : null }
+  ContextBridgeProfiles: { forURL: (url) => url.startsWith('https://chatgpt.com/') ? { name: 'chatgpt', selectors: { input: ['#prompt-textarea'] } } : null }
 });
 vm.runInContext(source, context);
 context.poll = async () => {};
@@ -40,6 +42,11 @@ context.checkFreshTab = async (id) => id === 3 || tabs.get(id)?.url === 'https:/
 const work = (key, metadata = {}) => ({ job: { contextbridge_session_key: key, metadata }, profile: { name: 'chatgpt' } });
 const bindingKey = (key) => context.workSessionKey(work(key));
 assert.notEqual(bindingKey('shared'), context.workSessionKey({ job: { contextbridge_session_key: 'shared' }, profile: { name: 'gemini' } }));
+assert.notEqual(context.workSessionKey({ job: { id: 'one', contextbridge_session_key: 'shared', metadata: { contextbridge_new_chat_per_job: true } }, profile: { name: 'chatgpt' } }),
+  context.workSessionKey({ job: { id: 'two', contextbridge_session_key: 'shared', metadata: { contextbridge_new_chat_per_job: true } }, profile: { name: 'chatgpt' } }));
+assert.equal(context.safeToCloseOwnedTab({ empty: true, provider_busy: false, has_attachments: false, focused: false }), true);
+assert.equal(context.safeToCloseOwnedTab({ empty: false }), false);
+assert.equal(context.safeToCloseOwnedTab({ empty: true, has_attachments: true }), false);
 await context.setTabEditMode(1, true);
 assert.equal(state.tabEditModes[1], true);
 await assert.rejects(context.setTabEditMode(99, true), /Attach this AI tab/);
@@ -87,4 +94,23 @@ assert.equal(state.sessionBindings['legacy-tab:1'].legacy, true);
 tabs.get(1).url = 'https://chatgpt.com/';
 assert.equal(await context.resolveWorkTab({}, work('new'), 1), 1);
 assert.equal(state.sessionBindings['legacy-tab:1'], undefined);
+tabs.set(3, { id: 3, url: 'https://chatgpt.com/c/owned', active: false });
+state.running = true;
+state.autoCloseFinishedChats = true;
+state.tabIds = [1, 3];
+const cleanupWork = { job: { id: 'cleanup-job', contextbridge_session_key: 'cleanup', metadata: { contextbridge_new_chat_per_job: true } },
+  profile: { name: 'chatgpt' } };
+const cleanupKey = context.workSessionKey(cleanupWork);
+state.sessionBindings = { [cleanupKey]: { tabId: 3, url: 'https://chatgpt.com/c/owned', autoCreated: true,
+  ownedTurn: { id: 'owned', digest: 'proof' } } };
+await context.markFinishedTabForClose(cleanupWork, 3, { artifacts: [] });
+assert.ok(state.sessionBindings[cleanupKey].closeEligibleAt > Date.now());
+state.sessionBindings[cleanupKey].closeEligibleAt = Date.now() - 1;
+await context.closeFinishedOwnedTabs();
+assert.equal(tabs.has(3), false, 'only an inactive completed owned tab may auto-close');
+tabs.set(3, { id: 3, url: 'https://chatgpt.com/c/manual', active: false });
+state.sessionBindings = { manual: { tabId: 3, url: 'https://chatgpt.com/c/manual', autoCreated: false,
+  ownedTurn: { id: 'owned', digest: 'proof' }, closeEligibleAt: Date.now() - 1 } };
+await context.closeFinishedOwnedTabs();
+assert.equal(tabs.has(3), true, 'a manually attached tab must not auto-close');
 console.log('Browser sessions are exclusive, producer-scoped, recoverable, and fail closed');

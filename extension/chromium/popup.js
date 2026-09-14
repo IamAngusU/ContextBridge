@@ -10,6 +10,7 @@ document.addEventListener('DOMContentLoaded', initialize);
 api.storage.onChanged?.addListener((changes, area) => {
   if (area !== 'local') return;
   if (changes.tabIds) attachedTabIDs = [...new Set((changes.tabIds.newValue || []).map(Number).filter(Boolean))];
+  if (changes.connectionProgress && connectPending) showConnectionProgress(changes.connectionProgress.newValue);
   if (changes.tabIds || changes.tabCapabilities || changes.tabCooldowns || changes.tabFailures || changes.lastError || changes.connectionError || changes.running) void refreshLiveTabs(Boolean(changes.tabIds || changes.running || changes.connectionError));
 });
 
@@ -21,6 +22,7 @@ async function initialize() {
   $('visual-mode').checked = saved.useVisualProfile;
   $('auto-attach-fresh').checked = saved.autoAttachFreshTabs;
   $('preserve-drafts').checked = saved.preserveDrafts;
+  $('auto-close-finished').checked = saved.autoCloseFinishedChats;
   $('session-mode').value = saved.sessionMode;
   attachedTabIDs = [...new Set((saved.tabIds?.length ? saved.tabIds : [saved.tabId]).map(Number).filter(Boolean))];
   toggleProfileMode();
@@ -222,8 +224,12 @@ $('auto-attach-fresh').addEventListener('change', async () => {
 $('preserve-drafts').addEventListener('change', async () => {
   await api.storage.local.set({ preserveDrafts: $('preserve-drafts').checked });
 });
+$('auto-close-finished').addEventListener('change', async () => {
+  await api.storage.local.set({ autoCloseFinishedChats: $('auto-close-finished').checked });
+});
 $('session-mode').addEventListener('change', async () => {
-  await api.storage.local.set({ sessionMode: $('session-mode').value === 'new_chat' ? 'new_chat' : 'manual' });
+  const mode = $('session-mode').value;
+  await api.storage.local.set({ sessionMode: ['new_chat', 'new_chat_per_job'].includes(mode) ? mode : 'manual' });
 });
 $('release-session-tab').addEventListener('click', async () => {
   try {
@@ -604,11 +610,20 @@ async function refreshState() {
     : attachedTabIDs.length
       ? `${attachedTabIDs.length} tab${attachedTabIDs.length === 1 ? '' : 's'} ready. Connect starts them without a separate test.`
       : 'Connect will ask to attach this AI page. No separate test is required.';
-  if (connectPending) setStatus('connecting', 'Connecting to the local service…');
+  if (connectPending) showConnectionProgress(saved.connectionProgress);
   else if (saved.connectionError) setStatus('error', saved.connectionError);
   else if (saved.running && saved.lastError) setStatus('error', saved.lastError);
   else if (saved.running) setStatus('live', `Connected · ${attachedTabIDs.length} tab${attachedTabIDs.length === 1 ? '' : 's'} attached`);
   else setStatus('idle', 'Not connected');
+}
+
+function showConnectionProgress(progress) {
+  if (!connectPending || !progress) return;
+  const done = Math.max(0, Number(progress.done) || 0);
+  const total = Math.max(1, Number(progress.total) || 1);
+  const eta = Number(progress.etaSeconds) > 0 ? ` · about ${Math.ceil(Number(progress.etaSeconds))}s left` : '';
+  $('pair').textContent = `Connecting ${done}/${total}…`;
+  setStatus('connecting', `${progress.phase || 'Connecting'} · ${done}/${total}${eta}`);
 }
 
 function renderProfile(profile, valid = null, copy = '') {
@@ -623,8 +638,8 @@ function renderProfile(profile, valid = null, copy = '') {
 }
 
 function renderRunning(running) {
-  $('pair').hidden = running;
-  $('stop').hidden = !running;
+  $('pair').hidden = running && !connectPending;
+  $('stop').hidden = !running || connectPending;
   $('teach').disabled = running;
   $('scan-capabilities').disabled = !primaryTabID();
   if (!connectPending) $('pair').textContent = attachedTabIDs.length ? 'Connect attached tabs' : 'Connect this AI page';
@@ -699,7 +714,9 @@ async function settings() {
     running: false,
     autoAttachFreshTabs: false,
     preserveDrafts: false,
+    autoCloseFinishedChats: false,
     sessionMode: 'manual',
+    connectionProgress: null,
     tabEditModes: {},
     autoAttachBlockedTabIds: [],
     useVisualProfile: true,

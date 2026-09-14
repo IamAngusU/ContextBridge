@@ -13,6 +13,7 @@ const chrome = {
 };
 const context = vm.createContext({ chrome, console, URL, TextEncoder, setTimeout, clearTimeout, setInterval, clearInterval, Date, Promise });
 vm.runInContext(source, context);
+context.crypto = webcrypto;
 chrome.tabs.get = async (id) => ({ id, url: 'https://bugcrowd.com/engagements/openai-safety' });
 await assert.rejects(context.scanPageCapabilities(99), /only on a ChatGPT or Gemini tab/);
 assert.equal(context.capabilityScanInterval('chatgpt', { currentModel: '', scanDiagnostic: { model: 'no trigger (0 composer menus)', noTriggerAttempts: 1 } }), 15000);
@@ -83,6 +84,41 @@ assert.equal(context.isEditAssistantTurn({ response_count: 9 }, { response_count
   stopVisible = true;
   assert.equal(await context.clearCurrentDraft(selectors, input.value, 'chatgpt'), false);
   assert.equal(input.value, 'A private unsent ChatGPT draft');
+}
+
+{
+  const input = { value: 'ContextBridge-owned unsent prompt', offsetWidth: 1, getClientRects: () => [1], focus() {}, dispatchEvent() {},
+    ownedJob: '', getAttribute() { return this.ownedJob; }, setAttribute(_name, value) { this.ownedJob = value; }, removeAttribute() { this.ownedJob = ''; } };
+  context.document = { querySelectorAll: (selector) => selector === '#draft' ? [input] : [] };
+  context.Event = class {};
+  const selectors = { input: ['#draft'] };
+  const stored = { ownedDrafts: {} };
+  const savedDrafts = [];
+  chrome.storage.local.get = async (defaults) => ({ ...defaults, ...stored });
+  chrome.storage.local.set = async (value) => Object.assign(stored, value);
+  chrome.scripting.executeScript = async ({ func, args }) => [{ result: await func(...args) }];
+  context.fetch = async (_url, request) => { savedDrafts.push(JSON.parse(request.body)); return { ok: true }; };
+  const tab = { id: 42, title: 'Test', url: 'https://chatgpt.com/c/test' };
+  const job = { id: 'owned-job', session_id: 'test', prompt: input.value };
+  await context.markOwnedDraft(42, tab, job);
+  await assert.rejects(context.preserveAndClearDraft({ bridgeUrl: 'http://127.0.0.1:32145', token: 'test', preserveDrafts: true,
+    ownedDrafts: stored.ownedDrafts }, 42, tab, { name: 'chatgpt', selectors }, job), /ownership marker is missing/);
+  assert.equal(savedDrafts.length, 0);
+  input.setAttribute('data-contextbridge-owned-job', job.id);
+  assert.ok(stored.ownedDrafts[42].digest);
+  await context.preserveAndClearDraft({ bridgeUrl: 'http://127.0.0.1:32145', token: 'test', preserveDrafts: false,
+    ownedDrafts: stored.ownedDrafts }, 42, tab, { name: 'chatgpt', selectors }, job);
+  assert.equal(input.value, '');
+  assert.equal(input.ownedJob, '');
+  assert.equal(savedDrafts.length, 0, 'an owned prompt must never enter user-draft history');
+  assert.equal(stored.ownedDrafts[42], undefined);
+  input.value = 'A genuinely different user draft';
+  await context.markOwnedDraft(42, tab, job);
+  await context.preserveAndClearDraft({ bridgeUrl: 'http://127.0.0.1:32145', token: 'test', preserveDrafts: true,
+    ownedDrafts: stored.ownedDrafts }, 42, tab, { name: 'chatgpt', selectors }, job);
+  assert.equal(savedDrafts.length, 1);
+  assert.equal(savedDrafts[0].text, 'A genuinely different user draft');
+  assert.equal(input.value, '');
 }
 
 const element = (text = '', attributes = {}) => ({
