@@ -2,6 +2,13 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.48 - 2026-09-14
+
+### Fixed
+
+- ChatGPT's visible "Too many requests" dialog is detected before draft handling, model selection, or Send; an older successful answer cannot mask the account-level rate limit
+- a rate-limited ChatGPT account cools down all attached ChatGPT tabs for five minutes while leaving Gemini available; background model scans do not open menus beneath visible dialogs
+
 ## 0.5.47 - 2026-09-14
 
 ### Added

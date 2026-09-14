@@ -574,6 +574,20 @@ async function processWork(cfg, work, claimedTabId) {
     if (!matches(tab.url || '', effectiveProfile.match_url || '')) throw new Error('The selected tab no longer matches its taught page');
     await sendHeartbeat('working');
     leaseTimer = setInterval(() => renewLease(cfg, work.job.id), 25000);
+    const rejectVisibleRateLimit = async () => {
+      const snapshot = await captureTabProgress(tabId, effectiveProfile.selectors);
+      if (snapshot.blocking_provider_error_code !== 'browser_rate_limited') return;
+      failureCode = 'browser_rate_limited';
+      failureReason = 'provider_rate_limit_modal';
+      await coolDownTab(tabId, 5 * 60 * 1000, effectiveProfile.name);
+      progressSequence += 1;
+      await reportProgress(cfg, work.job.id, { sequence: progressSequence, text: '', phase: 'rate_limited',
+        detail: 'Provider rate-limit dialog is visible; no prompt was sent', busy: false });
+      throw new Error('Provider rate-limit dialog is visible; no prompt was sent');
+    };
+    // A blocking provider dialog can still leave the composer mounted below
+    // it. Check before guarded recovery, draft handling, or model selection.
+    await rejectVisibleRateLimit();
     if (effectiveProfile.name === 'chatgpt') {
       failureCode = 'browser_provider_busy';
       await recoverPriorStall(work, tabId, effectiveProfile, binding?.ownedTurn || null);
@@ -585,6 +599,7 @@ async function processWork(cfg, work, claimedTabId) {
     // that tab until a real prompt control is visible; opening it manually is
     // not required, and an unready page fails without touching a draft.
     await waitForTabReady(tabId, effectiveProfile.selectors, 30000, 0);
+    await rejectVisibleRateLimit();
     if (cfg.preserveDrafts || cfg.ownedDrafts?.[tabId]) {
       try {
         await preserveAndClearDraft(cfg, tabId, tab, effectiveProfile, work.job);
@@ -714,7 +729,7 @@ async function processWork(cfg, work, claimedTabId) {
       failureCode = /^browser_[a-z_]+$/.test(String(answer?.code || '')) ? answer.code : failureCode;
       failureReason = classifyFailureReason(answer?.error);
       if (failureCode === 'browser_rate_limited') {
-		await coolDownTab(tabId, 5 * 60 * 1000);
+		await coolDownTab(tabId, 5 * 60 * 1000, effectiveProfile.name);
         progressSequence += 1;
         await reportProgress(cfg, work.job.id, { sequence: progressSequence, text: '', phase: 'rate_limited', detail: answer?.error || 'Provider rate limit', busy: false });
       }
@@ -826,9 +841,22 @@ function supportsTabEditJob(job) {
     && Number(job?.output?.min_images || 0) === 0 && Number(job?.output?.min_media || 0) === 0;
 }
 
-async function coolDownTab(tabId, duration) {
+async function coolDownTab(tabId, duration, providerName = '') {
   const cfg = await settings();
-  const tabCooldowns = { ...(cfg.tabCooldowns || {}), [tabId]: Date.now() + duration };
+  const until = Date.now() + duration;
+  const tabCooldowns = { ...(cfg.tabCooldowns || {}), [tabId]: Math.max(Number(cfg.tabCooldowns?.[tabId] || 0), until) };
+  // ChatGPT's conversation-access limit applies to the signed-in browser
+  // account, not just the tab that happened to display the dialog. Avoid
+  // immediately claiming the next job in another attached ChatGPT tab.
+  const host = providerName === 'chatgpt' ? 'chatgpt.com' : '';
+  if (host) {
+    for (const candidate of configuredTabIDs(cfg)) {
+      try {
+        const tab = await api.tabs.get(candidate);
+        if (new URL(tab.url).hostname === host) tabCooldowns[candidate] = Math.max(Number(tabCooldowns[candidate] || 0), until);
+      } catch (_) { /* A closed or inaccessible tab cannot be cooled. */ }
+    }
+  }
   await api.storage.local.set({ tabCooldowns });
 }
 
@@ -1633,6 +1661,16 @@ function automate(job, profile, jobDeadline, editTarget = null) {
   };
   const pageBusy = () => pageState().busy;
   const providerError = (responseElement, changedResponse, beforeUserTurns) => {
+    // ChatGPT's account-level "Too many requests" notice is a Radix dialog,
+    // not an alert. It can overlay a still-visible composer and an older
+    // successful answer, so it must be checked independently of turn changes.
+    for (const dialog of document.querySelectorAll('[role="dialog"], [role="alertdialog"]')) {
+      if (!isVisible(dialog)) continue;
+      const message = visibleText(dialog).slice(0, 400);
+      if (/rate.?limit|usage.?limit|too many (?:requests|messages)|quota|limit erreicht|nutzungslimit|zu viele anfragen|sp[aä]ter erneut|try again later|temporarily restricted/i.test(message)) {
+        return { code: 'browser_rate_limited', message: 'Provider rate-limit dialog is visible; wait before trying again', retryable: true, blocking: true };
+      }
+    }
     // ChatGPT can attach a retryable thread error to the newly sent *user*
     // turn without creating an assistant turn. Never classify an unrelated
     // older assistant answer as the error for this job.
@@ -2179,6 +2217,11 @@ function automate(job, profile, jobDeadline, editTarget = null) {
         : (before.length ? responseText(before[before.length - 1]) : '');
       const previousIdentity = responseIdentity(previousElement);
       const resumeOnly = Boolean(job.metadata?.contextbridge_resume_only);
+	  const initialFailure = providerError(null, false, beforeUserTurns);
+	  if (initialFailure?.blocking) {
+	    resolve({ ok: false, error: initialFailure.message, code: initialFailure.code, retryable: initialFailure.retryable });
+	    return;
+	  }
 	  if (!resumeOnly && profile.name === 'chatgpt' && chatGPTStopVisible()) {
 	    throw new Error('ChatGPT still shows Stop; the previous generation may be active and no new prompt was typed');
 	  }
@@ -2362,7 +2405,7 @@ function automate(job, profile, jobDeadline, editTarget = null) {
 			return;
 		}
 		const providerFailure = providerError(latestElement, changedResponse, beforeUserTurns);
-		if (providerFailure && !busy) {
+        if (providerFailure && (!busy || providerFailure.blocking)) {
 			resolve({ ok: false, error: providerFailure.message, code: providerFailure.code, retryable: providerFailure.retryable });
 			return;
 		}
@@ -2527,14 +2570,21 @@ function captureProgress(selectors) {
 	const modelFallback = isVisible(fallbackNotice);
 	const currentModel = String(document.querySelector?.('bard-mode-switcher button[aria-haspopup]')
 		?.getAttribute('aria-label')?.match(/(?:derzeit ausgewählt|currently selected|selected)\s*:\s*(.+)$/i)?.[1] || '').trim();
+  const dialogs = ['[role="dialog"]', '[role="alertdialog"]']
+    .flatMap((selector) => { try { return [...document.querySelectorAll(selector)].filter(isVisible); } catch (_) { return []; } })
+    .map(visibleText).filter(Boolean).join(' ');
   const alerts = ['[role="alert"]', '[aria-live="assertive"]', '[data-testid*="error" i]', '.toast-error', '.error-message']
     .flatMap((selector) => { try { return [...document.querySelectorAll(selector)].filter(isVisible); } catch (_) { return []; } })
     .map(visibleText).filter(Boolean).join(' ');
   const retryVisible = [...document.querySelectorAll('button')].filter(isVisible)
     .some((button) => /retry|try again|regenerate|erneut|noch einmal|wiederholen/i.test(`${visibleText(button)} ${button.getAttribute('aria-label') || ''}`));
-  const failureText = alerts || (retryVisible ? latestText : '');
-  if (/rate.?limit|usage.?limit|quota|capacity|limit erreicht|höchstgrenze erreicht|zu viele anfragen|too many requests|try again later|später erneut|temporarily unavailable|something went wrong|etwas ist schief/i.test(failureText)) {
-    return { text: '', busy: false, percent: 0, detail: 'Provider error', current_model: currentModel };
+  const failureText = [dialogs, alerts, retryVisible ? latestText : ''].filter(Boolean).join(' ');
+  const rateLimitPattern = /rate.?limit|usage.?limit|quota|capacity|limit erreicht|höchstgrenze erreicht|zu viele anfragen|too many (?:requests|messages)|try again later|später erneut|temporarily (?:unavailable|restricted)/i;
+  if (rateLimitPattern.test(failureText) || /something went wrong|etwas ist schief/i.test(failureText)) {
+    const rateLimited = rateLimitPattern.test(failureText);
+    return { text: '', busy: false, percent: 0, detail: 'Provider error', current_model: currentModel,
+      provider_error_code: rateLimited ? 'browser_rate_limited' : 'browser_provider_error',
+      blocking_provider_error_code: rateLimitPattern.test(dialogs) ? 'browser_rate_limited' : '' };
   }
   return { text: latestText, response_count: responses.length, response_identity: responseIdentity,
     busy, active_generation: activeGeneration, percent, detail: detail || (busy ? 'Generating' : ''), current_model: currentModel, model_fallback: modelFallback };
@@ -2863,6 +2913,8 @@ function configuredTabIDs(cfg) {
 }
 
 function safeToDiscoverPageCapabilities() {
+  if ([...document.querySelectorAll('[role="dialog"], [role="alertdialog"]')]
+    .some((element) => element.offsetWidth || element.offsetHeight || element.getClientRects().length)) return false;
   const composer = document.querySelector('#prompt-textarea, rich-textarea [contenteditable="true"][role="textbox"], div.ql-editor[contenteditable="true"][role="textbox"]');
   if (!composer) return false;
   // A private draft is not modified by opening and closing the model menu.

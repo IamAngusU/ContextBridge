@@ -249,6 +249,62 @@ const element = (text = '', attributes = {}) => ({
 }
 
 {
+  // Captured from ChatGPT's account-level rate limit: a visible Radix dialog
+  // overlays the composer and an unrelated, already completed JSON answer.
+  let inputTouched = false;
+  const input = { ...element(), focus() { inputTouched = true; } };
+  const response = element('{"marker":"CB46-JSON-OK","count":3,"valid":true}');
+  const dialog = element('Zu viele Anfragen\nDu stellst zu viele Anfragen in kurzer Zeit. Der Zugriff auf deine Unterhaltungen wurde vorübergehend eingeschränkt. Bitte warte ein paar Minuten.\nVerstanden');
+  const stop = element('Stop');
+  context.document = {
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === '#response') return [response];
+      if (selector.includes('[role="dialog"]')) return [dialog];
+      if (selector.includes('stop-button')) return [stop];
+      return [];
+    }
+  };
+  const snapshot = context.captureProgress({ response: ['#response'] });
+  assert.equal(snapshot.text, '', 'an older completed answer must not be reported through a blocking rate-limit dialog');
+  assert.equal(snapshot.provider_error_code, 'browser_rate_limited');
+  assert.equal(snapshot.blocking_provider_error_code, 'browser_rate_limited');
+  const result = await context.automate(
+    { id: 'new-job', prompt: 'This must not be sent', output: { mode: 'text' } },
+    { name: 'chatgpt', selectors: { input: ['#input'], response: ['#response'], submit: [] } },
+    new Date(Date.now() + 5000).toISOString()
+  );
+  assert.equal(result.code, 'browser_rate_limited');
+  assert.equal(result.ok, false);
+  assert.equal(inputTouched, false, 'the modal must stop automation before touching the composer');
+  dialog.offsetWidth = 0;
+  dialog.offsetHeight = 0;
+  dialog.getClientRects = () => [];
+  assert.equal(context.captureProgress({ response: ['#response'] }).text, response.innerText,
+    'a hidden, dismissed rate-limit dialog must not block future answers');
+}
+
+{
+  const previousGet = chrome.storage.local.get;
+  const previousSet = chrome.storage.local.set;
+  const previousTabGet = chrome.tabs.get;
+  const state = { tabIds: [11, 12, 13], tabCooldowns: {} };
+  chrome.storage.local.get = async (defaults) => ({ ...defaults, ...state });
+  chrome.storage.local.set = async (value) => Object.assign(state, value);
+  chrome.tabs.get = async (id) => ({ id, url: id === 13 ? 'https://gemini.google.com/app/test' : `https://chatgpt.com/c/${id}` });
+  try {
+    await context.coolDownTab(11, 300000, 'chatgpt');
+    assert.ok(state.tabCooldowns[11] > Date.now());
+    assert.equal(state.tabCooldowns[12], state.tabCooldowns[11], 'the same ChatGPT account must cool down across its attached tabs');
+    assert.equal(state.tabCooldowns[13], undefined, 'Gemini must remain available');
+  } finally {
+    chrome.storage.local.get = previousGet;
+    chrome.storage.local.set = previousSet;
+    chrome.tabs.get = previousTabGet;
+  }
+}
+
+{
   const input = element();
   const notice = element('Pro ist derzeit sehr gefragt. Für diese Antwort wurde ein anderes Modell verwendet.');
   const response = {
