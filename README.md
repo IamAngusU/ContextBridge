@@ -275,7 +275,7 @@ Generated config locations:
 
 Start from [config.example.yml](config.example.yml). A route declares a primary provider, ordered fallbacks, timeout, and optional browser profile. Visual profiles live in extension storage; YAML profiles remain available for audited and reproducible deployments.
 
-The interactive terminal has two presentation styles. `terminal.style: panel` (default) adds a compact ASCII banner with author/repository link and groups connection, tab, and job events under horizontal dividers. Set `terminal.style: classic` to keep the earlier minimal output. Both styles use the same live status and event data; redirected/service logs retain their stable timestamped format. Restart the running command after changing the setting.
+The interactive terminal has two presentation styles. `terminal.style: panel` (default) adds a compact ASCII banner with author/repository link and groups connection, tab, and job events under horizontal dividers. AI tabs are listed by provider (ChatGPT, Gemini, then other profiles), with working tabs above idle tabs in each group. A local-model section appears only while at least one local model is loaded; loaded models precede available but unloaded models. Real state changes append an update line, since the terminal is an event log rather than an in-place table. Set `terminal.style: classic` to keep the earlier minimal output. Both styles use the same live status and event data; redirected/service logs retain their stable timestamped format. Restart the running command after changing the setting.
 
 ```yaml
 routes:

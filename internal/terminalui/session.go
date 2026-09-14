@@ -41,6 +41,13 @@ type browserSelection struct {
 	profile   string
 	model     string
 	reasoning string
+	state     string
+}
+
+type localModelSelection struct {
+	provider string
+	name     string
+	loaded   bool
 }
 
 // ServiceSnapshot is the read-only subset shown by an attached console. It
@@ -53,6 +60,7 @@ type ServiceSnapshot struct {
 	ActiveTabs       int
 	BusyTabs         int
 	Tabs             []cluster.BrowserSessionCapability
+	LocalModels      []cluster.ModelCapability
 	JobsTotal        uint64
 	JobsFailed       uint64
 	GPU              string
@@ -81,6 +89,7 @@ type Session struct {
 	hardware          string
 	capabilities      cluster.Capabilities
 	browserSelections map[int]browserSelection
+	localModels       map[string]localModelSelection
 	width             int
 	widthFn           func() int
 	done              chan struct{}
@@ -107,7 +116,7 @@ func NewWithStyle(output *os.File, style string) *Session {
 	if os.Getenv("TERM") == "dumb" || os.Getenv("NO_COLOR") != "" {
 		interactive = false
 	}
-	session := &Session{out: output, console: output, interactive: interactive, style: style, jobs: map[string]jobState{}, browserSelections: map[int]browserSelection{}, width: terminalWidth(output), widthFn: func() int { return terminalWidth(output) }, done: make(chan struct{}), closed: make(chan struct{})}
+	session := &Session{out: output, console: output, interactive: interactive, style: style, jobs: map[string]jobState{}, browserSelections: map[int]browserSelection{}, localModels: map[string]localModelSelection{}, width: terminalWidth(output), widthFn: func() int { return terminalWidth(output) }, done: make(chan struct{}), closed: make(chan struct{})}
 	if interactive {
 		go session.animate()
 	} else {
@@ -183,6 +192,7 @@ func (s *Session) HandleWorker(event cluster.WorkerEvent) {
 		s.nextSection = "CONNECTION"
 		s.writeEventLocked("✓", message)
 		s.recordBrowserSelectionsLocked(event.Capabilities.BrowserSessions)
+		s.recordLocalModelsLocked(event.Capabilities.Models)
 		s.retries = 0
 		s.setStatusLocked("Idle", time.Now())
 	case cluster.WorkerCapabilities:
@@ -192,6 +202,7 @@ func (s *Session) HandleWorker(event cluster.WorkerEvent) {
 		}
 		s.hardware = capabilityLabel(event.Capabilities)
 		s.recordBrowserSelectionsLocked(event.Capabilities.BrowserSessions)
+		s.recordLocalModelsLocked(event.Capabilities.Models)
 	case cluster.WorkerJobStarted:
 		selection := requestedSelection(event)
 		s.jobs[event.JobID] = jobState{task: event.Task, phase: "starting", selection: selection, started: time.Now()}
@@ -286,6 +297,7 @@ func (s *Session) ObserveService(snapshot ServiceSnapshot) {
 	} else if len(s.browserSelections) > 0 {
 		s.browserSelections = map[int]browserSelection{}
 	}
+	s.recordLocalModelsLocked(snapshot.LocalModels)
 	if wasOnline {
 		if snapshot.Completed > previous.Completed {
 			s.nextSection = "ACTIVITY"
@@ -341,6 +353,7 @@ func (s *Session) recordBrowserSelectionsLocked(sessions []cluster.BrowserSessio
 			profile:   cleanTerminalLabel(empty(tab.Profile, "browser"), 30),
 			model:     cleanTerminalLabel(tab.CurrentModel, 80),
 			reasoning: cleanTerminalLabel(tab.CurrentReasoning, 40),
+			state:     cleanTerminalLabel(tab.State, 40),
 		}
 		// An empty reading is not evidence that the user changed the model or
 		// reasoning level. ChatGPT briefly removes controls while rerendering;
@@ -352,6 +365,9 @@ func (s *Session) recordBrowserSelectionsLocked(sessions []cluster.BrowserSessio
 			if selection.reasoning == "" {
 				selection.reasoning = previous.reasoning
 			}
+			if selection.state == "" {
+				selection.state = previous.state
+			}
 		}
 		current[tab.TabID] = selection
 	}
@@ -359,7 +375,19 @@ func (s *Session) recordBrowserSelectionsLocked(sessions []cluster.BrowserSessio
 	for id := range current {
 		ids = append(ids, id)
 	}
-	sort.Ints(ids)
+	sort.Slice(ids, func(i, j int) bool {
+		left, right := current[ids[i]], current[ids[j]]
+		if providerRank(left.profile) != providerRank(right.profile) {
+			return providerRank(left.profile) < providerRank(right.profile)
+		}
+		if !strings.EqualFold(left.profile, right.profile) {
+			return strings.ToLower(left.profile) < strings.ToLower(right.profile)
+		}
+		if browserStateRank(left.state) != browserStateRank(right.state) {
+			return browserStateRank(left.state) < browserStateRank(right.state)
+		}
+		return ids[i] < ids[j]
+	})
 	for _, id := range ids {
 		if s.browserSelections[id] != current[id] {
 			selection := current[id]
@@ -376,6 +404,7 @@ func (s *Session) recordBrowserSelectionsLocked(sessions []cluster.BrowserSessio
 			if selection.reasoning != "" {
 				parts = append(parts, "Denkstufe: "+selection.reasoning)
 			}
+			parts = append(parts, browserStateLabel(selection.state))
 			s.nextSection = "AI TABS"
 			s.writeEventLocked("◇", fmt.Sprintf("%s · %s", label, strings.Join(parts, " · ")))
 		}
@@ -387,6 +416,100 @@ func (s *Session) recordBrowserSelectionsLocked(sessions []cluster.BrowserSessio
 		}
 	}
 	s.browserSelections = current
+}
+
+func providerRank(profile string) int {
+	switch strings.ToLower(profile) {
+	case "chatgpt":
+		return 0
+	case "gemini":
+		return 1
+	default:
+		return 2
+	}
+}
+
+func browserStateRank(state string) int {
+	switch strings.ToLower(state) {
+	case "working":
+		return 0
+	case "waiting":
+		return 1
+	case "rate_limited":
+		return 3
+	default:
+		return 2
+	}
+}
+
+func browserStateLabel(state string) string {
+	switch strings.ToLower(state) {
+	case "working":
+		return "läuft"
+	case "waiting":
+		return "idle"
+	case "rate_limited":
+		return "kühlt ab"
+	default:
+		return "Status unbekannt"
+	}
+}
+
+func (s *Session) recordLocalModelsLocked(models []cluster.ModelCapability) {
+	current := map[string]localModelSelection{}
+	loaded := false
+	for _, model := range models {
+		provider := cleanTerminalLabel(model.Provider, 40)
+		name := cleanTerminalLabel(model.Name, 100)
+		if provider == "" || strings.EqualFold(provider, "browser") || name == "" {
+			continue
+		}
+		key := strings.ToLower(provider + "\x00" + name)
+		selection := localModelSelection{provider: provider, name: name, loaded: model.Loaded || current[key].loaded}
+		current[key] = selection
+		loaded = loaded || selection.loaded
+	}
+	if !loaded {
+		if len(s.localModels) > 0 {
+			s.nextSection = "LOCAL MODELS"
+			s.writeEventLocked("◇", "Kein lokales Modell mehr geladen")
+		}
+		s.localModels = map[string]localModelSelection{}
+		return
+	}
+	keys := make([]string, 0, len(current))
+	for key := range current {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		left, right := current[keys[i]], current[keys[j]]
+		if !strings.EqualFold(left.provider, right.provider) {
+			return strings.ToLower(left.provider) < strings.ToLower(right.provider)
+		}
+		if left.loaded != right.loaded {
+			return left.loaded
+		}
+		return strings.ToLower(left.name) < strings.ToLower(right.name)
+	})
+	for _, key := range keys {
+		selection := current[key]
+		if s.localModels[key] == selection {
+			continue
+		}
+		state := "bereit · nicht geladen"
+		if selection.loaded {
+			state = "geladen"
+		}
+		s.nextSection = "LOCAL MODELS"
+		s.writeEventLocked("◇", fmt.Sprintf("%s · %s · %s", selection.provider, selection.name, state))
+	}
+	for key, previous := range s.localModels {
+		if _, ok := current[key]; !ok {
+			s.nextSection = "LOCAL MODELS"
+			s.writeEventLocked("◇", fmt.Sprintf("%s · %s nicht mehr verfügbar", previous.provider, previous.name))
+		}
+	}
+	s.localModels = current
 }
 
 func cleanTerminalLabel(value string, limit int) string {

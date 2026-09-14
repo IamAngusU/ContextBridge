@@ -269,3 +269,73 @@ func TestWorkerConsoleDoesNotRepeatTabWhenReasoningTemporarilyDisappears(t *test
 		t.Fatalf("real model and reasoning changes were not reported: %s", output)
 	}
 }
+
+func TestBrowserTabsGroupProvidersAndPutWorkingBeforeIdle(t *testing.T) {
+	var output bytes.Buffer
+	session := &Session{out: &output, browserSelections: map[int]browserSelection{}}
+	tabs := []cluster.BrowserSessionCapability{
+		{TabID: 80, Profile: "gemini", State: "waiting", CurrentModel: "Flash"},
+		{TabID: 3, Profile: "chatgpt", State: "waiting", CurrentModel: "GPT-5.6 Sol"},
+		{TabID: 6, Profile: "custom", State: "working"},
+		{TabID: 5, Profile: "gemini", State: "working", CurrentModel: "Pro"},
+		{TabID: 4, Profile: "chatgpt", State: "working", CurrentModel: "GPT-5.6 Sol"},
+	}
+	session.recordBrowserSelectionsLocked(tabs)
+	got := output.String()
+	previous := -1
+	for _, label := range []string{"Tab 4 · chatgpt", "Tab 3 · chatgpt", "Tab 5 · gemini", "Tab 80 · gemini", "Tab 6 · custom"} {
+		index := strings.Index(got, label)
+		if index <= previous {
+			t.Fatalf("provider/state ordering is wrong at %q: %s", label, got)
+		}
+		previous = index
+	}
+	if !strings.Contains(got, "Tab 4 · chatgpt · Modell: GPT-5.6 Sol · läuft") ||
+		!strings.Contains(got, "Tab 3 · chatgpt · Modell: GPT-5.6 Sol · idle") {
+		t.Fatalf("tab activity is not distinguished: %s", got)
+	}
+	session.recordBrowserSelectionsLocked(tabs)
+	if output.String() != got {
+		t.Fatalf("unchanged browser states were logged again: %s", output.String())
+	}
+	tabs[1].State = ""
+	session.recordBrowserSelectionsLocked(tabs)
+	if output.String() != got {
+		t.Fatalf("a transient missing state created a false tab transition: %s", output.String())
+	}
+	tabs[1].State = "working"
+	session.recordBrowserSelectionsLocked(tabs)
+	if strings.Count(output.String(), "Tab 3 aktualisiert") != 1 || !strings.Contains(output.String(), "Tab 3 aktualisiert · chatgpt · Modell: GPT-5.6 Sol · läuft") {
+		t.Fatalf("real state transition was not logged once: %s", output.String())
+	}
+}
+
+func TestLocalModelsAppearOnlyWhileOneIsLoaded(t *testing.T) {
+	var output bytes.Buffer
+	session := &Session{out: &output, interactive: true, style: "panel", widthFn: func() int { return 90 },
+		localModels: map[string]localModelSelection{}}
+	models := []cluster.ModelCapability{
+		{Provider: "ollama", Name: "ready-model"},
+		{Provider: "browser", Name: "GPT-5.6 Sol", Loaded: true},
+		{Provider: "ollama", Name: "loaded-model"},
+	}
+	session.recordLocalModelsLocked(models)
+	if output.Len() != 0 {
+		t.Fatalf("unloaded or browser models should not open the local section: %s", output.String())
+	}
+	models[2].Loaded = true
+	session.recordLocalModelsLocked(models)
+	got := output.String()
+	if !strings.Contains(got, "+-- LOCAL MODELS") || strings.Index(got, "loaded-model · geladen") > strings.Index(got, "ready-model · bereit · nicht geladen") {
+		t.Fatalf("loaded local models must precede idle local models: %s", got)
+	}
+	session.recordLocalModelsLocked(models)
+	if output.String() != got {
+		t.Fatalf("unchanged local model state was repeated: %s", output.String())
+	}
+	models[2].Loaded = false
+	session.recordLocalModelsLocked(models)
+	if strings.Count(output.String(), "Kein lokales Modell mehr geladen") != 1 {
+		t.Fatalf("unload transition should be reported once: %s", output.String())
+	}
+}

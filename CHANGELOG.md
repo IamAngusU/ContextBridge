@@ -2,6 +2,13 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.49 - 2026-09-14
+
+### Improved
+
+- terminal AI-tab entries are grouped by provider (ChatGPT, Gemini, then others), with working tabs above idle tabs in each group and a visible per-tab state; only real state changes add an update line
+- a separate local-model section appears while at least one local model is loaded, listing loaded models before available but unloaded models within each provider; the attached read-only console uses the same state data
+
 ## 0.5.48 - 2026-09-14
 
 ### Fixed

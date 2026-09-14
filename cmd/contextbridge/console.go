@@ -28,7 +28,8 @@ type consoleStatus struct {
 	Completed int                        `json:"completed"`
 	Browser   bridge.BrowserClientStatus `json:"browser"`
 	Runtime   struct {
-		Hardware systeminfo.Snapshot `json:"hardware"`
+		Hardware systeminfo.Snapshot            `json:"hardware"`
+		Engines  map[string]bridge.EngineStatus `json:"engines"`
 	} `json:"runtime"`
 	Metrics struct {
 		JobsTotal  uint64 `json:"jobs_total"`
@@ -108,8 +109,19 @@ func toServiceSnapshot(status consoleStatus) terminalui.ServiceSnapshot {
 	}
 	for _, tab := range status.Browser.Tabs {
 		snapshot.Tabs = append(snapshot.Tabs, cluster.BrowserSessionCapability{
-			TabID: tab.ID, Profile: tab.Profile, CurrentModel: tab.CurrentModel, CurrentReasoning: tab.CurrentReasoning,
+			TabID: tab.ID, Profile: tab.Profile, State: tab.State,
+			CurrentModel: tab.CurrentModel, CurrentReasoning: tab.CurrentReasoning,
 		})
+	}
+	for provider, engine := range status.Runtime.Engines {
+		if engine.State != "online" {
+			continue
+		}
+		for _, model := range engine.Models {
+			snapshot.LocalModels = append(snapshot.LocalModels, cluster.ModelCapability{
+				Provider: provider, Name: model.Name, Loaded: model.Loaded, Size: model.Size, VRAM: model.VRAM,
+			})
+		}
 	}
 	if len(status.Runtime.Hardware.GPUs) > 0 {
 		gpu := status.Runtime.Hardware.GPUs[0]
