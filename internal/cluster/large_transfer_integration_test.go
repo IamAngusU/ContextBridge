@@ -164,7 +164,7 @@ func TestMaximumVisualInputAndArtifactResultRoundTrip(t *testing.T) {
 			name = "e2ee"
 		}
 		t.Run(name, func(t *testing.T) {
-			waitFor(t, 4*time.Second, func() bool {
+			waitFor(t, 15*time.Second, func() bool {
 				node, loadErr := relay.store.GetNode(nodeID)
 				return loadErr == nil && node.Connected && node.Capabilities.Running == 0
 			}, "large-transfer worker did not return to idle")
@@ -198,7 +198,11 @@ func TestMaximumVisualInputAndArtifactResultRoundTrip(t *testing.T) {
 			}
 
 			var completed Job
-			waitFor(t, 20*time.Second, func() bool {
+			// Race instrumentation and slower hosted runners can spend tens of
+			// seconds encoding and copying the intentional 8 MiB in / 12 MiB out
+			// boundary fixture. This is a test-observation deadline, not a product
+			// execution timeout.
+			waitFor(t, 90*time.Second, func() bool {
 				req, _ := http.NewRequest(http.MethodGet, relayHTTP.URL+"/v1/cluster/jobs/"+submitted.ID+"?compact=1", nil)
 				req.Header.Set("Authorization", "Bearer "+producer)
 				response, getErr := http.DefaultClient.Do(req)
