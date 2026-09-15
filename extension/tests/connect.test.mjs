@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import { TextEncoder } from 'node:util';
 
 const source = fs.readFileSync(new URL('../src/background.js', import.meta.url), 'utf8');
 const listener = { addListener() {} };
@@ -22,7 +23,7 @@ const chrome = {
   } }
 };
 const context = vm.createContext({
-  chrome, console, URL, navigator: { userAgent: 'Chrome/151.0' }, AbortController,
+  chrome, console, URL, TextEncoder, navigator: { userAgent: 'Chrome/151.0' }, AbortController,
   setTimeout, clearTimeout, setInterval, clearInterval, Date, Promise,
   ContextBridgeProfiles: { forURL: (url) => url.startsWith('https://chatgpt.com/')
     ? { name: 'chatgpt', label: 'ChatGPT', selectors: {} } : null },
@@ -254,7 +255,7 @@ assert.match(fs.readFileSync(new URL('../src/popup.html', import.meta.url), 'utf
       }
     };
     const workerContext = vm.createContext({
-      chrome: workerChrome, console, URL, navigator: { userAgent: 'Chrome/151.0' }, AbortController,
+      chrome: workerChrome, console, URL, TextEncoder, navigator: { userAgent: 'Chrome/151.0' }, AbortController,
       setTimeout, clearTimeout, setInterval: () => 1, clearInterval() {}, Date, Promise,
       ContextBridgeProfiles: { forURL: (url) => url.startsWith('https://chatgpt.com/')
         ? { name: 'chatgpt', label: 'ChatGPT', selectors: {} } : null },

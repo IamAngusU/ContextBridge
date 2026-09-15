@@ -824,6 +824,11 @@ func (s *Server) handleBrowserHeartbeat(w http.ResponseWriter, r *http.Request) 
 			}
 		}
 		if dom := status.Tabs[index].DOM; dom != nil {
+			switch dom.PageVisibility {
+			case "visible", "hidden", "prerender", "unknown":
+			default:
+				dom.PageVisibility = ""
+			}
 			dom.Inputs = limitedDOMControls(dom.Inputs, 8)
 			dom.Submit = limitedDOMControls(dom.Submit, 8)
 			dom.FileInputs = limitedDOMControls(dom.FileInputs, 12)

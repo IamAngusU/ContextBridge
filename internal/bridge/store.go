@@ -104,6 +104,8 @@ type BrowserTabFailure struct {
 // carries the prompt value, chat text, file contents, cookies, or full HTML.
 type BrowserDOMSnapshot struct {
 	CapturedAt                      time.Time           `json:"captured_at"`
+	PageVisibility                  string              `json:"page_visibility,omitempty"`
+	WasDiscarded                    bool                `json:"was_discarded,omitempty"`
 	Inputs                          []BrowserDOMControl `json:"inputs,omitempty"`
 	InputHasText                    bool                `json:"input_has_text,omitempty"`
 	InputCharacters                 int                 `json:"input_characters,omitempty"`

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import { TextEncoder } from 'node:util';
 
 const source = fs.readFileSync(new URL('../src/background.js', import.meta.url), 'utf8');
 const state = { running: false, token: 'test', tabId: 0, tabIds: [], autoAttachFreshTabs: true, autoAttachBlockedTabIds: [] };
@@ -17,7 +18,7 @@ const chrome = {
   scripting: { executeScript: async () => [{ result: true }] }
 };
 const context = vm.createContext({
-  chrome, console, URL, AbortController, setTimeout, clearTimeout, setInterval, clearInterval, Date, Promise,
+  chrome, console, URL, TextEncoder, AbortController, setTimeout, clearTimeout, setInterval, clearInterval, Date, Promise,
   ContextBridgeProfiles: { forURL: (url) => url.startsWith('https://chatgpt.com/') ? { name: 'chatgpt' } : null }
 });
 vm.runInContext(source, context);

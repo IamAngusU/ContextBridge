@@ -3899,6 +3899,55 @@ function capabilityScanInterval(profileName, capabilities) {
   return 5 * 60 * 1000;
 }
 
+const BROWSER_HEARTBEAT_BODY_BUDGET = 112 * 1024;
+
+// The service rejects heartbeat bodies above 128 KiB before decoding them.
+// Keep margin for future fixed metadata, while retaining every attached tab's
+// routing-critical state. Selector diagnostics and choice inventories degrade
+// first because they are supporting evidence, not authoritative availability.
+function browserHeartbeatBody(payload, budget = BROWSER_HEARTBEAT_BODY_BUDGET) {
+  const encode = (value) => JSON.stringify(value);
+  const size = (value) => new TextEncoder().encode(value).byteLength;
+  let body = encode(payload);
+  if (size(body) <= budget) return body;
+
+  const limited = (value, maximum) => String(value || '').slice(0, maximum);
+  const compact = {
+    ...payload,
+    state: limited(payload.state, 30),
+    origin: limited(payload.origin, 300),
+    tab_title: limited(payload.tab_title, 300),
+    profile_label: limited(payload.profile_label, 100),
+    extension_version: limited(payload.extension_version, 30),
+    browser: limited(payload.browser, 30),
+    tabs: (payload.tabs || []).map((tab) => ({ ...tab }))
+  };
+  for (let index = compact.tabs.length - 1; index >= 0 && size(body) > budget; index -= 1) {
+    delete compact.tabs[index].dom;
+    body = encode(compact);
+  }
+  for (let index = compact.tabs.length - 1; index >= 0 && size(body) > budget; index -= 1) {
+    delete compact.tabs[index].models;
+    delete compact.tabs[index].reasoning_levels;
+    delete compact.tabs[index].model_scan;
+    delete compact.tabs[index].reasoning_scan;
+    body = encode(compact);
+  }
+  if (size(body) <= budget) return body;
+
+  compact.tabs = compact.tabs.map((tab) => ({
+    id: Number.isInteger(Number(tab.id)) ? Number(tab.id) : 0,
+    origin: limited(tab.origin, 300),
+    title: limited(tab.title, 300),
+    profile: limited(tab.profile, 100),
+    state: limited(tab.state, 30),
+    current_model: limited(tab.current_model, 100),
+    current_reasoning: limited(tab.current_reasoning, 100),
+    dom_status: limited(tab.dom_status, 20)
+  }));
+  return encode(compact);
+}
+
 async function sendHeartbeatOnce(state, connecting = false, generation = lifecycleGeneration) {
   const requestId = ++heartbeatRequestId;
   const cfg = await settings();
@@ -3939,21 +3988,22 @@ async function sendHeartbeatOnce(state, connecting = false, generation = lifecyc
   if (stopRequested && state !== 'paused') return false;
   if (generation !== lifecycleGeneration) return false;
   try {
+    const payload = {
+      state: effectiveState,
+      origin: tab?.origin || '',
+      tab_title: tab?.title || '',
+      profile_label: profile?.label || cfg.profile || '',
+      selectors_ready: tabs.some((item) => cfg.useVisualProfile ? Boolean(item.profile) : Boolean(cfg.profile)),
+      extension_version: api.runtime.getManifest().version,
+      browser: navigator.userAgent.includes('Firefox/') ? 'firefox' : 'chromium',
+      active_tabs: tabs.length,
+      busy_tabs: busyTabs.size,
+      tabs
+    };
     const response = await fetchWithTimeout(`${cfg.bridgeUrl}/v1/browser/heartbeat`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${cfg.token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        state: effectiveState,
-        origin: tab?.origin || '',
-        tab_title: tab?.title || '',
-        profile_label: profile?.label || cfg.profile || '',
-        selectors_ready: tabs.some((item) => cfg.useVisualProfile ? Boolean(item.profile) : Boolean(cfg.profile)),
-        extension_version: api.runtime.getManifest().version,
-        browser: navigator.userAgent.includes('Firefox/') ? 'firefox' : 'chromium',
-        active_tabs: tabs.length,
-        busy_tabs: busyTabs.size,
-        tabs
-      })
+      body: browserHeartbeatBody(payload)
     }, 5000);
     if (generation !== lifecycleGeneration) return false;
     if (state !== 'paused') await recordHeartbeatResult(cfg, response.ok, response.status, requestId, generation);

@@ -40,6 +40,32 @@ const context = vm.createContext({ chrome, console, URL, TextEncoder, AbortContr
 vm.runInContext(source, context);
 context.crypto = webcrypto;
 {
+  const small = { state: 'waiting', active_tabs: 1, tabs: [{ id: 1, profile: 'chatgpt', state: 'waiting' }] };
+  assert.equal(context.browserHeartbeatBody(small), JSON.stringify(small),
+    'a normal heartbeat must retain its complete diagnostic payload');
+  const long = 'x'.repeat(120);
+  const controls = Array.from({ length: 32 }, (_, index) => ({
+    tag: 'button', id: `${index}-${long}`, test_id: long, role: 'button', aria_label: long,
+    text: long, type: 'button', accept: long, has_popup: 'menu', expanded: 'false', visible: true
+  }));
+  const tabs = Array.from({ length: 16 }, (_, index) => ({
+    id: index + 1, origin: 'https://chatgpt.com', title: `tab-${index}-${long}`, profile: 'chatgpt', state: 'waiting',
+    current_model: 'GPT-5.6 Sol', current_reasoning: 'Sehr hoch',
+    models: Array.from({ length: 50 }, (_, model) => `model-${model}-${long}`),
+    reasoning_levels: Array.from({ length: 20 }, (_, level) => `level-${level}-${long}`),
+    dom_status: 'ready', dom: { page_visibility: 'hidden', was_discarded: false, tools: controls, model_controls: controls }
+  }));
+  const body = context.browserHeartbeatBody({
+    state: 'waiting', tab_title: '😀'.repeat(100000), active_tabs: tabs.length, busy_tabs: 0, tabs
+  });
+  assert.ok(new TextEncoder().encode(body).byteLength <= 112 * 1024,
+    'a maximal multi-tab diagnostic heartbeat must stay below the service limit with safety margin');
+  const compact = JSON.parse(body);
+  assert.equal(compact.tabs.length, 16, 'payload budgeting must not hide attached tabs from routing');
+  assert.ok(compact.tab_title.length <= 300, 'page-controlled top-level metadata must also be bounded during compaction');
+  assert.equal(compact.tabs[15].current_model, 'GPT-5.6 Sol', 'routing-critical current model metadata must survive compaction');
+}
+{
   assert.equal(alarmCalls.length, 0,
     'loading a worker must wait for its startup/install/alarm event instead of racing lifecycle policy');
   assert.equal(typeof alarmListener, 'function', 'a suspended worker must have an alarm wake listener');

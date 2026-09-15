@@ -2,6 +2,22 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.68 - 2026-09-15
+
+### Fixed
+
+- browser heartbeats now accept the bounded page-visibility and discarded-tab
+  diagnostics emitted by the matching extension, preventing a successful
+  Connect from degrading into HTTP 400 after the first page scan
+- extension heartbeat bodies keep a safety margin below the service's 128 KiB
+  limit; selector evidence and model-choice inventories compact first while
+  every attached tab's routing-critical state remains present
+
+### Tested
+
+- the extension-to-service DOM heartbeat schema is checked across components,
+  and a synthetic 16-tab worst-case diagnostics payload stays within budget
+
 ## 0.5.67 - 2026-09-15
 
 ### Fixed
