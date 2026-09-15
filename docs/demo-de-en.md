@@ -2,7 +2,7 @@
 
 For a short recording, use the separate [2–3 minute video script](demo-video-de-en.md). This document is the complete technical runbook, including optional research and fact-check segments.
 
-This script uses the managed Windows service, an Opera extension, and a VPS relay. Run the Linux commands in **one VPS shell** so `DEMO_DIR`, `DEMO_ID`, and `IMAGE_FILE` remain available. `--new-chat` gives each demo segment its own ContextBridge-owned chat. Do not attach a personal conversation for this demo.
+This script uses the managed Windows service, local Ollama models, an Opera extension, and a VPS relay. Run the Linux commands in **one VPS shell** so `DEMO_DIR`, `DEMO_ID`, and `IMAGE_FILE` remain available. `--new-chat` gives each browser demo segment its own ContextBridge-owned chat. Do not attach a personal conversation for this demo. The short video begins with local Ollama text, then shows ChatGPT creating a real file, local Ollama vision reading it, and Gemini reading the same file.
 
 ## 1. Open ContextBridge on the Windows PC
 
@@ -12,11 +12,17 @@ In a fresh Windows CMD:
 contextbridge console --config "C:\ContextBridge\config.yml"
 ```
 
-This opens the live view of the already managed service; it does **not** start a second service. If the service is not running, start the installed `ContextBridge` scheduled task or the Start-menu shortcut first. Type `exit` and Enter to close only this view; the service and jobs continue.
+This opens the live view of the already managed service; it does **not** start a second service. If the service is not running, start the installed `ContextBridge` scheduled task or the Start-menu shortcut first. Start the Ollama Windows app if it is offline, then check its installed and ready models in a second CMD:
 
-**DE:** „ContextBridge läuft als lokaler Dienst. Mit diesem Befehl öffne ich seine Live-Ansicht: Verbindung, Tabs, Modelle, Jobs und Verlauf. Das Terminal kann ich später schließen, ohne laufende Jobs zu stoppen.“
+```cmd
+contextbridge models --config "C:\ContextBridge\config.yml"
+```
 
-**EN:** “ContextBridge runs as a local service. This command opens its live view: connection, tabs, models, jobs, and history. I can close the terminal later without stopping jobs.”
+For the exact commands below, `qwen2.5:latest` must be present as a text model and `qwen2.5vl:7b` as text+vision. Those models belong to this demo PC; they are **not** bundled with every ContextBridge installation. `models` shows Ollama-advertised modalities, parameters, quantization and loaded state where available, with model-name inference only as a compatibility fallback for older runtimes. It does not measure intelligence or guarantee OCR accuracy. Type `exit` and Enter to close only the console view; the service and jobs continue.
+
+**DE:** „ContextBridge läuft als lokaler Dienst. Hier sieht man meine installierten Ollama-Modelle: Text und Bildverständnis sind getrennte Fähigkeiten. Das Terminal kann ich später schließen, ohne Jobs zu stoppen.“
+
+**EN:** “ContextBridge runs as a local service. These are my installed Ollama models: text and vision are distinct capabilities. I can close the terminal later without stopping jobs.”
 
 ## 2. Attach the AI pages, then connect
 
@@ -32,18 +38,31 @@ Before recording, close or detach finished **test** chats you no longer need. Au
 
 ```bash
 contextbridge cluster status --config /var/lib/contextbridge/config.yml
-DEMO_DIR=$(mktemp -d /root/contextbridge-demo.XXXXXX)
+DEMO_DIR=/root/contextbridge-demo
+mkdir -p "$DEMO_DIR"
 DEMO_ID=$(date +%Y%m%d-%H%M%S)
 printf 'Demo ID: %s\nFiles: %s\n' "$DEMO_ID" "$DEMO_DIR"
 ```
 
-Check that the PC is online and at least one browser worker is available. The VPS saves returned artifacts in the printed `$DEMO_DIR`, **not** in the Windows inbox. The browser itself runs on the PC; the CLI and saved results run on the VPS.
+Check that the PC is online and that the named Ollama models and at least one browser worker are available. The ordinary status view lists model names but **does not rank model quality**. The VPS saves returned artifacts in the printed `$DEMO_DIR`, **not** in the Windows inbox. The models and browser run on the PC; the CLI and saved results run on the VPS.
 
-**DE:** „Jetzt wechsle ich auf meinen VPS. Der Relay sieht den PC, die freien Slots und die Modelle. Die Browserarbeit passiert auf dem PC; die Befehle und Ergebnisdateien liegen hier auf dem Server.“
+**DE:** „Jetzt wechsle ich auf meinen VPS. Der Relay sieht den PC, die freien Slots und die Modelle. Zuerst spreche ich ein lokales Ollama-Modell auf dem PC an – ganz ohne Browser-KI.“
 
-**EN:** “Now I switch to my VPS. The relay sees the PC, free slots, and models. Browser work happens on the PC; commands and returned files live here on the server.”
+**EN:** “Now I switch to my VPS. The relay sees the PC, free slots, and models. First I call a local Ollama model on the PC—without browser AI.”
 
-## 4. Create and save a real image with ChatGPT
+## 4. Control a local text model from the VPS
+
+```bash
+contextbridge cluster chat --config /var/lib/contextbridge/config.yml --provider ollama --model qwen2.5:latest --session "demo-$DEMO_ID-local-text" --artifacts off --prompt 'Antworte exakt mit CB-LOCAL-OK und keinen weiteren Zeichen.'
+```
+
+Check the VPS output for `CB-LOCAL-OK`, `↳ verwendet: ollama · qwen2.5:latest`, and the worker node ID. **Those route facts, not the model's prose, prove where the job ran.** This exact rehearsal returned in 5.9 seconds; do not promise the same latency to viewers.
+
+**DE:** „Ich gebe den Auftrag auf dem VPS ein; mein Windows-PC rechnet ihn mit dem lokalen Modell. Im Ergebnis stehen der tatsächlich verwendete Anbieter und das Modell.“
+
+**EN:** “I submit from the VPS; my Windows PC computes with its local model. The result names the provider and model actually used.”
+
+## 5. Create and save a real image with ChatGPT
 
 ```bash
 contextbridge cluster chat --config /var/lib/contextbridge/config.yml --profile chatgpt --new-chat --foreground-new-chat --session "demo-$DEMO_ID-image" --image --artifacts "$DEMO_DIR" --prompt 'Erstelle genau ein quadratisches Bild: reinweißer Hintergrund, mittig die klare schwarze Aufschrift „IamAngusU“ und direkt darunter deutlich kleiner „ContextBridge“. Keine weiteren Wörter, Symbole oder Verzierungen. Gib nur das Bild aus.'
@@ -61,7 +80,19 @@ printf 'Image for Gemini: %s\n' "$IMAGE_FILE"
 
 **EN:** “ChatGPT is creating a minimal image. ContextBridge does not accept the claim ‘image created’ alone: the job succeeds only when the actual image file has been saved on the VPS.”
 
-## 5. Give that image to Gemini for OCR only
+## 6. Give that same file to the local vision model
+
+```bash
+contextbridge cluster chat --config /var/lib/contextbridge/config.yml --provider ollama --model qwen2.5vl:7b --session "demo-$DEMO_ID-local-vision" --attach-image "$IMAGE_FILE" --artifacts off --prompt 'Lies nur den sichtbaren Text im angehängten Bild. Nenne die große und die kleine Zeile, ohne zu raten.'
+```
+
+Check for `↳ verwendet: ollama · qwen2.5vl:7b` and the **actual** answer. In one live test the model read `IamAngusU` and `ContextBridge` from the saved PNG in 18.1 seconds. `--attach-image` adds a hard vision requirement: when a model is named, that exact model—not merely another model on the same PC—must advertise vision. ContextBridge detects modality for placement, but it does not measure model intelligence or OCR reliability.
+
+**DE:** „Dasselbe Bild geht jetzt erst an mein eigenes Vision-Modell. Auch das steuere ich vom VPS; für diesen Schritt geht kein Prompt an ChatGPT oder Gemini.“
+
+**EN:** “The same picture now goes first to my own vision model. I control that from the VPS too; this step sends no prompt to ChatGPT or Gemini.”
+
+## 7. Give that image to Gemini for OCR only
 
 ```bash
 contextbridge cluster chat --config /var/lib/contextbridge/config.yml --profile gemini --new-chat --session "demo-$DEMO_ID-ocr" --attach-image "$IMAGE_FILE" --artifacts off --prompt 'Lies ausschließlich die Schrift im angehängten Bild. Nenne zuerst die große und dann die kleine Aufschrift. Keine Recherche, keine Identitätsprüfung und kein neues Bild.'
@@ -73,7 +104,7 @@ contextbridge cluster chat --config /var/lib/contextbridge/config.yml --profile 
 
 **EN:** “The saved image now goes to Gemini. This task is deliberately narrow: read only the two inscriptions. Research and identity checks come in the next, separate job.”
 
-## 6. Research identity in a separate Gemini chat
+## 8. Research identity in a separate Gemini chat
 
 ```bash
 contextbridge cluster chat --config /var/lib/contextbridge/config.yml --profile gemini --new-chat --foreground-new-chat --session "demo-$DEMO_ID-identity" --artifacts off --prompt 'Unabhängige Recherche für eine Demo: Auf einem separaten Bild standen IamAngusU und ContextBridge. Prüfe tatsächlich https://angusu.de/ und https://github.com/IamAngusU. Welcher bürgerliche Name wird auf angusu.de für den Programmierer genannt, und ist dessen Zuordnung zum GitHub-Benutzernamen IamAngusU direkt belegt? Nenne die konkret geprüften URLs. Trenne bestätigt, Indiz und nicht verifiziert. Wenn du eine Seite nicht öffnen kannst, sage es ausdrücklich. Der Bildtext allein beweist keine Identität.'
@@ -83,7 +114,7 @@ contextbridge cluster chat --config /var/lib/contextbridge/config.yml --profile 
 
 **EN:** “The next Gemini chat does not treat the picture as proof. It checks two public sources and must distinguish confirmed information from mere indications.”
 
-## 7. Show an unfocused or minimized browser
+## 9. Show an unfocused or minimized browser
 
 First prepare an owned Gemini chat while Opera is visible:
 
@@ -103,7 +134,7 @@ This is a **text** test. It proves that the browser window need not be focused f
 
 **EN:** “Opera is minimized now. I am still sending a new text job from the VPS. The answer appears here in the terminal without bringing the browser to the foreground.”
 
-## 8. Optional short fact-check and closing
+## 10. Optional short fact-check and closing
 
 ```bash
 contextbridge cluster chat --config /var/lib/contextbridge/config.yml --profile chatgpt --new-chat --foreground-new-chat --session "demo-$DEMO_ID-relativity" --artifacts off --prompt 'Prüfe kurz diese Behauptung: Aliens sind 70 Millionen Lichtjahre entfernt und fliegen mit 99,99999999999998 Prozent der Lichtgeschwindigkeit zu uns. Vergehen für uns ungefähr 70 Millionen Jahre, für sie aber genau ein Jahr? Rechne die Eigenzeit nachvollziehbar aus und korrigiere die Aussage in höchstens vier Sätzen.'

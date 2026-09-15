@@ -2,6 +2,21 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.65 - 2026-09-15
+
+### Fixed
+
+- Ollama model capabilities advertised by `/api/tags` now flow through the local runtime and cluster worker, so vision models with opaque names are routed correctly and misleading names cannot override authoritative metadata
+- Local cluster model size and VRAM fields use the runtime endpoint's actual JSON names
+- Browser text limits are measured in UTF-8 bytes without splitting characters; bounded answers return `truncated: true`, and `cluster chat` warns that the answer is incomplete instead of silently presenting a prefix
+- Visual inputs verify their decoded 8 MiB boundary in addition to bounded base64 validation
+- Cluster workers no longer echo prompts, source text, documents, queries, or base64 image inputs inside the result envelope, avoiding a second large upload while retaining routing metadata and the actual output
+- `cluster chat --attach-image` now requests a vision-capable model, and scheduler modality checks apply to the specifically requested model rather than any other model on the node
+
+### Tested
+
+- Exact and one-byte-over boundaries for 20,000-byte prompts, 200,000-byte text input, 8 MiB images, 64 KiB default output, 1 MiB maximum output, and the 12 MiB decoded artifact budget
+
 ## 0.5.64 - 2026-09-14
 
 ### Fixed

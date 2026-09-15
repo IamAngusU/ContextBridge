@@ -6,6 +6,8 @@
 
 <p align="center"><strong>Route AI jobs across your apps, private computers, local models, and explicitly taught browser tabs.</strong></p>
 
+<p align="center"><a href="docs/start-here.de.md">🇩🇪 Deutsch: ContextBridge einfach verstehen, installieren und ausprobieren</a></p>
+
 <p align="center">
   <a href="https://github.com/IamAngusU/ContextBridge/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/IamAngusU/ContextBridge?display_name=tag&sort=semver&style=flat-square&color=2a9d8f"></a>
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-20231f?style=flat-square"></a>

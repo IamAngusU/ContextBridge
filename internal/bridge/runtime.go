@@ -42,12 +42,13 @@ type EngineStatus struct {
 }
 
 type RuntimeModel struct {
-	Name      string `json:"name"`
-	Size      int64  `json:"size_bytes,omitempty"`
-	VRAM      int64  `json:"vram_bytes,omitempty"`
-	Affinity  string `json:"affinity,omitempty"`
-	ExpiresAt string `json:"expires_at,omitempty"`
-	Loaded    bool   `json:"loaded"`
+	Name         string   `json:"name"`
+	Size         int64    `json:"size_bytes,omitempty"`
+	VRAM         int64    `json:"vram_bytes,omitempty"`
+	Affinity     string   `json:"affinity,omitempty"`
+	ExpiresAt    string   `json:"expires_at,omitempty"`
+	Loaded       bool     `json:"loaded"`
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 type RuntimeManager struct {
@@ -370,13 +371,14 @@ func ollamaStatus(parent context.Context, name string, engine config.Engine) Eng
 	status.Version = version.Version
 	var cached struct {
 		Models []struct {
-			Name string `json:"name"`
-			Size int64  `json:"size"`
+			Name         string   `json:"name"`
+			Size         int64    `json:"size"`
+			Capabilities []string `json:"capabilities"`
 		} `json:"models"`
 	}
 	if getJSON(ctx, base+"/api/tags", &cached) {
 		for _, model := range cached.Models {
-			status.Models = append(status.Models, RuntimeModel{Name: model.Name, Size: model.Size})
+			status.Models = append(status.Models, RuntimeModel{Name: model.Name, Size: model.Size, Capabilities: modelregistry.OllamaCapabilities(model.Capabilities, model.Name)})
 		}
 	}
 	var running struct {
@@ -408,7 +410,7 @@ func ollamaStatus(parent context.Context, name string, engine config.Engine) Eng
 				}
 			}
 			if !updated {
-				status.Models = append(status.Models, RuntimeModel{Name: model.Name, Size: model.Size, VRAM: model.SizeVRAM, Affinity: affinity, ExpiresAt: model.ExpiresAt, Loaded: true})
+				status.Models = append(status.Models, RuntimeModel{Name: model.Name, Size: model.Size, VRAM: model.SizeVRAM, Affinity: affinity, ExpiresAt: model.ExpiresAt, Loaded: true, Capabilities: modelregistry.OllamaCapabilities(nil, model.Name)})
 			}
 		}
 	}

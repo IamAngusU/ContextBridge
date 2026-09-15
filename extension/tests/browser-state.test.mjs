@@ -87,6 +87,18 @@ assert.equal(context.isEditAssistantTurn({ response_count: 9 }, { response_count
 assert.equal(context.isEditAssistantTurn({ response_count: 9 }, { response_count: 9, active_generation: true }, 'Fresh edited answer', 'Prior answer'), true);
 
 {
+  const exact = context.parseOutput('ä'.repeat(128), { mode: 'text', max_bytes: 256 }, 'test');
+  assert.equal(exact.truncated, undefined);
+  assert.equal(new TextEncoder().encode(exact.text).length, 256);
+  const over = context.parseOutput('ä'.repeat(129), { mode: 'text', max_bytes: 256 }, 'test');
+  assert.equal(over.truncated, true);
+  assert.equal(new TextEncoder().encode(over.text).length, 256);
+  const emoji = context.parseOutput('x'.repeat(255) + '😀', { mode: 'text', max_bytes: 256 }, 'test');
+  assert.equal(emoji.truncated, true);
+  assert.equal(emoji.text, 'x'.repeat(255), 'a UTF-16 surrogate pair must stay intact');
+}
+
+{
   const input = { value: 'A private unsent draft', offsetWidth: 1, offsetHeight: 1, getClientRects: () => [1], focus() {}, dispatchEvent() {} };
   context.document = { querySelectorAll: (selector) => selector === '#draft' ? [input] : [] };
   context.Event = class {};

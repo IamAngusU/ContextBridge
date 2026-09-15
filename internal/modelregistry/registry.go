@@ -180,9 +180,10 @@ func discoverOllama(ctx context.Context, base string) []DiscoveryEntry {
 	}
 	var payload struct {
 		Models []struct {
-			Name    string `json:"name"`
-			Size    int64  `json:"size"`
-			Details struct {
+			Name         string   `json:"name"`
+			Size         int64    `json:"size"`
+			Capabilities []string `json:"capabilities"`
+			Details      struct {
 				ParameterSize string   `json:"parameter_size"`
 				Quantization  string   `json:"quantization_level"`
 				Family        string   `json:"family"`
@@ -213,7 +214,8 @@ func discoverOllama(ctx context.Context, base string) []DiscoveryEntry {
 	result := make([]DiscoveryEntry, 0, len(payload.Models))
 	for _, model := range payload.Models {
 		vram, isLoaded := loaded[strings.ToLower(model.Name)]
-		result = append(result, DiscoveryEntry{Name: model.Name, Provider: "ollama", Format: "ollama", Size: model.Size, MemoryEstimate: memoryEstimate(model.Size), VRAM: vram, Quantization: model.Details.Quantization, Parameters: model.Details.ParameterSize, Capabilities: modelCapabilities(model.Name + " " + model.Details.Family + " " + strings.Join(model.Details.Families, " ")), Installed: true, Ready: true, Loaded: isLoaded})
+		hint := model.Name + " " + model.Details.Family + " " + strings.Join(model.Details.Families, " ")
+		result = append(result, DiscoveryEntry{Name: model.Name, Provider: "ollama", Format: "ollama", Size: model.Size, MemoryEstimate: memoryEstimate(model.Size), VRAM: vram, Quantization: model.Details.Quantization, Parameters: model.Details.ParameterSize, Capabilities: OllamaCapabilities(model.Capabilities, hint), Installed: true, Ready: true, Loaded: isLoaded})
 	}
 	return result
 }
@@ -350,6 +352,33 @@ func modelCapabilities(name string) []string {
 	}
 	if strings.Contains(lower, "vision") || strings.Contains(lower, "llava") || strings.Contains(lower, "moondream") || strings.Contains(lower, "gemma3") || strings.Contains(lower, "-vl") || strings.Contains(lower, "_vl") || strings.Contains(lower, "qwen25vl") || strings.Contains(lower, "qwen3vl") {
 		result = append(result, "vision")
+	}
+	return result
+}
+
+// OllamaCapabilities converts Ollama's advertised runtime capabilities into
+// ContextBridge modalities. Older Ollama releases did not include the field,
+// so name/family inference remains a compatibility fallback only.
+func OllamaCapabilities(advertised []string, hint string) []string {
+	seen := map[string]bool{}
+	for _, capability := range advertised {
+		switch strings.ToLower(strings.TrimSpace(capability)) {
+		case "completion", "generate", "generation", "insert", "thinking", "tools":
+			seen["text"] = true
+		case "vision", "image", "images", "image_understanding", "image-analysis", "ocr":
+			seen["vision"] = true
+		case "embedding", "embeddings", "embed":
+			seen["embedding"] = true
+		}
+	}
+	if len(seen) == 0 {
+		return modelCapabilities(hint)
+	}
+	result := make([]string, 0, len(seen))
+	for _, capability := range []string{"text", "vision", "embedding"} {
+		if seen[capability] {
+			result = append(result, capability)
+		}
 	}
 	return result
 }

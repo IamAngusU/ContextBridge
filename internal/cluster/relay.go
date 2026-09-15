@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -793,7 +794,14 @@ func priceUsage(usage Usage, pricing Pricing) Usage {
 }
 
 func decodeJSON(body io.Reader, target interface{}, limit int64) error {
-	decoder := json.NewDecoder(io.LimitReader(body, limit+1))
+	raw, err := io.ReadAll(io.LimitReader(body, limit+1))
+	if err != nil {
+		return fmt.Errorf("read JSON: %w", err)
+	}
+	if int64(len(raw)) > limit {
+		return fmt.Errorf("JSON body exceeds %d bytes", limit)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
 		return err

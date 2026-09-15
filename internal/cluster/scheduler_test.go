@@ -29,6 +29,21 @@ func TestKnownLocalModelCapabilities(t *testing.T) {
 	}
 }
 
+func TestAdvertisedLocalModelCapabilitiesOverrideNameGuessing(t *testing.T) {
+	vision, embedding := modelFeaturesFromCapabilities("opaque-model", "generation", []string{"text", "vision"})
+	if !vision || embedding {
+		t.Fatal("advertised vision capability was ignored")
+	}
+	vision, embedding = modelFeaturesFromCapabilities("misleading-vision-name", "generation", []string{"text"})
+	if vision || embedding {
+		t.Fatal("name inference overrode authoritative advertised capabilities")
+	}
+	vision, embedding = modelFeaturesFromCapabilities("opaque-model", "generation", []string{"embedding"})
+	if vision || !embedding {
+		t.Fatal("advertised embedding capability was ignored")
+	}
+}
+
 func TestEstimatedVRAMPrefersGPUWithoutExcludingZeroGPUWorker(t *testing.T) {
 	now := time.Now().UTC()
 	nodes := []Node{
@@ -90,6 +105,22 @@ func TestModelCapabilityCannotCrossProviderBoundary(t *testing.T) {
 	}
 	if got := Rank([]Node{node}, Requirements{Task: "vision", Provider: "browser", Vision: true}); len(got) != 1 {
 		t.Fatalf("valid browser vision job was excluded: %#v", got)
+	}
+}
+
+func TestRequestedModelMustProvideRequestedModality(t *testing.T) {
+	node := Node{ID: "mixed-local", Connected: true, LastSeen: time.Now().UTC(), Capabilities: Capabilities{
+		Tasks: []string{"generation"}, Providers: []string{"ollama"}, MaxConcurrent: 2,
+		Models: []ModelCapability{
+			{Name: "text-only", Provider: "ollama", Tasks: []string{"generation"}},
+			{Name: "vision-model", Provider: "ollama", Vision: true, Tasks: []string{"generation", "vision"}},
+		},
+	}}
+	if got := Rank([]Node{node}, Requirements{Task: "generation", Provider: "ollama", Model: "text-only", Vision: true}); len(got) != 0 {
+		t.Fatalf("a different installed vision model satisfied the selected text-only model: %#v", got)
+	}
+	if got := Rank([]Node{node}, Requirements{Task: "generation", Provider: "ollama", Model: "vision-model", Vision: true}); len(got) != 1 {
+		t.Fatalf("the selected vision model was rejected: %#v", got)
 	}
 }
 

@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -87,5 +88,25 @@ func TestWorkerConsoleLabelsDoNotExposePromptOrAssumeSelectedModel(t *testing.T)
 	}
 	if provider, got, _ := localResultSelection(json.RawMessage(`{"output":{"provider":"ollama","model":"qwen"}}`)); provider != "ollama" || got != "qwen" {
 		t.Fatalf("local model was not read back: %q %q", provider, got)
+	}
+}
+
+func TestCompactLocalSubmissionDoesNotEchoLargeInput(t *testing.T) {
+	raw := []byte(`{"job":{"id":"job-1","prompt":"private prompt","text":"private text","image_base64":"very-large-input","model":"qwen"},"output":{"mode":"text","text":"answer"},"status":"completed"}`)
+	compact := compactLocalSubmission(raw)
+	if len(compact) >= len(raw) || strings.Contains(string(compact), "private prompt") || strings.Contains(string(compact), "very-large-input") {
+		t.Fatalf("large input was echoed in the cluster result: %s", compact)
+	}
+	var submission struct {
+		Job struct {
+			ID    string `json:"id"`
+			Model string `json:"model"`
+		} `json:"job"`
+		Output struct {
+			Text string `json:"text"`
+		} `json:"output"`
+	}
+	if err := json.Unmarshal(compact, &submission); err != nil || submission.Job.ID != "job-1" || submission.Job.Model != "qwen" || submission.Output.Text != "answer" {
+		t.Fatalf("useful result metadata was lost: %#v, %v", submission, err)
 	}
 }

@@ -40,6 +40,25 @@ func TestModelControlDiagnosticsAreBounded(t *testing.T) {
 	}
 }
 
+func TestDecodeJSONEnforcesExactBodyLimit(t *testing.T) {
+	raw := []byte(`{"ok":true}`)
+	var exact struct {
+		OK bool `json:"ok"`
+	}
+	if err := decodeJSON(bytes.NewReader(raw), &exact, int64(len(raw))); err != nil || !exact.OK {
+		t.Fatalf("exact JSON body limit was rejected: %#v, %v", exact, err)
+	}
+	var over struct {
+		OK bool `json:"ok"`
+	}
+	if err := decodeJSON(bytes.NewReader(append(append([]byte{}, raw...), ' ')), &over, int64(len(raw))); err == nil {
+		t.Fatal("one byte beyond the JSON body limit was accepted")
+	}
+	if err := decodeJSON(bytes.NewBufferString(`{"ok":true}{"ok":false}`), &over, 64); err == nil {
+		t.Fatal("multiple JSON values were accepted")
+	}
+}
+
 func TestBrowserJobRoundTrip(t *testing.T) {
 	cfg := config.Config{
 		Version: 1,

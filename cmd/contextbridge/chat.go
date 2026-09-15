@@ -337,6 +337,7 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 		return err
 	}
 	requirements := cluster.Requirements{Task: "generation", Provider: s.provider, Group: s.group, SessionID: s.sessionID}
+	requirements.Vision = s.imageBase64 != ""
 	if !strings.EqualFold(s.provider, "browser") {
 		requirements.Model = s.model
 	}
@@ -480,6 +481,9 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 				fmt.Print(submission.Output.Text)
 			}
 			fmt.Println()
+			if submission.Output.Truncated {
+				fmt.Fprintln(os.Stderr, "! response reached output.max_bytes and is incomplete")
+			}
 			if submission.Output.SelectedModel != "" || submission.Output.SelectedReasoning != "" {
 				fmt.Print("  ↳ Tab meldet:")
 				if submission.Output.SelectedModel != "" {

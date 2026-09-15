@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -846,8 +847,12 @@ func validateJob(job Job) error {
 		if len(job.ImageMediaType) > 100 || (job.ImageMediaType != "" && !strings.HasPrefix(strings.ToLower(job.ImageMediaType), "image/")) {
 			return errors.New("image_media_type must be an image MIME type")
 		}
-		if _, err := base64.StdEncoding.DecodeString(job.ImageBase64); err != nil {
+		decoded, err := base64.StdEncoding.DecodeString(job.ImageBase64)
+		if err != nil {
 			return errors.New("image_base64 must contain valid standard base64")
+		}
+		if len(decoded) > 8<<20 {
+			return errors.New("image exceeds the 8 MB decoded limit")
 		}
 	}
 	mode := outputMode(job.Output)
@@ -916,10 +921,20 @@ func (s *Server) validateRoute(name string) error {
 }
 
 func decodeJSON(reader io.Reader, target interface{}, limit int64) error {
-	decoder := json.NewDecoder(io.LimitReader(reader, limit))
+	raw, err := io.ReadAll(io.LimitReader(reader, limit+1))
+	if err != nil {
+		return fmt.Errorf("read JSON: %w", err)
+	}
+	if int64(len(raw)) > limit {
+		return fmt.Errorf("JSON body exceeds %d bytes", limit)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
 		return fmt.Errorf("invalid JSON: %w", err)
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return errors.New("request must contain one JSON value")
 	}
 	return nil
 }

@@ -448,6 +448,11 @@ func (w *Worker) execute(ctx context.Context, job Job, emitProgress func(JobProg
 	if outputErr := localOutputError(raw); outputErr != "" {
 		return nil, nil, usage, errors.New(outputErr)
 	}
+	// The outer cluster job already stores the submitted payload. Do not send
+	// large or sensitive request fields (especially image_base64) back across
+	// the network a second time merely because the local bridge echoes its Job
+	// in the Submission envelope.
+	raw = compactLocalSubmission(raw)
 	for _, gpu := range w.hardwareSnapshot(ctx, 2*time.Second).GPUs {
 		used := uint64(0)
 		if gpu.MemoryTotal >= gpu.MemoryFree {
@@ -462,6 +467,34 @@ func (w *Worker) execute(ctx context.Context, job Job, emitProgress func(JobProg
 		return nil, sealed, usage, sealErr
 	}
 	return json.RawMessage(raw), nil, usage, nil
+}
+
+func compactLocalSubmission(raw []byte) []byte {
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal(raw, &envelope) != nil {
+		return raw
+	}
+	jobRaw, ok := envelope["job"]
+	if !ok {
+		return raw
+	}
+	var job map[string]json.RawMessage
+	if json.Unmarshal(jobRaw, &job) != nil {
+		return raw
+	}
+	for _, field := range []string{"prompt", "text", "texts", "documents", "query", "image_base64"} {
+		delete(job, field)
+	}
+	compactJob, err := json.Marshal(job)
+	if err != nil {
+		return raw
+	}
+	envelope["job"] = compactJob
+	compact, err := json.Marshal(envelope)
+	if err != nil || len(compact) >= len(raw) {
+		return raw
+	}
+	return compact
 }
 
 // applyPolicy is the worker-side boundary. A relay may suggest a job, but it
@@ -665,10 +698,11 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 				Engines map[string]struct {
 					State  string `json:"state"`
 					Models []struct {
-						Name   string `json:"name"`
-						Size   int64  `json:"size"`
-						VRAM   int64  `json:"vram"`
-						Loaded bool   `json:"loaded"`
+						Name         string   `json:"name"`
+						Size         int64    `json:"size_bytes"`
+						VRAM         int64    `json:"vram_bytes"`
+						Loaded       bool     `json:"loaded"`
+						Capabilities []string `json:"capabilities"`
 					} `json:"models"`
 				} `json:"engines"`
 			} `json:"runtime"`
@@ -763,7 +797,7 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 					if !modelAllowed(model.Name) {
 						continue
 					}
-					vision, embedding := modelFeatures(model.Name, "generation")
+					vision, embedding := modelFeaturesFromCapabilities(model.Name, "generation", model.Capabilities)
 					if tasks := allowedModelTasks(modelTasks("generation", vision, embedding)); len(tasks) > 0 {
 						capability.Models = append(capability.Models, ModelCapability{Name: model.Name, Provider: provider, Size: model.Size, VRAM: model.VRAM, Loaded: model.Loaded, Vision: vision, Embedding: embedding, Tasks: tasks})
 					}
@@ -951,6 +985,14 @@ func modelFeatures(name, task string) (bool, bool) {
 	vision := task == "vision" || strings.Contains(lower, "vl") || strings.Contains(lower, "llava") || strings.Contains(lower, "gemma3") || strings.Contains(lower, "vision")
 	embedding := task == "embedding" || strings.Contains(lower, "embed") || strings.Contains(lower, "jina") || strings.Contains(lower, "nomic") || strings.Contains(lower, "bge")
 	return vision, embedding
+}
+
+func modelFeaturesFromCapabilities(name, task string, capabilities []string) (bool, bool) {
+	vision, embedding := modelFeatures(name, task)
+	if len(capabilities) == 0 {
+		return vision, embedding
+	}
+	return containsFold(capabilities, "vision"), containsFold(capabilities, "embedding")
 }
 
 func modelTasks(task string, vision, embedding bool) []string {

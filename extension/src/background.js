@@ -669,7 +669,7 @@ async function processWork(cfg, work, claimedTabId) {
           progressSequence += 1;
           await reportProgress(cfg, work.job.id, {
             sequence: progressSequence,
-            text: textChanged ? text.slice(0, 1024 * 1024) : '',
+            text: textChanged ? boundedUTF8(text, outputByteLimit(work.job.output || {})).text : '',
             phase: modeMismatch ? 'model_mismatch' : (snapshot.busy ? 'generating' : 'stabilizing'),
             detail: modeMismatch ? 'Gemini changed mode; holding answer for verification' : (snapshot.detail || ''),
             percent: Number(snapshot.percent) || 0,
@@ -793,7 +793,7 @@ async function processWork(cfg, work, claimedTabId) {
       progressSequence += 1;
       await reportProgress(cfg, work.job.id, {
         sequence: progressSequence,
-        text: String(answer.text).slice(0, 1024 * 1024),
+        text: boundedUTF8(answer.text, outputByteLimit(work.job.output || {})).text,
         phase: 'final',
         busy: false
       });
@@ -2812,7 +2812,10 @@ function parseOutput(text, spec, model, artifacts = []) {
   const mode = outputMode(spec);
 	if (mode === 'decision') return { ...parseDecision(text, model), artifacts };
   const clean = String(text || '').trim();
-	if (mode === 'text') return { mode, text: clean, model, artifacts };
+	if (mode === 'text') {
+	  const bounded = boundedUTF8(clean, outputByteLimit(spec));
+	  return { mode, text: bounded.text, model, artifacts, ...(bounded.truncated ? { truncated: true } : {}) };
+	}
   try {
     const objectStart = clean.indexOf('{');
     const arrayStart = clean.indexOf('[');
@@ -2824,6 +2827,33 @@ function parseOutput(text, spec, model, artifacts = []) {
   } catch (_) {
 	return { mode, error: 'browser_invalid_json', model, artifacts };
   }
+}
+
+function outputByteLimit(spec) {
+  const requested = Number(spec?.max_bytes || 0);
+  return Number.isInteger(requested) && requested >= 256 && requested <= 1024 * 1024
+    ? requested : 64 * 1024;
+}
+
+function boundedUTF8(value, limit) {
+  const text = String(value || '');
+  if (new TextEncoder().encode(text).length <= limit) return { text, truncated: false };
+  let low = 0;
+  let high = text.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    const candidate = text.slice(0, middle);
+    if (new TextEncoder().encode(candidate).length <= limit) low = middle;
+    else high = middle - 1;
+  }
+  // Avoid returning half of a UTF-16 surrogate pair. TextEncoder would
+  // replace it, which would fit the byte budget but alter the answer.
+  let end = low;
+  if (end > 0 && end < text.length) {
+    const last = text.charCodeAt(end - 1);
+    if (last >= 0xD800 && last <= 0xDBFF) end -= 1;
+  }
+  return { text: text.slice(0, end), truncated: true };
 }
 
 function outputMode(spec) {

@@ -107,10 +107,7 @@ func matchesNode(node Node, requirements Requirements) bool {
 	if requirements.Model != "" && !hasModel(capability.Models, requirements.Model, requirements.Provider) {
 		return false
 	}
-	if requirements.Vision && !modelFeature(capability.Models, requirements.Provider, true, false) {
-		return false
-	}
-	if requirements.Embedding && !modelFeature(capability.Models, requirements.Provider, false, true) {
+	if (requirements.Vision || requirements.Embedding) && !modelFeature(capability.Models, requirements.Model, requirements.Provider, requirements.Vision, requirements.Embedding) {
 		return false
 	}
 	if requirements.MinFreeVRAM > 0 {
@@ -169,9 +166,21 @@ func containsBrowserModel(values []string, wanted string) bool {
 	return false
 }
 
-func modelFeature(models []ModelCapability, provider string, vision, embedding bool) bool {
+func modelFeature(models []ModelCapability, name, provider string, vision, embedding bool) bool {
 	for _, model := range models {
-		if modelMatchesProvider(model, provider) && (!vision || model.Vision) && (!embedding || model.Embedding) {
+		if !modelMatchesProvider(model, provider) {
+			continue
+		}
+		if name != "" {
+			matches := strings.EqualFold(model.Name, name)
+			if strings.EqualFold(provider, "browser") {
+				matches = browserModelEqual(model.Name, name)
+			}
+			if !matches {
+				continue
+			}
+		}
+		if (!vision || model.Vision) && (!embedding || model.Embedding) {
 			return true
 		}
 	}

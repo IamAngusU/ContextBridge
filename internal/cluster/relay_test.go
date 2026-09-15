@@ -14,6 +14,22 @@ import (
 	"github.com/coder/websocket"
 )
 
+func TestDecodeJSONEnforcesExactBodyLimit(t *testing.T) {
+	raw := []byte(`{"ok":true}`)
+	var exact struct {
+		OK bool `json:"ok"`
+	}
+	if err := decodeJSON(bytes.NewReader(raw), &exact, int64(len(raw))); err != nil || !exact.OK {
+		t.Fatalf("exact JSON body limit was rejected: %#v, %v", exact, err)
+	}
+	var over struct {
+		OK bool `json:"ok"`
+	}
+	if err := decodeJSON(bytes.NewReader(append(append([]byte{}, raw...), ' ')), &over, int64(len(raw))); err == nil {
+		t.Fatal("one byte beyond the JSON body limit was accepted")
+	}
+}
+
 func TestRelayDispatchAndEncryptedRoundTrip(t *testing.T) {
 	admin := "admin_012345678901234567890123456789012345"
 	relay, err := NewRelay(RelayConfig{Database: filepath.Join(t.TempDir(), "relay.db"), AdminToken: admin, AllowedTasks: []string{"generation"}}, nil)

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/IamAngusU/ContextBridge/internal/vectorstore"
 )
@@ -163,6 +164,77 @@ func TestNormalizeTextOutputIsBounded(t *testing.T) {
 	output = NormalizeOutput([]byte("abcdefghijklmnopqrstuvwxyz"), OutputSpec{Mode: "text", MaxBytes: 256}, "test", "model", time.Millisecond)
 	if output.Text != "abcdefghijklmnopqrstuvwxyz" {
 		t.Fatalf("unexpected text output: %q", output.Text)
+	}
+}
+
+func TestNormalizeTextOutputReportsExactAndUTF8SafeBoundaries(t *testing.T) {
+	exact := NormalizeOutput([]byte(strings.Repeat("a", 256)), OutputSpec{Mode: "text", MaxBytes: 256}, "test", "model", time.Millisecond)
+	if exact.Truncated || len(exact.Text) != 256 {
+		t.Fatalf("exact text limit was not preserved: %#v", exact)
+	}
+
+	over := NormalizeOutput([]byte(strings.Repeat("ä", 129)), OutputSpec{Mode: "text", MaxBytes: 256}, "test", "model", time.Millisecond)
+	if !over.Truncated || len(over.Text) > 256 || !utf8.ValidString(over.Text) {
+		t.Fatalf("over-limit UTF-8 text was not marked and safely bounded: %#v", over)
+	}
+
+	defaultExact := NormalizeOutput([]byte(strings.Repeat("d", 64<<10)), OutputSpec{Mode: "text"}, "test", "model", time.Millisecond)
+	if defaultExact.Truncated || len(defaultExact.Text) != 64<<10 {
+		t.Fatalf("exact default text limit was not preserved: %d bytes, truncated=%t", len(defaultExact.Text), defaultExact.Truncated)
+	}
+	defaultOver := NormalizeOutput([]byte(strings.Repeat("d", (64<<10)+1)), OutputSpec{Mode: "text"}, "test", "model", time.Millisecond)
+	if !defaultOver.Truncated || len(defaultOver.Text) != 64<<10 {
+		t.Fatalf("default text overrun was not reported: %d bytes, truncated=%t", len(defaultOver.Text), defaultOver.Truncated)
+	}
+
+	maximumExact := NormalizeOutput([]byte(strings.Repeat("m", 1<<20)), OutputSpec{Mode: "text", MaxBytes: 1 << 20}, "test", "model", time.Millisecond)
+	if maximumExact.Truncated || len(maximumExact.Text) != 1<<20 {
+		t.Fatalf("exact maximum text limit was not preserved: %d bytes, truncated=%t", len(maximumExact.Text), maximumExact.Truncated)
+	}
+	maximumOver := NormalizeOutput([]byte(strings.Repeat("m", (1<<20)+1)), OutputSpec{Mode: "text", MaxBytes: 1 << 20}, "test", "model", time.Millisecond)
+	if !maximumOver.Truncated || len(maximumOver.Text) != 1<<20 {
+		t.Fatalf("maximum text overrun was not reported: %d bytes, truncated=%t", len(maximumOver.Text), maximumOver.Truncated)
+	}
+}
+
+func TestValidateJobExactProtocolBoundaries(t *testing.T) {
+	job := Job{
+		Prompt:      strings.Repeat("p", 20000),
+		Text:        strings.Repeat("t", 200000),
+		ImageBase64: base64.StdEncoding.EncodeToString(make([]byte, 8<<20)),
+		Output:      OutputSpec{Mode: "text", MaxBytes: 1 << 20, Artifacts: true, MaxArtifactBytes: 12 << 20},
+	}
+	if err := validateJob(job); err != nil {
+		t.Fatalf("exact protocol limits were rejected: %v", err)
+	}
+	for name, mutate := range map[string]func(*Job){
+		"prompt": func(value *Job) { value.Prompt += "x" },
+		"text":   func(value *Job) { value.Text += "x" },
+		"image": func(value *Job) {
+			value.ImageBase64 = base64.StdEncoding.EncodeToString(make([]byte, (8<<20)+1))
+		},
+		"output":    func(value *Job) { value.Output.MaxBytes++ },
+		"artifacts": func(value *Job) { value.Output.MaxArtifactBytes++ },
+	} {
+		candidate := job
+		mutate(&candidate)
+		if err := validateJob(candidate); err == nil {
+			t.Fatalf("%s limit accepted one byte too many", name)
+		}
+	}
+}
+
+func TestNormalizeArtifactsAcceptsExactBudgetAndRejectsOneByteMore(t *testing.T) {
+	spec := OutputSpec{Mode: "text", Artifacts: true, MaxArtifactBytes: 12 << 20}
+	exactData := make([]byte, 12<<20)
+	exact := NormalizeArtifacts([]Artifact{{Name: "exact.bin", MediaType: "application/octet-stream", DataBase64: base64.StdEncoding.EncodeToString(exactData)}}, spec)
+	if len(exact) != 1 || exact[0].Size != 12<<20 || exact[0].DataBase64 == "" {
+		t.Fatalf("exact artifact budget was rejected: %#v", exact)
+	}
+	overData := make([]byte, (12<<20)+1)
+	over := NormalizeArtifacts([]Artifact{{Name: "over.bin", MediaType: "application/octet-stream", DataBase64: base64.StdEncoding.EncodeToString(overData)}}, spec)
+	if len(over) != 0 {
+		t.Fatalf("artifact over budget was retained: %#v", over)
 	}
 }
 

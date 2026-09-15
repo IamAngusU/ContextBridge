@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/IamAngusU/ContextBridge/internal/config"
@@ -63,6 +64,32 @@ func TestDiscoverRejectsMissingPath(t *testing.T) {
 	_, err := Discover(context.Background(), config.Config{}, []string{filepath.Join(t.TempDir(), "missing")})
 	if err == nil {
 		t.Fatal("expected a missing model path to fail clearly")
+	}
+}
+
+func TestDiscoverOllamaTrustsAdvertisedCapabilitiesForOpaqueName(t *testing.T) {
+	t.Setenv("OLLAMA_MODELS", filepath.Join(t.TempDir(), "ollama-models"))
+	t.Setenv("OLLAMA_HOST", "")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/tags":
+			_, _ = w.Write([]byte(`{"models":[{"name":"opaque:latest","capabilities":["completion","vision"]}]}`))
+		case "/api/ps":
+			_, _ = w.Write([]byte(`{"models":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := config.Config{Storage: config.Storage{Models: t.TempDir()}, Providers: config.Providers{Ollama: config.OllamaProvider{URL: server.URL}}}
+	models, err := Discover(context.Background(), cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 1 || strings.Join(models[0].Capabilities, ",") != "text,vision" {
+		t.Fatalf("advertised Ollama capabilities were not preserved: %#v", models)
 	}
 }
 

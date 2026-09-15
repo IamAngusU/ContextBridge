@@ -509,15 +509,24 @@ func submitCommand(args []string) error {
 	if *jobPath == "" {
 		return errors.New("--file is required")
 	}
+	const maxJobJSONBytes = 12 << 20
 	var raw []byte
 	var err error
 	if *jobPath == "-" {
-		raw, err = io.ReadAll(io.LimitReader(os.Stdin, 12<<20))
+		raw, err = io.ReadAll(io.LimitReader(os.Stdin, maxJobJSONBytes+1))
 	} else {
-		raw, err = os.ReadFile(*jobPath)
+		file, openErr := os.Open(*jobPath)
+		if openErr != nil {
+			return openErr
+		}
+		defer file.Close()
+		raw, err = io.ReadAll(io.LimitReader(file, maxJobJSONBytes+1))
 	}
 	if err != nil {
 		return err
+	}
+	if len(raw) > maxJobJSONBytes {
+		return errors.New("job JSON exceeds the 12 MiB request limit")
 	}
 	var job bridge.Job
 	if err := json.Unmarshal(raw, &job); err != nil {

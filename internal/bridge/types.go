@@ -105,7 +105,11 @@ type Output struct {
 	OutputTokens      uint64              `json:"output_tokens,omitempty"`
 	TotalTokens       uint64              `json:"total_tokens,omitempty"`
 	Artifacts         []Artifact          `json:"artifacts,omitempty"`
-	Error             string              `json:"error,omitempty"`
+	// Truncated is set when a text result exceeded output.max_bytes. It keeps
+	// bounded responses explicit so callers never mistake a prefix for the
+	// complete model answer.
+	Truncated bool   `json:"truncated,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 type browserJob struct {
@@ -226,13 +230,15 @@ func NormalizeOutput(raw []byte, spec OutputSpec, provider, model string, latenc
 	limit := outputLimit(spec)
 	clean := strings.TrimSpace(string(raw))
 	if mode == "text" {
+		truncated := envelope.Truncated
 		if len(clean) > limit {
 			clean = truncateUTF8(clean, limit)
+			truncated = true
 		}
 		if clean == "" {
 			return OutputError(mode, provider, model, "empty_response", latency)
 		}
-		return Output{Mode: mode, Text: clean, Model: model, SelectedModel: selectedModel, SelectedReasoning: selectedReasoning, Provider: provider, LatencyMS: latency.Milliseconds(), Artifacts: artifacts}
+		return Output{Mode: mode, Text: clean, Model: model, SelectedModel: selectedModel, SelectedReasoning: selectedReasoning, Provider: provider, LatencyMS: latency.Milliseconds(), Artifacts: artifacts, Truncated: truncated}
 	}
 
 	if start := strings.IndexAny(clean, "[{"); start >= 0 {
