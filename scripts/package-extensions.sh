@@ -16,6 +16,7 @@ for browser in chromium firefox; do
   cp "$source_dir/popup.css" "$target/popup.css"
   cp "$source_dir/popup.js" "$target/popup.js"
   cp "$source_dir/icons/"*.png "$target/icons/"
+  cp "$source_dir/icons/"*.webp "$target/icons/"
   cp "$manifests/$browser.json" "$target/manifest.json"
 done
 

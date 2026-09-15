@@ -23,7 +23,7 @@ node "$root/extension/tests/session-isolation.test.mjs"
 for browser in chromium firefox; do
   package="$root/extension/$browser"
   node -e "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'))" "$package/manifest.json"
-  for file in background.js profiles.js picker.js popup.html popup.css popup.js manifest.json icons/icon-16.png icons/icon-32.png icons/icon-48.png icons/icon-128.png; do
+  for file in background.js profiles.js picker.js popup.html popup.css popup.js manifest.json icons/icon-16.png icons/icon-32.png icons/icon-48.png icons/icon-128.png icons/contextbridge-mark.webp; do
     test -s "$package/$file" || { echo "Missing $browser/$file" >&2; exit 1; }
   done
   same_file "$root/extension/src/background.js" "$package/background.js"
@@ -32,6 +32,7 @@ for browser in chromium firefox; do
   same_file "$root/extension/src/popup.html" "$package/popup.html"
   same_file "$root/extension/src/popup.css" "$package/popup.css"
   same_file "$root/extension/src/popup.js" "$package/popup.js"
+  same_file "$root/extension/src/icons/contextbridge-mark.webp" "$package/icons/contextbridge-mark.webp"
   same_file "$root/extension/manifests/$browser.json" "$package/manifest.json"
 done
 
