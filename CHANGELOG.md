@@ -12,6 +12,7 @@ All notable changes are documented here. ContextBridge follows semantic versioni
 - Visual inputs verify their decoded 8 MiB boundary in addition to bounded base64 validation
 - Cluster workers no longer echo prompts, source text, documents, queries, or base64 image inputs inside the result envelope, avoiding a second large upload while retaining routing metadata and the actual output
 - `cluster chat --attach-image` now requests a vision-capable model, and scheduler modality checks apply to the specifically requested model rather than any other model on the node
+- Local and compact cluster responses omit already-known base64 inputs, so a valid maximum-size visual input can coexist with a valid maximum-size returned artifact without overflowing the response transport
 
 ### Tested
 

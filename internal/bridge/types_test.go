@@ -224,6 +224,17 @@ func TestValidateJobExactProtocolBoundaries(t *testing.T) {
 	}
 }
 
+func TestResponseJobDoesNotEchoVisualInput(t *testing.T) {
+	job := Job{ID: "job-1", Prompt: "describe", ImageBase64: "large-input", ImageMediaType: "image/png", Model: "vision-model"}
+	response := responseJob(job)
+	if response.ImageBase64 != "" || response.ImageMediaType != "image/png" || response.ID != "job-1" || response.Model != "vision-model" {
+		t.Fatalf("visual response envelope was not compacted safely: %#v", response)
+	}
+	if job.ImageBase64 != "large-input" {
+		t.Fatal("response compaction mutated the queued job")
+	}
+}
+
 func TestNormalizeArtifactsAcceptsExactBudgetAndRejectsOneByteMore(t *testing.T) {
 	spec := OutputSpec{Mode: "text", Artifacts: true, MaxArtifactBytes: 12 << 20}
 	exactData := make([]byte, 12<<20)

@@ -30,6 +30,18 @@ func TestDecodeJSONEnforcesExactBodyLimit(t *testing.T) {
 	}
 }
 
+func TestCompactJobResponseOmitsKnownInputButKeepsResult(t *testing.T) {
+	job := Job{ID: "job-1", Payload: json.RawMessage(`{"prompt":"private"}`), SealedPayload: &SealedEnvelope{Ciphertext: "secret"}, Result: json.RawMessage(`{"output":{"text":"answer"}}`), Status: JobCompleted}
+	full := jobResponse(job, false)
+	if len(full.Payload) == 0 || full.SealedPayload == nil {
+		t.Fatal("ordinary job response was unexpectedly compacted")
+	}
+	compact := jobResponse(job, true)
+	if len(compact.Payload) != 0 || compact.SealedPayload != nil || len(compact.Result) == 0 || compact.ID != "job-1" {
+		t.Fatalf("compact job response lost output or retained input: %#v", compact)
+	}
+}
+
 func TestRelayDispatchAndEncryptedRoundTrip(t *testing.T) {
 	admin := "admin_012345678901234567890123456789012345"
 	relay, err := NewRelay(RelayConfig{Database: filepath.Join(t.TempDir(), "relay.db"), AdminToken: admin, AllowedTasks: []string{"generation"}}, nil)

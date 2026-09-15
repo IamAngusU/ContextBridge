@@ -332,7 +332,7 @@ func (r *Relay) handleJob(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusForbidden, errors.New("job belongs to another producer"))
 		return
 	}
-	writeJSON(w, http.StatusOK, job)
+	writeJSON(w, http.StatusOK, jobResponse(job, req.URL.Query().Get("compact") == "1"))
 }
 
 func (r *Relay) handleCancel(w http.ResponseWriter, req *http.Request) {
@@ -389,7 +389,15 @@ func (r *Relay) handleSubmit(w http.ResponseWriter, req *http.Request) {
 	}
 	_ = r.store.AddEvent(Event{Kind: "job.queued", Message: "Job queued", JobID: job.ID})
 	r.signalDispatch()
-	writeJSON(w, http.StatusAccepted, job)
+	writeJSON(w, http.StatusAccepted, jobResponse(job, req.URL.Query().Get("compact") == "1"))
+}
+
+func jobResponse(job Job, compact bool) Job {
+	if compact {
+		job.Payload = nil
+		job.SealedPayload = nil
+	}
+	return job
 }
 
 func (r *Relay) handleReserve(w http.ResponseWriter, req *http.Request) {

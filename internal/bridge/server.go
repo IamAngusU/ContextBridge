@@ -352,7 +352,7 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, map[string]string{"error": "job could not be reserved: " + err.Error()})
 		return
 	}
-	submission := Submission{Job: job, Status: "completed"}
+	submission := Submission{Job: responseJob(job), Status: "completed"}
 	if output.Mode == "decision" && output.Decision != nil {
 		submission.Decision = output.Decision
 		s.logger.Printf("completed job %s: %s via %s", job.ID, output.Decision.Verdict, output.Decision.Provider)
@@ -368,6 +368,14 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		s.store.AddActivity("output", "Output: "+status+" via "+output.Provider, job.ID)
 	}
 	writeJSON(w, http.StatusOK, submission)
+}
+
+func responseJob(job Job) Job {
+	// Returning the base64 input is redundant and can make a legal 8 MiB
+	// visual input plus a legal 12 MiB artifact exceed transport response
+	// limits. Keep its media type and routing metadata, but not the bytes.
+	job.ImageBase64 = ""
+	return job
 }
 
 func (s *Server) handleBrowserNext(w http.ResponseWriter, r *http.Request) {

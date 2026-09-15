@@ -365,7 +365,7 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 		input.AssignmentSecret = reservation.Secret
 	}
 	var job cluster.Job
-	if err := clusterPOST(ctx, s.relayURL+"/v1/cluster/jobs", s.token, input, &job); err != nil {
+	if err := clusterPOST(ctx, s.relayURL+"/v1/cluster/jobs?compact=1", s.token, input, &job); err != nil {
 		return err
 	}
 	spinner := newChatSpinner("Queued · waiting for a worker")
@@ -383,7 +383,7 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 			return ctx.Err()
 		case <-time.After(450 * time.Millisecond):
 		}
-		if err := clusterGET(ctx, s.relayURL+"/v1/cluster/jobs/"+url.PathEscape(job.ID), s.token, &job); err != nil {
+		if err := clusterGET(ctx, s.relayURL+"/v1/cluster/jobs/"+url.PathEscape(job.ID)+"?compact=1", s.token, &job); err != nil {
 			return err
 		}
 		if !s.e2ee && job.Progress != nil && job.Progress.Sequence > lastSequence {
