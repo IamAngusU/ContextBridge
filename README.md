@@ -125,17 +125,20 @@ check; use `--json` in installers and monitoring.
 Windows and Linux are first-class runtime targets, not browser-only controller
 machines. Published releases contain native AMD64 and ARM64 executables; Linux
 has the shell installer, user-systemd setup, and hardened systemd/nginx relay
-templates. The repository CI runs the Go test and vet suites on real Ubuntu,
-Windows, and macOS runners, with the race detector on Linux. The VPS relay and
-producer workflow documented here is a normal Linux deployment.
+templates. The repository CI workflow targets Ubuntu, Windows, and macOS, with
+the race detector on Linux. Release 0.5.66 was additionally exercised on a real
+Windows worker and Linux VPS; its Linux/macOS AMD64 and ARM64 binaries and test
+packages were cross-compiled. The VPS relay and producer workflow documented
+here is a normal Linux deployment.
 
 macOS has native AMD64/ARM64 release builds, the same shell installer, a
-LaunchAgent, and Apple Metal discovery. Its current evidence is the macOS CI
-suite plus cross-platform release builds; this project does not yet claim a
-maintained physical-Mac end-to-end matrix for Metal offload, Ollama, and every
-browser lifecycle edge case. Use Chromium or Firefox on macOS—the extension
-does not claim Safari support. OS support also does not imply that every GPU
-telemetry backend or third-party browser UI is available on every machine.
+LaunchAgent, and Apple Metal discovery. Its current 0.5.66 evidence is clean
+cross-compilation of the CLI and relevant test packages; this project does not
+yet claim a maintained physical-Mac end-to-end matrix for Metal offload,
+Ollama, and every browser lifecycle edge case. Use Chromium or Firefox on
+macOS—the extension does not claim Safari support. OS support also does not
+imply that every GPU telemetry backend or third-party browser UI is available
+on every machine.
 
 ## Build A Compute Cluster
 
