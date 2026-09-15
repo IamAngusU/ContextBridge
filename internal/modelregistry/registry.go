@@ -1,6 +1,7 @@
 package modelregistry
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/IamAngusU/ContextBridge/internal/config"
@@ -49,6 +51,23 @@ type DiscoveryEntry struct {
 }
 
 type Progress func(message string, received, total int64)
+
+// Individual GGUF files can legitimately be very large. Keep the ceiling high
+// enough for workstation/server models while still preventing an unbounded
+// response or corrupt resume file from consuming the entire volume.
+const maximumModelDownloadBytes int64 = 256 << 30
+
+const maximumOllamaShowBytes int64 = 2 << 20
+
+type ollamaCapabilityCacheEntry struct {
+	capabilities []string
+	expires      time.Time
+}
+
+var ollamaCapabilityCache = struct {
+	sync.Mutex
+	items map[string]ollamaCapabilityCacheEntry
+}{items: map[string]ollamaCapabilityCacheEntry{}}
 
 func Builtin(name string) (config.Model, bool) {
 	switch strings.ToLower(strings.TrimSpace(name)) {
@@ -181,6 +200,7 @@ func discoverOllama(ctx context.Context, base string) []DiscoveryEntry {
 	var payload struct {
 		Models []struct {
 			Name         string   `json:"name"`
+			Digest       string   `json:"digest"`
 			Size         int64    `json:"size"`
 			Capabilities []string `json:"capabilities"`
 			Details      struct {
@@ -211,11 +231,17 @@ func discoverOllama(ctx context.Context, base string) []DiscoveryEntry {
 			loaded[strings.ToLower(model.Name)] = model.SizeVRAM
 		}
 	}
-	result := make([]DiscoveryEntry, 0, len(payload.Models))
-	for _, model := range payload.Models {
+	result := make([]DiscoveryEntry, 0, min(len(payload.Models), 256))
+	metadataContext, cancelMetadata := context.WithTimeout(ctx, 2*time.Second)
+	defer cancelMetadata()
+	for index, model := range payload.Models {
+		if index >= 256 {
+			break
+		}
 		vram, isLoaded := loaded[strings.ToLower(model.Name)]
 		hint := model.Name + " " + model.Details.Family + " " + strings.Join(model.Details.Families, " ")
-		result = append(result, DiscoveryEntry{Name: model.Name, Provider: "ollama", Format: "ollama", Size: model.Size, MemoryEstimate: memoryEstimate(model.Size), VRAM: vram, Quantization: model.Details.Quantization, Parameters: model.Details.ParameterSize, Capabilities: OllamaCapabilities(model.Capabilities, hint), Installed: true, Ready: true, Loaded: isLoaded})
+		capabilities := ResolveOllamaCapabilities(metadataContext, client, base, model.Name, model.Digest, model.Capabilities, hint)
+		result = append(result, DiscoveryEntry{Name: model.Name, Provider: "ollama", Format: "ollama", Size: model.Size, MemoryEstimate: memoryEstimate(model.Size), VRAM: vram, Quantization: model.Details.Quantization, Parameters: model.Details.ParameterSize, Capabilities: capabilities, Installed: true, Ready: true, Loaded: isLoaded})
 	}
 	return result
 }
@@ -361,26 +387,121 @@ func modelCapabilities(name string) []string {
 // so name/family inference remains a compatibility fallback only.
 func OllamaCapabilities(advertised []string, hint string) []string {
 	seen := map[string]bool{}
+	hasAdvertised := false
 	for _, capability := range advertised {
-		switch strings.ToLower(strings.TrimSpace(capability)) {
+		normalized := strings.ToLower(strings.TrimSpace(capability))
+		if normalized == "" {
+			continue
+		}
+		hasAdvertised = true
+		switch normalized {
 		case "completion", "generate", "generation", "insert", "thinking", "tools":
 			seen["text"] = true
-		case "vision", "image", "images", "image_understanding", "image-analysis", "ocr":
+		case "vision":
 			seen["vision"] = true
+		case "image", "images", "image_generation":
+			// Ollama's image capability means image generation, not image
+			// understanding. Preserve the distinction for inventory without
+			// advertising it as a currently executable worker task.
+			seen["image_generation"] = true
 		case "embedding", "embeddings", "embed":
 			seen["embedding"] = true
 		}
 	}
-	if len(seen) == 0 {
+	if !hasAdvertised {
 		return modelCapabilities(hint)
 	}
 	result := make([]string, 0, len(seen))
-	for _, capability := range []string{"text", "vision", "embedding"} {
+	for _, capability := range []string{"text", "vision", "embedding", "image_generation"} {
 		if seen[capability] {
 			result = append(result, capability)
 		}
 	}
 	return result
+}
+
+// ResolveOllamaCapabilities reads the authoritative top-level capabilities
+// from POST /api/show. /api/tags does not normally expose this field. Results
+// are bounded and cached by daemon plus immutable model digest (or name for
+// older servers), so a frequent status refresh does not repeatedly inspect
+// every installed model. Older daemons retain the conservative tag/name
+// fallback when /api/show is unavailable.
+func ResolveOllamaCapabilities(ctx context.Context, client *http.Client, base, name, digest string, tagCapabilities []string, hint string) []string {
+	base = strings.TrimRight(strings.TrimSpace(base), "/")
+	name = strings.TrimSpace(name)
+	cacheIdentity := strings.TrimSpace(digest)
+	if cacheIdentity == "" {
+		cacheIdentity = strings.ToLower(name)
+	}
+	cacheKey := base + "|" + cacheIdentity
+	now := time.Now()
+	ollamaCapabilityCache.Lock()
+	if cached, ok := ollamaCapabilityCache.items[cacheKey]; ok && now.Before(cached.expires) {
+		result := append([]string(nil), cached.capabilities...)
+		ollamaCapabilityCache.Unlock()
+		return result
+	}
+	ollamaCapabilityCache.Unlock()
+
+	capabilities, authoritative := fetchOllamaShowCapabilities(ctx, client, base, name)
+	ttl := 5 * time.Minute
+	if !authoritative {
+		ttl = 30 * time.Second
+		if len(tagCapabilities) > 0 {
+			capabilities = OllamaCapabilities(tagCapabilities, hint)
+		} else {
+			capabilities = modelCapabilities(hint)
+		}
+	}
+	ollamaCapabilityCache.Lock()
+	if len(ollamaCapabilityCache.items) >= 1024 {
+		for key, item := range ollamaCapabilityCache.items {
+			if !now.Before(item.expires) {
+				delete(ollamaCapabilityCache.items, key)
+			}
+		}
+		if len(ollamaCapabilityCache.items) >= 1024 {
+			ollamaCapabilityCache.items = map[string]ollamaCapabilityCacheEntry{}
+		}
+	}
+	ollamaCapabilityCache.items[cacheKey] = ollamaCapabilityCacheEntry{capabilities: append([]string(nil), capabilities...), expires: now.Add(ttl)}
+	ollamaCapabilityCache.Unlock()
+	return capabilities
+}
+
+func fetchOllamaShowCapabilities(ctx context.Context, client *http.Client, base, name string) ([]string, bool) {
+	if base == "" || name == "" || client == nil {
+		return nil, false
+	}
+	body, err := json.Marshal(map[string]interface{}{"model": name, "verbose": false})
+	if err != nil {
+		return nil, false
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/api/show", bytes.NewReader(body))
+	if err != nil {
+		return nil, false
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, false
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1024))
+		return nil, false
+	}
+	raw, err := io.ReadAll(io.LimitReader(response.Body, maximumOllamaShowBytes+1))
+	if err != nil || int64(len(raw)) > maximumOllamaShowBytes {
+		return nil, false
+	}
+	var payload struct {
+		Capabilities []string `json:"capabilities"`
+	}
+	if json.Unmarshal(raw, &payload) != nil || len(payload.Capabilities) == 0 {
+		return nil, false
+	}
+	return OllamaCapabilities(payload.Capabilities, ""), true
 }
 
 func Path(cfg config.Config, alias string) (string, error) {
@@ -476,6 +597,9 @@ func download(ctx context.Context, url, target, expected string, progress Progre
 	var offset int64
 	if stat, err := os.Stat(partial); err == nil {
 		offset = stat.Size()
+		if err := validateModelDownloadWindow(offset, -1); err != nil {
+			return fmt.Errorf("partial model exceeds %d GiB download limit", maximumModelDownloadBytes>>30)
+		}
 	}
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if offset > 0 {
@@ -505,6 +629,10 @@ func download(ctx context.Context, url, target, expected string, progress Progre
 	}
 	total := resp.ContentLength
 	if total > 0 {
+		if err := validateModelDownloadWindow(offset, total); err != nil {
+			file.Close()
+			return err
+		}
 		total += offset
 	}
 	progress("Downloading "+filepath.Base(target), offset, total)
@@ -514,6 +642,10 @@ func download(ctx context.Context, url, target, expected string, progress Progre
 	for {
 		n, readErr := resp.Body.Read(buffer)
 		if n > 0 {
+			if int64(n) > maximumModelDownloadBytes-received {
+				file.Close()
+				return fmt.Errorf("model download exceeds %d GiB limit", maximumModelDownloadBytes>>30)
+			}
 			if _, err := file.Write(buffer[:n]); err != nil {
 				file.Close()
 				return err
@@ -549,6 +681,16 @@ func download(ctx context.Context, url, target, expected string, progress Progre
 		return err
 	}
 	progress("Installed "+filepath.Base(target), received, total)
+	return nil
+}
+
+func validateModelDownloadWindow(offset, responseBytes int64) error {
+	if offset < 0 || offset > maximumModelDownloadBytes {
+		return fmt.Errorf("model download offset exceeds %d GiB limit", maximumModelDownloadBytes>>30)
+	}
+	if responseBytes > 0 && responseBytes > maximumModelDownloadBytes-offset {
+		return fmt.Errorf("model download exceeds %d GiB limit", maximumModelDownloadBytes>>30)
+	}
 	return nil
 }
 

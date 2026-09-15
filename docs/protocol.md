@@ -32,6 +32,23 @@ automatically enforce `requirements.provider` on the forwarded local job.
 
 The synchronous HTTP response contains the normalized decision. Folder jobs are renamed while processing and produce a neighboring `.result.json` file.
 
+## Trusted prompt and submitted data
+
+The Core always builds the safety and output-contract wrapper. It is not an
+extension setting: browser teaching changes selectors, never this trust
+boundary. Operators edit the job's `prompt`, while external or end-user input
+belongs in `text`. Putting untrusted material directly in `prompt`
+intentionally treats it as trusted instructions and should be avoided.
+
+The generated wrapper supports exact JSON requests. Use
+`output.mode: "json"`, declare essential top-level `required_keys`, and
+state types, allowed values, and exact semantics in `prompt`. Required keys
+are only a shallow presence check, not full JSON Schema validation; callers
+must validate types, ranges, unknown fields, and any value used for a
+consequential action. Visual profile YAML cannot replace or disable the
+wrapper. See
+[Browser sessions and prompt contracts](browser-sessions-and-prompts.de-en.md).
+
 For browser jobs, `session_id` pins follow-ups to one selected conversation. The worker namespaces it by authenticated producer; distinct keys cannot reuse an occupied chat. With no ID, jobs from one producer share its default session. A new session requires an unassigned attached tab unless the extension is set to create a new chat tab or `metadata.contextbridge_new_chat: true` is set on that job. The extension can also be set to open a fresh chat for every job, or an individual job can request this with `metadata.contextbridge_new_chat_per_job: true`. Per-job mode intentionally prevents conversation follow-ups; use per-session mode for multi-step exchanges. Completed, ContextBridge-created per-job tabs may be closed after a two-minute idle grace period if the user enables the opt-in popup switch. `metadata.contextbridge_close_tab_after_job: true` requests the same guarded cleanup for one explicitly auto-created job tab. Manual switching requires navigating to the saved conversation URL; a moved tab fails before Send. `browser_profile` selects a provider tab such as `chatgpt` or `gemini`; `model` and `reasoning` are matched against that provider's localized visible menus. These fields are bounded preferences: an unavailable explicit choice is an error, never a silent substitution.
 
 ```json
@@ -156,6 +173,8 @@ Cluster endpoints use separate admin, observer, producer, and node bearer creden
 | `GET` | `/v1/cluster/workers/connect` | Node | Upgrade to the worker WebSocket |
 | `POST` | `/v1/cluster/pipelines/{name}/run` | Admin, producer | Start a declared pipeline |
 
+Detailed terminal records are subject to relay retention. By default a startup and five-minute periodic sweep keeps only terminal jobs from the last 30 days (at most 500), events from the last 30 days (at most 5,000), and terminal pipeline runs from the last 30 days (at most 200). Age and count are both upper bounds. Active or unrecognized lifecycle states are never swept. Once detail is pruned, its job or pipeline-run endpoint returns not found and its prompt, result, sealed envelopes, and per-record ownership metadata are no longer available; aggregate lifetime counts remain available from `/v1/cluster/overview`. Configure the guarded limits with `cluster.relay.retention_days`, `max_terminal_jobs`, `max_events`, `max_terminal_pipeline_runs`, and `retention_sweep_seconds`.
+
 A cluster job contains routing metadata and one local ContextBridge job as its payload:
 
 ```json
@@ -170,13 +189,12 @@ A cluster job contains routing metadata and one local ContextBridge job as its p
   },
   "payload": {
     "route": "default",
-    "task": "generation",
+    "task": "vision",
     "prompt": "Describe the image as structured JSON.",
     "image_base64": "...",
     "output": {"mode": "json"}
   },
-  "priority": 20,
-  "max_attempts": 3
+  "priority": 20
 }
 ```
 
@@ -187,4 +205,33 @@ route is eligible only while its extension heartbeat and taught selectors are
 ready. Omit the field to let the scheduler choose any live provider for the
 requested task.
 
-For E2EE, call `/v1/cluster/assign`, encrypt the payload for the returned node public key, and submit the sealed envelope with the one-time assignment ID and secret. The authenticated additional data is `job:{job_id}:{node_id}`. Results use `result:{job_id}:{node_id}` and a separate derived key.
+The worker binds the relay-approved `requirements.task` to local execution;
+the effective local route task must match it. A worker error, disconnect, or
+execution timeout is terminal because the provider may already have accepted
+the request. `max_attempts` remains a bounded compatibility field in the wire
+schema, but it does not authorize automatic replay after an ambiguous
+assignment. Explicit resubmission creates a new execution. Retrying delivery
+of an already produced completion payload is allowed because it does not call
+the provider again.
+
+For E2EE, call `/v1/cluster/assign` with an object containing `requirements`
+and the optional `tenant_id`, encrypt the payload for the returned node public
+key, and submit the sealed envelope with the one-time assignment ID and secret.
+The assignment fixes the authenticated producer subject, tenant, complete
+requirements (including `session_id`), selected node, job ID, and first
+assignment attempt. A producer must reject a response that changes an
+explicitly requested value before encrypting; the only server-filled routing
+value is a blank group when the producer token authorizes exactly one group.
+
+Worker WebSocket protocol version 2 carries the assignment `attempt` on
+`started`, `progress`, and `result` frames. The relay changes job state only
+when both the authenticated node ID and attempt match the current assignment,
+so a foreign worker or a stale execution generation cannot complete it.
+
+`cluster.JobAAD` and `cluster.ResultAAD` serialize a compact JSON envelope with
+scheme `contextbridge.cluster.e2ee.v2`, purpose `job` or `result`, and a context
+containing `job_id`, `node_id`, `attempt`, `owner_subject`, optional `tenant_id`,
+and the complete `requirements` object. The worker reconstructs this context
+from the received outer job before decrypting; any changed execution or
+namespace field fails AES-GCM authentication before local execution. Results
+authenticate the same context under the separately derived response key.

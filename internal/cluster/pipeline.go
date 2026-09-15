@@ -32,6 +32,10 @@ func (r *Relay) handlePipelineRun(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusNotFound, errors.New("pipeline not found"))
 		return
 	}
+	// A map value copy still aliases the Steps backing array. Scope a deep copy
+	// so one producer request cannot mutate shared relay configuration (or race
+	// with another producer using a different group scope).
+	pipeline = clonePipeline(pipeline)
 	record, _ := tokenRecord(req.Context())
 	for index := range pipeline.Steps {
 		if err := scopeRequirements(&pipeline.Steps[index].Requirements, record); err != nil {
@@ -50,8 +54,14 @@ func (r *Relay) handlePipelineRun(w http.ResponseWriter, req *http.Request) {
 	}
 	run := PipelineRun{ID: randomID("run"), Pipeline: name, Status: "running", Input: input, CreatedAt: time.Now().UTC()}
 	run.OwnerSubject = record.Subject
-	if err := r.store.SavePipelineRun(run); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+	if err := r.store.CreatePipelineRunAdmitted(run, maxActivePipelineRuns, maxActivePipelineRunsPerOwner); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, ErrOwnerPipelineCapacity) {
+			status = http.StatusTooManyRequests
+		} else if errors.Is(err, ErrPipelineCapacity) {
+			status = http.StatusServiceUnavailable
+		}
+		writeError(w, status, err)
 		return
 	}
 	go r.executePipeline(run, pipeline)
@@ -98,13 +108,13 @@ func (r *Relay) executePipeline(run PipelineRun, pipeline Pipeline) {
 			iterations = globalIterations
 		}
 		for iteration := 0; iteration < iterations; iteration++ {
-			payload, err := renderPipelineInput(step.Input, values)
+			payload, err := renderPipelineInputBounded(step.Input, values, r.cfg.MaxJobBytes)
 			if err != nil {
 				r.failPipeline(&run, err)
 				return
 			}
 			requirements := step.Requirements
-			job, err := r.store.CreateJob(SubmitRequest{OwnerSubject: run.OwnerSubject, Source: "pipeline:" + run.Pipeline, Requirements: requirements, Payload: payload, MaxAttempts: step.Retries + 1})
+			job, err := r.store.CreateJobAdmitted(SubmitRequest{OwnerSubject: run.OwnerSubject, Source: "pipeline:" + run.Pipeline, Requirements: requirements, Payload: payload, MaxAttempts: step.Retries + 1}, r.cfg.MaxQueuedJobs, r.ownerQueueLimit())
 			if err != nil {
 				r.failPipeline(&run, err)
 				return
@@ -142,6 +152,23 @@ func (r *Relay) executePipeline(run PipelineRun, pipeline Pipeline) {
 	_ = r.store.AddEvent(Event{Kind: "pipeline.completed", Message: "Pipeline " + run.Pipeline + " completed", JobID: run.ID})
 }
 
+func clonePipeline(pipeline Pipeline) Pipeline {
+	copyPipeline := pipeline
+	copyPipeline.Steps = make([]PipelineStep, len(pipeline.Steps))
+	copy(copyPipeline.Steps, pipeline.Steps)
+	for index := range copyPipeline.Steps {
+		copyPipeline.Steps[index].Requirements = cloneRequirements(copyPipeline.Steps[index].Requirements)
+	}
+	return copyPipeline
+}
+
+func cloneRequirements(requirements Requirements) Requirements {
+	copyRequirements := requirements
+	copyRequirements.RequiredTags = append([]string(nil), requirements.RequiredTags...)
+	copyRequirements.PreferredNodes = append([]string(nil), requirements.PreferredNodes...)
+	return copyRequirements
+}
+
 func (r *Relay) waitJob(ctx context.Context, id string, timeoutSeconds int) (Job, error) {
 	if timeoutSeconds <= 0 {
 		timeoutSeconds = 300
@@ -151,10 +178,8 @@ func (r *Relay) waitJob(ctx context.Context, id string, timeoutSeconds int) (Job
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		select {
-		case <-stepCtx.Done():
-			return Job{}, stepCtx.Err()
-		case <-ticker.C:
+		if err := stepCtx.Err(); err != nil {
+			return r.cancelTimedOutPipelineJob(id, err)
 		}
 		job, err := r.store.GetJob(id)
 		if err != nil {
@@ -162,11 +187,48 @@ func (r *Relay) waitJob(ctx context.Context, id string, timeoutSeconds int) (Job
 		}
 		switch job.Status {
 		case JobCompleted:
+			if err := stepCtx.Err(); err != nil {
+				return job, err
+			}
+			if deadline, ok := stepCtx.Deadline(); ok && job.FinishedAt.After(deadline) {
+				return job, context.DeadlineExceeded
+			}
 			return job, nil
 		case JobFailed, JobCancelled:
+			if job.Error == "" {
+				return job, fmt.Errorf("job ended with status %s", job.Status)
+			}
 			return job, errors.New(job.Error)
 		}
+		select {
+		case <-stepCtx.Done():
+			return r.cancelTimedOutPipelineJob(id, stepCtx.Err())
+		case <-ticker.C:
+		}
 	}
+}
+
+func (r *Relay) cancelTimedOutPipelineJob(id string, timeoutErr error) (Job, error) {
+	job, err := r.store.GetJob(id)
+	if err != nil {
+		return Job{}, fmt.Errorf("%w; unable to read timed-out job: %v", timeoutErr, err)
+	}
+	if job.Status == JobCompleted || job.Status == JobFailed || job.Status == JobCancelled {
+		return job, timeoutErr
+	}
+	cancelled, err := r.store.CancelJob(id)
+	if err == nil {
+		r.cancelWorkerExecution(cancelled.AssignedNode, cancelled.ID)
+		_ = r.store.AddEvent(Event{Kind: "job.cancelled", Message: "Pipeline step timed out", JobID: id})
+		return cancelled, timeoutErr
+	}
+	// A worker result may have won the transaction race with cancellation. The
+	// pipeline deadline still wins for orchestration, so report the real final
+	// record while retaining the timeout as the pipeline error.
+	if latest, readErr := r.store.GetJob(id); readErr == nil {
+		return latest, timeoutErr
+	}
+	return job, fmt.Errorf("%w; unable to cancel timed-out job: %v", timeoutErr, err)
 }
 
 func (r *Relay) failPipeline(run *PipelineRun, err error) {
@@ -178,20 +240,54 @@ func (r *Relay) failPipeline(run *PipelineRun, err error) {
 }
 
 func renderPipelineInput(template string, values map[string]json.RawMessage) (json.RawMessage, error) {
+	return renderPipelineInputBounded(template, values, 0)
+}
+
+func renderPipelineInputBounded(template string, values map[string]json.RawMessage, maxBytes int64) (json.RawMessage, error) {
 	template = strings.TrimSpace(template)
 	if template == "" {
 		template = "${previous}"
 	}
-	for key, value := range values {
-		template = strings.ReplaceAll(template, "${"+key+"}", string(value))
+	var rendered strings.Builder
+	for len(template) > 0 {
+		start := strings.Index(template, "${")
+		if start < 0 {
+			if err := appendPipelineFragment(&rendered, template, maxBytes); err != nil {
+				return nil, err
+			}
+			break
+		}
+		if err := appendPipelineFragment(&rendered, template[:start], maxBytes); err != nil {
+			return nil, err
+		}
+		template = template[start+2:]
+		end := strings.IndexByte(template, '}')
+		if end < 0 {
+			return nil, errors.New("pipeline input contains an unresolved placeholder")
+		}
+		key := template[:end]
+		value, ok := values[key]
+		if !ok {
+			return nil, errors.New("pipeline input contains an unresolved placeholder")
+		}
+		if err := appendPipelineFragment(&rendered, string(value), maxBytes); err != nil {
+			return nil, err
+		}
+		template = template[end+1:]
 	}
-	if strings.Contains(template, "${") {
-		return nil, errors.New("pipeline input contains an unresolved placeholder")
-	}
-	if !json.Valid([]byte(template)) {
+	result := rendered.String()
+	if !json.Valid([]byte(result)) {
 		return nil, errors.New("pipeline input template did not produce valid JSON")
 	}
-	return json.RawMessage(template), nil
+	return json.RawMessage(result), nil
+}
+
+func appendPipelineFragment(builder *strings.Builder, fragment string, maxBytes int64) error {
+	if maxBytes > 0 && int64(len(fragment)) > maxBytes-int64(builder.Len()) {
+		return &payloadLimitError{message: fmt.Sprintf("pipeline rendered payload exceeds %d bytes", maxBytes)}
+	}
+	_, _ = builder.WriteString(fragment)
+	return nil
 }
 
 func jsonPathEquals(raw json.RawMessage, path, wanted string) bool {
@@ -221,7 +317,16 @@ func mergeUsage(target *Usage, value Usage) {
 	target.EstimatedCostUSD += value.EstimatedCostUSD
 	target.EquivalentCostUSD += value.EquivalentCostUSD
 	target.SavedCostUSD += value.SavedCostUSD
-	if value.PeakVRAMBytes > target.PeakVRAMBytes {
-		target.PeakVRAMBytes = value.PeakVRAMBytes
+	if value.ResourceScope == "job" {
+		target.ResourceScope = "job"
+		if value.PeakVRAMBytes > target.PeakVRAMBytes {
+			target.PeakVRAMBytes = value.PeakVRAMBytes
+		}
+		if value.PeakRAMBytes > target.PeakRAMBytes {
+			target.PeakRAMBytes = value.PeakRAMBytes
+		}
+		if value.PeakGPUUtilization > target.PeakGPUUtilization {
+			target.PeakGPUUtilization = value.PeakGPUUtilization
+		}
 	}
 }

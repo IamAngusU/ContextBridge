@@ -20,6 +20,7 @@
         <span class="profile-signal" aria-hidden="true"></span>
         <div><strong id="current-provider">Detecting page…</strong><small id="current-tab-state">ChatGPT and Gemini are recognized automatically.</small></div>
       </div>
+      <small class="session-advisory" id="session-health" hidden></small>
       <button id="toggle-current-tab" class="primary full" type="button" disabled>Attach this page</button>
       <button id="release-session-tab" class="text-button" type="button" hidden>Use this page for a new session</button>
       <label class="mode" id="edit-last-message-row" hidden><input id="edit-last-message" type="checkbox"><span>Edit the last ContextBridge message on this page for follow-up jobs</span></label>
@@ -46,6 +47,7 @@
         <label class="select-field"><span class="sr-only">Browser tabs</span><select id="tab" size="5"></select></label>
         <label class="tab-filter">Show <select id="tab-filter" aria-label="Filter browser tabs"><option value="all">All tabs</option><option value="attached">Attached</option><option value="available">Not attached</option></select></label>
         <small class="field-hint" id="tab-state">Selecting a tab alone never grants access.</small>
+        <small class="session-advisory" id="tab-session-health" hidden></small>
         <button id="toggle-selected-tab" class="secondary full" type="button">Attach selected tab</button>
         <button id="select-ai-tabs" class="secondary full" type="button">Attach fresh ChatGPT + Gemini chats</button>
         <label class="mode"><input id="auto-attach-fresh" type="checkbox"><span>Auto-attach new, empty AI chats while connected</span></label>

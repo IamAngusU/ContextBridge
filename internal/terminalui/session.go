@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -16,15 +17,16 @@ import (
 )
 
 const (
-	ansiReset  = "\x1b[0m"
-	ansiCyan   = "\x1b[36m"
-	ansiGreen  = "\x1b[32m"
-	ansiYellow = "\x1b[33m"
-	ansiRed    = "\x1b[31m"
-	ansiDim    = "\x1b[2m"
-	ansiOrange = "\x1b[38;5;208m"
-	ansiPurple = "\x1b[35m"
-	ansiBlue   = "\x1b[34m"
+	ansiReset               = "\x1b[0m"
+	ansiCyan                = "\x1b[36m"
+	ansiGreen               = "\x1b[32m"
+	ansiYellow              = "\x1b[33m"
+	ansiRed                 = "\x1b[31m"
+	ansiDim                 = "\x1b[2m"
+	ansiOrange              = "\x1b[38;5;208m"
+	ansiPurple              = "\x1b[35m"
+	ansiBlue                = "\x1b[34m"
+	maximumVisiblePoolNodes = 8
 )
 
 type jobState struct {
@@ -51,12 +53,19 @@ type localModelSelection struct {
 	loaded   bool
 }
 
+type nodeDetailVisibility struct {
+	gpus   bool
+	models bool
+}
+
 // PoolNode is deliberately limited to public display metadata. Keys, tokens,
 // addresses and job payloads from the relay never enter terminal history.
 type PoolNode struct {
 	ID, Name       string
 	Connected      bool
 	Running, Slots int
+	GPUs           []cluster.GPUCapability
+	Models         []cluster.ModelCapability
 }
 
 // ServiceSnapshot is the read-only subset shown by an attached console. It
@@ -108,6 +117,7 @@ type Session struct {
 	poolNodes         []PoolNode
 	poolKnown         bool
 	poolError         bool
+	nodeDetails       map[string]nodeDetailVisibility
 	bannerVersion     string
 	bannerComponents  string
 	history           []historyEntry
@@ -121,6 +131,11 @@ type Session struct {
 	observing         bool
 	observedOnline    bool
 	observed          ServiceSnapshot
+	commandEnabled    bool
+	commandClosesView bool
+	commandInput      string
+	commandNotice     string
+	selectionActiveFn func() bool
 }
 
 func (s *Session) SetRelayTarget(rawURL string) {
@@ -151,6 +166,217 @@ func (s *Session) ObservePool(nodes []PoolNode, err error) {
 	}
 }
 
+// EnableCommands adds a persistent input row to the panel console. It is kept
+// separate from session history so UI help and typing never become service
+// events or leak into redirected logs.
+func (s *Session) EnableCommands() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.commandEnabled = true
+	s.commandClosesView = true
+	if s.nodeDetails == nil {
+		s.nodeDetails = map[string]nodeDetailVisibility{}
+	}
+	if s.panelStarted {
+		s.renderPanelLocked()
+	}
+}
+
+// EnableServiceCommands exposes the same display-only commands in a terminal
+// that owns a foreground run/worker process. Unlike an attached console, an
+// exit command must not silently stop that process: Ctrl+C remains the explicit
+// service-stop action, while `contextbridge console` is the detachable view.
+func (s *Session) EnableServiceCommands() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.commandEnabled = true
+	s.commandClosesView = false
+	if s.nodeDetails == nil {
+		s.nodeDetails = map[string]nodeDetailVisibility{}
+	}
+	if s.panelStarted {
+		s.renderPanelLocked()
+	}
+}
+
+// LiveCommandEditor reports whether this session actually owns an in-place
+// command row. Callers must not disable terminal echo merely because the
+// configured style says panel: redirected, color-disabled, and initially
+// narrow terminals deliberately use the normal line editor instead.
+func (s *Session) LiveCommandEditor() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.commandEnabled && s.panelStarted && s.interactive && s.style == "panel"
+}
+
+// SetCommandInput updates the console-owned line editor. The value is bounded
+// and stripped of terminal control characters before it reaches the renderer.
+func (s *Session) SetCommandInput(value string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.commandInput = cleanTerminalLabel(value, 512)
+	if s.panelStarted {
+		s.renderPanelLocked()
+	}
+}
+
+// HandleCommand applies read-only console commands. It returns true only when
+// the caller should close this view; it never stops the ContextBridge service.
+func (s *Session) HandleCommand(command string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.commandInput = ""
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		s.commandNotice = s.commandHelpLocked()
+		s.renderCommandResultLocked()
+		return false
+	}
+	switch strings.ToLower(fields[0]) {
+	case "exit", "quit", "q", ":q":
+		if s.commandClosesView {
+			return true
+		}
+		s.commandNotice = "Vordergrunddienst bleibt aktiv · Ctrl+C stoppt ihn; `contextbridge console` ist abkoppelbar."
+	case "help", "?":
+		s.commandNotice = s.commandHelpLocked()
+	case "clear", "cls":
+		s.history = nil
+		s.historyTotal = 0
+		if s.interactive && !s.panelStarted {
+			fmt.Fprint(s.out, "\x1b[2J\x1b[H")
+		}
+		s.commandNotice = "Sitzungsverlauf geleert; Dienst und Jobs laufen weiter."
+	case "details", "gpus", "models":
+		if len(fields) != 2 {
+			s.commandNotice = fields[0] + " erwartet all oder die angezeigte Node-Nummer, z. B. " + fields[0] + " 1"
+			break
+		}
+		s.commandNotice = s.toggleNodeDetailsLocked(strings.ToLower(fields[0]), fields[1])
+	default:
+		s.commandNotice = "Unbekannter Befehl: " + cleanTerminalLabel(fields[0], 40) + " · help zeigt alle Befehle"
+	}
+	s.renderCommandResultLocked()
+	return false
+}
+
+func (s *Session) commandHelpLocked() string {
+	commands := "help · clear · details [all|N] · gpus [all|N] · models [all|N]"
+	if s.commandClosesView {
+		return commands + " · exit"
+	}
+	return commands + " · Ctrl+C stoppt den Vordergrunddienst"
+}
+
+func (s *Session) renderCommandResultLocked() {
+	if s.panelStarted {
+		s.renderPanelLocked()
+		return
+	}
+	if s.interactive {
+		s.clearStatusLocked()
+		fmt.Fprintln(s.out, "  "+s.commandNotice)
+		s.drawStatusLocked()
+	}
+}
+
+func (s *Session) toggleNodeDetailsLocked(kind, target string) string {
+	nodes := s.orderedPoolNodesLocked()
+	if len(nodes) == 0 {
+		return "Keine Pool-Nodes verfügbar."
+	}
+	visibleCount := min(len(nodes), maximumVisiblePoolNodes)
+	visibleNodes := nodes[:visibleCount]
+	selected := []PoolNode{}
+	hiddenCount := len(nodes) - visibleCount
+	if strings.EqualFold(target, "all") {
+		selected = visibleNodes
+	} else if index, err := strconv.Atoi(target); err == nil && index >= 1 && index <= len(nodes) {
+		if index > visibleCount {
+			return fmt.Sprintf("Node %d wird nur im Dashboard angezeigt; im Terminal sind maximal %d Nodes sichtbar.", index, maximumVisiblePoolNodes)
+		}
+		selected = append(selected, visibleNodes[index-1])
+	} else {
+		needle := strings.TrimPrefix(strings.ToLower(target), "#")
+		for _, node := range visibleNodes {
+			if strings.EqualFold(node.ID, target) || strings.EqualFold(node.Name, target) || strings.EqualFold(cluster.NodeDiscriminator(node.ID), needle) {
+				selected = append(selected, node)
+			}
+		}
+		if len(selected) == 0 {
+			return "Node nicht gefunden: " + cleanTerminalLabel(target, 40)
+		}
+		if len(selected) > 1 {
+			return "Node-Name ist mehrdeutig; bitte die angezeigte Nummer verwenden."
+		}
+	}
+	if s.nodeDetails == nil {
+		s.nodeDetails = map[string]nodeDetailVisibility{}
+	}
+	allVisible := true
+	for _, node := range selected {
+		visibility := s.nodeDetails[nodeDetailKey(node)]
+		switch kind {
+		case "gpus":
+			allVisible = allVisible && visibility.gpus
+		case "models":
+			allVisible = allVisible && visibility.models
+		default:
+			allVisible = allVisible && visibility.gpus && visibility.models
+		}
+	}
+	show := !allVisible
+	for _, node := range selected {
+		key := nodeDetailKey(node)
+		visibility := s.nodeDetails[key]
+		switch kind {
+		case "gpus":
+			visibility.gpus = show
+		case "models":
+			visibility.models = show
+		default:
+			visibility.gpus, visibility.models = show, show
+		}
+		s.nodeDetails[key] = visibility
+	}
+	label := "Details"
+	if kind == "gpus" {
+		label = "GPU-Details"
+	} else if kind == "models" {
+		label = "Modell-Details"
+	}
+	state := "ausgeblendet"
+	if show {
+		state = "eingeblendet"
+	}
+	notice := fmt.Sprintf("%s für %d Node(s) %s.", label, len(selected), state)
+	if strings.EqualFold(target, "all") && hiddenCount > 0 {
+		notice += fmt.Sprintf(" %d weitere Node(s) werden nur im Dashboard angezeigt.", hiddenCount)
+	}
+	return notice
+}
+
+func nodeDetailKey(node PoolNode) string {
+	if node.ID != "" {
+		return node.ID
+	}
+	return strings.ToLower(node.Name)
+}
+
+func (s *Session) orderedPoolNodesLocked() []PoolNode {
+	nodes := append([]PoolNode(nil), s.poolNodes...)
+	sort.Slice(nodes, func(i, j int) bool {
+		if nodes[i].Connected != nodes[j].Connected {
+			return nodes[i].Connected
+		}
+		if nodes[i].Running != nodes[j].Running {
+			return nodes[i].Running > nodes[j].Running
+		}
+		return strings.ToLower(nodes[i].Name) < strings.ToLower(nodes[j].Name)
+	})
+	return nodes
+}
+
 type historyEntry struct {
 	when    time.Time
 	section string
@@ -176,7 +402,7 @@ func NewWithStyle(output *os.File, style string) *Session {
 	if os.Getenv("TERM") == "dumb" || os.Getenv("NO_COLOR") != "" {
 		interactive = false
 	}
-	session := &Session{out: output, console: output, interactive: interactive, style: style, jobs: map[string]jobState{}, browserSelections: map[int]browserSelection{}, localModels: map[string]localModelSelection{}, width: terminalWidth(output), widthFn: func() int { return terminalWidth(output) }, heightFn: func() int { return terminalHeight(output) }, done: make(chan struct{}), closed: make(chan struct{})}
+	session := &Session{out: output, console: output, interactive: interactive, style: style, jobs: map[string]jobState{}, browserSelections: map[int]browserSelection{}, localModels: map[string]localModelSelection{}, nodeDetails: map[string]nodeDetailVisibility{}, width: terminalWidth(output), widthFn: func() int { return terminalWidth(output) }, heightFn: func() int { return terminalHeight(output) }, done: make(chan struct{}), closed: make(chan struct{})}
 	if interactive {
 		go session.animate()
 	} else {
@@ -189,7 +415,7 @@ func (s *Session) Banner(version, components string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.interactive {
-		if s.panelEnabledLocked() && s.panelWidthLocked() >= 58 {
+		if s.panelEnabledLocked() {
 			s.bannerVersion, s.bannerComponents = version, components
 			s.renderPanelLocked()
 			return
@@ -844,6 +1070,79 @@ func panelSection(label string, width int) string {
 	return prefix + strings.Repeat("-", max(0, width-utf8.RuneCountInString(prefix)-1)) + "+"
 }
 
+func nodeGPURows(node PoolNode, line func(string) string) []string {
+	suffix := ""
+	if !node.Connected {
+		suffix = " · zuletzt gemeldet"
+	}
+	if len(node.GPUs) == 0 {
+		return []string{"  |    System-GPU · Zero-GPU" + suffix}
+	}
+	rows := []string{}
+	for index, gpu := range node.GPUs {
+		if index == 8 {
+			rows = append(rows, "  |    "+line(fmt.Sprintf("… %d weitere System-GPUs", len(node.GPUs)-index)))
+			break
+		}
+		parts := []string{fmt.Sprintf("System-GPU %d", index+1), cleanTerminalLabel(gpu.Name, 50), fmt.Sprintf("%d%%", gpu.Utilization)}
+		if gpu.MemoryTotal > 0 {
+			parts = append(parts, humanBytes(gpu.MemoryFree)+"/"+humanBytes(gpu.MemoryTotal)+" frei")
+		}
+		if gpu.Temperature > 0 {
+			parts = append(parts, fmt.Sprintf("%d°C", gpu.Temperature))
+		}
+		rows = append(rows, "  |    "+colorGPUPercent(line(strings.Join(parts, " · ")+suffix), gpu.Utilization))
+	}
+	return rows
+}
+
+func nodeModelRows(node PoolNode, line func(string) string) []string {
+	suffix := ""
+	if !node.Connected {
+		suffix = " · zuletzt gemeldet"
+	}
+	if len(node.Models) == 0 {
+		return []string{"  |    Worker-Modelle · keine gemeldet" + suffix}
+	}
+	models := append([]cluster.ModelCapability(nil), node.Models...)
+	sort.Slice(models, func(i, j int) bool {
+		if models[i].Loaded != models[j].Loaded {
+			return models[i].Loaded
+		}
+		if !strings.EqualFold(models[i].Provider, models[j].Provider) {
+			return strings.ToLower(models[i].Provider) < strings.ToLower(models[j].Provider)
+		}
+		return strings.ToLower(models[i].Name) < strings.ToLower(models[j].Name)
+	})
+	rows := []string{}
+	for index, model := range models {
+		if index == 12 {
+			rows = append(rows, "  |    "+line(fmt.Sprintf("… %d weitere Worker-Modelle", len(models)-index)))
+			break
+		}
+		state := "bereit"
+		if model.Loaded {
+			state = "geladen"
+		}
+		parts := []string{"Worker-Modell", cleanTerminalLabel(model.Name, 70), state}
+		if model.Provider != "" {
+			parts = append(parts, cleanTerminalLabel(model.Provider, 30))
+		}
+		modes := append([]string(nil), model.Tasks...)
+		if model.Vision && !containsIndicator(modes, "vision") {
+			modes = append(modes, "vision")
+		}
+		if model.Embedding && !containsIndicator(modes, "embedding") {
+			modes = append(modes, "embedding")
+		}
+		if len(modes) > 0 {
+			parts = append(parts, strings.Join(modes, ","))
+		}
+		rows = append(rows, "  |    "+line(strings.Join(parts, " · ")+suffix))
+	}
+	return rows
+}
+
 func (s *Session) panelStatusLocked() string {
 	if s.observing {
 		if !s.observedOnline {
@@ -872,6 +1171,15 @@ func (s *Session) panelStatusLocked() string {
 // zoom or resize. Session events remain in memory and are shown below HISTORY.
 func (s *Session) renderPanelLocked() {
 	if !s.interactive || s.style != "panel" {
+		return
+	}
+	selectionActive := false
+	if s.selectionActiveFn != nil {
+		selectionActive = s.selectionActiveFn()
+	} else if s.console != nil {
+		selectionActive = consoleSelectionActive(s.console)
+	}
+	if s.panelStarted && selectionActive {
 		return
 	}
 	width := s.panelWidthLocked()
@@ -922,13 +1230,7 @@ func (s *Session) renderPanelLocked() {
 		} else if !s.poolKnown {
 			rows = append(rows, "  | ◇  "+line("Relay "+s.relayHost+" · Poolstatus wird geladen…"))
 		} else {
-			nodes := append([]PoolNode(nil), s.poolNodes...)
-			sort.Slice(nodes, func(i, j int) bool {
-				if nodes[i].Connected != nodes[j].Connected {
-					return nodes[i].Connected
-				}
-				return strings.ToLower(nodes[i].Name) < strings.ToLower(nodes[j].Name)
-			})
+			nodes := s.orderedPoolNodesLocked()
 			online := 0
 			for _, node := range nodes {
 				if node.Connected {
@@ -940,7 +1242,7 @@ func (s *Session) renderPanelLocked() {
 				rows = append(rows, "  | ·  Keine Worker verbunden")
 			}
 			for index, node := range nodes {
-				if index == 8 {
+				if index == maximumVisiblePoolNodes {
 					rows = append(rows, "  | ·  "+line(fmt.Sprintf("%d weitere Nodes im Dashboard", len(nodes)-index)))
 					break
 				}
@@ -955,7 +1257,18 @@ func (s *Session) renderPanelLocked() {
 				if node.ID != "" && node.ID == s.nodeID {
 					self = " · dieser PC"
 				}
-				rows = append(rows, "  | ·  "+colorPanelState(line(fmt.Sprintf("%s · %s · %d/%d Jobs%s", nodeLabel(node.Name, node.ID, false), state, node.Running, max(1, node.Slots), self)), state))
+				visibility := s.nodeDetails[nodeDetailKey(node)]
+				detailState := "Details aus"
+				if visibility.gpus || visibility.models {
+					detailState = "Details an"
+				}
+				rows = append(rows, "  | ·  "+colorPanelState(line(fmt.Sprintf("[%d] %s · %s · %d/%d Jobs%s · %s", index+1, nodeLabel(node.Name, node.ID, false), state, node.Running, max(1, node.Slots), self, detailState)), state))
+				if visibility.gpus {
+					rows = append(rows, nodeGPURows(node, line)...)
+				}
+				if visibility.models {
+					rows = append(rows, nodeModelRows(node, line)...)
+				}
 			}
 		}
 		rows = gap(rows)
@@ -1065,12 +1378,24 @@ func (s *Session) renderPanelLocked() {
 		if s.hardware != "" {
 			hardware := s.hardware
 			if len(s.capabilities.GPUs) > 0 {
-				hardware = colorGPUPercent(hardware, s.capabilities.GPUs[0].Utilization)
+				maximumUtilization := 0
+				for _, gpu := range s.capabilities.GPUs {
+					maximumUtilization = max(maximumUtilization, gpu.Utilization)
+				}
+				hardware = colorGPUPercent(hardware, maximumUtilization)
 			}
 			statusDetails = append(statusDetails, "  | "+hardware)
 		}
 	}
-	maxLiveRows := max(1, height-6-len(statusDetails))
+	commandReserve := 0
+	if s.commandEnabled {
+		commandReserve = 4 // heading, input, hint/result, closing border
+	}
+	tailReserve := 5 + len(statusDetails) + commandReserve // status plus a boxed history row
+	if spacious {
+		tailReserve++
+	}
+	maxLiveRows := max(1, height-tailReserve)
 	// Spacing is decorative. Preserve actual live state first when the window
 	// is short or the pool grows; only then truncate content if necessary.
 	for len(rows) > maxLiveRows {
@@ -1093,29 +1418,81 @@ func (s *Session) renderPanelLocked() {
 	rows = append(rows, panelSection("STATUS", width), status)
 	rows = append(rows, statusDetails...)
 	rows = gap(rows)
-	availableHistory := max(0, height-len(rows)-1)
+	availableHistory := max(1, height-len(rows)-2-commandReserve)
 	rows = append(rows, panelSection(fmt.Sprintf("HISTORY · Sitzung · %d Ereignisse", s.historyTotal), width))
 	historyRows := []string{}
-	// At most one event per visible row is needed; details can only add rows.
-	firstHistoryEvent := max(0, len(s.history)-max(1, availableHistory))
-	for _, entry := range s.history[firstHistoryEvent:] {
+	// Newest first keeps the current event next to live state. Details remain
+	// directly below their parent event so the hierarchy is never inverted.
+	for index := len(s.history) - 1; index >= 0; index-- {
+		entry := s.history[index]
 		label := entry.when.Format("15:04:05") + " " + entry.symbol + " "
 		if entry.section != "" {
 			label += "[" + entry.section + "] "
 		}
 		historyLine := line(label + entry.message)
-		historyRows = append(historyRows, "  | "+strings.Replace(historyLine, " "+entry.symbol+" ", " "+coloredSymbol(entry.symbol)+" ", 1))
+		block := []string{"  | " + strings.Replace(historyLine, " "+entry.symbol+" ", " "+coloredSymbol(entry.symbol)+" ", 1)}
 		for _, detail := range entry.details {
-			historyRows = append(historyRows, "  |   +-> "+line(detail))
+			block = append(block, "  |   +-> "+line(detail))
 		}
+		remaining := availableHistory - len(historyRows)
+		if remaining <= 0 {
+			break
+		}
+		if len(block) > remaining {
+			block = block[:remaining]
+		}
+		historyRows = append(historyRows, block...)
 	}
 	if len(historyRows) == 0 {
 		historyRows = append(historyRows, "  | ·  Noch keine Ereignisse")
 	}
-	if len(historyRows) > availableHistory {
-		historyRows = historyRows[len(historyRows)-availableHistory:]
-	}
 	rows = append(rows, historyRows...)
+	rows = append(rows, panelBorder(width))
+	if s.commandEnabled {
+		notice := s.commandNotice
+		if notice == "" {
+			notice = s.commandHelpLocked()
+		}
+		rows = append(rows,
+			panelSection("COMMAND", width),
+			"  | "+line("cb › "+s.commandInput+"▌"),
+			"  | "+ansiDim+line(notice)+ansiReset,
+			panelBorder(width),
+		)
+	}
+	// A heavily zoomed or split terminal can be only a handful of rows tall.
+	// Keep the authoritative status and command line visible without letting a
+	// nominally "in-place" frame spill into scrollback and multiply snapshots.
+	if len(rows) > height {
+		compactRows := []string{
+			panelBorder(width),
+			panelRow("ContextBridge  "+cleanTerminalLabel(s.bannerVersion, 24), width),
+			panelSection("STATUS", width),
+			status,
+		}
+		if s.commandEnabled {
+			notice := s.commandNotice
+			if notice == "" {
+				notice = s.commandHelpLocked()
+			}
+			compactRows = append(compactRows,
+				panelSection("COMMAND", width),
+				"  | "+line("cb › "+s.commandInput+"▌"),
+				"  | "+ansiDim+line(notice)+ansiReset,
+				panelBorder(width),
+			)
+		} else {
+			if len(statusDetails) > 0 {
+				compactRows = append(compactRows, statusDetails[0])
+			}
+			compactRows = append(compactRows, panelSection(fmt.Sprintf("HISTORY · %d", s.historyTotal), width))
+			if len(historyRows) > 0 {
+				compactRows = append(compactRows, historyRows[0])
+			}
+			compactRows = append(compactRows, panelBorder(width))
+		}
+		rows = compactRows
+	}
 	for index, value := range rows {
 		rows[index] = clipANSIColumns(value, max(1, width))
 	}
@@ -1550,11 +1927,21 @@ func capabilityLabel(capability cluster.Capabilities) string {
 	parts := []string{}
 	if len(capability.GPUs) > 0 {
 		gpu := capability.GPUs[0]
+		maximumUtilization := gpu.Utilization
+		bestFree := gpu.MemoryFree
+		for _, candidate := range capability.GPUs[1:] {
+			maximumUtilization = max(maximumUtilization, candidate.Utilization)
+			bestFree = max(bestFree, candidate.MemoryFree)
+		}
 		state := "GPU bereit"
-		if gpu.Utilization > 0 {
+		if maximumUtilization > 0 {
 			state = "GPU aktiv"
 		}
-		parts = append(parts, fmt.Sprintf("%s · %s · %d%% · %s VRAM frei", cleanTerminalLabel(gpu.Name, 40), state, gpu.Utilization, humanBytes(gpu.MemoryFree)))
+		if len(capability.GPUs) == 1 {
+			parts = append(parts, fmt.Sprintf("%s · %s · %d%% · %s VRAM frei", cleanTerminalLabel(gpu.Name, 40), state, maximumUtilization, humanBytes(bestFree)))
+		} else {
+			parts = append(parts, fmt.Sprintf("%d GPUs · %s · max %d%% · beste GPU %s VRAM frei", len(capability.GPUs), state, maximumUtilization, humanBytes(bestFree)))
+		}
 	} else {
 		parts = append(parts, "Zero-GPU")
 	}
@@ -1568,10 +1955,18 @@ func compactGPUState(capability cluster.Capabilities) string {
 	if len(capability.GPUs) == 0 {
 		return ansiDim + "0GPU" + ansiReset
 	}
-	if capability.GPUs[0].Utilization > 0 {
-		return ansiGreen + "GPU+" + ansiReset
+	active := false
+	for _, gpu := range capability.GPUs {
+		active = active || gpu.Utilization > 0
 	}
-	return ansiYellow + "GPU~" + ansiReset
+	label := "GPU"
+	if len(capability.GPUs) > 1 {
+		label = fmt.Sprintf("%dGPU", len(capability.GPUs))
+	}
+	if active {
+		return ansiGreen + label + "+" + ansiReset
+	}
+	return ansiYellow + label + "~" + ansiReset
 }
 
 func humanBytes(value uint64) string {

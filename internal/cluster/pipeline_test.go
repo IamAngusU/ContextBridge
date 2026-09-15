@@ -27,4 +27,7 @@ func TestDashboardHasNoRemoteRuntimeOrPersistentTokenStorage(t *testing.T) {
 			t.Fatalf("dashboard contains forbidden runtime dependency %s", forbidden)
 		}
 	}
+	if !strings.Contains(value, "gpus.slice(0,8)") || !strings.Contains(value, "more GPUs") {
+		t.Fatal("dashboard does not render bounded details for every reported GPU")
+	}
 }

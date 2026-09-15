@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,24 +24,35 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/IamAngusU/ContextBridge/internal/cluster"
 	"github.com/IamAngusU/ContextBridge/internal/config"
 	"github.com/IamAngusU/ContextBridge/internal/updater"
 	"github.com/IamAngusU/ContextBridge/internal/vectorstore"
 )
 
 type Server struct {
-	cfg             config.Config
-	store           *Store
-	schedules       *scheduleStore
-	processor       *Processor
-	runtime         *RuntimeManager
-	updates         *updater.Manager
-	rag             vectorstore.Store
-	logger          *log.Logger
-	draftHistoryMu  sync.Mutex
-	draftHistoryDir string
-	activeJobs      atomic.Int64
+	cfg                 config.Config
+	store               *Store
+	schedules           *scheduleStore
+	processor           *Processor
+	runtime             *RuntimeManager
+	updates             *updater.Manager
+	rag                 vectorstore.Store
+	logger              *log.Logger
+	draftHistoryMu      sync.Mutex
+	draftHistoryDir     string
+	activeJobs          atomic.Int64
+	scheduleAdmissionMu sync.Mutex
+	regularActiveJobs   int
+	jobAdmissionLimit   int
+	inboxSlots          chan struct{}
 }
+
+const (
+	maximumJobRequestBytes int64 = 12 << 20
+	maximumInboxConcurrent       = 4
+	maximumInboxScanBatch        = 256
+)
 
 var browserScanDiagnosticPattern = regexp.MustCompile(`^(?:no trigger \([0-9]{1,3} composer menus\)|(?:composer|other) trigger, expanded=(?:true|false), submenu=(?:true|false), [0-9]{1,4} candidates(?:, open=(?:already|pointer|mouse|click))?)$`)
 var browserModeControlTextPattern = regexp.MustCompile(`(?i)^(?:(?:gemini|gpt)[ ._-]*)?(?:[0-9]+(?:\.[0-9]+)?[ ._-]*)?(?:flash|pro|advanced|erweitert|schnell|fast|thinking|nachdenken|auto)(?:[ ._-]*(?:lite|flash|pro|advanced|erweitert|preview))?$`)
@@ -61,7 +73,8 @@ func NewServer(cfg config.Config, logger *log.Logger) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	schedules, err := newScheduleStore(cfg.Storage.Directory)
+	admissionLimit := configuredJobAdmissionLimit(cfg)
+	schedules, err := newScheduleStore(cfg.Storage.Directory, admissionLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +84,12 @@ func NewServer(cfg config.Config, logger *log.Logger) (*Server, error) {
 	if logger == nil {
 		logger = log.New(os.Stderr, "", log.LstdFlags)
 	}
-	server := &Server{cfg: cfg, store: store, schedules: schedules, processor: NewProcessor(cfg, store), runtime: NewRuntimeManager(cfg, logger), logger: logger}
+	server := &Server{
+		cfg: cfg, store: store, schedules: schedules, processor: NewProcessor(cfg, store),
+		runtime: NewRuntimeManager(cfg, logger), logger: logger,
+		jobAdmissionLimit: admissionLimit,
+		inboxSlots:        make(chan struct{}, maximumInboxConcurrent),
+	}
 	if home, homeErr := os.UserHomeDir(); homeErr == nil {
 		server.draftHistoryDir = filepath.Join(home, ".contextbridge")
 	}
@@ -83,6 +101,16 @@ func NewServer(cfg config.Config, logger *log.Logger) (*Server, error) {
 		server.rag = ragStore
 	}
 	return server, nil
+}
+
+// configuredJobAdmissionLimit is the shared local service capacity for
+// ordinary and scheduled jobs. A running worker is the authority for its real
+// slot count; service-only installations retain the established local default.
+func configuredJobAdmissionLimit(cfg config.Config) int {
+	if cfg.Cluster.Worker.Enabled && cfg.Cluster.Worker.MaxConcurrent > 0 {
+		return min(cfg.Cluster.Worker.MaxConcurrent, cluster.MaximumWorkerConcurrency)
+	}
+	return defaultJobAdmissionLimit
 }
 
 func (s *Server) Handler() http.Handler {
@@ -133,8 +161,11 @@ func (s *Server) Run(ctx context.Context) error {
 }
 
 func (s *Server) Process(ctx context.Context, job Job) (Output, error) {
-	s.activeJobs.Add(1)
-	defer s.activeJobs.Add(-1)
+	releaseAccounting, err := s.beginJobAccounting(ctx)
+	if err != nil {
+		return Output{}, err
+	}
+	defer releaseAccounting()
 	prepareJob(&job)
 	job.routeProvider = s.cfg.Route(job.Route).Provider
 	if routeTask := strings.TrimSpace(s.cfg.Route(job.Route).Task); routeTask != "" {
@@ -150,6 +181,42 @@ func (s *Server) Process(ctx context.Context, job Job) (Output, error) {
 	}
 	s.store.RecordCompleted(job, output)
 	return output, nil
+}
+
+type scheduledExecutionContextKey struct{}
+
+func withScheduledExecution(ctx context.Context) context.Context {
+	return context.WithValue(ctx, scheduledExecutionContextKey{}, true)
+}
+
+func isScheduledExecution(ctx context.Context) bool {
+	value, _ := ctx.Value(scheduledExecutionContextKey{}).(bool)
+	return value
+}
+
+// beginJobAccounting serializes ordinary-job accounting with schedule claims.
+// The marker is private context state: the public Job.Source field cannot be
+// used by a caller to masquerade as an already-reserved scheduled run.
+func (s *Server) beginJobAccounting(ctx context.Context) (func(), error) {
+	s.scheduleAdmissionMu.Lock()
+	regular := !isScheduledExecution(ctx)
+	if regular && s.regularActiveJobs+s.schedules.runningCount() >= s.jobAdmissionLimit {
+		s.scheduleAdmissionMu.Unlock()
+		return nil, errScheduleCapacity
+	}
+	s.activeJobs.Add(1)
+	if regular {
+		s.regularActiveJobs++
+	}
+	s.scheduleAdmissionMu.Unlock()
+	return func() {
+		s.scheduleAdmissionMu.Lock()
+		if regular {
+			s.regularActiveJobs--
+		}
+		s.activeJobs.Add(-1)
+		s.scheduleAdmissionMu.Unlock()
+	}, nil
 }
 
 func (s *Server) processJob(ctx context.Context, job Job) Output {
@@ -324,7 +391,7 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var job Job
-	if err := decodeJSON(r.Body, &job, 12<<20); err != nil {
+	if err := decodeJSON(r.Body, &job, maximumJobRequestBytes); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -334,6 +401,10 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	if routeTask := strings.TrimSpace(s.cfg.Route(job.Route).Task); routeTask != "" {
 		job.Task = routeTask
+	}
+	if expectedTask := strings.TrimSpace(r.Header.Get("X-ContextBridge-Expected-Task")); expectedTask != "" && !strings.EqualFold(jobTask(job, s.cfg.Route(job.Route).Task), expectedTask) {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "worker-approved task does not match the selected local route"})
+		return
 	}
 	applyTaskOutput(&job, s.cfg.Route(job.Route).Task)
 	if err := validateJob(job); err != nil {
@@ -348,11 +419,17 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		status := http.StatusInternalServerError
 		if errors.Is(err, os.ErrExist) {
 			status = http.StatusConflict
+		} else if errors.Is(err, errScheduleCapacity) {
+			status = http.StatusServiceUnavailable
 		}
 		writeJSON(w, status, map[string]string{"error": "job could not be reserved: " + err.Error()})
 		return
 	}
-	submission := Submission{Job: responseJob(job), Status: "completed"}
+	response := responseJob(job)
+	if r.URL.Query().Get("compact") == "1" {
+		response = compactResponseJob(job)
+	}
+	submission := Submission{Job: response, Status: "completed"}
 	if output.Mode == "decision" && output.Decision != nil {
 		submission.Decision = output.Decision
 		s.logger.Printf("completed job %s: %s via %s", job.ID, output.Decision.Verdict, output.Decision.Provider)
@@ -375,6 +452,19 @@ func responseJob(job Job) Job {
 	// visual input plus a legal 12 MiB artifact exceed transport response
 	// limits. Keep its media type and routing metadata, but not the bytes.
 	job.ImageBase64 = ""
+	return job
+}
+
+func compactResponseJob(job Job) Job {
+	job = responseJob(job)
+	// Cluster workers already retain the submitted payload in the relay job.
+	// A compact local response therefore carries only routing/result metadata,
+	// never a second copy of potentially sensitive or multi-megabyte inputs.
+	job.Prompt = ""
+	job.Text = ""
+	job.Texts = nil
+	job.Documents = nil
+	job.Query = ""
 	return job
 }
 
@@ -433,6 +523,11 @@ func (s *Server) handleBrowserJobAction(w http.ResponseWriter, r *http.Request) 
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET or POST required"})
 			return
 		}
+		generation, err := browserLeaseGeneration(r)
+		if err != nil {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
 		var progress BrowserProgress
 		if err := decodeJSON(r.Body, &progress, 2<<20); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -446,7 +541,7 @@ func (s *Server) handleBrowserJobAction(w http.ResponseWriter, r *http.Request) 
 		if progress.Phase != "generating" && progress.Phase != "stabilizing" && progress.Phase != "final" && progress.Phase != "submitting" && progress.Phase != "recovering" && progress.Phase != "rate_limited" {
 			progress.Phase = "generating"
 		}
-		if !s.store.UpdateBrowserProgress(parts[0], progress) {
+		if !s.store.UpdateBrowserProgress(parts[0], generation, progress) {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "job is missing or expired"})
 			return
 		}
@@ -459,12 +554,44 @@ func (s *Server) handleBrowserJobAction(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if parts[1] == "lease" {
+		generation, err := browserLeaseGeneration(r)
+		if err != nil {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
 		lease := time.Duration(s.cfg.Providers.Browser.LeaseSeconds) * time.Second
-		if !s.store.Renew(parts[0], lease) {
+		if !s.store.Renew(parts[0], generation, lease) {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "job is missing or expired"})
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+		return
+	}
+	if parts[1] == "claim" {
+		generation, err := browserLeaseGeneration(r)
+		if err != nil {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		var claim struct {
+			Action string `json:"action"`
+		}
+		if err := decodeJSON(r.Body, &claim, 1024); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		switch claim.Action {
+		case "upload", "edit", "send":
+		default:
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "action must be upload, edit, or send"})
+			return
+		}
+		lease := time.Duration(s.cfg.Providers.Browser.LeaseSeconds) * time.Second
+		if !s.store.MarkBrowserAction(parts[0], generation, lease) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "job lease was lost"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true, "sent_unknown": true})
 		return
 	}
 	if parts[1] != "complete" {
@@ -476,13 +603,18 @@ func (s *Server) handleBrowserJobAction(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	spec, model, ok := s.store.BrowserCompletionContext(parts[0])
+	generation, err := browserLeaseGeneration(r)
+	if err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		return
+	}
+	spec, model, ok := s.store.BrowserCompletionContext(parts[0], generation)
 	if !ok {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "job is missing, expired, or already completed"})
 		return
 	}
 	output := NormalizeOutput(raw, spec, "browser", model, 0)
-	if !s.store.Complete(parts[0], output) {
+	if !s.store.Complete(parts[0], generation, output) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "job is missing, expired, or already completed"})
 		return
 	}
@@ -495,6 +627,15 @@ func (s *Server) handleBrowserJobAction(w http.ResponseWriter, r *http.Request) 
 	files, references := artifactCounts(output.Artifacts)
 	s.logger.Printf("browser completed job %s: %s [%d file(s), %d reference(s)]", parts[0], status, files, references)
 	writeJSON(w, http.StatusOK, output)
+}
+
+func browserLeaseGeneration(r *http.Request) (uint64, error) {
+	value := strings.TrimSpace(r.Header.Get("X-ContextBridge-Lease-Generation"))
+	generation, err := strconv.ParseUint(value, 10, 64)
+	if err != nil || generation == 0 {
+		return 0, errors.New("a valid browser lease generation is required")
+	}
+	return generation, nil
 }
 
 func artifactCounts(artifacts []Artifact) (files, references int) {
@@ -725,33 +866,68 @@ func limitedModelControls(values []BrowserDOMControl, count int) []BrowserDOMCon
 func (s *Server) watchInbox(ctx context.Context) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
+	var directory *os.File
+	defer func() {
+		if directory != nil {
+			_ = directory.Close()
+		}
+	}()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			matches, _ := filepath.Glob(filepath.Join(s.cfg.Storage.Inbox, "*.json"))
-			for _, path := range matches {
-				if strings.HasSuffix(path, ".result.json") || strings.HasSuffix(path, ".processing.json") {
+			if directory == nil {
+				var err error
+				directory, err = os.Open(s.cfg.Storage.Inbox)
+				if err != nil {
+					s.logger.Printf("inbox could not be scanned: %v", err)
 					continue
 				}
+			}
+			entries, err := directory.ReadDir(maximumInboxScanBatch)
+			if errors.Is(err, io.EOF) {
+				_ = directory.Close()
+				directory = nil
+			} else if err != nil {
+				s.logger.Printf("inbox could not be scanned: %v", err)
+				_ = directory.Close()
+				directory = nil
+				continue
+			}
+			for _, entry := range entries {
+				name := entry.Name()
+				if !strings.HasSuffix(strings.ToLower(name), ".json") || strings.HasSuffix(name, ".result.json") || strings.HasSuffix(name, ".processing.json") {
+					continue
+				}
+				info, infoErr := entry.Info()
+				if infoErr != nil || !info.Mode().IsRegular() {
+					s.logger.Printf("ignored non-regular inbox entry %s", name)
+					continue
+				}
+				select {
+				case s.inboxSlots <- struct{}{}:
+				default:
+					continue
+				}
+				path := filepath.Join(s.cfg.Storage.Inbox, name)
 				processing := strings.TrimSuffix(path, ".json") + ".processing.json"
 				if os.Rename(path, processing) != nil {
+					<-s.inboxSlots
 					continue
 				}
-				go s.processInboxFile(ctx, processing)
+				go func() {
+					defer func() { <-s.inboxSlots }()
+					s.processInboxFile(ctx, processing)
+				}()
 			}
 		}
 	}
 }
 
 func (s *Server) processInboxFile(ctx context.Context, path string) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return
-	}
 	var job Job
-	if json.Unmarshal(raw, &job) != nil || s.validateRoute(job.Route) != nil {
+	if decodeInboxJob(path, &job) != nil || s.validateRoute(job.Route) != nil {
 		s.logger.Printf("ignored invalid inbox job %s", filepath.Base(path))
 		return
 	}
@@ -765,6 +941,13 @@ func (s *Server) processInboxFile(ctx context.Context, path string) {
 	}
 	output, err := s.Process(ctx, job)
 	if err != nil {
+		if errors.Is(err, errScheduleCapacity) {
+			pending := strings.TrimSuffix(path, ".processing.json") + ".json"
+			if renameErr := os.Rename(path, pending); renameErr != nil {
+				s.logger.Printf("capacity-limited inbox job %s could not be returned to the queue: %v", filepath.Base(path), renameErr)
+			}
+			return
+		}
 		s.logger.Printf("inbox job %s could not be processed: %v", filepath.Base(path), err)
 		return
 	}
@@ -774,8 +957,65 @@ func (s *Server) processInboxFile(ctx context.Context, path string) {
 		payload = *output.Decision
 	}
 	result, _ := json.MarshalIndent(payload, "", "  ")
-	os.WriteFile(resultPath, append(result, '\n'), 0600)
-	os.Remove(path)
+	if err := writeInboxResult(resultPath, append(result, '\n')); err != nil {
+		s.logger.Printf("inbox result %s could not be stored safely: %v", filepath.Base(resultPath), err)
+		return
+	}
+	if err := os.Remove(path); err != nil {
+		s.logger.Printf("processed inbox job %s could not be removed: %v", filepath.Base(path), err)
+	}
+}
+
+func decodeInboxJob(path string, job *Job) error {
+	file, err := openRegularNoFollow(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	return decodeJSON(file, job, maximumJobRequestBytes)
+}
+
+// writeInboxResult never opens the operator-visible result pathname for
+// writing. A unique regular file is completed first and then renamed, so an
+// attacker-created symlink/reparse point at the final component is replaced
+// as a directory entry on Unix or causes a safe failure on Windows rather than
+// being followed to another file.
+func writeInboxResult(path string, value []byte) error {
+	if existing, err := os.Lstat(path); err == nil {
+		return fmt.Errorf("result already exists (%s)", existing.Mode().Type())
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	directory := filepath.Dir(path)
+	temporary, err := os.CreateTemp(directory, ".contextbridge-result-*.tmp")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	committed := false
+	defer func() {
+		_ = temporary.Close()
+		if !committed {
+			_ = os.Remove(temporaryPath)
+		}
+	}()
+	if err := temporary.Chmod(0600); err != nil {
+		return err
+	}
+	if _, err := temporary.Write(value); err != nil {
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 func prepareJob(job *Job) {
@@ -935,6 +1175,9 @@ func decodeJSON(reader io.Reader, target interface{}, limit int64) error {
 	}
 	if int64(len(raw)) > limit {
 		return fmt.Errorf("JSON body exceeds %d bytes", limit)
+	}
+	if !utf8.Valid(raw) {
+		return errors.New("invalid JSON: input is not valid UTF-8")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()

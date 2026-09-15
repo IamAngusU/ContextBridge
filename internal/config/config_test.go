@@ -93,6 +93,22 @@ func TestConfigSaveRoundTripCluster(t *testing.T) {
 	}
 }
 
+func TestRejectsRelayJobLimitAboveSupportedMaximum(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := Default(path); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Cluster.Relay.Enabled = true
+	cfg.Cluster.Relay.MaxJobBytes = cluster.MaximumJobPayloadBytes + 1
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("relay job limit above the supported maximum was accepted")
+	}
+}
+
 func TestRejectsPublicListen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yml")
 	raw := []byte("version: 1\nserver:\n  listen: 0.0.0.0:32145\n  token: strong-token-value\nroutes:\n  default:\n    provider: ollama\n")

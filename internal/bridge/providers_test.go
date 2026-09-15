@@ -89,7 +89,7 @@ func TestExplicitBrowserErrorIsNotAcceptedAsAnAnswer(t *testing.T) {
 					time.Sleep(5 * time.Millisecond)
 				}
 			}
-			if work == nil || !store.Complete(work.Job.ID, Output{Mode: "text", Error: failure}) {
+			if work == nil || !store.Complete(work.Job.ID, work.LeaseGeneration, Output{Mode: "text", Error: failure}) {
 				t.Fatal("browser job was not queued")
 			}
 			if output := <-result; output.Error != failure || output.Text != "" {

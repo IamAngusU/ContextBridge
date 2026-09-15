@@ -34,16 +34,14 @@ func RankWithEstimate(nodes []Node, requirements Requirements, estimatedVRAM uin
 		}
 		busy := float64(node.Capabilities.Running) / float64(capacity)
 		queue := float64(node.Capabilities.QueueDepth) / float64(capacity)
-		memoryPressure := 0.0
-		if node.Capabilities.MemoryTotal > 0 {
-			memoryPressure = 1 - float64(node.Capabilities.MemoryFree)/float64(node.Capabilities.MemoryTotal)
+		memoryPressure := boundedMemoryPressure(node.Capabilities.MemoryFree, node.Capabilities.MemoryTotal)
+		placementVRAM := requirements.MinFreeVRAM
+		if placementVRAM == 0 {
+			placementVRAM = estimatedVRAM
 		}
-		vramHeadroom := bestVRAMHeadroom(node, requirements.MinFreeVRAM)
-		gpuPressure := 0.0
-		if len(node.Capabilities.GPUs) > 0 {
-			gpuPressure = float64(node.Capabilities.GPUs[0].Utilization) / 100
-		}
-		cpuPressure := float64(node.Capabilities.CPUUtilization) / 100
+		vramHeadroom := bestVRAMHeadroom(node, placementVRAM)
+		gpuPressure := bestGPUUtilization(node, placementVRAM)
+		cpuPressure := boundedUtilization(node.Capabilities.CPUUtilization)
 		score := busy*60 + queue*20 + memoryPressure*10 + cpuPressure*10 + gpuPressure*15 - vramHeadroom*12
 		if strings.EqualFold(requirements.Provider, "browser") && node.Capabilities.BrowserTabs > 0 {
 			score += float64(node.Capabilities.BrowserBusy) / float64(node.Capabilities.BrowserTabs) * 40
@@ -78,7 +76,7 @@ func RankWithEstimate(nodes []Node, requirements Requirements, estimatedVRAM uin
 
 func hasVRAM(node Node, required uint64) bool {
 	for _, gpu := range node.Capabilities.GPUs {
-		if gpu.MemoryFree >= required {
+		if boundedFreeMemory(gpu.MemoryFree, gpu.MemoryTotal) >= required {
 			return true
 		}
 	}
@@ -101,10 +99,11 @@ func matchesNode(node Node, requirements Requirements) bool {
 	if strings.EqualFold(requirements.Provider, "browser") && capability.BrowserTabs > 0 && capability.BrowserBusy >= capability.BrowserTabs {
 		return false
 	}
-	if requirements.Task != "" && !containsFold(capability.Tasks, requirements.Task) && !modelSupports(capability.Models, requirements) {
-		return false
-	}
-	if requirements.Model != "" && !hasModel(capability.Models, requirements.Model, requirements.Provider) {
+	if requirements.Model != "" {
+		if !selectedModelSupports(capability.Models, requirements) {
+			return false
+		}
+	} else if requirements.Task != "" && !containsFold(capability.Tasks, requirements.Task) && !modelSupports(capability.Models, requirements) {
 		return false
 	}
 	if (requirements.Vision || requirements.Embedding) && !modelFeature(capability.Models, requirements.Model, requirements.Provider, requirements.Vision, requirements.Embedding) {
@@ -113,7 +112,7 @@ func matchesNode(node Node, requirements Requirements) bool {
 	if requirements.MinFreeVRAM > 0 {
 		found := false
 		for _, gpu := range capability.GPUs {
-			if gpu.MemoryFree >= requirements.MinFreeVRAM {
+			if boundedFreeMemory(gpu.MemoryFree, gpu.MemoryTotal) >= requirements.MinFreeVRAM {
 				found = true
 				break
 			}
@@ -134,15 +133,16 @@ func modelSupports(models []ModelCapability, requirements Requirements) bool {
 	return false
 }
 
-func hasModel(models []ModelCapability, name, provider string) bool {
+func selectedModelSupports(models []ModelCapability, requirements Requirements) bool {
 	for _, model := range models {
-		if !modelMatchesProvider(model, provider) {
+		if !modelMatchesProvider(model, requirements.Provider) {
 			continue
 		}
-		if strings.EqualFold(provider, "browser") && browserModelEqual(model.Name, name) {
-			return true
+		matches := strings.EqualFold(model.Name, requirements.Model)
+		if strings.EqualFold(requirements.Provider, "browser") {
+			matches = browserModelEqual(model.Name, requirements.Model)
 		}
-		if !strings.EqualFold(provider, "browser") && strings.EqualFold(model.Name, name) {
+		if matches && (requirements.Task == "" || containsFold(model.Tasks, requirements.Task)) {
 			return true
 		}
 	}
@@ -194,15 +194,62 @@ func modelMatchesProvider(model ModelCapability, provider string) bool {
 func bestVRAMHeadroom(node Node, required uint64) float64 {
 	best := 0.0
 	for _, gpu := range node.Capabilities.GPUs {
-		if gpu.MemoryTotal == 0 || gpu.MemoryFree < required {
+		free := boundedFreeMemory(gpu.MemoryFree, gpu.MemoryTotal)
+		if gpu.MemoryTotal == 0 || free < required {
 			continue
 		}
-		headroom := float64(gpu.MemoryFree-required) / float64(gpu.MemoryTotal)
+		headroom := float64(free-required) / float64(gpu.MemoryTotal)
 		if headroom > best {
 			best = headroom
 		}
 	}
 	return best
+}
+
+func bestGPUUtilization(node Node, required uint64) float64 {
+	best := 1.0
+	found := false
+	for _, gpu := range node.Capabilities.GPUs {
+		if boundedFreeMemory(gpu.MemoryFree, gpu.MemoryTotal) < required {
+			continue
+		}
+		utilization := boundedUtilization(gpu.Utilization)
+		if !found || utilization < best {
+			best = utilization
+			found = true
+		}
+	}
+	if !found {
+		return 0
+	}
+	return best
+}
+
+// Worker telemetry is a routing hint, not trusted input. Bound impossible or
+// stale samples so they cannot give a node a negative load score or unbounded
+// preference. Unknown totals remain neutral rather than looking full.
+func boundedMemoryPressure(free, total uint64) float64 {
+	if total == 0 || free >= total {
+		return 0
+	}
+	return 1 - float64(free)/float64(total)
+}
+
+func boundedFreeMemory(free, total uint64) uint64 {
+	if total > 0 && free > total {
+		return total
+	}
+	return free
+}
+
+func boundedUtilization(value int) float64 {
+	if value <= 0 {
+		return 0
+	}
+	if value >= 100 {
+		return 1
+	}
+	return float64(value) / 100
 }
 
 func contains(values []string, wanted string) bool {

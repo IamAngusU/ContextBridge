@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/coder/websocket"
 )
@@ -37,17 +38,34 @@ type RelayConfig struct {
 	Pipelines          map[string]Pipeline
 	MaxPipelineRuntime time.Duration
 	JobTimeout         time.Duration
+	RetentionMaxAge    time.Duration
+	MaxTerminalJobs    int
+	MaxEvents          int
+	MaxTerminalRuns    int
+	RetentionSweep     time.Duration
 }
 
+const (
+	maxActiveReservationsPerOwner = 64
+	maxQueuedJobsPerOwner         = 64
+	maxActivePipelineRuns         = 64
+	maxActivePipelineRunsPerOwner = 8
+)
+
 type Relay struct {
-	cfg     RelayConfig
-	store   *Store
-	logger  *log.Logger
-	mu      sync.RWMutex
-	workers map[string]*workerConnection
-	rateMu  sync.Mutex
-	rate    map[string]*rateWindow
-	wake    chan struct{}
+	cfg             RelayConfig
+	store           *Store
+	logger          *log.Logger
+	mu              sync.RWMutex
+	workers         map[string]*workerConnection
+	rateMu          sync.Mutex
+	rate            map[string]*rateWindow
+	wake            chan struct{}
+	retentionMu     sync.Mutex
+	nextRetention   time.Time
+	fairnessMu      sync.Mutex
+	lastOwner       map[int]string
+	queueScanOffset int
 }
 
 func (r *Relay) Idle() bool {
@@ -67,9 +85,7 @@ type workerConnection struct {
 }
 
 func newWorkerConnection(conn *websocket.Conn, capacity int) *workerConnection {
-	if capacity <= 0 {
-		capacity = 1
-	}
+	capacity = boundedWorkerCapacity(capacity)
 	return &workerConnection{conn: conn, capacity: capacity, inFlight: map[string]struct{}{}}
 }
 
@@ -77,7 +93,7 @@ func (w *workerConnection) reserve(jobID string) bool {
 	w.stateMu.Lock()
 	defer w.stateMu.Unlock()
 	if _, exists := w.inFlight[jobID]; exists {
-		return true
+		return false
 	}
 	if len(w.inFlight) >= w.capacity {
 		return false
@@ -99,12 +115,20 @@ func (w *workerConnection) load() (running, capacity int) {
 }
 
 func (w *workerConnection) updateCapacity(capacity int) {
-	if capacity <= 0 {
-		capacity = 1
-	}
+	capacity = boundedWorkerCapacity(capacity)
 	w.stateMu.Lock()
 	w.capacity = capacity
 	w.stateMu.Unlock()
+}
+
+func boundedWorkerCapacity(capacity int) int {
+	if capacity <= 0 {
+		return 1
+	}
+	if capacity > MaximumWorkerConcurrency {
+		return MaximumWorkerConcurrency
+	}
+	return capacity
 }
 
 func (w *workerConnection) write(ctx context.Context, message []byte) error {
@@ -129,7 +153,10 @@ func NewRelay(cfg RelayConfig, logger *log.Logger) (*Relay, error) {
 		return nil, errors.New("relay admin token must contain at least 32 characters")
 	}
 	if cfg.MaxJobBytes <= 0 {
-		cfg.MaxJobBytes = 12 << 20
+		cfg.MaxJobBytes = MaximumJobPayloadBytes
+	}
+	if cfg.MaxJobBytes > MaximumJobPayloadBytes {
+		return nil, fmt.Errorf("relay max job bytes must not exceed %d MiB", MaximumJobPayloadBytes>>20)
 	}
 	if cfg.MaxQueuedJobs <= 0 {
 		cfg.MaxQueuedJobs = 10000
@@ -149,6 +176,9 @@ func NewRelay(cfg RelayConfig, logger *log.Logger) (*Relay, error) {
 	if cfg.JobTimeout <= 0 {
 		cfg.JobTimeout = 15 * time.Minute
 	}
+	if err := applyRetentionDefaults(&cfg); err != nil {
+		return nil, err
+	}
 	store, err := OpenStore(cfg.Database)
 	if err != nil {
 		return nil, err
@@ -157,10 +187,59 @@ func NewRelay(cfg RelayConfig, logger *log.Logger) (*Relay, error) {
 		store.Close()
 		return nil, err
 	}
+	if _, err := store.RecoverRelayRestart("relay restarted before worker completion"); err != nil {
+		store.Close()
+		return nil, err
+	}
+	if _, err := store.FailActivePipelineRuns("relay restarted before pipeline completion"); err != nil {
+		store.Close()
+		return nil, err
+	}
+	now := time.Now().UTC()
+	if _, err := store.PruneRetention(now, relayRetentionPolicy(cfg)); err != nil {
+		store.Close()
+		return nil, fmt.Errorf("prune relay history: %w", err)
+	}
 	if logger == nil {
 		logger = log.Default()
 	}
-	return &Relay{cfg: cfg, store: store, logger: logger, workers: map[string]*workerConnection{}, rate: map[string]*rateWindow{}, wake: make(chan struct{}, 1)}, nil
+	return &Relay{cfg: cfg, store: store, logger: logger, workers: map[string]*workerConnection{}, rate: map[string]*rateWindow{}, wake: make(chan struct{}, 1), nextRetention: now.Add(cfg.RetentionSweep), lastOwner: map[int]string{}}, nil
+}
+
+func applyRetentionDefaults(cfg *RelayConfig) error {
+	if cfg.RetentionMaxAge == 0 {
+		cfg.RetentionMaxAge = time.Duration(DefaultRetentionDays) * 24 * time.Hour
+	}
+	if cfg.MaxTerminalJobs == 0 {
+		cfg.MaxTerminalJobs = DefaultMaxTerminalJobs
+	}
+	if cfg.MaxEvents == 0 {
+		cfg.MaxEvents = DefaultMaxEvents
+	}
+	if cfg.MaxTerminalRuns == 0 {
+		cfg.MaxTerminalRuns = DefaultMaxTerminalPipelineRuns
+	}
+	if cfg.RetentionSweep == 0 {
+		cfg.RetentionSweep = time.Duration(DefaultRetentionSweepSeconds) * time.Second
+	}
+	if err := relayRetentionPolicy(*cfg).Validate(); err != nil {
+		return err
+	}
+	minimumSweep := time.Duration(MinimumRetentionSweepSeconds) * time.Second
+	maximumSweep := time.Duration(MaximumRetentionSweepSeconds) * time.Second
+	if cfg.RetentionSweep < minimumSweep || cfg.RetentionSweep > maximumSweep {
+		return fmt.Errorf("retention sweep must be between %s and %s", minimumSweep, maximumSweep)
+	}
+	return nil
+}
+
+func relayRetentionPolicy(cfg RelayConfig) RetentionPolicy {
+	return RetentionPolicy{
+		MaxAge:                  cfg.RetentionMaxAge,
+		MaxTerminalJobs:         cfg.MaxTerminalJobs,
+		MaxEvents:               cfg.MaxEvents,
+		MaxTerminalPipelineRuns: cfg.MaxTerminalRuns,
+	}
 }
 
 func (r *Relay) Close() error { return r.store.Close() }
@@ -350,16 +429,147 @@ func (r *Relay) handleCancel(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusConflict, err)
 		return
 	}
+	r.cancelWorkerExecution(job.AssignedNode, job.ID)
 	writeJSON(w, http.StatusOK, job)
 }
 
-func (r *Relay) handleSubmit(w http.ResponseWriter, req *http.Request) {
-	if queued, _ := r.store.CountJobs(JobQueued); queued >= r.cfg.MaxQueuedJobs {
-		writeError(w, http.StatusServiceUnavailable, errors.New("relay queue is full"))
+func (r *Relay) cancelWorkerExecution(nodeID, jobID string) {
+	if nodeID == "" || jobID == "" {
 		return
 	}
+	r.mu.RLock()
+	worker := r.workers[nodeID]
+	r.mu.RUnlock()
+	if worker == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	message := WireMessage{Version: ProtocolVersion, Type: "cancel", JobID: jobID}
+	if err := worker.write(ctx, mustJSON(message)); err != nil {
+		r.logger.Printf("worker cancellation for %s could not be delivered: %v", jobID, err)
+	}
+}
+
+func (r *Relay) handleSubmit(w http.ResponseWriter, req *http.Request) {
 	var input SubmitRequest
-	if err := decodeJSON(req.Body, &input, r.cfg.MaxJobBytes); err != nil {
+	// MaxJobBytes is the cleartext payload budget. A sealed payload base64-
+	// encodes that same payload and therefore needs a larger HTTP envelope.
+	// Decode against the bounded wire budget, then enforce the cleartext budget
+	// independently below so encryption never reduces the usable job size.
+	if err := decodeJSON(req.Body, &input, sealedSubmitBodyLimit(r.cfg.MaxJobBytes)); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := validateSubmitPayload(input, r.cfg.MaxJobBytes); err != nil {
+		status := http.StatusBadRequest
+		var limitErr *payloadLimitError
+		if errors.As(err, &limitErr) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		writeError(w, status, err)
+		return
+	}
+	record, _ := tokenRecord(req.Context())
+	if err := scopeRequirements(&input.Requirements, record); err != nil {
+		writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if err := r.validateRequirements(input.Requirements); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err)
+		return
+	}
+	if err := validateTenantID(input.TenantID); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err)
+		return
+	}
+	if input.MaxAttempts == 0 {
+		input.MaxAttempts = r.cfg.MaxAttempts
+	}
+	input.OwnerSubject = record.Subject
+	var job Job
+	var err error
+	if input.AssignmentID != "" {
+		job, err = r.store.ConsumeReservationAdmitted(input.AssignmentID, input.AssignmentSecret, input.Sealed, input.Source, input.TenantID, input.OwnerSubject, input.Priority, input.MaxAttempts, r.cfg.MaxQueuedJobs, r.ownerQueueLimit())
+	} else {
+		job, err = r.store.CreateJobAdmitted(input, r.cfg.MaxQueuedJobs, r.ownerQueueLimit())
+	}
+	if err != nil {
+		status := http.StatusUnprocessableEntity
+		if errors.Is(err, ErrQueueFull) {
+			status = http.StatusServiceUnavailable
+		} else if errors.Is(err, ErrOwnerQueueCapacity) {
+			status = http.StatusTooManyRequests
+		} else if errors.Is(err, ErrReservationOwnerMismatch) {
+			status = http.StatusForbidden
+		}
+		writeError(w, status, err)
+		return
+	}
+	_ = r.store.AddEvent(Event{Kind: "job.queued", Message: "Job queued", JobID: job.ID})
+	r.signalDispatch()
+	writeJSON(w, http.StatusAccepted, jobResponse(job, req.URL.Query().Get("compact") == "1"))
+}
+
+type payloadLimitError struct {
+	message string
+}
+
+func (e *payloadLimitError) Error() string { return e.message }
+
+func sealedSubmitBodyLimit(cleartextLimit int64) int64 {
+	if cleartextLimit <= 0 {
+		cleartextLimit = MaximumJobPayloadBytes
+	}
+	// AES-GCM adds a 16-byte tag; RawURL base64 expands by at most 4/3.
+	// Leave a small, fixed allowance for requirements and envelope metadata.
+	ciphertextLimit := cleartextLimit + 16
+	encodedCiphertextLimit := (ciphertextLimit*4 + 2) / 3
+	return encodedCiphertextLimit + (64 << 10)
+}
+
+func validateSubmitPayload(input SubmitRequest, cleartextLimit int64) error {
+	if len(input.Payload) > 0 && input.Sealed != nil {
+		return errors.New("job must contain either payload or sealed_payload, not both")
+	}
+	if int64(len(input.Payload)) > cleartextLimit {
+		return &payloadLimitError{message: fmt.Sprintf("job payload exceeds %d bytes", cleartextLimit)}
+	}
+	if input.Sealed == nil {
+		return nil
+	}
+	if input.Sealed.Algorithm != sealedAlgorithm {
+		return errors.New("sealed payload uses an unsupported algorithm")
+	}
+	ciphertext, err := decode(input.Sealed.Ciphertext)
+	if err != nil {
+		return errors.New("sealed payload ciphertext is invalid")
+	}
+	if len(ciphertext) < 16 || int64(len(ciphertext)) > cleartextLimit+16 {
+		return &payloadLimitError{message: fmt.Sprintf("sealed job payload exceeds %d cleartext bytes", cleartextLimit)}
+	}
+	nonce, err := decode(input.Sealed.Nonce)
+	if err != nil || len(nonce) != 12 {
+		return errors.New("sealed payload nonce is invalid")
+	}
+	publicKey, err := decode(input.Sealed.EphemeralPublic)
+	if err != nil || len(publicKey) != 32 {
+		return errors.New("sealed payload public key is invalid")
+	}
+	return nil
+}
+
+func jobResponse(job Job, compact bool) Job {
+	if compact {
+		job.Payload = nil
+		job.SealedPayload = nil
+	}
+	return job
+}
+
+func (r *Relay) handleReserve(w http.ResponseWriter, req *http.Request) {
+	var input AssignmentRequest
+	if err := decodeJSON(req.Body, &input, 64<<10); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -372,52 +582,13 @@ func (r *Relay) handleSubmit(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, err)
 		return
 	}
-	if input.MaxAttempts == 0 {
-		input.MaxAttempts = r.cfg.MaxAttempts
-	}
-	input.OwnerSubject = record.Subject
-	var job Job
-	var err error
-	if input.AssignmentID != "" {
-		job, err = r.store.ConsumeReservation(input.AssignmentID, input.AssignmentSecret, input.Sealed, input.Source, input.TenantID, input.OwnerSubject, input.Priority, input.MaxAttempts)
-	} else {
-		job, err = r.store.CreateJob(input)
-	}
-	if err != nil {
-		writeError(w, http.StatusUnprocessableEntity, err)
-		return
-	}
-	_ = r.store.AddEvent(Event{Kind: "job.queued", Message: "Job queued", JobID: job.ID})
-	r.signalDispatch()
-	writeJSON(w, http.StatusAccepted, jobResponse(job, req.URL.Query().Get("compact") == "1"))
-}
-
-func jobResponse(job Job, compact bool) Job {
-	if compact {
-		job.Payload = nil
-		job.SealedPayload = nil
-	}
-	return job
-}
-
-func (r *Relay) handleReserve(w http.ResponseWriter, req *http.Request) {
-	var requirements Requirements
-	if err := decodeJSON(req.Body, &requirements, 64<<10); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	record, _ := tokenRecord(req.Context())
-	if err := scopeRequirements(&requirements, record); err != nil {
-		writeError(w, http.StatusForbidden, err)
-		return
-	}
-	if err := r.validateRequirements(requirements); err != nil {
+	if err := validateTenantID(input.TenantID); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err)
 		return
 	}
 	nodes, _ := r.store.ListNodes()
-	routingRequirements := r.withSessionAffinity(requirements, record.Subject)
-	candidates := RankWithEstimate(nodes, routingRequirements, r.store.EstimateVRAM(requirements))
+	routingRequirements := r.withSessionAffinity(input.Requirements, record.Subject)
+	candidates := RankWithEstimate(nodes, routingRequirements, r.store.EstimateVRAM(input.Requirements))
 	if len(candidates) == 0 {
 		writeError(w, http.StatusServiceUnavailable, errors.New("no online node satisfies these requirements"))
 		return
@@ -428,9 +599,23 @@ func (r *Relay) handleReserve(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	secret, _ := randomToken("as_")
-	assignment := Assignment{ID: randomID("assignment"), JobID: randomID("job"), NodeID: node.ID, NodeName: node.Name, PublicKey: node.PublicKey, ExpiresAt: time.Now().UTC().Add(r.cfg.AssignmentTTL), Requirements: requirements}
-	if err := r.store.CreateReservation(assignment, secret); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+	assignment := Assignment{
+		ID: randomID("assignment"), JobID: randomID("job"), NodeID: node.ID, NodeName: node.Name,
+		PublicKey: node.PublicKey, Attempt: 1, OwnerSubject: record.Subject, TenantID: input.TenantID,
+		ExpiresAt: time.Now().UTC().Add(r.cfg.AssignmentTTL), Requirements: input.Requirements,
+	}
+	ownerLimit := maxActiveReservationsPerOwner
+	if r.cfg.MaxQueuedJobs < ownerLimit {
+		ownerLimit = r.cfg.MaxQueuedJobs
+	}
+	if err := r.store.CreateReservationAdmitted(assignment, secret, record.Subject, r.cfg.MaxQueuedJobs, ownerLimit); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, ErrOwnerReservationCapacity) {
+			status = http.StatusTooManyRequests
+		} else if errors.Is(err, ErrReservationCapacity) {
+			status = http.StatusServiceUnavailable
+		}
+		writeError(w, status, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, AssignmentResponse{Assignment: assignment, Secret: secret})
@@ -445,6 +630,13 @@ func (r *Relay) handleCreateToken(w http.ResponseWriter, req *http.Request) {
 	}
 	if err := decodeJSON(req.Body, &input, 32<<10); err != nil {
 		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	// Validate before converting to time.Duration: multiplying an attacker-
+	// controlled int first can wrap and accidentally create a different token
+	// lifetime. Zero retains the existing non-expiring admin-token behavior.
+	if input.LifetimeHours < 0 || input.LifetimeHours > 10*365*24 {
+		writeError(w, http.StatusUnprocessableEntity, errors.New("lifetime_hours must be 0 to 87600"))
 		return
 	}
 	token, record, err := r.store.CreateToken(input.Role, input.Subject, input.Groups, time.Duration(input.LifetimeHours)*time.Hour)
@@ -466,7 +658,7 @@ func (r *Relay) handleWorker(w http.ResponseWriter, req *http.Request) {
 	if err != nil {
 		return
 	}
-	conn.SetReadLimit(r.cfg.MaxJobBytes + (12 << 20))
+	conn.SetReadLimit(MaximumJobResultWireBytes)
 	defer conn.Close(websocket.StatusNormalClosure, "worker disconnected")
 	ctx := req.Context()
 	_, raw, err := conn.Read(ctx)
@@ -474,7 +666,7 @@ func (r *Relay) handleWorker(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	var hello WireMessage
-	if json.Unmarshal(raw, &hello) != nil || hello.Type != "hello" || hello.Node == nil || hello.Node.ID != record.Subject {
+	if json.Unmarshal(raw, &hello) != nil || hello.Version != ProtocolVersion || hello.Type != "hello" || hello.Node == nil || hello.Node.ID != record.Subject {
 		conn.Close(websocket.StatusPolicyViolation, "invalid worker hello")
 		return
 	}
@@ -484,9 +676,8 @@ func (r *Relay) handleWorker(w http.ResponseWriter, req *http.Request) {
 		conn.Close(websocket.StatusPolicyViolation, "worker name is empty")
 		return
 	}
-	if len(record.Groups) > 0 {
-		node.Capabilities.Groups = intersectFold(node.Capabilities.Groups, record.Groups)
-	}
+	scopeNodeCapabilities(&node.Capabilities, record)
+	node.Capabilities.MaxConcurrent = boundedWorkerCapacity(node.Capabilities.MaxConcurrent)
 	node.Connected = true
 	node.State = "online"
 	node.LastSeen = time.Now().UTC()
@@ -498,8 +689,14 @@ func (r *Relay) handleWorker(w http.ResponseWriter, req *http.Request) {
 			node.PublicKey = saved.PublicKey
 		}
 	}
-	if err := r.store.UpsertNode(node); err != nil {
-		conn.Close(websocket.StatusInternalError, "node could not be stored")
+	if err := r.store.UpsertNodePinned(node); err != nil {
+		status := websocket.StatusInternalError
+		message := "node could not be stored"
+		if errors.Is(err, ErrNodePublicKeyMismatch) {
+			status = websocket.StatusPolicyViolation
+			message = "node public key differs from paired identity; re-pair to rotate it"
+		}
+		conn.Close(status, message)
 		return
 	}
 	worker := newWorkerConnection(conn, node.Capabilities.MaxConcurrent)
@@ -527,6 +724,7 @@ func (r *Relay) handleWorker(w http.ResponseWriter, req *http.Request) {
 		case "heartbeat":
 			if message.Capabilities != nil {
 				node.Capabilities = *message.Capabilities
+				scopeNodeCapabilities(&node.Capabilities, record)
 				worker.updateCapacity(node.Capabilities.MaxConcurrent)
 				running, capacity := worker.load()
 				if node.Capabilities.Running < running {
@@ -542,24 +740,29 @@ func (r *Relay) handleWorker(w http.ResponseWriter, req *http.Request) {
 			}
 			_ = r.store.UpsertNode(node)
 		case "started":
-			_, _ = r.store.MarkRunning(message.JobID, node.ID)
+			_, _ = r.store.MarkRunning(message.JobID, node.ID, message.Attempt)
 		case "progress":
 			if message.Progress != nil {
-				_, _ = r.store.UpdateJobProgress(message.JobID, node.ID, *message.Progress)
+				_, _ = r.store.UpdateJobProgress(message.JobID, node.ID, message.Attempt, *message.Progress)
 			}
 		case "result":
-			worker.release(message.JobID)
 			usage := priceUsage(message.Usage, r.cfg.Pricing)
-			job, completeErr := r.store.CompleteJob(message.JobID, message.Result, message.SealedResult, usage, message.Error)
+			job, completeErr := r.store.CompleteJob(message.JobID, node.ID, message.Attempt, message.Result, message.SealedResult, usage, message.Error)
+			// Only the current assignment generation may release the worker slot.
+			// A final job can still receive its matching late result after a producer
+			// cancellation, in which case execution really has ended and the slot is
+			// safe to release even though the store rejects the state transition.
+			final := job.Status == JobCompleted || job.Status == JobFailed || job.Status == JobCancelled
+			if completeErr == nil || (final && job.AssignedNode == node.ID && job.Attempt == message.Attempt) {
+				worker.release(message.JobID)
+				r.signalDispatch()
+			}
 			if completeErr == nil {
 				kind := "job.completed"
-				if job.Status == JobQueued {
-					kind = "job.requeued"
-				} else if job.Status == JobFailed {
+				if job.Status == JobFailed {
 					kind = "job.failed"
 				}
 				_ = r.store.AddEvent(Event{Kind: kind, Message: "Worker reported " + job.Status, JobID: job.ID, NodeID: node.ID})
-				r.signalDispatch()
 			}
 		}
 	}
@@ -580,15 +783,22 @@ func (r *Relay) dispatchLoop(ctx context.Context) {
 }
 
 func (r *Relay) dispatch() {
-	if recovered, err := r.store.RecoverStaleJobs(time.Now().UTC(), r.cfg.AssignmentTTL, r.cfg.JobTimeout); err == nil {
+	now := time.Now().UTC()
+	if _, err := r.store.GarbageCollectReservations(now); err != nil {
+		r.logger.Printf("assignment reservation cleanup failed: %v", err)
+	}
+	if recovered, err := r.store.RecoverStaleJobs(now, r.cfg.AssignmentTTL, r.cfg.JobTimeout); err == nil {
 		for _, job := range recovered {
 			_ = r.store.AddEvent(Event{Kind: "job." + job.Status, Message: job.Error, JobID: job.ID, NodeID: job.AssignedNode})
 		}
 	}
-	jobs, err := r.store.QueuedJobs(200)
+	r.pruneRetentionIfDue(now)
+	owners, offset := r.dispatchScanSnapshot()
+	jobs, total, nextOffset, err := r.store.QueuedJobsFairPage(200, offset, owners)
 	if err != nil || len(jobs) == 0 {
 		return
 	}
+	r.recordQueueScan(nextOffset, total)
 	nodes, err := r.store.ListNodes()
 	if err != nil {
 		return
@@ -636,6 +846,7 @@ func (r *Relay) dispatch() {
 				_, _ = r.store.RequeueNode(candidate.Node.ID, "worker connection failed")
 				r.disconnectNode(candidate.Node.ID, worker)
 			} else {
+				r.recordDispatchedOwner(job.Priority, job.OwnerSubject)
 				_ = r.store.AddEvent(Event{Kind: "job.assigned", Message: "Job assigned to " + candidate.Node.Name, JobID: job.ID, NodeID: candidate.Node.ID})
 				candidate.Node.Capabilities.Running++
 				for index := range nodes {
@@ -646,6 +857,70 @@ func (r *Relay) dispatch() {
 			}
 			break
 		}
+	}
+}
+
+func (r *Relay) fairnessSnapshot() map[int]string {
+	result, _ := r.dispatchScanSnapshot()
+	return result
+}
+
+func (r *Relay) dispatchScanSnapshot() (map[int]string, int) {
+	r.fairnessMu.Lock()
+	defer r.fairnessMu.Unlock()
+	result := make(map[int]string, len(r.lastOwner))
+	for priority, owner := range r.lastOwner {
+		result[priority] = owner
+	}
+	return result, r.queueScanOffset
+}
+
+func (r *Relay) recordQueueScan(next, total int) {
+	r.fairnessMu.Lock()
+	if total <= 0 {
+		r.queueScanOffset = 0
+	} else {
+		r.queueScanOffset = next % total
+	}
+	r.fairnessMu.Unlock()
+}
+
+func (r *Relay) recordDispatchedOwner(priority int, owner string) {
+	if owner == "" {
+		return
+	}
+	r.fairnessMu.Lock()
+	r.lastOwner[priority] = owner
+	r.fairnessMu.Unlock()
+}
+
+func (r *Relay) pruneRetentionIfDue(now time.Time) {
+	r.retentionMu.Lock()
+	defer r.retentionMu.Unlock()
+	if now.Before(r.nextRetention) {
+		return
+	}
+	r.nextRetention = now.Add(r.cfg.RetentionSweep)
+	pruned, err := r.store.PruneRetention(now, relayRetentionPolicy(r.cfg))
+	if err != nil {
+		r.logger.Printf("relay history retention failed: %v", err)
+		return
+	}
+	if pruned.Jobs > 0 || pruned.Events > 0 || pruned.PipelineRuns > 0 {
+		r.logger.Printf("relay history retention removed %d terminal jobs, %d events, and %d terminal pipeline runs", pruned.Jobs, pruned.Events, pruned.PipelineRuns)
+	}
+}
+
+func (r *Relay) ownerQueueLimit() int {
+	if r.cfg.MaxQueuedJobs <= 0 || r.cfg.MaxQueuedJobs > maxQueuedJobsPerOwner {
+		return maxQueuedJobsPerOwner
+	}
+	return r.cfg.MaxQueuedJobs
+}
+
+func scopeNodeCapabilities(capabilities *Capabilities, record TokenRecord) {
+	if len(record.Groups) > 0 {
+		capabilities.Groups = intersectFold(capabilities.Groups, record.Groups)
 	}
 }
 
@@ -661,8 +936,8 @@ func (r *Relay) disconnectNode(id string, worker *workerConnection) {
 		return
 	}
 	_ = r.store.SetNodeConnected(id, false)
-	requeued, _ := r.store.RequeueNode(id, "worker disconnected")
-	_ = r.store.AddEvent(Event{Kind: "node.offline", Message: "Worker disconnected", NodeID: id, Data: map[string]interface{}{"affected_jobs": len(requeued)}})
+	affected, _ := r.store.RequeueNode(id, "worker disconnected")
+	_ = r.store.AddEvent(Event{Kind: "node.offline", Message: "Worker disconnected", NodeID: id, Data: map[string]interface{}{"affected_jobs": len(affected)}})
 	r.signalDispatch()
 }
 
@@ -676,11 +951,47 @@ func (r *Relay) validateRequirements(requirements Requirements) error {
 	if len(requirements.RequiredTags) > 32 || len(requirements.PreferredNodes) > 32 {
 		return errors.New("too many routing selectors")
 	}
-	if len(requirements.SessionID) > 128 || strings.TrimSpace(requirements.SessionID) != requirements.SessionID || strings.IndexFunc(requirements.SessionID, unicode.IsControl) >= 0 {
+	for name, value := range map[string]string{
+		"task":  requirements.Task,
+		"model": requirements.Model,
+		"group": requirements.Group,
+	} {
+		if name != "task" && value == "" {
+			continue
+		}
+		if !validRoutingLabel(value, 160) {
+			return fmt.Errorf("requirements.%s must be at most 160 bytes without surrounding whitespace or control characters", name)
+		}
+	}
+	for _, tag := range requirements.RequiredTags {
+		if !validRoutingLabel(tag, 80) {
+			return errors.New("requirements.required_tags entries must be 1 to 80 bytes without surrounding whitespace or control characters")
+		}
+	}
+	for _, node := range requirements.PreferredNodes {
+		if !validRoutingLabel(node, 160) {
+			return errors.New("requirements.preferred_nodes entries must be 1 to 160 bytes without surrounding whitespace or control characters")
+		}
+	}
+	if requirements.SessionID != "" && !validRoutingLabel(requirements.SessionID, 128) {
 		return errors.New("requirements.session_id must be at most 128 bytes without surrounding whitespace or control characters")
 	}
-	if len(requirements.Provider) > 80 || strings.TrimSpace(requirements.Provider) != requirements.Provider || strings.Contains(requirements.Provider, "..") || strings.IndexFunc(requirements.Provider, unicode.IsControl) >= 0 {
+	if requirements.Provider != "" && (!validRoutingLabel(requirements.Provider, 80) || strings.Contains(requirements.Provider, "..")) {
 		return errors.New("requirements.provider is invalid")
+	}
+	return nil
+}
+
+func validRoutingLabel(value string, maximum int) bool {
+	return value != "" && utf8.ValidString(value) && len(value) <= maximum && strings.TrimSpace(value) == value &&
+		strings.IndexFunc(value, func(r rune) bool {
+			return unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp)
+		}) < 0
+}
+
+func validateTenantID(tenantID string) error {
+	if tenantID != "" && !validRoutingLabel(tenantID, 200) {
+		return errors.New("tenant_id must be at most 200 bytes without surrounding whitespace or control characters")
 	}
 	return nil
 }
@@ -708,10 +1019,7 @@ func (r *Relay) authorize(roles ...string) func(http.HandlerFunc) http.HandlerFu
 
 func (r *Relay) rateLimit(max int, window time.Duration, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
-		host, _, _ := net.SplitHostPort(req.RemoteAddr)
-		if host == "" {
-			host = req.RemoteAddr
-		}
+		host := rateLimitClientKey(req)
 		now := time.Now()
 		r.rateMu.Lock()
 		if len(r.rate) > 10000 {
@@ -736,6 +1044,28 @@ func (r *Relay) rateLimit(max int, window time.Duration, next http.HandlerFunc) 
 		}
 		next(w, req)
 	}
+}
+
+func rateLimitClientKey(req *http.Request) string {
+	host, _, err := net.SplitHostPort(req.RemoteAddr)
+	if err != nil || host == "" {
+		host = req.RemoteAddr
+	}
+	peer := net.ParseIP(strings.Trim(host, "[]"))
+	// The supported public topology binds the relay to loopback and places a
+	// TLS reverse proxy in front. Trust exactly one proxy-normalized IP header
+	// only from that loopback peer; never trust an arbitrary X-Forwarded-For
+	// chain from a directly connected client.
+	if peer != nil && peer.IsLoopback() {
+		forwarded := strings.TrimSpace(req.Header.Get("X-Real-IP"))
+		if candidate := net.ParseIP(strings.Trim(forwarded, "[]")); candidate != nil {
+			return candidate.String()
+		}
+	}
+	if peer != nil {
+		return peer.String()
+	}
+	return host
 }
 
 func (r *Relay) signalDispatch() {
@@ -808,6 +1138,9 @@ func decodeJSON(body io.Reader, target interface{}, limit int64) error {
 	}
 	if int64(len(raw)) > limit {
 		return fmt.Errorf("JSON body exceeds %d bytes", limit)
+	}
+	if !utf8.Valid(raw) {
+		return errors.New("JSON body must be valid UTF-8")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()

@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base32"
@@ -13,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	bolt "go.etcd.io/bbolt"
 )
@@ -34,9 +36,23 @@ type Store struct {
 	db *bolt.DB
 }
 
+var (
+	ErrQueueFull                   = errors.New("relay queue is full")
+	ErrOwnerQueueCapacity          = errors.New("producer queue capacity is full")
+	ErrReservationCapacity         = errors.New("assignment reservation capacity is full")
+	ErrOwnerReservationCapacity    = errors.New("producer assignment reservation capacity is full")
+	ErrReservationOwnerMismatch    = errors.New("assignment belongs to another producer")
+	ErrReservationContextMismatch  = errors.New("assignment tenant context does not match the reservation")
+	ErrReservationInvalidOrExpired = errors.New("assignment is invalid or expired")
+	ErrPipelineCapacity            = errors.New("active pipeline capacity is full")
+	ErrOwnerPipelineCapacity       = errors.New("producer active pipeline capacity is full")
+	ErrNodePublicKeyMismatch       = errors.New("node public key differs from paired identity")
+)
+
 type reservation struct {
-	Assignment Assignment `json:"assignment"`
-	SecretHash string     `json:"secret_hash"`
+	Assignment   Assignment `json:"assignment"`
+	SecretHash   string     `json:"secret_hash"`
+	OwnerSubject string     `json:"owner_subject"`
 }
 
 func OpenStore(path string) (*Store, error) {
@@ -48,7 +64,7 @@ func OpenStore(path string) (*Store, error) {
 		return nil, err
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, name := range [][]byte{bucketJobs, bucketJobIndex, bucketQueue, bucketNodes, bucketTokens, bucketPairings, bucketPairCodes, bucketAssignments, bucketEvents, bucketPipelineRuns} {
+		for _, name := range [][]byte{bucketJobs, bucketJobIndex, bucketQueue, bucketNodes, bucketTokens, bucketPairings, bucketPairCodes, bucketAssignments, bucketEvents, bucketPipelineRuns, bucketHistoricalTotals} {
 			if _, createErr := tx.CreateBucketIfNotExists(name); createErr != nil {
 				return createErr
 			}
@@ -67,6 +83,12 @@ func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) CreateToken(role, subject string, groups []string, lifetime time.Duration) (string, TokenRecord, error) {
 	if role != "admin" && role != "producer" && role != "node" && role != "observer" {
 		return "", TokenRecord{}, fmt.Errorf("unsupported token role %s", role)
+	}
+	if err := validateTokenIdentity(role, subject, groups); err != nil {
+		return "", TokenRecord{}, err
+	}
+	if lifetime < 0 || lifetime > 10*365*24*time.Hour {
+		return "", TokenRecord{}, errors.New("token lifetime must be zero or at most 10 years")
 	}
 	token, err := randomToken("cb_" + role + "_")
 	if err != nil {
@@ -89,6 +111,9 @@ func (s *Store) EnsureToken(token, role, subject string, groups []string) error 
 	if role != "admin" && role != "producer" && role != "node" && role != "observer" {
 		return fmt.Errorf("unsupported token role %s", role)
 	}
+	if err := validateTokenIdentity(role, subject, groups); err != nil {
+		return err
+	}
 	record := TokenRecord{ID: randomID("tok"), Role: role, Subject: cleanLabel(subject, 120), Groups: cleanList(groups, 32, 80), CreatedAt: time.Now().UTC()}
 	return s.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(bucketTokens)
@@ -98,6 +123,24 @@ func (s *Store) EnsureToken(token, role, subject string, groups []string) error 
 		}
 		return putJSON(bucket, key, record)
 	})
+}
+
+func validateTokenIdentity(role, subject string, groups []string) error {
+	if (role == "producer" || role == "node") && !validRoutingLabel(subject, 120) {
+		return fmt.Errorf("%s token subject must be 1 to 120 safe UTF-8 bytes", role)
+	}
+	if subject != "" && !validRoutingLabel(subject, 120) {
+		return errors.New("token subject must be at most 120 safe UTF-8 bytes")
+	}
+	if len(groups) > 32 {
+		return errors.New("token may contain at most 32 groups")
+	}
+	for _, group := range groups {
+		if !validRoutingLabel(group, 80) {
+			return errors.New("token groups must contain 1 to 80 safe UTF-8 bytes")
+		}
+	}
+	return nil
 }
 
 func (s *Store) Authenticate(token string) (TokenRecord, bool) {
@@ -149,6 +192,9 @@ func (s *Store) CreatePairing(request PairRequest, verificationURI string, lifet
 		return PairResponse{}, fmt.Errorf("invalid node public key: %w", err)
 	}
 	err = s.db.Update(func(tx *bolt.Tx) error {
+		if _, err := garbageCollectPairings(tx, time.Now().UTC()); err != nil {
+			return err
+		}
 		if err := putJSON(tx.Bucket(bucketPairings), pairing.DeviceCodeHash, pairing); err != nil {
 			return err
 		}
@@ -158,6 +204,9 @@ func (s *Store) CreatePairing(request PairRequest, verificationURI string, lifet
 }
 
 func (s *Store) ListPairings() ([]Pairing, error) {
+	if _, err := s.GarbageCollectPairings(time.Now().UTC()); err != nil {
+		return nil, err
+	}
 	result := []Pairing{}
 	err := s.db.View(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketPairings).ForEach(func(_, value []byte) error {
@@ -178,6 +227,9 @@ func (s *Store) ListPairings() ([]Pairing, error) {
 
 func (s *Store) DecidePairing(userCode string, approve bool) (Pairing, error) {
 	userCode = strings.ToUpper(strings.TrimSpace(userCode))
+	if _, err := s.GarbageCollectPairings(time.Now().UTC()); err != nil {
+		return Pairing{}, err
+	}
 	var result Pairing
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		hash := tx.Bucket(bucketPairCodes).Get([]byte(userCode))
@@ -226,7 +278,10 @@ func (s *Store) PollPairing(deviceCode string) (string, Pairing, string, error) 
 		}
 		if time.Now().After(pairing.ExpiresAt) {
 			state = "expired_token"
-			return nil
+			if err := deletePairCodeForHash(tx.Bucket(bucketPairCodes), pairing.UserCode, []byte(hash)); err != nil {
+				return err
+			}
+			return tx.Bucket(bucketPairings).Delete([]byte(hash))
 		}
 		if pairing.Denied {
 			state = "access_denied"
@@ -238,28 +293,105 @@ func (s *Store) PollPairing(deviceCode string) (string, Pairing, string, error) 
 		state = "approved"
 		token = pairing.PendingToken
 		pairing.PendingToken = ""
+		// Keep the token-free device record until its normal expiry so a repeat
+		// poll preserves the protocol's authorization_pending response. The
+		// short approval code is no longer useful and can be removed now.
 		if err := putJSON(tx.Bucket(bucketPairings), hash, pairing); err != nil {
 			return err
 		}
-		return tx.Bucket(bucketPairCodes).Delete([]byte(pairing.UserCode))
+		return deletePairCodeForHash(tx.Bucket(bucketPairCodes), pairing.UserCode, []byte(hash))
 	})
 	pairing.PendingToken = ""
 	return state, pairing, token, err
+}
+
+// GarbageCollectPairings deletes only expired pairing delivery records and
+// their matching short-code indexes. Node identities and job history are not
+// part of this lifecycle.
+func (s *Store) GarbageCollectPairings(now time.Time) (int, error) {
+	removed := 0
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		var err error
+		removed, err = garbageCollectPairings(tx, now)
+		return err
+	})
+	return removed, err
+}
+
+func garbageCollectPairings(tx *bolt.Tx, now time.Time) (int, error) {
+	pairings := tx.Bucket(bucketPairings)
+	codes := tx.Bucket(bucketPairCodes)
+	removed := 0
+	cursor := pairings.Cursor()
+	for key, value := cursor.First(); key != nil; key, value = cursor.Next() {
+		var pairing Pairing
+		if err := json.Unmarshal(value, &pairing); err != nil {
+			return removed, err
+		}
+		if pairing.ExpiresAt.After(now) {
+			continue
+		}
+		if err := deletePairCodeForHash(codes, pairing.UserCode, key); err != nil {
+			return removed, err
+		}
+		if err := cursor.Delete(); err != nil {
+			return removed, err
+		}
+		removed++
+	}
+	return removed, nil
+}
+
+func deletePairCodeForHash(codes *bolt.Bucket, userCode string, expectedHash []byte) error {
+	key := []byte(strings.ToUpper(strings.TrimSpace(userCode)))
+	if current := codes.Get(key); !bytes.Equal(current, expectedHash) {
+		return nil
+	}
+	return codes.Delete(key)
 }
 
 func (s *Store) UpsertNode(node Node) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		var existing Node
 		_ = getJSON(tx.Bucket(bucketNodes), node.ID, &existing)
-		node.JobsTotal = existing.JobsTotal
-		node.JobsFailed = existing.JobsFailed
-		node.ComputeMS = existing.ComputeMS
-		node.CostUSD = existing.CostUSD
-		if node.PublicKey == "" {
-			node.PublicKey = existing.PublicKey
-		}
+		mergeStoredNodeState(&node, existing)
 		return putJSON(tx.Bucket(bucketNodes), node.ID, node)
 	})
+}
+
+// UpsertNodePinned stores live node state without allowing possession of the
+// bearer token to rotate the public key established during pairing. A token
+// created manually by an administrator may pin its key on first use; every
+// later connection must present that exact key.
+func (s *Store) UpsertNodePinned(node Node) error {
+	if _, err := parsePublicKey(node.PublicKey); err != nil {
+		return fmt.Errorf("invalid node public key: %w", err)
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		var existing Node
+		err := getJSON(tx.Bucket(bucketNodes), node.ID, &existing)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if existing.PublicKey != "" && node.PublicKey != existing.PublicKey {
+			return ErrNodePublicKeyMismatch
+		}
+		if existing.PublicKey != "" {
+			node.PublicKey = existing.PublicKey
+		}
+		mergeStoredNodeState(&node, existing)
+		return putJSON(tx.Bucket(bucketNodes), node.ID, node)
+	})
+}
+
+func mergeStoredNodeState(node *Node, existing Node) {
+	node.JobsTotal = existing.JobsTotal
+	node.JobsFailed = existing.JobsFailed
+	node.ComputeMS = existing.ComputeMS
+	node.CostUSD = existing.CostUSD
+	if node.PublicKey == "" {
+		node.PublicKey = existing.PublicKey
+	}
 }
 
 func (s *Store) GetNode(id string) (Node, error) {
@@ -306,6 +438,21 @@ func (s *Store) SetNodeConnected(id string, connected bool) error {
 }
 
 func (s *Store) CreateJob(request SubmitRequest) (Job, error) {
+	return s.createJob(request, 0, 0)
+}
+
+// CreateJobAdmitted atomically checks and consumes queue capacity in the same
+// write transaction that creates the job. maxOwner is optional to preserve the
+// existing store API; a non-positive limit is unbounded.
+func (s *Store) CreateJobAdmitted(request SubmitRequest, maxQueued int, maxOwner ...int) (Job, error) {
+	ownerLimit := 0
+	if len(maxOwner) > 0 {
+		ownerLimit = maxOwner[0]
+	}
+	return s.createJob(request, maxQueued, ownerLimit)
+}
+
+func (s *Store) createJob(request SubmitRequest, maxQueued, maxOwner int) (Job, error) {
 	now := time.Now().UTC()
 	job := Job{
 		ID: request.ID, OwnerSubject: cleanLabel(request.OwnerSubject, 120), TenantID: cleanLabel(request.TenantID, 200), Source: cleanLabel(request.Source, 120), Requirements: request.Requirements,
@@ -314,6 +461,8 @@ func (s *Store) CreateJob(request SubmitRequest) (Job, error) {
 	}
 	if job.ID == "" {
 		job.ID = randomID("job")
+	} else if !validJobID(job.ID) {
+		return Job{}, errors.New("job id must use 1-128 safe ASCII characters and must not contain '..'")
 	}
 	if job.MaxAttempts <= 0 {
 		job.MaxAttempts = 3
@@ -331,6 +480,18 @@ func (s *Store) CreateJob(request SubmitRequest) (Job, error) {
 		if tx.Bucket(bucketJobs).Get([]byte(job.ID)) != nil {
 			return os.ErrExist
 		}
+		if maxQueued > 0 || maxOwner > 0 {
+			queued, owned, err := queueCounts(tx, job.OwnerSubject)
+			if err != nil {
+				return err
+			}
+			if maxQueued > 0 && queued >= maxQueued {
+				return ErrQueueFull
+			}
+			if maxOwner > 0 && owned >= maxOwner {
+				return ErrOwnerQueueCapacity
+			}
+		}
 		if err := putJSON(tx.Bucket(bucketJobs), job.ID, job); err != nil {
 			return err
 		}
@@ -342,27 +503,129 @@ func (s *Store) CreateJob(request SubmitRequest) (Job, error) {
 	return job, err
 }
 
-func (s *Store) CreateReservation(assignment Assignment, secret string) error {
+func validJobID(value string) bool {
+	if len(value) < 1 || len(value) > 128 || strings.Contains(value, "..") {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		alphaNumeric := character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9'
+		if index == 0 {
+			if !alphaNumeric {
+				return false
+			}
+			continue
+		}
+		if !alphaNumeric && character != '.' && character != '_' && character != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+// CreateReservationAdmitted garbage-collects expired reservations and admits a
+// new one under global and per-owner bounds in one write transaction. The
+// owner is later required when the reservation is consumed.
+func (s *Store) CreateReservationAdmitted(assignment Assignment, secret, owner string, maxGlobal, maxOwner int) error {
+	owner = cleanLabel(owner, 120)
+	if owner == "" {
+		return errors.New("assignment owner is required")
+	}
+	assignment.OwnerSubject = owner
+	if assignment.Attempt == 0 {
+		assignment.Attempt = 1
+	}
+	if assignment.Attempt != 1 {
+		return errors.New("reserved assignments must start at attempt 1")
+	}
+	if err := validateTenantID(assignment.TenantID); err != nil {
+		return err
+	}
+	if assignment.ID == "" || !validJobID(assignment.ID) || assignment.JobID == "" || !validJobID(assignment.JobID) {
+		return errors.New("assignment and job ids must use safe ASCII characters")
+	}
+	if secret == "" {
+		return errors.New("assignment secret is required")
+	}
+	if !assignment.ExpiresAt.After(time.Now().UTC()) {
+		return ErrReservationInvalidOrExpired
+	}
 	return s.db.Update(func(tx *bolt.Tx) error {
-		return putJSON(tx.Bucket(bucketAssignments), assignment.ID, reservation{Assignment: assignment, SecretHash: tokenHash(secret)})
+		assignments := tx.Bucket(bucketAssignments)
+		if err := garbageCollectReservations(assignments, time.Now().UTC()); err != nil {
+			return err
+		}
+		if assignments.Get([]byte(assignment.ID)) != nil || tx.Bucket(bucketJobs).Get([]byte(assignment.JobID)) != nil {
+			return os.ErrExist
+		}
+		global, owned, err := reservationCounts(assignments, owner)
+		if err != nil {
+			return err
+		}
+		if maxGlobal > 0 && global >= maxGlobal {
+			return ErrReservationCapacity
+		}
+		if maxOwner > 0 && owned >= maxOwner {
+			return ErrOwnerReservationCapacity
+		}
+		return putJSON(assignments, assignment.ID, reservation{Assignment: assignment, SecretHash: tokenHash(secret), OwnerSubject: owner})
 	})
 }
 
-func (s *Store) ConsumeReservation(id, secret string, sealed *SealedEnvelope, source, tenant, owner string, priority, attempts int) (Job, error) {
+// ConsumeReservationAdmitted verifies producer ownership and atomically moves
+// the reservation into the bounded job queue. If the queue is full the
+// reservation remains available until its original expiry.
+func (s *Store) ConsumeReservationAdmitted(id, secret string, sealed *SealedEnvelope, source, tenant, owner string, priority, attempts, maxQueued int, maxOwner ...int) (Job, error) {
 	var job Job
+	ownerLimit := 0
+	if len(maxOwner) > 0 {
+		ownerLimit = maxOwner[0]
+	}
+	owner = cleanLabel(owner, 120)
+	if owner == "" {
+		return Job{}, ErrReservationOwnerMismatch
+	}
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		var saved reservation
 		if err := getJSON(tx.Bucket(bucketAssignments), id, &saved); err != nil {
 			return err
 		}
-		if time.Now().After(saved.Assignment.ExpiresAt) || !constantEqual(saved.SecretHash, tokenHash(secret)) {
-			return errors.New("assignment is invalid or expired")
+		if !saved.Assignment.ExpiresAt.After(time.Now().UTC()) {
+			_ = tx.Bucket(bucketAssignments).Delete([]byte(id))
+			return ErrReservationInvalidOrExpired
+		}
+		if !constantEqual(saved.SecretHash, tokenHash(secret)) {
+			return ErrReservationInvalidOrExpired
+		}
+		if saved.OwnerSubject == "" || saved.OwnerSubject != owner || saved.Assignment.OwnerSubject != owner {
+			return ErrReservationOwnerMismatch
+		}
+		if tenant != saved.Assignment.TenantID {
+			return ErrReservationContextMismatch
+		}
+		if saved.Assignment.Attempt != 1 {
+			return ErrReservationContextMismatch
 		}
 		if sealed == nil {
 			return errors.New("reserved assignments require a sealed payload")
 		}
+		if tx.Bucket(bucketJobs).Get([]byte(saved.Assignment.JobID)) != nil {
+			return os.ErrExist
+		}
+		if maxQueued > 0 || ownerLimit > 0 {
+			queued, owned, err := queueCounts(tx, owner)
+			if err != nil {
+				return err
+			}
+			if maxQueued > 0 && queued >= maxQueued {
+				return ErrQueueFull
+			}
+			if ownerLimit > 0 && owned >= ownerLimit {
+				return ErrOwnerQueueCapacity
+			}
+		}
 		now := time.Now().UTC()
-		job = Job{ID: saved.Assignment.JobID, OwnerSubject: cleanLabel(owner, 120), Source: cleanLabel(source, 120), TenantID: cleanLabel(tenant, 200), Requirements: saved.Assignment.Requirements, SealedPayload: sealed, Status: JobQueued, AssignedNode: saved.Assignment.NodeID, Priority: priority, MaxAttempts: attempts, CreatedAt: now, UpdatedAt: now}
+		job = Job{ID: saved.Assignment.JobID, OwnerSubject: saved.Assignment.OwnerSubject, Source: cleanLabel(source, 120), TenantID: saved.Assignment.TenantID, Requirements: saved.Assignment.Requirements, SealedPayload: sealed, Status: JobQueued, AssignedNode: saved.Assignment.NodeID, Priority: priority, MaxAttempts: attempts, CreatedAt: now, UpdatedAt: now}
 		if job.MaxAttempts <= 0 {
 			job.MaxAttempts = 1
 		}
@@ -378,6 +641,92 @@ func (s *Store) ConsumeReservation(id, secret string, sealed *SealedEnvelope, so
 		return tx.Bucket(bucketAssignments).Delete([]byte(id))
 	})
 	return job, err
+}
+
+// GarbageCollectReservations removes expired E2EE assignment reservations.
+// It is safe to call from the relay's periodic dispatch loop.
+func (s *Store) GarbageCollectReservations(now time.Time) (int, error) {
+	removed := 0
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		var err error
+		removed, err = garbageCollectReservationsCount(tx.Bucket(bucketAssignments), now)
+		return err
+	})
+	return removed, err
+}
+
+func garbageCollectReservations(bucket *bolt.Bucket, now time.Time) error {
+	_, err := garbageCollectReservationsCount(bucket, now)
+	return err
+}
+
+func garbageCollectReservationsCount(bucket *bolt.Bucket, now time.Time) (int, error) {
+	removed := 0
+	cursor := bucket.Cursor()
+	for key, value := cursor.First(); key != nil; key, value = cursor.Next() {
+		var saved reservation
+		if err := json.Unmarshal(value, &saved); err != nil {
+			return removed, err
+		}
+		if saved.Assignment.ExpiresAt.After(now) {
+			continue
+		}
+		if err := cursor.Delete(); err != nil {
+			return removed, err
+		}
+		removed++
+	}
+	return removed, nil
+}
+
+func reservationCounts(bucket *bolt.Bucket, owner string) (global, owned int, err error) {
+	err = bucket.ForEach(func(_, value []byte) error {
+		var saved reservation
+		if decodeErr := json.Unmarshal(value, &saved); decodeErr != nil {
+			return decodeErr
+		}
+		global++
+		if saved.OwnerSubject == owner {
+			owned++
+		}
+		return nil
+	})
+	return global, owned, err
+}
+
+func countAndCleanQueue(tx *bolt.Tx) (int, error) {
+	total, _, err := queueCounts(tx, "")
+	return total, err
+}
+
+func queueCounts(tx *bolt.Tx, owner string) (total, owned int, err error) {
+	queue := tx.Bucket(bucketQueue)
+	jobs := tx.Bucket(bucketJobs)
+	cursor := queue.Cursor()
+	for key, id := cursor.First(); key != nil; key, id = cursor.Next() {
+		raw := jobs.Get(id)
+		if raw == nil {
+			if err := cursor.Delete(); err != nil {
+				return 0, 0, err
+			}
+			continue
+		}
+		var job Job
+		if err := json.Unmarshal(raw, &job); err != nil {
+			return 0, 0, err
+		}
+		if job.Status != JobQueued {
+			if err := cursor.Delete(); err != nil {
+				return 0, 0, err
+			}
+			continue
+		}
+		total++
+		if job.OwnerSubject == owner {
+			owned++
+		}
+	}
+	return total, owned, nil
 }
 
 func (s *Store) GetJob(id string) (Job, error) {
@@ -442,14 +791,14 @@ func (s *Store) AssignJob(id, nodeID string) (Job, error) {
 	return job, err
 }
 
-func (s *Store) MarkRunning(id, nodeID string) (Job, error) {
+func (s *Store) MarkRunning(id, nodeID string, attempt int) (Job, error) {
 	var job Job
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		if err := getJSON(tx.Bucket(bucketJobs), id, &job); err != nil {
 			return err
 		}
-		if job.Status != JobAssigned || job.AssignedNode != nodeID {
-			return errors.New("job is not assigned to this node")
+		if job.Status != JobAssigned || job.AssignedNode != nodeID || attempt <= 0 || job.Attempt != attempt {
+			return errors.New("job is not assigned to this node and attempt")
 		}
 		job.Status = JobRunning
 		job.StartedAt = time.Now().UTC()
@@ -459,14 +808,14 @@ func (s *Store) MarkRunning(id, nodeID string) (Job, error) {
 	return job, err
 }
 
-func (s *Store) UpdateJobProgress(id, nodeID string, progress JobProgress) (Job, error) {
+func (s *Store) UpdateJobProgress(id, nodeID string, attempt int, progress JobProgress) (Job, error) {
 	var job Job
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		if err := getJSON(tx.Bucket(bucketJobs), id, &job); err != nil {
 			return err
 		}
-		if (job.Status != JobAssigned && job.Status != JobRunning) || job.AssignedNode != nodeID {
-			return errors.New("job is not running on this node")
+		if (job.Status != JobAssigned && job.Status != JobRunning) || job.AssignedNode != nodeID || attempt <= 0 || job.Attempt != attempt {
+			return errors.New("job is not running on this node and attempt")
 		}
 		if job.SealedPayload != nil {
 			return errors.New("plaintext progress is disabled for encrypted jobs")
@@ -508,7 +857,7 @@ func (s *Store) CancelJob(id string) (Job, error) {
 	return job, err
 }
 
-func (s *Store) CompleteJob(id string, result json.RawMessage, sealed *SealedEnvelope, usage Usage, jobError string) (Job, error) {
+func (s *Store) CompleteJob(id, nodeID string, attempt int, result json.RawMessage, sealed *SealedEnvelope, usage Usage, jobError string) (Job, error) {
 	var job Job
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		if err := getJSON(tx.Bucket(bucketJobs), id, &job); err != nil {
@@ -517,8 +866,24 @@ func (s *Store) CompleteJob(id string, result json.RawMessage, sealed *SealedEnv
 		if job.Status != JobAssigned && job.Status != JobRunning {
 			return errors.New("job is not assigned")
 		}
-		job.Result = result
-		job.SealedResult = sealed
+		if nodeID == "" || job.AssignedNode != nodeID {
+			return errors.New("job is not assigned to this node")
+		}
+		if attempt <= 0 || job.Attempt != attempt {
+			return errors.New("job result belongs to a stale assignment attempt")
+		}
+		completionError := validateWorkerResult(job, result, sealed, jobError)
+		if completionError == nil {
+			job.Result = result
+			job.SealedResult = sealed
+		} else {
+			// A malformed completion from the assigned worker is terminal. Retrying
+			// an execution whose side effects are unknown could submit a browser
+			// prompt twice; the producer must explicitly create a new job.
+			job.Result = nil
+			job.SealedResult = nil
+			jobError = "worker result rejected: " + completionError.Error()
+		}
 		if !job.AssignedAt.IsZero() && job.AssignedAt.After(job.CreatedAt) {
 			usage.QueueMS = uint64(job.AssignedAt.Sub(job.CreatedAt).Milliseconds())
 		}
@@ -534,15 +899,6 @@ func (s *Store) CompleteJob(id string, result json.RawMessage, sealed *SealedEnv
 				job.Progress.UpdatedAt = job.FinishedAt
 			}
 			job.Status = JobCompleted
-		} else if job.Attempt < job.MaxAttempts && job.SealedPayload == nil {
-			job.Status = JobQueued
-			job.AssignedNode = ""
-			job.Result = nil
-			job.SealedResult = nil
-			job.Progress = nil
-			if err := tx.Bucket(bucketQueue).Put(queueKey(job), []byte(job.ID)); err != nil {
-				return err
-			}
 		} else {
 			job.Status = JobFailed
 		}
@@ -566,6 +922,43 @@ func (s *Store) CompleteJob(id string, result json.RawMessage, sealed *SealedEnv
 	return job, err
 }
 
+func validateWorkerResult(job Job, result json.RawMessage, sealed *SealedEnvelope, jobError string) error {
+	if strings.TrimSpace(jobError) != "" {
+		if len(result) != 0 || sealed != nil {
+			return errors.New("failed completion must not include a result")
+		}
+		return nil
+	}
+	if job.SealedPayload == nil {
+		if sealed != nil {
+			return errors.New("plaintext job returned an encrypted result")
+		}
+		if len(result) == 0 || int64(len(result)) > MaximumJobResultBytes || !utf8.Valid(result) || !json.Valid(result) {
+			return fmt.Errorf("plaintext result must be valid JSON up to %d bytes", MaximumJobResultBytes)
+		}
+		var object map[string]json.RawMessage
+		if json.Unmarshal(result, &object) != nil || object == nil {
+			return errors.New("plaintext result must be a JSON object")
+		}
+		return nil
+	}
+	if len(result) != 0 || sealed == nil {
+		return errors.New("encrypted job must return only an encrypted result")
+	}
+	if sealed.Algorithm != sealedAlgorithm || sealed.EphemeralPublic != "" {
+		return errors.New("encrypted result envelope is invalid")
+	}
+	nonce, err := decode(sealed.Nonce)
+	if err != nil || len(nonce) != 12 {
+		return errors.New("encrypted result nonce is invalid")
+	}
+	ciphertext, err := decode(sealed.Ciphertext)
+	if err != nil || len(ciphertext) < 16 || int64(len(ciphertext)) > MaximumJobResultBytes+16 {
+		return fmt.Errorf("encrypted result ciphertext must represent at most %d bytes", MaximumJobResultBytes)
+	}
+	return nil
+}
+
 func (s *Store) RequeueNode(nodeID, reason string) ([]Job, error) {
 	updated := []Job{}
 	err := s.db.Update(func(tx *bolt.Tx) error {
@@ -580,18 +973,12 @@ func (s *Store) RequeueNode(nodeID, reason string) ([]Job, error) {
 			if json.Unmarshal(value, &job) != nil || job.AssignedNode != nodeID || (job.Status != JobAssigned && job.Status != JobRunning) {
 				return nil
 			}
-			job.Error = cleanLabel(reason, 500)
+			job.Error = cleanLabel(reason+"; execution state is ambiguous; explicit resubmission required", 500)
 			job.UpdatedAt = time.Now().UTC()
-			if job.SealedPayload == nil && job.Attempt < job.MaxAttempts {
-				job.Status = JobQueued
-				job.AssignedNode = ""
-				job.Progress = nil
-				if err := tx.Bucket(bucketQueue).Put(queueKey(job), []byte(job.ID)); err != nil {
-					return err
-				}
-			} else {
-				job.Status = JobFailed
-				job.FinishedAt = job.UpdatedAt
+			job.Status = JobFailed
+			job.FinishedAt = job.UpdatedAt
+			if err := deleteQueueEntry(tx.Bucket(bucketQueue), job.ID); err != nil {
+				return err
 			}
 			changes = append(changes, pending{key: append([]byte(nil), key...), job: job})
 			updated = append(updated, job)
@@ -605,6 +992,72 @@ func (s *Store) RequeueNode(nodeID, reason string) ([]Job, error) {
 				return err
 			}
 			if err := bucket.Put(change.key, encoded); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return updated, err
+}
+
+// RecoverRelayRestart closes every execution whose worker connection belonged
+// to the previous relay process and marks persisted nodes offline. An assigned
+// or running provider action may already have happened, so these jobs must
+// fail closed instead of becoming eligible for automatic re-execution.
+func (s *Store) RecoverRelayRestart(reason string) ([]Job, error) {
+	now := time.Now().UTC()
+	reason = cleanLabel(reason+"; execution state is ambiguous; explicit resubmission required", 500)
+	updated := []Job{}
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		nodes := tx.Bucket(bucketNodes)
+		if err := nodes.ForEach(func(key, value []byte) error {
+			var node Node
+			if json.Unmarshal(value, &node) != nil {
+				return nil
+			}
+			node.Connected = false
+			node.State = "offline"
+			node.Capabilities.Running = 0
+			encoded, err := json.Marshal(node)
+			if err != nil {
+				return err
+			}
+			return nodes.Put(key, encoded)
+		}); err != nil {
+			return err
+		}
+
+		jobs := tx.Bucket(bucketJobs)
+		type pending struct {
+			key []byte
+			job Job
+		}
+		changes := []pending{}
+		if err := jobs.ForEach(func(key, value []byte) error {
+			var job Job
+			if json.Unmarshal(value, &job) != nil || (job.Status != JobAssigned && job.Status != JobRunning) {
+				return nil
+			}
+			job.Error = reason
+			job.Status = JobFailed
+			job.UpdatedAt = now
+			job.FinishedAt = now
+			job.Progress = nil
+			if err := deleteQueueEntry(tx.Bucket(bucketQueue), job.ID); err != nil {
+				return err
+			}
+			changes = append(changes, pending{key: append([]byte(nil), key...), job: job})
+			updated = append(updated, job)
+			return nil
+		}); err != nil {
+			return err
+		}
+		for _, change := range changes {
+			encoded, err := json.Marshal(change.job)
+			if err != nil {
+				return err
+			}
+			if err := jobs.Put(change.key, encoded); err != nil {
 				return err
 			}
 		}
@@ -639,18 +1092,13 @@ func (s *Store) RecoverStaleJobs(now time.Time, sealedWait, execution time.Durat
 				return nil
 			}
 			job.UpdatedAt = now
-			if staleExecution && job.SealedPayload == nil && job.Attempt < job.MaxAttempts {
-				job.Status, job.AssignedNode, job.Error = JobQueued, "", "worker execution timed out; job requeued"
-				job.StartedAt, job.AssignedAt = time.Time{}, time.Time{}
-				job.Progress = nil
-				if err := tx.Bucket(bucketQueue).Put(queueKey(job), []byte(job.ID)); err != nil {
-					return err
-				}
+			if staleExecution {
+				job.Status, job.Error, job.FinishedAt = JobFailed, "worker execution timed out; execution state is ambiguous; explicit resubmission required", now
 			} else {
-				job.Status, job.Error, job.FinishedAt = JobFailed, "encrypted worker reservation or execution expired", now
-				if err := deleteQueueEntry(tx.Bucket(bucketQueue), job.ID); err != nil {
-					return err
-				}
+				job.Status, job.Error, job.FinishedAt = JobFailed, "encrypted worker reservation expired; explicit resubmission required", now
+			}
+			if err := deleteQueueEntry(tx.Bucket(bucketQueue), job.ID); err != nil {
+				return err
 			}
 			changes = append(changes, change{key: append([]byte(nil), key...), job: job})
 			updated = append(updated, job)
@@ -691,6 +1139,106 @@ func (s *Store) QueuedJobs(limit int) ([]Job, error) {
 		return nil
 	})
 	return queued, err
+}
+
+// QueuedJobsFair preserves priority ordering while round-robining producers
+// within each priority tier. One producer therefore cannot hide another's
+// equally urgent work beyond the dispatch scan window.
+func (s *Store) QueuedJobsFair(limit int) ([]Job, error) {
+	return s.QueuedJobsFairAfter(limit, nil)
+}
+
+// QueuedJobsFairAfter starts each same-priority owner rotation immediately
+// after the owner that most recently received a slot. The relay updates that
+// cursor only after a successful dispatch, preventing a deep queue from
+// winning every repeated one-slot scan.
+func (s *Store) QueuedJobsFairAfter(limit int, afterOwner map[int]string) ([]Job, error) {
+	jobs, _, _, err := s.QueuedJobsFairPage(limit, 0, afterOwner)
+	return jobs, err
+}
+
+// QueuedJobsFairPage returns a rotating window over the complete fair order.
+// Dispatch uses this to make progress past a large prefix of temporarily
+// incompatible jobs without sacrificing owner round-robin within priorities.
+func (s *Store) QueuedJobsFairPage(limit, offset int, afterOwner map[int]string) ([]Job, int, int, error) {
+	if limit <= 0 || limit > 5000 {
+		limit = 100
+	}
+	all := []Job{}
+	err := s.db.View(func(tx *bolt.Tx) error {
+		cursor := tx.Bucket(bucketQueue).Cursor()
+		for key, id := cursor.First(); key != nil; key, id = cursor.Next() {
+			var job Job
+			if err := getJSON(tx.Bucket(bucketJobs), string(id), &job); err != nil {
+				return err
+			}
+			if job.Status == JobQueued {
+				all = append(all, job)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	ordered := make([]Job, 0, len(all))
+	for start := 0; start < len(all); {
+		end := start + 1
+		for end < len(all) && all[end].Priority == all[start].Priority {
+			end++
+		}
+		appendFairPriorityTier(&ordered, all[start:end], len(all), afterOwner[all[start].Priority])
+		start = end
+	}
+	total := len(ordered)
+	if total == 0 {
+		return nil, 0, 0, nil
+	}
+	offset %= total
+	if offset < 0 {
+		offset += total
+	}
+	count := min(limit, total)
+	result := make([]Job, 0, count)
+	for index := 0; index < count; index++ {
+		result = append(result, ordered[(offset+index)%total])
+	}
+	return result, total, (offset + count) % total, nil
+}
+
+func appendFairPriorityTier(target *[]Job, tier []Job, limit int, afterOwner string) {
+	owners := make([]string, 0)
+	byOwner := make(map[string][]Job)
+	for _, job := range tier {
+		owner := job.OwnerSubject
+		if _, exists := byOwner[owner]; !exists {
+			owners = append(owners, owner)
+		}
+		byOwner[owner] = append(byOwner[owner], job)
+	}
+	if afterOwner != "" && len(owners) > 1 {
+		for index, owner := range owners {
+			if owner == afterOwner {
+				next := index + 1
+				owners = append(append([]string{}, owners[next:]...), owners[:next]...)
+				break
+			}
+		}
+	}
+	for remaining := len(tier); remaining > 0 && len(*target) < limit; {
+		for _, owner := range owners {
+			jobs := byOwner[owner]
+			if len(jobs) == 0 {
+				continue
+			}
+			*target = append(*target, jobs[0])
+			byOwner[owner] = jobs[1:]
+			remaining--
+			if len(*target) >= limit {
+				return
+			}
+		}
+	}
 }
 
 func (s *Store) ListJobs(limit int, status string) ([]Job, error) {
@@ -737,7 +1285,7 @@ func (s *Store) EstimateVRAM(requirements Requirements) uint64 {
 		cursor := tx.Bucket(bucketJobIndex).Cursor()
 		for key, id := cursor.Last(); key != nil && len(samples) < 500; key, id = cursor.Prev() {
 			var job Job
-			if getJSON(tx.Bucket(bucketJobs), string(id), &job) != nil || job.Status != JobCompleted || job.Usage.PeakVRAMBytes == 0 {
+			if getJSON(tx.Bucket(bucketJobs), string(id), &job) != nil || job.Status != JobCompleted || job.Usage.ResourceScope != "job" || job.Usage.PeakVRAMBytes == 0 {
 				continue
 			}
 			if requirements.Model != "" && !strings.EqualFold(job.Requirements.Model, requirements.Model) {
@@ -806,15 +1354,20 @@ func (s *Store) Overview() (Overview, error) {
 		overview.Usage.EstimatedCostUSD += node.CostUSD
 	}
 	err = s.db.View(func(tx *bolt.Tx) error {
+		totals, err := readHistoricalJobTotals(tx.Bucket(bucketHistoricalTotals))
+		if err != nil {
+			return err
+		}
+		mergeHistoricalJobTotals(&overview, totals)
 		return tx.Bucket(bucketJobs).ForEach(func(_, value []byte) error {
 			var job Job
 			if err := json.Unmarshal(value, &job); err != nil {
 				return err
 			}
-			overview.JobsByState[job.Status]++
-			overview.Usage.InputTokens += job.Usage.InputTokens
-			overview.Usage.OutputTokens += job.Usage.OutputTokens
-			overview.Usage.TotalTokens += job.Usage.TotalTokens
+			overview.JobsByState[job.Status] = saturatingUint64Add(overview.JobsByState[job.Status], 1)
+			overview.Usage.InputTokens = saturatingUint64Add(overview.Usage.InputTokens, job.Usage.InputTokens)
+			overview.Usage.OutputTokens = saturatingUint64Add(overview.Usage.OutputTokens, job.Usage.OutputTokens)
+			overview.Usage.TotalTokens = saturatingUint64Add(overview.Usage.TotalTokens, job.Usage.TotalTokens)
 			overview.Usage.EquivalentCostUSD += job.Usage.EquivalentCostUSD
 			overview.Usage.SavedCostUSD += job.Usage.SavedCostUSD
 			return nil
@@ -825,6 +1378,91 @@ func (s *Store) Overview() (Overview, error) {
 
 func (s *Store) SavePipelineRun(run PipelineRun) error {
 	return s.db.Update(func(tx *bolt.Tx) error { return putJSON(tx.Bucket(bucketPipelineRuns), run.ID, run) })
+}
+
+// CreatePipelineRunAdmitted atomically counts active runs and persists the new
+// run in one Bolt write transaction. This prevents parallel HTTP requests from
+// all passing a non-atomic count before starting their goroutines.
+func (s *Store) CreatePipelineRunAdmitted(run PipelineRun, maxGlobal, maxOwner int) error {
+	if run.ID == "" || !validJobID(run.ID) {
+		return errors.New("pipeline run id must use safe ASCII characters")
+	}
+	if run.Status != "running" {
+		return errors.New("an admitted pipeline run must start in running state")
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketPipelineRuns)
+		if bucket.Get([]byte(run.ID)) != nil {
+			return os.ErrExist
+		}
+		global, owned, err := activePipelineCounts(bucket, run.OwnerSubject)
+		if err != nil {
+			return err
+		}
+		if maxGlobal > 0 && global >= maxGlobal {
+			return ErrPipelineCapacity
+		}
+		if maxOwner > 0 && owned >= maxOwner {
+			return ErrOwnerPipelineCapacity
+		}
+		return putJSON(bucket, run.ID, run)
+	})
+}
+
+func activePipelineCounts(bucket *bolt.Bucket, owner string) (global, owned int, err error) {
+	err = bucket.ForEach(func(_, value []byte) error {
+		var run PipelineRun
+		if decodeErr := json.Unmarshal(value, &run); decodeErr != nil {
+			return decodeErr
+		}
+		if run.Status != "running" {
+			return nil
+		}
+		global++
+		if run.OwnerSubject == owner {
+			owned++
+		}
+		return nil
+	})
+	return global, owned, err
+}
+
+// FailActivePipelineRuns closes orphaned admission slots on relay startup.
+// Pipeline goroutines are process-local and cannot survive a restart.
+func (s *Store) FailActivePipelineRuns(reason string) (int, error) {
+	reason = cleanLabel(reason, 500)
+	if reason == "" {
+		reason = "relay restarted before pipeline completion"
+	}
+	failed := 0
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketPipelineRuns)
+		updates := map[string]PipelineRun{}
+		if err := bucket.ForEach(func(key, value []byte) error {
+			var run PipelineRun
+			if err := json.Unmarshal(value, &run); err != nil {
+				return err
+			}
+			if run.Status != "running" {
+				return nil
+			}
+			run.Status = "failed"
+			run.Error = reason
+			run.FinishedAt = time.Now().UTC()
+			updates[string(key)] = run
+			failed++
+			return nil
+		}); err != nil {
+			return err
+		}
+		for key, run := range updates {
+			if err := putJSON(bucket, key, run); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return failed, err
 }
 
 func (s *Store) GetPipelineRun(id string) (PipelineRun, error) {
@@ -928,7 +1566,18 @@ func cleanLabel(value string, limit int) string {
 		return r
 	}, value)
 	if len(value) > limit {
-		value = value[:limit]
+		value = truncateUTF8Bytes(value, limit)
+	}
+	return value
+}
+
+func truncateUTF8Bytes(value string, limit int) string {
+	if limit < 0 || len(value) <= limit {
+		return value
+	}
+	value = value[:limit]
+	for value != "" && !utf8.ValidString(value) {
+		value = value[:len(value)-1]
 	}
 	return value
 }

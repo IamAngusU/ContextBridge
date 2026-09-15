@@ -2,7 +2,9 @@
 
 For a short recording, use the separate [2–3 minute video script](demo-video-de-en.md). This document is the complete technical runbook, including optional research and fact-check segments.
 
-This script uses the managed Windows service, local Ollama models, an Opera extension, and a VPS relay. Run the Linux commands in **one VPS shell** so `DEMO_DIR`, `DEMO_ID`, and `IMAGE_FILE` remain available. `--new-chat` gives each browser demo segment its own ContextBridge-owned chat. Do not attach a personal conversation for this demo. The short video begins with local Ollama text, then shows ChatGPT creating a real file, local Ollama vision reading it, and Gemini reading the same file.
+This script requires **ContextBridge 0.5.66 or newer** on the VPS and worker, plus a compatible 0.5.66-or-newer browser extension. Run the Linux commands in **one Bash VPS shell** so `DEMO_DIR`, `DEMO_ID`, and `IMAGE_FILE` remain available. It uses the managed Windows service, local Ollama models, an Opera extension, and a VPS relay. `--new-chat` gives each browser demo segment its own ContextBridge-owned chat. Do not attach a personal conversation for this demo. The short video begins with local Ollama text, then shows ChatGPT creating a real file, optionally lets local Ollama vision read it when enough resources are free, and gives the same file to Gemini.
+
+The Windows commands intentionally use this recording machine's **custom** config path, `C:\ContextBridge\config.yml`. A default Windows installer uses `%LOCALAPPDATA%\ContextBridge\config.yml`; on that installation either omit `--config` or replace the demonstrated path with the default. The VPS demo directory stays exactly `/root/contextbridge-demo` and is never cleared by this runbook.
 
 ## 1. Open ContextBridge on the Windows PC
 
@@ -18,7 +20,7 @@ This opens the live view of the already managed service; it does **not** start a
 contextbridge models --config "C:\ContextBridge\config.yml"
 ```
 
-For the exact commands below, `qwen2.5:latest` must be present as a text model and `qwen2.5vl:7b` as text+vision. Those models belong to this demo PC; they are **not** bundled with every ContextBridge installation. `models` shows Ollama-advertised modalities, parameters, quantization and loaded state where available, with model-name inference only as a compatibility fallback for older runtimes. It does not measure intelligence or guarantee OCR accuracy. Type `exit` and Enter to close only the console view; the service and jobs continue.
+For the reliable local text command below, `qwen2.5:1.5b` must be present. The optional local-vision step uses `qwen2.5vl:7b` and should run only when the worker has enough free RAM/VRAM; otherwise skip that step and continue with Gemini OCR. Those models belong to this demo PC; they are **not** bundled with every ContextBridge installation. `models` shows Ollama-advertised modalities, parameters, quantization and loaded state where available, with model-name inference only as a compatibility fallback for older runtimes. It does not measure intelligence or guarantee OCR accuracy. Type `exit` and Enter to close only the console view; the service and jobs continue.
 
 **DE:** „ContextBridge läuft als lokaler Dienst. Hier sieht man meine installierten Ollama-Modelle: Text und Bildverständnis sind getrennte Fähigkeiten. Das Terminal kann ich später schließen, ohne Jobs zu stoppen.“
 
@@ -37,6 +39,7 @@ Before recording, close or detach finished **test** chats you no longer need. Au
 ## 3. Check the remote pool on the VPS
 
 ```bash
+contextbridge version
 contextbridge cluster status --config /var/lib/contextbridge/config.yml
 DEMO_DIR=/root/contextbridge-demo
 mkdir -p "$DEMO_DIR"
@@ -53,10 +56,10 @@ Check that the PC is online and that the named Ollama models and at least one br
 ## 4. Control a local text model from the VPS
 
 ```bash
-contextbridge cluster chat --config /var/lib/contextbridge/config.yml --provider ollama --model qwen2.5:latest --session "demo-$DEMO_ID-local-text" --artifacts off --prompt 'Antworte exakt mit CB-LOCAL-OK und keinen weiteren Zeichen.'
+contextbridge cluster chat --config /var/lib/contextbridge/config.yml --provider ollama --model qwen2.5:1.5b --session "demo-$DEMO_ID-local-text" --artifacts off --prompt 'Antworte exakt mit CB-LOCAL-OK und keinen weiteren Zeichen.'
 ```
 
-Check the VPS output for `CB-LOCAL-OK`, `↳ verwendet: ollama · qwen2.5:latest`, and the worker node ID. **Those route facts, not the model's prose, prove where the job ran.** This exact rehearsal returned in 5.9 seconds; do not promise the same latency to viewers.
+Check the VPS output for `CB-LOCAL-OK`, `↳ verwendet: ollama · qwen2.5:1.5b`, and the worker node ID. **Those route facts, not the model's prose, prove where the job ran.** This exact live rehearsal returned in 6.4 seconds; do not promise the same latency to viewers.
 
 **DE:** „Ich gebe den Auftrag auf dem VPS ein; mein Windows-PC rechnet ihn mit dem lokalen Modell. Im Ergebnis stehen der tatsächlich verwendete Anbieter und das Modell.“
 
@@ -65,28 +68,48 @@ Check the VPS output for `CB-LOCAL-OK`, `↳ verwendet: ollama · qwen2.5:latest
 ## 5. Create and save a real image with ChatGPT
 
 ```bash
-contextbridge cluster chat --config /var/lib/contextbridge/config.yml --profile chatgpt --new-chat --foreground-new-chat --session "demo-$DEMO_ID-image" --image --artifacts "$DEMO_DIR" --prompt 'Erstelle genau ein quadratisches Bild: reinweißer Hintergrund, mittig die klare schwarze Aufschrift „IamAngusU“ und direkt darunter deutlich kleiner „ContextBridge“. Keine weiteren Wörter, Symbole oder Verzierungen. Gib nur das Bild aus.'
-```
-
-The job succeeds only if real image bytes are received and saved. Note the `Saved artifact:` line. Find the latest image and verify its file type:
-
-```bash
-IMAGE_FILE=$(find "$DEMO_DIR" -maxdepth 1 -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.webp' \) -printf '%T@ %p\n' | sort -nr | head -n 1 | cut -d' ' -f2-)
-test -n "$IMAGE_FILE" && file "$IMAGE_FILE"
+unset IMAGE_FILE
+ARTIFACT_LOG=$(mktemp /tmp/contextbridge-demo-artifact.XXXXXX.log)
+set -o pipefail
+contextbridge cluster chat --config /var/lib/contextbridge/config.yml --profile chatgpt --new-chat --foreground-new-chat --session "demo-$DEMO_ID-image" --image --artifacts "$DEMO_DIR" --prompt 'Erstelle genau ein quadratisches Bild: reinweißer Hintergrund, mittig die klare schwarze Aufschrift „IamAngusU“ und direkt darunter deutlich kleiner „ContextBridge“. Keine weiteren Wörter, Symbole oder Verzierungen. Gib nur das Bild aus.' 2>&1 | tee "$ARTIFACT_LOG"
+IMAGE_JOB_STATUS=${PIPESTATUS[0]}
+mapfile -t IMAGE_PATHS < <(sed -n 's/^Saved artifact: //p' "$ARTIFACT_LOG")
+rm -f -- "$ARTIFACT_LOG"
+unset ARTIFACT_LOG
+if [ "$IMAGE_JOB_STATUS" -eq 0 ] && [ "${#IMAGE_PATHS[@]}" -eq 1 ]; then
+  IMAGE_FILE=${IMAGE_PATHS[0]}
+fi
+unset IMAGE_PATHS IMAGE_JOB_STATUS
+case "${IMAGE_FILE:-}" in
+  "$DEMO_DIR"/*) ;;
+  *) printf 'STOP: this run did not return exactly one artifact inside %s\n' "$DEMO_DIR" >&2; unset IMAGE_FILE ;;
+esac
+if [ -n "${IMAGE_FILE:-}" ] && [ -f "$IMAGE_FILE" ]; then
+  IMAGE_MIME=$(file -b --mime-type -- "$IMAGE_FILE")
+  case "$IMAGE_MIME" in
+    image/png|image/jpeg|image/webp) file -- "$IMAGE_FILE" ;;
+    *) printf 'STOP: returned artifact is not a supported image: %s\n' "$IMAGE_MIME" >&2; unset IMAGE_FILE ;;
+  esac
+else
+  unset IMAGE_FILE
+fi
+test -n "${IMAGE_FILE:-}" || { printf 'Do not run the OCR steps; no verified image belongs to this run.\n' >&2; false; }
 printf 'Image for Gemini: %s\n' "$IMAGE_FILE"
 ```
+
+The job succeeds only if real image bytes are received and saved. This block captures the `Saved artifact:` path emitted by **this command** in a temporary `/tmp` log, requires exactly one supported image under the persistent demo directory, and then deletes only the temporary log. It never chooses the newest pre-existing file from `/root/contextbridge-demo`; on any ambiguity it unsets `IMAGE_FILE` and stops the sequence before OCR.
 
 **DE:** „ChatGPT erstellt jetzt ein schlichtes Bild. ContextBridge akzeptiert nicht bloß die Behauptung ‚Bild erstellt‘: Der Job gilt erst als erfolgreich, wenn die tatsächliche Bilddatei auf dem VPS gespeichert wurde.“
 
 **EN:** “ChatGPT is creating a minimal image. ContextBridge does not accept the claim ‘image created’ alone: the job succeeds only when the actual image file has been saved on the VPS.”
 
-## 6. Give that same file to the local vision model
+## 6. Optional: give that same file to the local vision model
 
 ```bash
 contextbridge cluster chat --config /var/lib/contextbridge/config.yml --provider ollama --model qwen2.5vl:7b --session "demo-$DEMO_ID-local-vision" --attach-image "$IMAGE_FILE" --artifacts off --prompt 'Lies nur den sichtbaren Text im angehängten Bild. Nenne die große und die kleine Zeile, ohne zu raten.'
 ```
 
-Check for `↳ verwendet: ollama · qwen2.5vl:7b` and the **actual** answer. In one live test the model read `IamAngusU` and `ContextBridge` from the saved PNG in 18.1 seconds. `--attach-image` adds a hard vision requirement: when a model is named, that exact model—not merely another model on the same PC—must advertise vision. ContextBridge detects modality for placement, but it does not measure model intelligence or OCR reliability.
+Run this optional step only when `qwen2.5vl:7b` is installed and the worker has enough free RAM/VRAM; otherwise skip directly to Gemini OCR. Check for `↳ verwendet: ollama · qwen2.5vl:7b` and the **actual** answer. In one live test the model read `IamAngusU` and `ContextBridge` from the saved PNG in 18.1 seconds. `--attach-image` adds a hard vision requirement: when a model is named, that exact model—not merely another model on the same PC—must advertise vision. ContextBridge detects modality for placement, but it does not measure model intelligence or OCR reliability.
 
 **DE:** „Dasselbe Bild geht jetzt erst an mein eigenes Vision-Modell. Auch das steuere ich vom VPS; für diesen Schritt geht kein Prompt an ChatGPT oder Gemini.“
 

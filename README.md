@@ -31,9 +31,9 @@ ChatGPT and Gemini are detected automatically from stable DOM and accessibility 
 - **Parallel web-chat pool:** select several ChatGPT and Gemini tabs in one extension; each becomes an independent serial UI slot. Browser sessions are bound to separate conversations, including when two producers choose the same public `session_id`. A missing ID uses one producer-scoped default session.
 - **Provider-aware recovery:** progress percentages, stop/send controls, rate limits, errors, accidental reloads, and stalled image generation are separate states rather than answer text. A one-shot reload requires proof that the same ContextBridge turn is still present and no unsent draft or attachment would be lost.
 - **Images and files back:** opt in to bounded response artifacts, verify their SHA-256, and save them with `--artifacts`.
-- **1:1, 1:N, and N:N compute:** connect one app to one worker, distribute one queue across many workers, or share a capability-aware node pool between producers.
+- **1:1, N:1, 1:N, and N:N compute:** connect one app to one worker, let scoped producers share a worker, distribute one queue across many workers, or share a capability-aware node pool between producers.
 - **Outbound worker connections:** workers join through WebSockets without router port forwarding or fixed public worker ports.
-- **Durable scheduling:** priority queue, history, bounded retries, disconnect recovery, groups, tags, task requirements, and VRAM-aware placement survive relay restarts.
+- **Durable scheduling:** priority queue, bounded history, fail-closed recovery from ambiguous worker loss, groups, tags, task requirements, and VRAM-aware placement survive relay restarts.
 - **Optional E2EE jobs:** a producer can seal a payload for the selected worker with X25519 and AES-256-GCM so the relay cannot read the payload or result.
 - **Bounded model pipelines:** chain extraction, embeddings, retrieval, vision, and generation with fixed steps and explicit loop limits.
 - **Explicit scope:** only the chosen page origin and local service are requested.
@@ -71,7 +71,7 @@ On Windows, the installer also creates **ContextBridge → Terminal** and **Cont
 
 The installer adds its installation folder to the **user PATH** unless `-NoPath` was selected. Open a new CMD or PowerShell window, then run `contextbridge console` to attach to the managed service. Type `exit` and press Enter (or use Ctrl+C) to leave that read-only view; the service keeps running. If the view was launched from the Start menu shortcut, its own console window closes too. If you launched it from an existing CMD or PowerShell, you return to that shell and can type `exit` there to close the shell window. Do not close a terminal running `contextbridge run` in the foreground unless you intend to stop that service process.
 
-Browser Connect confirms the local service and selected tabs first. Page-control and model scans continue in the background, so an idle or suspended AI page does not hold the Connect button indefinitely; a tab still has to become ready before a job can send to it.
+Browser Connect confirms the local service and selected tabs first. Page-control and model scans continue independently, so one idle or suspended AI page does not hold the Connect button indefinitely; that tab still has to become responsive before a job can send to it. Already loaded text chats often keep working in a background or minimized Chromium window, but browsers may throttle, discard, or lazily render inactive pages. ContextBridge therefore does not claim universal headless browser operation, and it never treats composer readiness alone as proof of completion.
 The popup's **Reconnect automatically after an update or connection loss** option is on by default. It restores the user's existing attached-tab connection after a browser or extension restart and retries temporary service outages with bounded backoff; it never attaches new personal chats or reloads a provider page. **Disconnect** always stays disconnected until clicked again. A rejected pairing token or access permission fails closed and needs a manual fix.
 
 ## Automatic Updates
@@ -94,13 +94,24 @@ If you started `contextbridge run` manually in a Windows terminal, close that te
 
 For a systemd relay whose executable is root-owned but service runs as `contextbridge`, install [`deploy/contextbridge-relay.service`](deploy/contextbridge-relay.service), [`deploy/contextbridge-relay-update.service`](deploy/contextbridge-relay-update.service), and [`deploy/contextbridge-relay-update.timer`](deploy/contextbridge-relay-update.timer). Enable the relay service and update timer. The service uses `CONTEXTBRIDGE_UPDATES_EXTERNAL=1`, so only the root-owned timer performs installations; `updates.enabled: false` still disables them. Each hourly timer run checks whether a release check is due and applies a newer release only when the relay has no queued or active jobs, then restarts and verifies the service with rollback if needed. No GitHub Actions are involved.
 
-The public installer endpoint counts total requests and privacy-preserving unique installer starts. Unique values use an HMAC of a masked network prefix and short user-agent family. Raw IP addresses, cookies, prompts, results, device names, and model activity are not collected. Self-hosted installations do not send runtime telemetry to `angusu.de`.
+The public installer endpoint keeps a bounded aggregate of accepted installer requests and a coarse current-day network estimate. The estimate uses a daily rotating HMAC of a masked network prefix; User-Agent is deliberately excluded. Per-network daily admission, per-day cardinality, and a 31-day uniqueness window bound abuse and retained rows. Raw IP addresses, cookies, prompts, results, device names, and model activity are not collected. Self-hosted installations do not send runtime telemetry to `angusu.de`.
 
-Manual installation is just as small:
+For a portable manual installation, initialize once:
 
 ```bash
 contextbridge init
+```
+
+Then start the service in one terminal and leave that foreground process running:
+
+```bash
 contextbridge run
+```
+
+Use a **second** terminal for checks and the dashboard, because `run` does not
+return to the shell until the service stops:
+
+```bash
 contextbridge doctor
 contextbridge dashboard
 ```
@@ -108,6 +119,23 @@ contextbridge dashboard
 `contextbridge doctor` verifies the config, running local service, token, default
 route, relay, and worker identity. It prints a concrete fix for every blocking
 check; use `--json` in installers and monitoring.
+
+## Platform Support And Evidence
+
+Windows and Linux are first-class runtime targets, not browser-only controller
+machines. Published releases contain native AMD64 and ARM64 executables; Linux
+has the shell installer, user-systemd setup, and hardened systemd/nginx relay
+templates. The repository CI runs the Go test and vet suites on real Ubuntu,
+Windows, and macOS runners, with the race detector on Linux. The VPS relay and
+producer workflow documented here is a normal Linux deployment.
+
+macOS has native AMD64/ARM64 release builds, the same shell installer, a
+LaunchAgent, and Apple Metal discovery. Its current evidence is the macOS CI
+suite plus cross-platform release builds; this project does not yet claim a
+maintained physical-Mac end-to-end matrix for Metal offload, Ollama, and every
+browser lifecycle edge case. Use Chromium or Firefox on macOS—the extension
+does not claim Safari support. OS support also does not imply that every GPU
+telemetry backend or third-party browser UI is available on every machine.
 
 ## Build A Compute Cluster
 
@@ -135,6 +163,11 @@ contextbridge run
 
 The worker prints a short code. An admin approves it in the relay dashboard or with `contextbridge cluster pairing --approve CODE`. The node token and X25519 private key stay in the owner-only identity file.
 
+For an unattended Linux or macOS worker, set every installer choice through
+environment variables and keep relay approval separate. See the
+[headless worker install guide](docs/headless-worker-install.md); it does not
+bypass pairing or place an administrator token on the worker.
+
 ### Producer
 
 Create a scoped producer token once:
@@ -147,17 +180,19 @@ contextbridge cluster chat --token cb_producer_TOKEN
 contextbridge cluster chat --token cb_producer_TOKEN --e2ee
 ```
 
-Set requirements such as `task`, `provider`, `group`, `model`, `vision`, `embedding`, tags, or minimum free VRAM. Use `provider: browser` to require a live, taught web-chat tab, or `provider: ollama` to require a local Ollama engine. The scheduler chooses a compatible online node using live concurrency, queue, RAM, and VRAM data. Measured VRAM demand is a preference, not a hidden requirement, so CPU-only workers remain useful unless `min_free_vram_bytes` is explicitly set. Normal TLS jobs can move to another node after a disconnect. E2EE jobs are bound to the worker key selected during reservation and fail clearly if that worker disappears.
+Set requirements such as `task`, `provider`, `group`, `model`, `vision`, `embedding`, tags, or minimum free VRAM. Use `provider: browser` to require a live, taught web-chat tab, or `provider: ollama` to require a local Ollama engine. The scheduler chooses a compatible online node using live concurrency, queue, RAM, and VRAM data. Measured VRAM demand is a preference, not a hidden requirement, so CPU-only workers remain useful unless `min_free_vram_bytes` is explicitly set. If a worker disappears after assignment, normal TLS and E2EE jobs both fail closed because execution may already have reached the provider; an operator can inspect the job and explicitly resubmit it. E2EE resubmission also reserves a new worker key.
 
-Use the same non-secret `requirements.session_id` for follow-up turns. The relay keeps that producer's conversation on the most recently used compatible worker, while retaining failover when the node is offline. The selected ChatGPT or Gemini tab supplies the actual conversation history. The browser extension reserves one conversation for one internal producer-and-session key; a different key never sends into that chat. By default, a new session needs an unassigned attached tab. Choose **Open a new chat tab automatically** in the extension to create a fresh chat per session, or set `metadata.contextbridge_new_chat: true` on an individual browser job. In manual mode, navigate an attached tab to a new empty chat and click **Use this page for a new session**; returning to the exact saved URL resumes an earlier session. Closing a tab parks its known conversation until reopened and attached. Old tabs whose pre-0.5.20 session histories may have mixed are quarantined until the user opens a new empty chat and explicitly releases them. These are conversation-routing boundaries, not separate browser accounts or a substitute for the provider's own privacy controls. `contextbridge cluster chat` manages the ID automatically and provides a streaming `you ›` / `ai ›` terminal session. A producer token may be passed with `--token`, stored safely from a credential file with `contextbridge cluster login --token-file producer.json`, or supplied through `CONTEXTBRIDGE_CLUSTER_TOKEN`.
+Use the same non-secret `requirements.session_id` for follow-up turns. The relay prefers that producer's most recently used compatible worker. A later job can choose another compatible node when the preferred node is already known offline **before assignment**; an assigned or running job is never failed over and re-executed after ambiguous worker loss. The selected ChatGPT or Gemini tab supplies the actual conversation history. The browser extension reserves one conversation for one internal producer-and-session key; a different key never sends into that chat. By default, a new session needs an unassigned attached tab. Choose **Open a new chat tab automatically** in the extension to create a fresh chat per session, or set `metadata.contextbridge_new_chat: true` on an individual browser job. In manual mode, navigate an attached tab to a new empty chat and click **Use this page for a new session**; returning to the exact saved URL resumes an earlier session. Closing a tab parks its known conversation until reopened and attached. Old tabs whose pre-0.5.20 session histories may have mixed are quarantined until the user opens a new empty chat and explicitly releases them. These are conversation-routing boundaries, not separate browser accounts or a substitute for the provider's own privacy controls. `contextbridge cluster chat` manages the ID automatically and provides a streaming `you ›` / `ai ›` terminal session. A producer token may be passed with `--token`, stored safely from a credential file with `contextbridge cluster login --token-file producer.json`, or supplied through `CONTEXTBRIDGE_CLUSTER_TOKEN`.
 
-From the terminal, `cluster chat --new-chat` requests a fresh page for one session and `--new-chat-per-job` requests one for every turn. `--foreground-new-chat` explicitly shows a newly created page. Image uploads into automatically created chats are shown automatically because an inactive Opera tab can suspend the upload; text-only jobs still run in background tabs. A browser minimized-window test should use a text job and confirm the returned answer, not assume every website media tool behaves the same way.
+From the terminal, `cluster chat --new-chat` requests a fresh page for one session and `--new-chat-per-job` requests one for every turn. `--foreground-new-chat` explicitly shows a newly created page. Image uploads into automatically created chats are shown automatically because an inactive Opera tab can suspend the upload. Text-only jobs can run in responsive background tabs on tested configurations, but a browser may still throttle or discard them. A minimized-window test should confirm the returned answer and must not be generalized to every browser, power-saving mode, or website media tool.
 
 If a tab should reuse just one prompt instead of accumulating turns, enable **Edit the last ContextBridge message** on that attached page before its first job. A fresh chat gets one initial message; later jobs for that session rewrite only that verified ContextBridge-owned text turn. A changed message, active generation, or old/new file attachment blocks editing. This is not a file-replacement feature and does not edit pre-existing personal messages.
 
 This release uses one durable BoltDB file per relay process. It supports many producers and workers through one relay. Active-active relay replication is a separate deployment tier and requires a shared database and message broker rather than copying the BoltDB file.
 
-A PC can join more than one independent relay with one worker process and identity per relay, with per-worker task/provider/model allow-lists. See [multiple-server setup and its shared-hardware limitation](docs/multiple-servers.md). The server never needs the PC's browser credentials or direct access to its local model files.
+Detailed terminal relay history is bounded by both age and count. Defaults keep at most the newest 500 terminal jobs, 5,000 events, and 200 terminal pipeline runs for no longer than 30 days; `cluster.relay.retention_*` settings in [config.example.yml](config.example.yml) can lower or raise those limits within guarded bounds. Queued, reserved, assigned, running, and unknown future states are never removed by retention. Pruning removes stored prompts, results/ciphertext, and their detail indexes, so an old job or pipeline-run URL may later return not found. Lifetime job-state and token/cost-savings totals remain monotonic, as do cumulative node compute and cost counters. BoltDB reuses freed pages but does not promise that the file immediately shrinks on disk after a sweep.
+
+A PC can join more than one independent relay with one worker process and identity per relay, with per-worker task/provider/model allow-lists. See [multiple-server, multi-GPU, and rack setup and its shared-hardware limitations](docs/multiple-servers.md). The server never needs the PC's browser credentials or direct access to its local model files.
 
 Choose a web provider and its UI options for the whole terminal session:
 
@@ -166,7 +201,7 @@ contextbridge cluster chat --provider browser --profile chatgpt --model gpt-6-as
 contextbridge cluster chat --provider browser --profile gemini
 ```
 
-Inside interactive chat, `/model …`, `/reasoning …`, `/profile …`, `/image on|off`, `/min-images 0…12`, `/music on|off`, `/min-artifacts 0…12`, and `/e2ee on|off` change subsequent turns; `/settings` shows the active choices. E2EE encrypts prompts and final results for one reserved worker; plaintext streaming and transparent failover are intentionally unavailable for that turn. The same `model`, `reasoning`, `browser_profile`, and `session_id` fields can be placed in an individual browser job payload. Choices are matched against the provider's visible localized menu; use the full scanned label (for example, `3.1 Pro` rather than `Pro`). Normal spaces are accepted where a browser label uses non-breaking spaces. An unavailable choice fails clearly instead of silently running a different model.
+Inside interactive chat, `/model …`, `/reasoning …`, `/profile …`, `/image on|off`, `/min-images 0…12`, `/music on|off`, `/min-artifacts 0…12`, and `/e2ee on|off` change subsequent turns; `/settings` shows the active choices. E2EE encrypts prompts and final results for one reserved worker and disables plaintext progress streaming. No job is transparently re-executed after ambiguous worker loss; E2EE also cannot move between reservation and submission without a fresh reservation and encryption. The same `model`, `reasoning`, `browser_profile`, and `session_id` fields can be placed in an individual browser job payload. Choices are matched against the provider's visible localized menu; use the full scanned label (for example, `3.1 Pro` rather than `Pro`). Normal spaces are accepted where a browser label uses non-breaking spaces. An unavailable choice fails clearly instead of silently running a different model.
 
 ## Connect A Browser Tab
 
@@ -269,6 +304,15 @@ Choose an explicit output contract per job:
 
 ContextBridge treats every result as data. It never evaluates returned code or runs returned commands.
 
+The Core always adds a defensive wrapper around that contract: the job's
+`prompt` is the editable trusted instruction, while end-user material belongs
+in `text` and is marked as untrusted submitted content. The wrapper and output
+contract enforcement are not disableable extension settings, and visual page
+teaching changes selectors rather than this boundary. This is defense in
+depth—not a claim that one model instruction solves prompt injection. See
+[browser sessions and prompt contracts](docs/browser-sessions-and-prompts.de-en.md)
+for a strict-JSON example and the exact boundary.
+
 ## Configuration
 
 Generated config locations:
@@ -281,7 +325,23 @@ Generated config locations:
 
 Start from [config.example.yml](config.example.yml). A route declares a primary provider, ordered fallbacks, timeout, and optional browser profile. Visual profiles live in extension storage; YAML profiles remain available for audited and reproducible deployments.
 
-The interactive terminal has two presentation styles. `terminal.style: panel` (default) keeps a responsive, in-place live overview above a separate session-history divider. ChatGPT, Gemini, other browser profiles, and reachable local providers have their own subheadings; working tabs precede idle tabs, and Ollama remains visible when reachable but no model is loaded. When local models are loaded, they appear before installed but unloaded models. The panel uses the alternate screen to prevent zoom/resize from duplicating old snapshots in scrollback; the newest history entries that fit the window remain visible below the live area (up to 10,000 events are retained in memory for the current process). Set `terminal.style: classic` to keep the earlier minimal, scrollback-friendly event stream. Redirected/service logs retain their stable timestamped format. Restart the running command after changing the setting.
+The interactive terminal has two presentation styles. `terminal.style: panel` (default) keeps a responsive, in-place live overview above a separate session-history divider. ChatGPT, Gemini, other browser profiles, and reachable local providers have their own subheadings; working tabs precede idle tabs, and Ollama remains visible when reachable but no model is loaded. When local models are loaded, they appear before installed but unloaded models. The panel uses the alternate screen to prevent zoom/resize from duplicating old snapshots in scrollback; the newest history entries appear first below the live area (up to 10,000 events are retained in memory for the current process). Set `terminal.style: classic` to keep the earlier minimal, scrollback-friendly event stream. Redirected/service logs retain their stable timestamped format. Restart the running command after changing the setting.
+
+`contextbridge console` is an interactive, read-only view of the already
+running service. Its numbered node rows keep GPU and model lists collapsed by
+default. Type `details 1`, `gpus 1`, or `models 1` to toggle both lists or one
+list for node 1; use `all` in place of the number for every displayed node.
+`help` repeats the available controls and `clear` clears only this console
+session's displayed history. `exit` (or Ctrl+C) closes the view but does not
+stop the service or its jobs. These are console commands, not operating-system
+shell commands; enter them only after `contextbridge console` has opened.
+
+Live CPU, RAM, temperature, GPU utilization, and free VRAM are whole-node
+snapshots, not amounts attributed to ContextBridge or one job. Per-job
+RAM/VRAM/GPU peaks remain absent unless an execution engine supplies a genuine
+`resource_scope: "job"` measurement; ContextBridge does not manufacture them
+by subtracting two shared-machine snapshots. The scheduler and reporting
+boundary are detailed in [Architecture](docs/architecture.md#hardware-reporting-and-placement).
 
 ```yaml
 routes:
@@ -360,7 +420,7 @@ Releases do not depend on GitHub Actions. From PowerShell, build every supported
 platform bundle, both extension archives, and `SHA256SUMS` locally:
 
 ```powershell
-.\scripts\build-release.ps1 -Version v0.4.0
+.\scripts\build-release.ps1 -Version v0.5.66
 ```
 
 Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md), use a focused issue for behavior changes, and include tests for routing or protocol work.

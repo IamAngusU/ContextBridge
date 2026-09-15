@@ -3,11 +3,15 @@ package systeminfo
 import (
 	"bufio"
 	"context"
+	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -83,10 +87,10 @@ func Detect(ctx context.Context) Snapshot {
 	if s.UptimeSeconds == 0 {
 		s.UptimeSeconds = uptimeSeconds(ctx)
 	}
+	// Probe each vendor independently. A workstation can contain NVIDIA and
+	// AMD devices at the same time; finding CUDA must not hide a ROCm rack.
 	s.GPUs = append(s.GPUs, nvidiaGPUs(ctx)...)
-	if len(s.GPUs) == 0 {
-		s.GPUs = append(s.GPUs, rocmGPUs(ctx)...)
-	}
+	s.GPUs = append(s.GPUs, rocmGPUs(ctx)...)
 	if runtime.GOOS == "darwin" {
 		s.GPUs = append(s.GPUs, metalGPUs(ctx)...)
 	}
@@ -339,9 +343,22 @@ func nvidiaGPUs(ctx context.Context) []GPU {
 	if err != nil {
 		return nil
 	}
+	return parseNVIDIAGPUs(raw)
+}
+
+func parseNVIDIAGPUs(raw []byte) []GPU {
 	var result []GPU
-	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
-		parts := strings.Split(line, ",")
+	reader := csv.NewReader(strings.NewReader(string(raw)))
+	reader.TrimLeadingSpace = true
+	reader.FieldsPerRecord = -1
+	for {
+		parts, err := reader.Read()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil
+		}
 		if len(parts) < 7 {
 			continue
 		}
@@ -361,12 +378,22 @@ func rocmGPUs(ctx context.Context) []GPU {
 	if err != nil {
 		return nil
 	}
+	return parseROCmGPUs(raw)
+}
+
+func parseROCmGPUs(raw []byte) []GPU {
 	var cards map[string]map[string]interface{}
 	if json.Unmarshal(raw, &cards) != nil {
 		return nil
 	}
 	result := make([]GPU, 0, len(cards))
-	for _, card := range cards {
+	keys := make([]string, 0, len(cards))
+	for key := range cards {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		card := cards[key]
 		name := stringValue(card, "Card series", "Card model", "Card SKU")
 		total := numberValue(card, "VRAM Total Memory (B)")
 		used := numberValue(card, "VRAM Total Used Memory (B)")

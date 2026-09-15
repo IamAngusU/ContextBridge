@@ -22,6 +22,8 @@ func TestDiscoverOllamaAndLocalModels(t *testing.T) {
 			_, _ = w.Write([]byte(`{"models":[{"name":"llava:7b","size":4096,"details":{"parameter_size":"7B","quantization_level":"Q4_K_M","family":"llava"}}]}`))
 		case "/api/ps":
 			_, _ = w.Write([]byte(`{"models":[{"name":"llava:7b","size_vram":2048}]}`))
+		case "/api/show":
+			_, _ = w.Write([]byte(`{"capabilities":["completion","vision"]}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -70,13 +72,21 @@ func TestDiscoverRejectsMissingPath(t *testing.T) {
 func TestDiscoverOllamaTrustsAdvertisedCapabilitiesForOpaqueName(t *testing.T) {
 	t.Setenv("OLLAMA_MODELS", filepath.Join(t.TempDir(), "ollama-models"))
 	t.Setenv("OLLAMA_HOST", "")
+	showCalls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/api/tags":
-			_, _ = w.Write([]byte(`{"models":[{"name":"opaque:latest","capabilities":["completion","vision"]}]}`))
+			// This is the official tags shape: capabilities live on /api/show.
+			_, _ = w.Write([]byte(`{"models":[{"name":"opaque:latest","digest":"sha256:opaque"}]}`))
 		case "/api/ps":
 			_, _ = w.Write([]byte(`{"models":[]}`))
+		case "/api/show":
+			if r.Method != http.MethodPost {
+				t.Errorf("show used %s, want POST", r.Method)
+			}
+			showCalls++
+			_, _ = w.Write([]byte(`{"capabilities":["completion","vision"]}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -90,6 +100,23 @@ func TestDiscoverOllamaTrustsAdvertisedCapabilitiesForOpaqueName(t *testing.T) {
 	}
 	if len(models) != 1 || strings.Join(models[0].Capabilities, ",") != "text,vision" {
 		t.Fatalf("advertised Ollama capabilities were not preserved: %#v", models)
+	}
+	if showCalls != 1 {
+		t.Fatalf("model capabilities were not read once from /api/show: %d", showCalls)
+	}
+	models, err = Discover(context.Background(), cfg, nil)
+	if err != nil || showCalls != 1 {
+		t.Fatalf("digest capability cache was not reused: calls=%d err=%v", showCalls, err)
+	}
+}
+
+func TestOllamaImageGenerationIsNotVisionUnderstanding(t *testing.T) {
+	capabilities := OllamaCapabilities([]string{"image"}, "misleading-vision-model")
+	if got := strings.Join(capabilities, ","); got != "image_generation" {
+		t.Fatalf("Ollama image generation was confused with vision understanding: %q", got)
+	}
+	if capabilities := OllamaCapabilities([]string{"unrecognized"}, "llava:7b"); len(capabilities) != 0 {
+		t.Fatalf("authoritative advertised capabilities fell back to name guessing: %#v", capabilities)
 	}
 }
 

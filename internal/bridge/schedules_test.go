@@ -2,15 +2,21 @@ package bridge
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -55,7 +61,7 @@ func TestScheduleTiming(t *testing.T) {
 
 func TestScheduleClaimRestartNeverReplays(t *testing.T) {
 	dir := t.TempDir()
-	store, err := newScheduleStore(dir)
+	store, err := newScheduleStore(dir, defaultJobAdmissionLimit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +79,7 @@ func TestScheduleClaimRestartNeverReplays(t *testing.T) {
 	if claimed.CurrentRunID != job.ID || job.Metadata["contextbridge_reasoning_fallbacks"] == nil || job.Metadata["contextbridge_new_chat"] != true || job.Metadata["contextbridge_foreground_new_chat"] != true || !claimed.NextRun.After(now) {
 		t.Fatalf("bad claim: %+v, %+v", claimed, job)
 	}
-	reopened, err := newScheduleStore(dir)
+	reopened, err := newScheduleStore(dir, defaultJobAdmissionLimit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,6 +92,264 @@ func TestScheduleClaimRestartNeverReplays(t *testing.T) {
 	}
 	if len(loaded.History) != 1 || loaded.History[0].Outcome != "interrupted" {
 		t.Fatalf("interrupted run was not retained in history: %+v", loaded.History)
+	}
+}
+
+func TestConcurrentManualScheduleClaimsRespectCapacity(t *testing.T) {
+	store, err := newScheduleStore(t.TempDir(), defaultJobAdmissionLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for index := 0; index < 24; index++ {
+		_, err := store.add(Schedule{
+			ID:        fmt.Sprintf("manual-%02d", index),
+			Name:      "manual",
+			Job:       Job{Prompt: "bounded", Output: OutputSpec{Mode: "text"}},
+			Timing:    ScheduleTiming{Type: "at", At: now.Add(time.Hour)},
+			Enabled:   true,
+			NextRun:   now.Add(time.Hour),
+			CreatedAt: now,
+			UpdatedAt: now,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var admitted atomic.Int64
+	var capacityLimited atomic.Int64
+	var wait sync.WaitGroup
+	start := make(chan struct{})
+	for index := 0; index < 24; index++ {
+		wait.Add(1)
+		go func(id string) {
+			defer wait.Done()
+			<-start
+			_, _, claimErr := store.claim(id, now, true)
+			switch {
+			case claimErr == nil:
+				admitted.Add(1)
+			case errors.Is(claimErr, errScheduleCapacity):
+				capacityLimited.Add(1)
+			default:
+				t.Errorf("unexpected claim error: %v", claimErr)
+			}
+		}(fmt.Sprintf("manual-%02d", index))
+	}
+	close(start)
+	wait.Wait()
+
+	if got := admitted.Load(); got != defaultJobAdmissionLimit {
+		t.Fatalf("admitted %d manual schedules, want %d", got, defaultJobAdmissionLimit)
+	}
+	if got := capacityLimited.Load(); got != 24-defaultJobAdmissionLimit {
+		t.Fatalf("capacity-limited %d manual schedules", got)
+	}
+	if got := store.runningCount(); got != defaultJobAdmissionLimit {
+		t.Fatalf("running count = %d, want %d", got, defaultJobAdmissionLimit)
+	}
+}
+
+func TestConfiguredWorkerCapacityAllowsEightOrdinaryJobs(t *testing.T) {
+	directory := t.TempDir()
+	server, err := NewServer(config.Config{
+		Storage: config.Storage{Directory: directory, Inbox: filepath.Join(directory, "inbox")},
+		Cluster: config.Cluster{Worker: config.ClusterWorker{Enabled: true, MaxConcurrent: 8}},
+	}, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if server.jobAdmissionLimit != 8 {
+		t.Fatalf("admission limit = %d, want 8", server.jobAdmissionLimit)
+	}
+	releases := make([]func(), 0, 8)
+	for index := 0; index < 8; index++ {
+		release, claimErr := server.beginJobAccounting(context.Background())
+		if claimErr != nil {
+			t.Fatalf("ordinary job %d was not admitted: %v", index, claimErr)
+		}
+		releases = append(releases, release)
+	}
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+	if _, claimErr := server.beginJobAccounting(context.Background()); !errors.Is(claimErr, errScheduleCapacity) {
+		t.Fatalf("ninth ordinary job error = %v, want capacity error", claimErr)
+	}
+}
+
+func TestCombinedOrdinaryAndScheduleAdmissionIsAtomic(t *testing.T) {
+	directory := t.TempDir()
+	server, err := NewServer(config.Config{
+		Storage: config.Storage{Directory: directory, Inbox: filepath.Join(directory, "inbox")},
+		Cluster: config.Cluster{Worker: config.ClusterWorker{Enabled: true, MaxConcurrent: 8}},
+	}, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for index := 0; index < 24; index++ {
+		_, err := server.schedules.add(Schedule{
+			ID: fmt.Sprintf("mixed-%02d", index), Name: "mixed",
+			Job:    Job{Prompt: "bounded", Output: OutputSpec{Mode: "text"}},
+			Timing: ScheduleTiming{Type: "at", At: now.Add(time.Hour)}, Enabled: true,
+			NextRun: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	releases := make([]func(), 0, 6)
+	for index := 0; index < 6; index++ {
+		release, err := server.beginJobAccounting(context.Background())
+		if err != nil {
+			t.Fatalf("ordinary job %d was not admitted: %v", index, err)
+		}
+		releases = append(releases, release)
+	}
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+
+	var admitted atomic.Int64
+	var limited atomic.Int64
+	var wait sync.WaitGroup
+	start := make(chan struct{})
+	for index := 0; index < 24; index++ {
+		wait.Add(1)
+		go func(id string) {
+			defer wait.Done()
+			<-start
+			_, _, claimErr := server.claimSchedule(id, now, true)
+			switch {
+			case claimErr == nil:
+				admitted.Add(1)
+			case errors.Is(claimErr, errScheduleCapacity):
+				limited.Add(1)
+			default:
+				t.Errorf("unexpected claim error: %v", claimErr)
+			}
+		}(fmt.Sprintf("mixed-%02d", index))
+	}
+	close(start)
+	wait.Wait()
+	if got := admitted.Load(); got != 2 {
+		t.Fatalf("six ordinary jobs left room for %d schedules, want 2", got)
+	}
+	if got := limited.Load(); got != 22 {
+		t.Fatalf("capacity-limited %d schedules, want 22", got)
+	}
+}
+
+func TestOrdinaryAndScheduleRaceForLastConfiguredSlot(t *testing.T) {
+	directory := t.TempDir()
+	server, err := NewServer(config.Config{
+		Storage: config.Storage{Directory: directory, Inbox: filepath.Join(directory, "inbox")},
+		Cluster: config.Cluster{Worker: config.ClusterWorker{Enabled: true, MaxConcurrent: 8}},
+	}, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for index := 0; index < 5; index++ {
+		id := fmt.Sprintf("last-slot-%d", index)
+		if _, err := server.schedules.add(Schedule{
+			ID: id, Name: id, Job: Job{Prompt: "bounded", Output: OutputSpec{Mode: "text"}},
+			Timing: ScheduleTiming{Type: "at", At: now.Add(time.Hour)}, Enabled: true,
+			NextRun: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if index < 4 {
+			if _, _, err := server.claimSchedule(id, now, true); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	baseReleases := make([]func(), 0, 3)
+	for index := 0; index < 3; index++ {
+		release, claimErr := server.beginJobAccounting(context.Background())
+		if claimErr != nil {
+			t.Fatalf("ordinary setup job %d was not admitted: %v", index, claimErr)
+		}
+		baseReleases = append(baseReleases, release)
+	}
+	defer func() {
+		for _, release := range baseReleases {
+			release()
+		}
+	}()
+
+	type result struct {
+		err     error
+		release func()
+	}
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	go func() {
+		<-start
+		release, claimErr := server.beginJobAccounting(context.Background())
+		results <- result{err: claimErr, release: release}
+	}()
+	go func() {
+		<-start
+		_, _, claimErr := server.claimSchedule("last-slot-4", now, true)
+		results <- result{err: claimErr}
+	}()
+	close(start)
+
+	admitted, limited := 0, 0
+	var racedOrdinaryRelease func()
+	for index := 0; index < 2; index++ {
+		outcome := <-results
+		switch {
+		case outcome.err == nil:
+			admitted++
+			if outcome.release != nil {
+				racedOrdinaryRelease = outcome.release
+			}
+		case errors.Is(outcome.err, errScheduleCapacity):
+			limited++
+		default:
+			t.Fatalf("unexpected admission error: %v", outcome.err)
+		}
+	}
+	if racedOrdinaryRelease != nil {
+		defer racedOrdinaryRelease()
+	}
+	if admitted != 1 || limited != 1 {
+		t.Fatalf("last-slot race admitted=%d limited=%d, want 1 and 1", admitted, limited)
+	}
+	if total := server.regularActiveJobs + server.schedules.runningCount(); total != 8 {
+		t.Fatalf("combined running jobs = %d, want configured cap 8", total)
+	}
+}
+
+func TestPublicScheduleSourceCannotBypassCombinedCapacity(t *testing.T) {
+	directory := t.TempDir()
+	server, err := NewServer(config.Config{Storage: config.Storage{Directory: directory, Inbox: filepath.Join(directory, "inbox")}}, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for index := 0; index < defaultJobAdmissionLimit; index++ {
+		id := fmt.Sprintf("reserved-%d", index)
+		if _, err := server.schedules.add(Schedule{ID: id, Name: id, Job: Job{Prompt: "scheduled", Output: OutputSpec{Mode: "text"}}, Timing: ScheduleTiming{Type: "at", At: now.Add(time.Hour)}, Enabled: true, NextRun: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now}); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := server.claimSchedule(id, now, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err = server.Process(context.Background(), Job{ID: "spoof", Source: "schedule", Prompt: "must not run", Output: OutputSpec{Mode: "text"}})
+	if !errors.Is(err, errScheduleCapacity) {
+		t.Fatalf("public source field bypassed combined capacity: %v", err)
 	}
 }
 
@@ -309,7 +573,7 @@ func TestScheduleWorkflowUsesSavedPreviousResultAndHistory(t *testing.T) {
 			if loaded.LastOutcome != "completed" || len(loaded.History) != 1 || len(loaded.History[0].Steps) != 2 || len(prompts) != 2 || !strings.Contains(prompts[1], "follow previous_result.text in submitted_content") || !strings.Contains(prompts[1], `"text":"CB40-FIRST"`) || strings.Index(prompts[1], "CB40-FIRST") < strings.Index(prompts[1], "<submitted_content>") {
 				t.Fatalf("incorrect workflow: schedule=%+v prompts=%q", loaded, prompts)
 			}
-			reopened, err := newScheduleStore(dir)
+			reopened, err := newScheduleStore(dir, defaultJobAdmissionLimit)
 			if err != nil {
 				t.Fatal(err)
 			}

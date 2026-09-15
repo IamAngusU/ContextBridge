@@ -5,6 +5,15 @@ import { webcrypto } from 'node:crypto';
 import { TextEncoder } from 'node:util';
 
 const source = fs.readFileSync(new URL('../src/background.js', import.meta.url), 'utf8');
+assert.equal(source.includes('await response.blob()'), false, 'page artifact collection must enforce its byte limit while streaming');
+assert.equal(source.includes("fetch(candidate.url, { credentials: 'include'"), false,
+  'provider DOM URLs must not be fetched credentialed before origin policy checks');
+assert.match(source, /jobs\/next\?wait=25[\s\S]{0,300}fetchWithTimeout|fetchWithTimeout[\s\S]{0,300}jobs\/next\?wait=25/,
+  'the relay long poll must have an abortable deadline');
+assert.equal(source.includes("add(href, cleanFileName(anchor.download"), true,
+  'download links stay available as references');
+assert.match(source, /add\(href,[\s\S]{0,300}'generic_link', false\)/,
+  'generic assistant links must not trigger an extension-side transfer');
 const listeners = { addListener() {} };
 let alarmListener;
 const alarmCalls = [];
@@ -18,7 +27,7 @@ const chrome = {
     clear: (name) => alarmCalls.push(['clear', name])
   }
 };
-const context = vm.createContext({ chrome, console, URL, TextEncoder, setTimeout, clearTimeout, setInterval, clearInterval, Date, Promise });
+const context = vm.createContext({ chrome, console, URL, TextEncoder, AbortController, setTimeout, clearTimeout, setInterval, clearInterval, Date, Promise });
 vm.runInContext(source, context);
 context.crypto = webcrypto;
 {
@@ -42,6 +51,19 @@ await assert.rejects(context.scanPageCapabilities(99), /only on a ChatGPT or Gem
 assert.equal(context.capabilityScanInterval('chatgpt', { currentModel: '', scanDiagnostic: { model: 'no trigger (0 composer menus)', noTriggerAttempts: 1 } }), 15000);
 assert.equal(context.capabilityScanInterval('chatgpt', { currentModel: '', scanDiagnostic: { model: 'no trigger (0 composer menus)', noTriggerAttempts: 3 } }), 300000);
 assert.equal(context.capabilityScanInterval('chatgpt', { currentModel: 'GPT-5.6 Sol' }), 1800000);
+{
+  const health = context.summarizePageHealth({ discarded: true }, {
+    status: 'ready', latencyMs: 999999, slowScans: 99,
+    dom: { assistant_turns: 999999, gemini_user_turns: -5, page_visibility: 'private-value', was_discarded: false }
+  });
+  assert.equal(health.discarded, true);
+  assert.equal(health.assistantTurns, 10000);
+  assert.equal(health.userTurns, 0);
+  assert.equal(health.diagnosticMs, 10000);
+  assert.equal(health.slowScans, 10);
+  assert.equal(health.visibility, 'unknown');
+  assert.equal(health.domStatus, 'ready');
+}
 {
   const pill = { innerText: '5.6 Hoch', offsetWidth: 1, getAttribute: () => null };
   const composer = { querySelectorAll: () => [pill] };
@@ -201,7 +223,7 @@ const element = (text = '', attributes = {}) => ({
   response.querySelectorAll = () => [];
   assert.equal(context.captureProgress({ response: ['section[data-turn="assistant"]'] }).text, '',
     'a ChatGPT thinking section without answer markdown is not a finished answer');
-  assert.equal((source.match(/if \(!markdownParts.length\) markdownParts = \[\.\.\.element.querySelectorAll\('\.markdown'\)\];/g) || []).length, 2,
+  assert.equal((source.match(/if \(!markdownParts.length\) markdownParts = boundedNodes\(element, '\.markdown'\);/g) || []).length, 2,
     'both progress sampling and final response capture must use the fallback');
 }
 
@@ -898,7 +920,7 @@ const element = (text = '', attributes = {}) => ({
   }
   context.HTMLTextAreaElement = TextArea;
   context.HTMLInputElement = class {};
-  context.InputEvent = class {};
+  context.InputEvent = class { constructor(type) { this.type = type; } };
   context.Event = class {};
   const input = new TextArea();
   const picker = {
@@ -1044,7 +1066,7 @@ const element = (text = '', attributes = {}) => ({
       { name: 'gemini', selectors: { input: ['#input'], response: ['#response'], submit: ['#send'] } },
       new Date(Date.now() + 60000).toISOString()
     );
-    assert.equal(result.ok, true);
+    assert.equal(result.ok, true, JSON.stringify(result));
     assert.equal(result.text, 'Gemini answer with stale busy flag');
     assert.ok(fakeNow - Date.now() >= 12000);
   } finally {
@@ -1171,6 +1193,152 @@ const element = (text = '', attributes = {}) => ({
   assert.match(existing.error, /unsent attachment is already present/);
   assert.equal(existing.code, 'browser_composer_busy');
   assert.deepEqual(uploaded, ['input', 'change'], 'an existing attachment must not be replaced');
+}
+
+for (const [kind, showPreview, expectedCode] of [
+  ['image', false, 'browser_upload_unavailable'],
+  ['image', true, 'browser_automation_error'],
+  ['file', false, 'browser_upload_unavailable']
+]) {
+  const realDate = context.Date;
+  const realSetTimeout = context.setTimeout;
+  let fakeNow = Date.now();
+  let preview = false;
+  context.Date = class extends Date { static now() { return fakeNow; } };
+  context.setTimeout = (callback, milliseconds) => realSetTimeout(() => { fakeNow += milliseconds; callback(); }, 1);
+  const composer = {
+    innerText: kind === 'image' ? 'Describe contextbridge-image.png' : 'Read demo.txt', querySelector: () => null,
+    querySelectorAll: (selector) => selector.startsWith('img,') && preview ? [element('', { alt: kind === 'image' ? 'contextbridge-image.png' : 'demo.txt' })] : []
+  };
+  const input = { ...element(), closest: () => composer, focus() { throw new Error('Attachment proof passed before prompt entry'); } };
+  const field = { type: 'file', accept: '*/*', files: [], dispatchEvent(event) {
+    if (event.type === 'change' && showPreview) preview = true;
+  } };
+  context.document = { querySelectorAll(selector) {
+    if (selector === '#input') return [input];
+    if (selector === 'input[type="file"]') return [field];
+    return [];
+  } };
+  const job = kind === 'image'
+    ? { prompt: 'Describe', image_base64: Buffer.from([137, 80, 78, 71]).toString('base64'), image_media_type: 'image/png', output: { mode: 'text' } }
+    : { prompt: 'Read', metadata: { contextbridge_input_file: { name: 'demo.txt', media_type: 'text/plain',
+      data_base64: Buffer.from('demo').toString('base64') } }, output: { mode: 'text' } };
+  try {
+    const result = await context.automate(job,
+      { name: 'chatgpt', selectors: { input: ['#input'], file_input: ['input[type="file"]'], response: [], submit: [] } },
+      new Date(fakeNow + 3000).toISOString());
+    assert.equal(result.code, expectedCode);
+    if (showPreview) assert.equal(result.error, 'Attachment proof passed before prompt entry');
+    else assert.match(result.error, /did not show the uploaded (?:image|file)/i);
+  } finally {
+    context.Date = realDate;
+    context.setTimeout = realSetTimeout;
+  }
+}
+
+for (const kind of ['image', 'file']) {
+  const realDate = context.Date;
+  const realSetTimeout = context.setTimeout;
+  let fakeNow = Date.now();
+  let preview = false;
+  let sent = false;
+  context.Date = class extends Date { static now() { return fakeNow; } };
+  context.setTimeout = (callback, milliseconds) => realSetTimeout(() => { fakeNow += milliseconds; callback(); }, 1);
+  class TextArea {
+    constructor() { this.value = ''; this.offsetWidth = 1; this.offsetHeight = 1; }
+    getClientRects() { return [1]; }
+    focus() {}
+    dispatchEvent() {}
+    setAttribute() {}
+  }
+  context.HTMLTextAreaElement = TextArea;
+  context.HTMLInputElement = class {};
+  context.InputEvent = class {};
+  const input = new TextArea();
+  const expectedName = kind === 'image' ? 'contextbridge-image.png' : 'demo.txt';
+  const previewNode = element('', { alt: expectedName });
+  const composer = { querySelector: () => null,
+    querySelectorAll: (selector) => selector.startsWith('img,') && preview ? [previewNode] : [] };
+  input.closest = () => composer;
+  const field = { type: 'file', accept: '*/*', files: [], dispatchEvent(event) {
+    if (event.type === 'change') preview = true;
+  } };
+  const send = { ...element('', { 'aria-label': 'Send message' }), click() { sent = true; input.value = ''; } };
+  const answer = element(`${kind} accepted`);
+  context.document = { querySelectorAll(selector) {
+    if (selector === '#input') return [input];
+    if (selector === '#send') return [send];
+    if (selector === '#response') return sent ? [answer] : [];
+    if (selector === 'input[type="file"]') return [field];
+    if (selector === '[data-turn="user"]') return [];
+    return [];
+  } };
+  const job = kind === 'image'
+    ? { id: 'chatgpt-image-success', prompt: 'Describe', image_base64: Buffer.from([137, 80, 78, 71]).toString('base64'),
+      image_media_type: 'image/png', output: { mode: 'text' } }
+    : { id: 'chatgpt-file-success', prompt: 'Read', metadata: { contextbridge_input_file: { name: 'demo.txt',
+      media_type: 'text/plain', data_base64: Buffer.from('demo').toString('base64') } }, output: { mode: 'text' } };
+  try {
+    const result = await context.automate(job,
+      { name: 'chatgpt', selectors: { input: ['#input'], file_input: ['input[type="file"]'], response: ['#response'], submit: ['#send'] } },
+      new Date(fakeNow + 30000).toISOString());
+    assert.equal(sent, true, `the verified ChatGPT ${kind} must reach Send`);
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(result.text, `${kind} accepted`);
+  } finally {
+    context.Date = realDate;
+    context.setTimeout = realSetTimeout;
+  }
+}
+
+{
+  // Providers can remount the composer after a file input change. A preview
+  // that existed immediately after upload is not enough if it disappears
+  // before Send becomes actionable.
+  const realDate = context.Date;
+  const realSetTimeout = context.setTimeout;
+  let fakeNow = Date.now();
+  let preview = false;
+  let sent = false;
+  context.Date = class extends Date { static now() { return fakeNow; } };
+  context.setTimeout = (callback, milliseconds) => realSetTimeout(() => { fakeNow += milliseconds; callback(); }, 1);
+  class TextArea {
+    constructor() { this.value = ''; this.offsetWidth = 1; this.offsetHeight = 1; }
+    getClientRects() { return [1]; }
+    focus() {}
+    setAttribute() {}
+    dispatchEvent(event) { if (event.type === 'input') preview = false; }
+  }
+  context.HTMLTextAreaElement = TextArea;
+  context.HTMLInputElement = class {};
+  context.InputEvent = class { constructor(type) { this.type = type; } };
+  const input = new TextArea();
+  const previewNode = element('', { alt: 'contextbridge-image.png' });
+  const composer = { querySelector: () => null,
+    querySelectorAll: (selector) => selector.startsWith('img,') && preview ? [previewNode] : [] };
+  input.closest = () => composer;
+  const field = { type: 'file', accept: 'image/*', files: [], dispatchEvent(event) {
+    if (event.type === 'change') preview = true;
+  } };
+  const send = { ...element('', { 'aria-label': 'Send message' }), click() { sent = true; } };
+  context.document = { querySelectorAll(selector) {
+    if (selector === '#input') return [input];
+    if (selector === '#send') return [send];
+    if (selector === 'input[type="file"]') return [field];
+    return [];
+  } };
+  try {
+    const result = await context.automate({ id: 'upload-remounted-away', prompt: 'Describe',
+      image_base64: Buffer.from([137, 80, 78, 71]).toString('base64'), image_media_type: 'image/png', output: { mode: 'text' } },
+    { name: 'chatgpt', selectors: { input: ['#input'], file_input: ['input[type="file"]'], response: [], submit: ['#send'] } },
+    new Date(fakeNow + 4000).toISOString());
+    assert.equal(result.code, 'browser_upload_unavailable');
+    assert.match(result.error, /no longer shows the uploaded image/i);
+    assert.equal(sent, false, 'a disappeared upload preview must stop before Send');
+  } finally {
+    context.Date = realDate;
+    context.setTimeout = realSetTimeout;
+  }
 }
 
 {
@@ -1739,9 +1907,9 @@ for (const disabled of [true, false]) {
   context.btoa = (value) => Buffer.from(value, 'binary').toString('base64');
   const bytes = new Uint8Array([137, 80, 78, 71]);
   let fetches = 0;
-  context.fetch = async (_url, options) => {
+  context.fetch = async (url, options) => {
     fetches += 1;
-    assert.equal(options.credentials, 'include');
+    assert.equal(options.credentials, String(url).includes('/backend-api/files/') ? 'include' : 'omit');
     assert.equal(options.redirect, 'error');
     let sent = false;
     return {
@@ -1753,18 +1921,53 @@ for (const disabled of [true, false]) {
       }) }
     };
   };
-  const reference = { name: 'image-1.png', media_type: 'image/png', url: 'https://chatgpt.com/generated.png' };
+  const reference = { name: 'image-1.png', media_type: 'image/png',
+    url: 'https://chatgpt.com/backend-api/files/file_abc123/download', contextbridge_provenance: 'chatgpt_file_citation' };
   const hydrated = await context.hydrateArtifactReferences([reference], 'https://chatgpt.com/c/test', { artifacts: true });
   assert.equal(hydrated[0].data_base64, Buffer.from(bytes).toString('base64'));
   assert.equal(hydrated[0].size, bytes.length);
   assert.equal(hydrated[0].sha256.length, 64);
+  assert.equal(hydrated[0].contextbridge_provenance, undefined, 'internal provenance must not leave the extension');
+  const generic = await context.hydrateArtifactReferences(
+    [{ name: 'public.png', media_type: 'image/png', url: 'https://chatgpt.com/generated.png' }],
+    'https://chatgpt.com/c/test', { artifacts: true });
+  assert.equal(generic[0].data_base64, Buffer.from(bytes).toString('base64'));
+  const anchorOnly = await context.hydrateArtifactReferences(
+    [{ name: 'download.png', media_type: 'image/png', url: 'https://chatgpt.com/download-looking-link',
+      contextbridge_provenance: 'generic_link' }],
+    'https://chatgpt.com/c/test', { artifacts: true });
+  assert.equal(anchorOnly[0].data_base64, undefined, 'a generic link is retained but never transferred');
+  assert.equal(anchorOnly[0].contextbridge_provenance, undefined, 'the no-transfer marker stays internal');
+  const spoofed = await context.hydrateArtifactReferences(
+    [{ name: 'private.json', media_type: 'application/json', url: 'https://chatgpt.com/backend-api/accounts',
+      contextbridge_provenance: 'chatgpt_file_citation' }],
+    'https://chatgpt.com/c/test', { artifacts: true });
+  assert.equal(spoofed[0].data_base64, undefined, 'a provenance label cannot credential-fetch a non-citation endpoint');
   const external = await context.hydrateArtifactReferences(
     [{ ...reference, url: 'https://other.example/generated.png' }],
     'https://chatgpt.com/c/test',
     { artifacts: true }
   );
   assert.equal(external[0].data_base64, undefined);
-  assert.equal(fetches, 1);
+  assert.equal(fetches, 2);
+
+  let cancelled = false;
+  let chunk = 0;
+  context.fetch = async () => ({
+    ok: true,
+    headers: { get: (name) => String(name).toLowerCase() === 'content-type' ? 'image/png' : null },
+    body: { getReader: () => ({
+      read: async () => ++chunk === 1 ? { done: false, value: new Uint8Array(700) }
+        : chunk === 2 ? { done: false, value: new Uint8Array(400) } : { done: true },
+      cancel: async () => { cancelled = true; }
+    }) }
+  });
+  const oversized = await context.hydrateArtifactReferences([reference], 'https://chatgpt.com/c/test',
+    { artifacts: true, max_artifact_bytes: 1024 });
+  assert.equal(oversized[0].data_base64, undefined,
+    'a chunked artifact with no Content-Length must not cross the byte ceiling');
+  assert.equal(oversized[0].url, reference.url, 'an over-limit stream remains only a reference');
+  assert.equal(cancelled, true, 'the reader must be cancelled as soon as the streamed limit is exceeded');
 }
 
 {
@@ -1773,7 +1976,7 @@ for (const disabled of [true, false]) {
   let contentType = 'video/mp4';
   context.fetch = async (_url, options) => {
     fetches += 1;
-    assert.equal(options.credentials, 'include');
+    assert.equal(options.credentials, 'omit');
     let sent = false;
     return {
       ok: true,
@@ -1805,6 +2008,8 @@ for (const disabled of [true, false]) {
   const upload = { ...element('', { 'data-testid': 'upload-photos-input' }), offsetWidth: 0, offsetHeight: 0, getClientRects: () => [], tagName: 'INPUT', id: 'upload-photos', type: 'file', accept: 'image/*', multiple: true };
   const answer = { ...element('private answer'), querySelectorAll: (selector) => selector === 'img' ? [{}, {}] : [] };
   context.document = {
+    visibilityState: 'hidden',
+    wasDiscarded: true,
     querySelectorAll(selector) {
       if (selector === '#prompt-textarea') return [prompt];
       if (selector === '#send') return [toolbar];
@@ -1820,6 +2025,8 @@ for (const disabled of [true, false]) {
   assert.equal(snapshot.file_inputs[0].accept, 'image/*');
   assert.equal(snapshot.last_response_images, 2);
   assert.equal(snapshot.last_response_loaded_images, 0);
+  assert.equal(snapshot.page_visibility, 'hidden');
+  assert.equal(snapshot.was_discarded, true);
   assert.equal(JSON.stringify(snapshot).includes('private answer'), false);
 }
 
@@ -1952,6 +2159,281 @@ for (const disabled of [true, false]) {
     chrome.scripting.executeScript = originalExecute;
     chrome.storage.local.set = originalStorageSet;
   }
+}
+
+{
+  const previousLocation = context.location;
+  const previousSendMessage = chrome.runtime.sendMessage;
+  let authorityChecks = 0;
+  chrome.runtime.sendMessage = async () => { authorityChecks += 1; return { ok: true }; };
+  context.location = { href: 'https://chatgpt.com/c/other', origin: 'https://chatgpt.com', hostname: 'chatgpt.com' };
+  const changed = await context.automate({ id: 'url-guard', prompt: 'must not leak', output: { mode: 'text' } },
+    { name: 'chatgpt', selectors: { input: ['#input'], submit: ['#send'], response: [] } },
+    new Date(Date.now() + 5000).toISOString(), null, 'https://chatgpt.com/c/expected',
+    { jobId: 'url-guard', generation: 7 });
+  assert.equal(changed.code, 'browser_session_changed');
+  assert.equal(authorityChecks, 0, 'a changed conversation must fail before contacting or touching the provider page');
+
+  chrome.runtime.sendMessage = async () => { authorityChecks += 1; return { ok: false, error: 'browser_job_lease_lost' }; };
+  context.location = { href: 'https://chatgpt.com/c/expected', origin: 'https://chatgpt.com', hostname: 'chatgpt.com' };
+  context.document = { querySelectorAll: () => [] };
+  const cancelled = await context.automate({ id: 'lease-guard', prompt: 'must not send', output: { mode: 'text' } },
+    { name: 'chatgpt', selectors: { input: ['#input'], submit: ['#send'], response: [] } },
+    new Date(Date.now() + 5000).toISOString(), null, 'https://chatgpt.com/c/expected',
+    { jobId: 'lease-guard', generation: 8 });
+  assert.equal(cancelled.code, 'browser_lease_lost');
+  assert.equal(authorityChecks, 1, 'the injected automation must consult authoritative lease state before page work');
+  chrome.runtime.sendMessage = previousSendMessage;
+  if (previousLocation === undefined) delete context.location;
+  else context.location = previousLocation;
+}
+
+{
+  const previousLocation = context.location;
+  const previousDocument = context.document;
+  const previousSendMessage = chrome.runtime.sendMessage;
+  const previousTextArea = context.HTMLTextAreaElement;
+  const previousInput = context.HTMLInputElement;
+  const previousInputEvent = context.InputEvent;
+  let clicked = false;
+  class TextArea {
+    constructor() { this.value = ''; this.offsetWidth = 1; this.offsetHeight = 1; }
+    getClientRects() { return [1]; }
+    focus() {}
+    dispatchEvent() {}
+    setAttribute() {}
+    closest() { return { querySelector: () => null, querySelectorAll: () => [] }; }
+  }
+  context.HTMLTextAreaElement = TextArea;
+  context.HTMLInputElement = class {};
+  context.InputEvent = class {};
+  const input = new TextArea();
+  const send = { ...element('', { 'aria-label': 'Send message' }), click() { clicked = true; } };
+  context.location = { href: 'https://chatgpt.com/c/expected', origin: 'https://chatgpt.com', hostname: 'chatgpt.com' };
+  context.document = { querySelectorAll(selector) {
+    if (selector === '#input') return [input];
+    if (selector === '#send') return [send];
+    if (selector === '[data-turn="user"]') return [];
+    return [];
+  } };
+  chrome.runtime.sendMessage = async (message) => {
+    if (message.action === 'send') {
+      await Promise.resolve();
+      context.location.href = 'https://chatgpt.com/c/changed-during-send-claim';
+    }
+    return { ok: true };
+  };
+  try {
+    const result = await context.automate({ id: 'send-url-race', prompt: 'do not leak', output: { mode: 'text' } },
+      { name: 'chatgpt', selectors: { input: ['#input'], submit: ['#send'], response: [] } },
+      new Date(Date.now() + 5000).toISOString(), null, 'https://chatgpt.com/c/expected',
+      { jobId: 'send-url-race', generation: 9 });
+    assert.equal(result.code, 'browser_session_changed');
+    assert.equal(clicked, false, 'a URL change while awaiting Send authorization must fail before the provider click');
+  } finally {
+    chrome.runtime.sendMessage = previousSendMessage;
+    context.document = previousDocument;
+    if (previousLocation === undefined) delete context.location;
+    else context.location = previousLocation;
+    context.HTMLTextAreaElement = previousTextArea;
+    context.HTMLInputElement = previousInput;
+    context.InputEvent = previousInputEvent;
+  }
+}
+
+{
+  const previousSettings = context.settings;
+  const previousFetch = context.fetch;
+  const previousTabGet = chrome.tabs.get;
+  const previousStorageSet = chrome.storage.local.set;
+  const activeLeases = vm.runInContext('activeBrowserLeases', context);
+  const expectedURL = 'https://chatgpt.com/c/lease-owned';
+  const state = { running: true, tabIds: [22], browserJobClaims: {
+    'claimed-job': { generation: 11, sessionKey: 'session', baselineDigest: 'a'.repeat(64), at: Date.now() }
+  } };
+  let claims = 0;
+  context.settings = async () => ({ bridgeUrl: 'http://127.0.0.1:32145', token: 'token', ...state });
+  context.fetch = async (url, options) => {
+    assert.match(url, /\/claim$/);
+    assert.equal(options.headers['X-ContextBridge-Lease-Generation'], '11');
+    assert.equal(JSON.parse(options.body).action, 'send');
+    claims += 1;
+    return { ok: true };
+  };
+  chrome.tabs.get = async () => ({ id: 22, url: expectedURL });
+  chrome.storage.local.set = async (update) => Object.assign(state, update);
+  activeLeases.set('claimed-job', { jobId: 'claimed-job', generation: 11, tabId: 22, expectedURL, cancelled: false });
+  const authorized = await context.authorizeBrowserJobAction(
+    { jobId: 'claimed-job', generation: 11, action: 'send', expectedURL }, { tab: { id: 22 } });
+  assert.equal(authorized.ok, true);
+  assert.equal(state.browserJobClaims['claimed-job'].state, 'sent_unknown');
+  assert.equal(claims, 1);
+  const stale = await context.authorizeBrowserJobAction(
+    { jobId: 'claimed-job', generation: 10, action: 'send', expectedURL }, { tab: { id: 22 } });
+  assert.equal(stale.ok, false);
+  assert.equal(claims, 1, 'a stale generation must fail before the server action endpoint');
+  activeLeases.delete('claimed-job');
+  context.settings = previousSettings;
+  context.fetch = previousFetch;
+  chrome.tabs.get = previousTabGet;
+  chrome.storage.local.set = previousStorageSet;
+}
+
+{
+  const previousSettings = context.settings;
+  const previousFetch = context.fetch;
+  const previousTabGet = chrome.tabs.get;
+  const previousExecute = chrome.scripting.executeScript;
+  const previousStorageSet = chrome.storage.local.set;
+  const activeLeases = vm.runInContext('activeBrowserLeases', context);
+  const freshURL = 'https://chatgpt.com/';
+  const permanentURL = 'https://chatgpt.com/c/new-owned-chat';
+  const ownedTurn = { id: 'owned-turn', digest: 'b'.repeat(64), provider: 'chatgpt' };
+  const state = { running: true, tabIds: [31], sessionBindingsMigrated: true,
+    sessionBindings: { session: { tabId: 31, url: freshURL, autoCreated: true } },
+    browserJobClaims: { job: { generation: 4, sessionKey: 'session', tabId: 31,
+      expectedURL: freshURL, state: 'sent_unknown', at: Date.now() } } };
+  context.settings = async () => ({ bridgeUrl: 'http://127.0.0.1:32145', token: 'token', ...state });
+  context.fetch = async (url) => {
+    assert.match(url, /\/lease$/);
+    return { ok: true };
+  };
+  chrome.tabs.get = async () => ({ id: 31, url: permanentURL });
+  chrome.scripting.executeScript = async () => [{ result: ownedTurn }];
+  chrome.storage.local.set = async (update) => Object.assign(state, update);
+  const lease = { jobId: 'job', generation: 4, tabId: 31, expectedURL: freshURL, cancelled: false,
+    sessionKey: 'session', prompt: 'owned prompt', profileName: 'chatgpt', sentUnknown: true };
+  activeLeases.set('job', lease);
+  const promoted = await context.authorizeBrowserJobAction(
+    { jobId: 'job', generation: 4, action: 'observe', expectedURL: freshURL }, { tab: { id: 31 } });
+  assert.equal(promoted.ok, true);
+  assert.equal(promoted.expectedURL, permanentURL);
+  assert.equal(lease.expectedURL, permanentURL);
+  assert.equal(state.sessionBindings.session.url, permanentURL);
+  assert.equal(state.browserJobClaims.job.expectedURL, permanentURL);
+  assert.equal(state.sessionBindings.session.ownedTurn.id, ownedTurn.id);
+
+  chrome.tabs.get = async () => ({ id: 31, url: 'https://chatgpt.com/c/unrelated-chat' });
+  const changed = await context.authorizeBrowserJobAction(
+    { jobId: 'job', generation: 4, action: 'observe', expectedURL: permanentURL }, { tab: { id: 31 } });
+  assert.equal(changed.ok, false);
+  assert.equal(changed.error, 'browser_conversation_changed');
+  activeLeases.delete('job');
+  context.settings = previousSettings;
+  context.fetch = previousFetch;
+  chrome.tabs.get = previousTabGet;
+  chrome.scripting.executeScript = previousExecute;
+  chrome.storage.local.set = previousStorageSet;
+}
+
+{
+  assert.ok(context.boundedPendingCompletion({ mode: 'text', text: 'small' }, 1));
+  assert.equal(context.boundedPendingCompletion({ mode: 'text', artifacts: [{ data_base64: 'A'.repeat(1024 * 1024) }] }, 1), null,
+    'oversized Base64 results must never be written to extension local storage');
+  const previousSettings = context.settings;
+  const previousFetch = context.fetch;
+  const previousStorageSet = chrome.storage.local.set;
+  context.settings = async () => ({ pendingCompletions: {} });
+  chrome.storage.local.set = async () => { throw new Error('QUOTA_BYTES exceeded'); };
+  assert.equal(await context.rememberPendingCompletion('small', { mode: 'text', text: 'safe retry' }, 2), false,
+    'a storage quota failure must not replace the authoritative completion path');
+  context.fetch = async () => ({ ok: true, status: 200 });
+  assert.equal(await context.completeWork({ bridgeUrl: 'http://127.0.0.1:32145', token: 'token' },
+    'acknowledged', { mode: 'text', text: 'done' }, 3), true,
+  'local cache cleanup failure must not undo an authoritative relay acknowledgement');
+  context.fetch = (_url, options) => new Promise((resolve, reject) => {
+    options.signal.addEventListener('abort', () => reject(options.signal.reason || new Error('aborted')), { once: true });
+  });
+  await assert.rejects(context.completeWork({ bridgeUrl: 'http://127.0.0.1:32145', token: 'token' },
+    'hung-completion', { mode: 'text', text: 'done' }, 4, 5), (error) => error?.name === 'AbortError',
+  'a hung completion request must abort so pending-completion recovery can run');
+  await assert.rejects(context.fetchWithTimeout('http://127.0.0.1:32145/v1/browser/jobs/next?wait=25&profile=chatgpt',
+    { headers: { Authorization: 'Bearer token' } }, 5), (error) => error?.name === 'AbortError',
+  'a hung long-poll request must receive an AbortSignal deadline');
+  context.settings = previousSettings;
+  context.fetch = previousFetch;
+  chrome.storage.local.set = previousStorageSet;
+}
+
+{
+  const previousExecute = chrome.scripting.executeScript;
+  let executions = 0;
+  chrome.scripting.executeScript = () => { executions += 1; return new Promise(() => {}); };
+  await assert.rejects(context.executeDiagnosticScript(77, { target: { tabId: 77 }, func() {} }, 5), /respond in time/);
+  await assert.rejects(context.executeDiagnosticScript(77, { target: { tabId: 77 }, func() {} }, 5), /still pending/);
+  assert.equal(executions, 1, 'heartbeat diagnostics must not accumulate unresolved injected scripts');
+  await assert.rejects(context.captureTabProgress(78, { response: [] }), /respond in time/);
+  await assert.rejects(context.captureTabProgress(78, { response: [] }), /still pending/);
+  assert.equal(executions, 2, 'progress sampling must keep at most one unresolved scan per tab');
+  vm.runInContext('diagnosticScriptsInFlight.delete(77); progressScriptsInFlight.delete(78)', context);
+  chrome.scripting.executeScript = previousExecute;
+}
+
+{
+  const latest = { ...element('LATEST-LONG-CHAT'), tagName: 'SECTION', id: 'latest',
+    matches: () => false, querySelectorAll: () => [], querySelector: () => null };
+  const responses = Array.from({ length: 10001 }, (_, index) => index === 10000 ? latest : element(`old-${index}`));
+  const empty = [];
+  context.document = {
+    visibilityState: 'hidden', wasDiscarded: false,
+    querySelector: () => null,
+    querySelectorAll(selector) {
+      if (selector === '#many-responses') return responses;
+      return empty;
+    }
+  };
+  const health = context.inspectPageDOM({ input: [], submit: [], response: ['#many-responses'] });
+  assert.equal(health.assistant_turns, 10000, 'reported long-chat counts stay bounded');
+  assert.equal(health.last_response_characters, 'LATEST-LONG-CHAT'.length,
+    'the latest response must not become the ten-thousandth response after the diagnostic cap');
+}
+
+{
+  let turnText = 'exact owned prompt';
+  const content = { get textContent() { return turnText; } };
+  const turn = {
+    getAttribute: (name) => name === 'data-turn-id' ? 'turn-1' : null,
+    querySelector: () => content,
+    compareDocumentPosition: (candidate) => candidate?.after ? 4 : 2
+  };
+  const after = { after: true };
+  context.document = { querySelectorAll(selector) {
+    if (selector === 'section[data-turn="user"]') return [turn];
+    if (selector === '#answer') return [after];
+    return [];
+  } };
+  assert.ok(await context.inspectLatestOwnedTurn('exact owned prompt', 'chatgpt', true, { response: ['#answer'] }));
+  turnText = 'exact owned prompt Copy Edit';
+  assert.equal(await context.inspectLatestOwnedTurn('exact owned prompt', 'chatgpt', true, { response: ['#answer'] }), null,
+    'decorated or containing text must not promote a fresh-chat lease');
+  turnText = 'exact owned prompt';
+  after.after = false;
+  assert.equal(await context.inspectLatestOwnedTurn('exact owned prompt', 'chatgpt', true, { response: ['#answer'] }), null,
+    'an older assistant response must not satisfy a newly owned user turn');
+}
+
+{
+  const promptPart = { textContent: 'exact nested prompt' };
+  const attachmentPart = { textContent: 'upload.png', closest: () => ({}) };
+  const content = {
+    textContent: 'upload.png exact nested prompt Copy Edit',
+    querySelector: (selector) => /data-message-content-part|whitespace-pre-wrap|\.markdown/.test(selector) ? promptPart : null,
+    querySelectorAll: (selector) => /data-message-content-part|whitespace-pre-wrap|\.markdown/.test(selector) ? [attachmentPart, promptPart] : []
+  };
+  const turn = { getAttribute: () => 'turn-with-controls', querySelector: () => content };
+  context.document = { querySelectorAll: (selector) => selector === 'section[data-turn="user"]' ? [turn] : [] };
+  assert.ok(await context.inspectLatestOwnedTurn('exact nested prompt', 'chatgpt'),
+    'provider action chrome may decorate the wrapper, but the nested prompt node must still match exactly');
+}
+
+{
+  const content = { textContent: 'bounded latest prompt' };
+  const latestTurn = { getAttribute: () => 'latest', querySelector: () => content };
+  const hugeNodeList = { length: 10001, item: (index) => index === 10000 ? latestTurn : null,
+    [Symbol.iterator]() { throw new Error('hot ownership scan copied the entire DOM'); } };
+  context.document = { querySelectorAll: (selector) => selector === 'section[data-turn="user"]' ? hugeNodeList : [] };
+  assert.ok(await context.inspectLatestOwnedTurn('bounded latest prompt', 'chatgpt'),
+    'ownership inspection must address only the last turn even in a very long chat');
 }
 
 console.log('Browser progress and provider failures verified');

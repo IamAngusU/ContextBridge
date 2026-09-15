@@ -253,6 +253,9 @@ func runCommand(args []string) error {
 	if cfg.Cluster.Relay.Enabled || cfg.Cluster.Worker.Enabled {
 		go watchPoolDisplay(ctx, cfg, session)
 	}
+	session.EnableServiceCommands()
+	commands, restoreInput := foregroundServiceCommandInput(os.Stdin, session)
+	defer restoreInput()
 	go func() { errorsCh <- local.Run(ctx) }()
 	if relay != nil {
 		go func() { errorsCh <- relay.Run(ctx) }()
@@ -260,13 +263,7 @@ func runCommand(args []string) error {
 	if worker != nil {
 		go func() { errorsCh <- worker.RunWithEvents(ctx, session.HandleWorker) }()
 	}
-	for i := 0; i < components; i++ {
-		if err := <-errorsCh; err != nil {
-			stop()
-			return err
-		}
-	}
-	return nil
+	return waitForForegroundComponents(stop, session, errorsCh, commands, components)
 }
 
 func startUpdater(ctx context.Context, manager *updater.Manager, logger *log.Logger, idle func(context.Context) bool) {
@@ -1153,7 +1150,12 @@ func workerCommand(args []string) error {
 		startUpdater(ctx, updateManager, logger, func(context.Context) bool { return worker.Idle() })
 	}
 	session.Banner(version, "worker · "+name)
-	return worker.RunWithEvents(ctx, session.HandleWorker)
+	session.EnableServiceCommands()
+	commands, restoreInput := foregroundServiceCommandInput(os.Stdin, session)
+	defer restoreInput()
+	errorsCh := make(chan error, 1)
+	go func() { errorsCh <- worker.RunWithEvents(ctx, session.HandleWorker) }()
+	return waitForForegroundComponents(stop, session, errorsCh, commands, 1)
 }
 
 func splitWorkerList(raw string) []string {
@@ -1168,7 +1170,19 @@ func splitWorkerList(raw string) []string {
 }
 
 func relayConfig(cfg config.Config) cluster.RelayConfig {
-	return cluster.RelayConfig{Version: version, Listen: cfg.Cluster.Relay.Listen, PublicURL: cfg.Cluster.Relay.PublicURL, Database: cfg.Cluster.Relay.Database, AdminToken: cfg.Cluster.Relay.AdminToken, AllowedOrigins: cfg.Cluster.Relay.AllowedOrigins, MaxJobBytes: cfg.Cluster.Relay.MaxJobBytes, MaxQueuedJobs: cfg.Cluster.Relay.MaxQueue, PairingTTL: time.Duration(cfg.Cluster.Relay.PairingTTLSeconds) * time.Second, Pricing: cfg.Cluster.Pricing, AllowedTasks: cfg.Cluster.Policies.AllowedTasks, MaxAttempts: cfg.Cluster.Policies.MaxAttempts, Pipelines: cfg.Cluster.Pipelines, MaxPipelineRuntime: time.Duration(cfg.Cluster.Policies.MaxRuntime) * time.Second, JobTimeout: time.Duration(cfg.Cluster.Policies.MaxJobRuntime) * time.Second}
+	return cluster.RelayConfig{
+		Version: version, Listen: cfg.Cluster.Relay.Listen, PublicURL: cfg.Cluster.Relay.PublicURL,
+		Database: cfg.Cluster.Relay.Database, AdminToken: cfg.Cluster.Relay.AdminToken, AllowedOrigins: cfg.Cluster.Relay.AllowedOrigins,
+		MaxJobBytes: cfg.Cluster.Relay.MaxJobBytes, MaxQueuedJobs: cfg.Cluster.Relay.MaxQueue,
+		PairingTTL: time.Duration(cfg.Cluster.Relay.PairingTTLSeconds) * time.Second,
+		Pricing:    cfg.Cluster.Pricing, AllowedTasks: cfg.Cluster.Policies.AllowedTasks, MaxAttempts: cfg.Cluster.Policies.MaxAttempts,
+		Pipelines: cfg.Cluster.Pipelines, MaxPipelineRuntime: time.Duration(cfg.Cluster.Policies.MaxRuntime) * time.Second,
+		JobTimeout:      time.Duration(cfg.Cluster.Policies.MaxJobRuntime) * time.Second,
+		RetentionMaxAge: time.Duration(cfg.Cluster.Relay.RetentionDays) * 24 * time.Hour,
+		MaxTerminalJobs: cfg.Cluster.Relay.MaxTerminalJobs, MaxEvents: cfg.Cluster.Relay.MaxEvents,
+		MaxTerminalRuns: cfg.Cluster.Relay.MaxTerminalPipelineRuns,
+		RetentionSweep:  time.Duration(cfg.Cluster.Relay.RetentionSweepSeconds) * time.Second,
+	}
 }
 
 func configuredWorker(cfg config.Config) (*cluster.Worker, error) {
@@ -1323,9 +1337,9 @@ func clusterPipelineCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	raw, err := os.ReadFile(*file)
+	raw, err := readRegularFileBounded(*file, cluster.MaximumJobPayloadBytes)
 	if err != nil {
-		return err
+		return fmt.Errorf("pipeline input: %w", err)
 	}
 	var run cluster.PipelineRun
 	if err := clusterPOST(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/pipelines/"+url.PathEscape(*name)+"/run", cfg.Cluster.Relay.AdminToken, json.RawMessage(raw), &run); err != nil {
@@ -1495,34 +1509,48 @@ func clusterSubmitCommand(args []string) error {
 	if *token == "" {
 		*token = clusterClientToken(cfg, "")
 	}
-	raw, err := os.ReadFile(*file)
+	const maximumClusterSubmissionFileBytes = ((cluster.MaximumJobPayloadBytes+16)*4+2)/3 + (64 << 10)
+	raw, err := readRegularFileBounded(*file, maximumClusterSubmissionFileBytes)
 	if err != nil {
-		return err
+		return fmt.Errorf("cluster job: %w", err)
 	}
 	var input cluster.SubmitRequest
 	if err := json.Unmarshal(raw, &input); err != nil {
 		return err
 	}
 	shared := ""
+	encryptionContext := cluster.EncryptionContext{}
 	if *sealed {
 		var reservation cluster.AssignmentResponse
-		if err := clusterPOST(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/assign", *token, input.Requirements, &reservation); err != nil {
+		assignmentRequest := cluster.AssignmentRequest{TenantID: input.TenantID, Requirements: input.Requirements}
+		if err := clusterPOST(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/assign", *token, assignmentRequest, &reservation); err != nil {
 			return err
 		}
-		envelope, sharedKey, err := cluster.SealFor(reservation.Assignment.PublicKey, input.Payload, []byte("job:"+reservation.Assignment.JobID+":"+reservation.Assignment.NodeID))
+		encryptionContext, err = cluster.ValidateAssignmentResponse(assignmentRequest, reservation, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		envelope, sharedKey, err := cluster.SealFor(reservation.Assignment.PublicKey, input.Payload, cluster.JobAAD(encryptionContext))
 		if err != nil {
 			return err
 		}
 		shared = sharedKey
 		input.ID = reservation.Assignment.JobID
+		input.TenantID = reservation.Assignment.TenantID
+		input.Requirements = reservation.Assignment.Requirements
 		input.Payload = nil
 		input.Sealed = envelope
 		input.AssignmentID = reservation.Assignment.ID
 		input.AssignmentSecret = reservation.Secret
 	}
 	var job cluster.Job
-	if err := clusterPOST(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/jobs", *token, input, &job); err != nil {
+	if err := clusterPOST(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/jobs?compact=1", *token, input, &job); err != nil {
 		return err
+	}
+	if *sealed {
+		if err := cluster.ValidateEncryptedJobContext(encryptionContext, job); err != nil {
+			return err
+		}
 	}
 	fmt.Println("Queued:", job.ID)
 	if !*wait {
@@ -1542,8 +1570,13 @@ func clusterSubmitCommand(args []string) error {
 			return ctx.Err()
 		case <-time.After(500 * time.Millisecond):
 		}
-		if err := clusterGET(ctx, clusterBaseURL(cfg)+"/v1/cluster/jobs/"+url.PathEscape(job.ID), *token, &job); err != nil {
+		if err := clusterGET(ctx, clusterBaseURL(cfg)+"/v1/cluster/jobs/"+url.PathEscape(job.ID)+"?compact=1", *token, &job); err != nil {
 			return err
+		}
+		if *sealed {
+			if err := cluster.ValidateEncryptedJobContext(encryptionContext, job); err != nil {
+				return err
+			}
 		}
 		if *stream && !*sealed && job.Progress != nil && job.Progress.Sequence > lastSequence {
 			current := job.Progress.Text
@@ -1565,7 +1598,7 @@ func clusterSubmitCommand(args []string) error {
 				fmt.Fprintln(os.Stderr)
 			}
 			if job.SealedResult != nil {
-				raw, err := cluster.OpenResponse(shared, job.SealedResult, []byte("result:"+job.ID+":"+job.AssignedNode))
+				raw, err := cluster.OpenResponse(shared, job.SealedResult, cluster.ResultAAD(encryptionContext))
 				if err != nil {
 					return err
 				}
@@ -1619,12 +1652,9 @@ func clusterLoginCommand(args []string) error {
 	if *tokenFile == "" {
 		return errors.New("--token-file is required so credentials do not enter shell history")
 	}
-	raw, err := os.ReadFile(*tokenFile)
+	raw, err := readRegularFileBounded(*tokenFile, 32<<10)
 	if err != nil {
 		return err
-	}
-	if len(raw) > 32<<10 {
-		return errors.New("token file is unexpectedly large")
 	}
 	token := strings.TrimSpace(string(raw))
 	var envelope struct {
@@ -1696,7 +1726,10 @@ func clusterGET(ctx context.Context, target, token string, output interface{}) e
 		return err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 24<<20))
+	raw, err := readClusterAPIResponse(resp.Body)
+	if err != nil {
+		return err
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("relay returned %s: %s", resp.Status, strings.TrimSpace(string(raw)))
 	}
@@ -1713,7 +1746,10 @@ func clusterPOST(ctx context.Context, target, token string, input, output interf
 		return err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 24<<20))
+	body, err := readClusterAPIResponse(resp.Body)
+	if err != nil {
+		return err
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("relay returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
@@ -1721,6 +1757,19 @@ func clusterPOST(ctx context.Context, target, token string, input, output interf
 		return json.Unmarshal(body, output)
 	}
 	return nil
+}
+
+const maximumClusterAPIResponseBytes = cluster.MaximumJobResultWireBytes + (2 << 20)
+
+func readClusterAPIResponse(reader io.Reader) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(reader, maximumClusterAPIResponseBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > maximumClusterAPIResponseBytes {
+		return nil, fmt.Errorf("relay response exceeds %d bytes", maximumClusterAPIResponseBytes)
+	}
+	return body, nil
 }
 
 func formatBytes(value uint64) string {
@@ -1784,7 +1833,7 @@ func submit(configPath string, job bridge.Job) (bridge.Submission, error) {
 }
 
 func readInkWallJob(dir string) (bridge.Job, error) {
-	raw, err := os.ReadFile(filepath.Join(dir, "payload.json"))
+	raw, err := readRegularFileBounded(filepath.Join(dir, "payload.json"), 1<<20)
 	if err != nil {
 		return bridge.Job{}, err
 	}
@@ -1801,10 +1850,16 @@ func readInkWallJob(dir string) (bridge.Job, error) {
 	name := strings.TrimSpace(payload.Content.Name)
 	message := strings.TrimSpace(payload.Content.Message)
 	if name == "" {
-		name = readText(filepath.Join(dir, "name.txt"))
+		name, err = readOptionalTextBounded(filepath.Join(dir, "name.txt"), 200000)
+		if err != nil {
+			return bridge.Job{}, err
+		}
 	}
 	if message == "" {
-		message = readText(filepath.Join(dir, "message.txt"))
+		message, err = readOptionalTextBounded(filepath.Join(dir, "message.txt"), 200000)
+		if err != nil {
+			return bridge.Job{}, err
+		}
 	}
 	job := bridge.Job{
 		ID:     payload.ID,
@@ -1818,23 +1873,92 @@ func readInkWallJob(dir string) (bridge.Job, error) {
 		},
 		Output: bridge.OutputSpec{Mode: "decision"},
 	}
-	images, _ := filepath.Glob(filepath.Join(dir, "image.*"))
-	if len(images) > 0 {
-		imageRaw, readErr := os.ReadFile(images[0])
-		if readErr == nil && len(imageRaw) <= 8<<20 {
-			job.ImageBase64 = base64.StdEncoding.EncodeToString(imageRaw)
-			job.ImageMediaType = mime.TypeByExtension(filepath.Ext(images[0]))
-			if job.ImageMediaType == "" {
-				job.ImageMediaType = http.DetectContentType(imageRaw)
-			}
+	imagePath, findErr := firstRegularImageFile(dir)
+	if findErr != nil {
+		return bridge.Job{}, findErr
+	}
+	if imagePath != "" {
+		imageRaw, readErr := readRegularFileBounded(imagePath, 8<<20)
+		if readErr != nil {
+			return bridge.Job{}, fmt.Errorf("review image: %w", readErr)
+		}
+		job.ImageBase64 = base64.StdEncoding.EncodeToString(imageRaw)
+		job.ImageMediaType = mime.TypeByExtension(filepath.Ext(imagePath))
+		if job.ImageMediaType == "" {
+			job.ImageMediaType = http.DetectContentType(imageRaw)
 		}
 	}
 	return job, nil
 }
 
-func readText(path string) string {
-	raw, _ := os.ReadFile(path)
-	return strings.TrimSpace(string(raw))
+func readRegularFileBounded(path string, limit int64) ([]byte, error) {
+	if limit < 0 {
+		return nil, errors.New("file limit must not be negative")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("path must be a regular file")
+	}
+	if info.Size() > limit {
+		return nil, fmt.Errorf("file exceeds %d bytes", limit)
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(raw)) > limit {
+		return nil, fmt.Errorf("file exceeds %d bytes", limit)
+	}
+	return raw, nil
+}
+
+func readOptionalTextBounded(path string, limit int64) (string, error) {
+	raw, err := readRegularFileBounded(path, limit)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", filepath.Base(path), err)
+	}
+	return strings.TrimSpace(string(raw)), nil
+}
+
+func firstRegularImageFile(dir string) (string, error) {
+	directory, err := os.Open(dir)
+	if err != nil {
+		return "", err
+	}
+	defer directory.Close()
+	for {
+		entries, readErr := directory.ReadDir(64)
+		for _, entry := range entries {
+			name := entry.Name()
+			if !strings.HasPrefix(strings.ToLower(name), "image.") || strings.ContainsAny(name, `/\\`) {
+				continue
+			}
+			info, infoErr := entry.Info()
+			if infoErr != nil {
+				return "", infoErr
+			}
+			if info.Mode().IsRegular() {
+				return filepath.Join(dir, name), nil
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			return "", nil
+		}
+		if readErr != nil {
+			return "", readErr
+		}
+	}
 }
 
 func baseURL(cfg config.Config) string {

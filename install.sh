@@ -6,8 +6,25 @@ INSTALL_DIR="${CONTEXTBRIDGE_HOME:-$HOME/.local/share/contextbridge}"
 BIN_DIR="${CONTEXTBRIDGE_BIN_DIR:-$HOME/.local/bin}"
 provider="${CONTEXTBRIDGE_PROVIDER:-ask}"
 cluster_mode="${CONTEXTBRIDGE_CLUSTER_MODE:-ask}"
+relay_url="${CONTEXTBRIDGE_RELAY_URL:-}"
+public_url="${CONTEXTBRIDGE_PUBLIC_URL:-}"
+worker_name="${CONTEXTBRIDGE_WORKER_NAME:-auto}"
+interactive=0
+if [ "${CONTEXTBRIDGE_NONINTERACTIVE:-0}" != "1" ] && [ -r /dev/tty ]; then
+  interactive=1
+fi
+if [ "$cluster_mode" = "worker" ] && [ "$interactive" = "0" ] && [ -z "$relay_url" ]; then
+  echo "A relay URL is required for worker mode. Set CONTEXTBRIDGE_RELAY_URL for an unattended install." >&2
+  exit 1
+fi
+if [ -n "$relay_url" ]; then
+  case "$relay_url" in
+    https://*|http://127.0.0.1:*|http://localhost:*) ;;
+    *) echo "CONTEXTBRIDGE_RELAY_URL must use HTTPS or a localhost URL." >&2; exit 1 ;;
+  esac
+fi
 
-if [ "$provider" = "ask" ] && [ -r /dev/tty ]; then
+if [ "$provider" = "ask" ] && [ "$interactive" = "1" ]; then
   printf '\nChoose the first local target:\n' >/dev/tty
   printf '  1) Existing Ollama, with automatic local model detection (recommended)\n' >/dev/tty
   printf '  2) Managed llama.cpp runtime and a verified GGUF model\n' >/dev/tty
@@ -67,7 +84,7 @@ if [ ! -f "$config" ]; then
   "$BIN_DIR/contextbridge" init --config "$config"
 fi
 
-if [ "$cluster_mode" = "ask" ] && [ -r /dev/tty ]; then
+if [ "$cluster_mode" = "ask" ] && [ "$interactive" = "1" ]; then
   printf '\nChoose how this device participates:\n' >/dev/tty
   printf '  1) Local bridge only (recommended for a first install)\n' >/dev/tty
   printf '  2) Relay for other devices\n' >/dev/tty
@@ -80,28 +97,29 @@ elif [ "$cluster_mode" = "ask" ]; then
   cluster_mode="local"
 fi
 
-relay_url=""
-public_url=""
-if [ "$cluster_mode" = "worker" ] && [ -r /dev/tty ]; then
+if [ "$cluster_mode" = "worker" ] && [ -z "$relay_url" ] && [ "$interactive" = "1" ]; then
   printf 'Public HTTPS relay URL: ' >/dev/tty
   read -r relay_url </dev/tty
-  [ -n "$relay_url" ] || { echo "A relay URL is required for worker mode." >&2; exit 1; }
 fi
-if [ "$cluster_mode" = "relay" ] && [ -r /dev/tty ]; then
+if { [ "$cluster_mode" = "relay" ] || [ "$cluster_mode" = "all" ]; } && [ -z "$public_url" ] && [ "$interactive" = "1" ]; then
   printf 'Public HTTPS relay URL, or leave empty while configuring the reverse proxy: ' >/dev/tty
   read -r public_url </dev/tty || public_url=""
 fi
+if [ "$cluster_mode" = "worker" ] && [ -z "$relay_url" ]; then
+  echo "A relay URL is required for worker mode. Set CONTEXTBRIDGE_RELAY_URL for an unattended install." >&2
+  exit 1
+fi
 if [ -n "$relay_url" ]; then
-  "$BIN_DIR/contextbridge" cluster configure --config "$config" --mode "$cluster_mode" --relay-url "$relay_url"
+  "$BIN_DIR/contextbridge" cluster configure --config "$config" --mode "$cluster_mode" --relay-url "$relay_url" --name "$worker_name"
 elif [ -n "$public_url" ]; then
-  "$BIN_DIR/contextbridge" cluster configure --config "$config" --mode "$cluster_mode" --listen auto --public-url "$public_url"
+  "$BIN_DIR/contextbridge" cluster configure --config "$config" --mode "$cluster_mode" --listen auto --public-url "$public_url" --name "$worker_name"
 elif [ "$cluster_mode" = "relay" ] || [ "$cluster_mode" = "all" ]; then
-  "$BIN_DIR/contextbridge" cluster configure --config "$config" --mode "$cluster_mode" --listen auto
+  "$BIN_DIR/contextbridge" cluster configure --config "$config" --mode "$cluster_mode" --listen auto --name "$worker_name"
 else
-  "$BIN_DIR/contextbridge" cluster configure --config "$config" --mode "$cluster_mode"
+  "$BIN_DIR/contextbridge" cluster configure --config "$config" --mode "$cluster_mode" --name "$worker_name"
 fi
 if [ "$cluster_mode" = "worker" ] || [ "$cluster_mode" = "all" ]; then
-  "$BIN_DIR/contextbridge" pair --config "$config"
+  "$BIN_DIR/contextbridge" pair --config "$config" --name "$worker_name"
 fi
 
 if [ "$provider" = "browser" ]; then
@@ -118,7 +136,7 @@ elif [ "$provider" = "ollama" ]; then
   rm -f "$config.bak"
 elif [ "$provider" = "managed" ]; then
   managed_model="${CONTEXTBRIDGE_MANAGED_MODEL:-jina}"
-  if [ -r /dev/tty ] && [ -z "${CONTEXTBRIDGE_MANAGED_MODEL:-}" ]; then
+  if [ "$interactive" = "1" ] && [ -z "${CONTEXTBRIDGE_MANAGED_MODEL:-}" ]; then
     printf '\nChoose the first managed workload:\n' >/dev/tty
     printf '  1) Jina v4 retrieval embeddings\n' >/dev/tty
     printf '  2) NuExtract3 structured extraction\n' >/dev/tty

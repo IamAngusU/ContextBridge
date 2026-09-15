@@ -14,6 +14,25 @@ import (
 	"github.com/coder/websocket"
 )
 
+func TestRateLimitClientKeyTrustsOnlyLoopbackProxy(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "http://relay.test/v1/pair/request", nil)
+	request.RemoteAddr = "127.0.0.1:43210"
+	request.Header.Set("X-Real-IP", "203.0.113.7")
+	if got := rateLimitClientKey(request); got != "203.0.113.7" {
+		t.Fatalf("loopback proxy client key = %q", got)
+	}
+	request.RemoteAddr = "198.51.100.8:43210"
+	request.Header.Set("X-Real-IP", "203.0.113.7")
+	if got := rateLimitClientKey(request); got != "198.51.100.8" {
+		t.Fatalf("direct client spoofed proxy identity: %q", got)
+	}
+	request.RemoteAddr = "[::1]:43210"
+	request.Header.Set("X-Real-IP", "not-an-ip")
+	if got := rateLimitClientKey(request); got != "::1" {
+		t.Fatalf("invalid forwarded address replaced peer identity: %q", got)
+	}
+}
+
 func TestDecodeJSONEnforcesExactBodyLimit(t *testing.T) {
 	raw := []byte(`{"ok":true}`)
 	var exact struct {
@@ -27,6 +46,43 @@ func TestDecodeJSONEnforcesExactBodyLimit(t *testing.T) {
 	}
 	if err := decodeJSON(bytes.NewReader(append(append([]byte{}, raw...), ' ')), &over, int64(len(raw))); err == nil {
 		t.Fatal("one byte beyond the JSON body limit was accepted")
+	}
+}
+
+func TestCreateTokenRejectsLifetimeBeforeDurationConversion(t *testing.T) {
+	adminToken := "admin_012345678901234567890123456789012345"
+	relay, err := NewRelay(RelayConfig{Database: filepath.Join(t.TempDir(), "relay.db"), AdminToken: adminToken}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+
+	for _, lifetime := range []string{"-1", "87601", "9223372036854775807"} {
+		request := httptest.NewRequest(http.MethodPost, "/v1/cluster/tokens", strings.NewReader(`{"role":"producer","subject":"test","lifetime_hours":`+lifetime+`}`))
+		request.Header.Set("Authorization", "Bearer "+adminToken)
+		response := httptest.NewRecorder()
+		relay.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("lifetime %s returned %d: %s", lifetime, response.Code, response.Body.String())
+		}
+	}
+}
+
+func TestWorkerConnectionRejectsDuplicateReservation(t *testing.T) {
+	worker := newWorkerConnection(nil, 2)
+	if !worker.reserve("job-one") {
+		t.Fatal("first reservation was rejected")
+	}
+	if worker.reserve("job-one") {
+		t.Fatal("duplicate in-flight reservation was accepted")
+	}
+	running, capacity := worker.load()
+	if running != 1 || capacity != 2 {
+		t.Fatalf("duplicate reservation changed worker load: %d/%d", running, capacity)
+	}
+	worker.release("job-one")
+	if !worker.reserve("job-one") {
+		t.Fatal("released job could not be reserved again")
 	}
 }
 
@@ -90,14 +146,25 @@ func TestRelayDispatchAndEncryptedRoundTrip(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	var assignment AssignmentResponse
-	postTest(t, server.URL+"/v1/cluster/assign", producer, Requirements{Task: "generation", Group: "fast"}, &assignment)
+	assignmentRequest := AssignmentRequest{TenantID: "tenant-a", Requirements: Requirements{Task: "generation", Group: "fast"}}
+	postTest(t, server.URL+"/v1/cluster/assign", producer, assignmentRequest, &assignment)
+	encryptionContext, err := ValidateAssignmentResponse(assignmentRequest, assignment, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assignment.Assignment.OwnerSubject != "test" || assignment.Assignment.TenantID != "tenant-a" || assignment.Assignment.Attempt != 1 {
+		t.Fatalf("reservation did not bind authenticated namespace and first attempt: %#v", assignment.Assignment)
+	}
 	plain := json.RawMessage(`{"prompt":"relay must not see this"}`)
-	envelope, shared, err := SealFor(assignment.Assignment.PublicKey, plain, jobAAD(assignment.Assignment.JobID, assignment.Assignment.NodeID))
+	envelope, shared, err := SealFor(assignment.Assignment.PublicKey, plain, JobAAD(encryptionContext))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var submitted Job
-	postTest(t, server.URL+"/v1/cluster/jobs", producer, SubmitRequest{Requirements: assignment.Assignment.Requirements, Sealed: envelope, AssignmentID: assignment.Assignment.ID, AssignmentSecret: assignment.Secret}, &submitted)
+	postTest(t, server.URL+"/v1/cluster/jobs", producer, SubmitRequest{TenantID: assignment.Assignment.TenantID, Requirements: assignment.Assignment.Requirements, Sealed: envelope, AssignmentID: assignment.Assignment.ID, AssignmentSecret: assignment.Secret}, &submitted)
+	if err := ValidateEncryptedJobContext(encryptionContext, submitted); err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_, raw, err := conn.Read(ctx)
@@ -111,22 +178,26 @@ func TestRelayDispatchAndEncryptedRoundTrip(t *testing.T) {
 	if bytes.Contains(wire.Job.Payload, []byte("relay must not see")) || wire.Job.SealedPayload == nil {
 		t.Fatal("relay exposed the sealed payload")
 	}
-	decrypted, workerShared, err := OpenWith(privateKey, wire.Job.SealedPayload, jobAAD(wire.Job.ID, node.ID))
+	workerContext, contextErr := wire.Job.EncryptionContextForNode(node.ID)
+	if contextErr != nil || !workerContext.Equal(encryptionContext) {
+		t.Fatalf("worker received a different encryption context: %#v, %v", workerContext, contextErr)
+	}
+	decrypted, workerShared, err := OpenWith(privateKey, wire.Job.SealedPayload, JobAAD(workerContext))
 	if err != nil || !bytes.Equal(decrypted, plain) {
 		t.Fatalf("worker could not decrypt: %v", err)
 	}
-	sealedResult, err := SealResponse(workerShared, []byte(`{"answer":"done"}`), resultAAD(wire.Job.ID, node.ID))
+	sealedResult, err := SealResponse(workerShared, []byte(`{"answer":"done"}`), ResultAAD(workerContext))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := conn.Write(ctx, websocket.MessageText, mustJSON(WireMessage{Version: ProtocolVersion, Type: "result", JobID: wire.Job.ID, SealedResult: sealedResult, Usage: Usage{InputTokens: 4, OutputTokens: 2}})); err != nil {
+	if err := conn.Write(ctx, websocket.MessageText, mustJSON(WireMessage{Version: ProtocolVersion, Type: "result", JobID: wire.Job.ID, Attempt: wire.Job.Attempt, SealedResult: sealedResult, Usage: Usage{InputTokens: 4, OutputTokens: 2}})); err != nil {
 		t.Fatal(err)
 	}
 	deadline = time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		job, _ := relay.store.GetJob(wire.Job.ID)
 		if job.Status == JobCompleted {
-			opened, err := OpenResponse(shared, job.SealedResult, resultAAD(job.ID, node.ID))
+			opened, err := OpenResponse(shared, job.SealedResult, ResultAAD(encryptionContext))
 			if err != nil || string(opened) != `{"answer":"done"}` {
 				t.Fatalf("producer could not decrypt: %v", err)
 			}

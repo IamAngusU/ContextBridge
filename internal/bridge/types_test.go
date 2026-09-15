@@ -235,6 +235,30 @@ func TestResponseJobDoesNotEchoVisualInput(t *testing.T) {
 	}
 }
 
+func TestCompactResponseJobDoesNotEchoAnyLargeOrSensitiveInput(t *testing.T) {
+	job := Job{
+		ID:             "job-compact",
+		Prompt:         "private prompt",
+		Text:           "private text",
+		Texts:          []string{"private batch"},
+		Documents:      []vectorstore.Document{{ID: "private-doc", Text: "private document"}},
+		Query:          "private query",
+		ImageBase64:    "private-image",
+		ImageMediaType: "image/png",
+		Model:          "vision-model",
+	}
+	response := compactResponseJob(job)
+	if response.Prompt != "" || response.Text != "" || len(response.Texts) != 0 || len(response.Documents) != 0 || response.Query != "" || response.ImageBase64 != "" {
+		t.Fatalf("compact response retained submitted content: %#v", response)
+	}
+	if response.ID != job.ID || response.Model != job.Model || response.ImageMediaType != job.ImageMediaType {
+		t.Fatalf("compact response lost routing metadata: %#v", response)
+	}
+	if job.Prompt == "" || job.ImageBase64 == "" || len(job.Documents) == 0 {
+		t.Fatal("compact response mutated the original job")
+	}
+}
+
 func TestNormalizeArtifactsAcceptsExactBudgetAndRejectsOneByteMore(t *testing.T) {
 	spec := OutputSpec{Mode: "text", Artifacts: true, MaxArtifactBytes: 12 << 20}
 	exactData := make([]byte, 12<<20)

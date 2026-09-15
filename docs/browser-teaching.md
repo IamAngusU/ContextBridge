@@ -62,6 +62,15 @@ common generation-busy indicators to disappear before it returns a result, but
 the page remains a stateful third-party interface. Only automate a provider when
 its account terms and your organization policy allow it.
 
+The popup reports a content-free session-health hint for growing conversations,
+repeatedly slow bounded control scans, discarded tabs, and unavailable
+controls. It does not block genuine follow-ups merely because a conversation
+is old. ContextBridge never hides or deletes old provider messages: doing so
+would not shrink server-side model context and could break a virtualized page,
+response ownership, or recovery. Detach the old page and attach a fresh chat
+for an unrelated task. See
+[Browser sessions and prompt contracts](browser-sessions-and-prompts.de-en.md).
+
 While the answer grows, the extension reports bounded progressive snapshots to
 the local bridge. A cluster worker forwards them to the relay and
 `contextbridge cluster submit --stream` displays the new text. Progress is not

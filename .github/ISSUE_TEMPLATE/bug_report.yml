@@ -10,7 +10,8 @@ body:
     id: version
     attributes:
       label: ContextBridge version
-      placeholder: v0.3.1
+      description: Paste the output of `contextbridge version`; include the popup version for browser issues.
+      placeholder: v0.5.66 (core), v0.5.66 (extension)
     validations:
       required: true
   - type: dropdown
@@ -18,12 +19,18 @@ body:
     attributes:
       label: Area
       options:
-        - Local service or dashboard
-        - Ollama provider
-        - Chromium extension
-        - Firefox extension
-        - Installer or autostart
-        - Protocol or integration
+        - Local service, CLI, or terminal panel
+        - Dashboard or schedules
+        - Ollama or managed local runtime
+        - Hardware or model detection
+        - Cluster relay, worker, queue, or pairing
+        - Browser automation or model selection
+        - Chromium extension or popup
+        - Firefox extension or popup
+        - Images, uploads, or returned artifacts
+        - Installer, update, PATH, or autostart
+        - Protocol, security, or integration
+        - Website or documentation
     validations:
       required: true
   - type: textarea

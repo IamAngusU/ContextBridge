@@ -19,6 +19,7 @@ async function fixture() {
   let responseText = 'Completed answer';
   let mutateOnDelay = null;
   const url = 'https://chatgpt.com/c/owned-conversation';
+  let currentURL = url;
   const visible = { offsetWidth: 1, getClientRects: () => [1] };
   const copy = { ...visible, getAttribute(name) { return name === 'data-testid' ? 'copy-turn-action-button' : null; } };
   const stop = {
@@ -32,7 +33,19 @@ async function fixture() {
     get value() { return draft; },
     closest() { return { querySelectorAll: () => [], querySelector: () => attachment ? {} : null }; }
   };
-  const content = { get textContent() { return turnText; } };
+  const content = {
+    get textContent() { return turnText; },
+    querySelector(selector) {
+      if (/data-message-content-part|whitespace-pre-wrap|\.markdown/.test(selector)) {
+        return { textContent: turnText.replace(/ Copy message$/, '') };
+      }
+      return null;
+    },
+    querySelectorAll(selector) {
+      return /data-message-content-part|whitespace-pre-wrap|\.markdown/.test(selector)
+        ? [{ textContent: turnText.replace(/ Copy message$/, '') }] : [];
+    }
+  };
   const turn = {
     getAttribute(name) { return name === 'data-turn-id' ? 'owned-id' : null; },
     querySelector() { return content; },
@@ -62,7 +75,7 @@ async function fixture() {
     runtime: { onInstalled: listener, onStartup: listener, onMessage: listener },
     tabs: {
       onUpdated: listener, onRemoved: listener,
-      get: async () => ({ url }),
+      get: async () => ({ url: currentURL }),
       reload: async () => { reloads++; stopVisible = false; }
     },
     scripting: { executeScript: async ({ func, args = [] }) => [{ result: await func(...args) }] },
@@ -79,7 +92,8 @@ async function fixture() {
   const profile = { name: 'chatgpt', selectors: { input: ['#input'], response: ['#response'] } };
   const ownedTurn = await context.inspectLatestOwnedTurn(turnText, 'chatgpt');
   const work = { job: { id: 'test-job', session_id: 'test-session', prompt: 'NEW-TURN', metadata: {} },
-    profile, deadline: new Date(Date.now() + 180000).toISOString() };
+    profile, deadline: new Date(Date.now() + 180000).toISOString(), lease_generation: 1,
+    lease_expires_at: new Date(Date.now() + 90000).toISOString() };
   storage.sessionBindings[context.workSessionKey(work)] = { tabId: 7, url, ownedTurn };
   return {
     context, chrome, storage, profile, ownedTurn, work,
@@ -91,6 +105,7 @@ async function fixture() {
     setDraft: (value) => { draft = value; },
     setTurnText: (value) => { turnText = value; },
     setResponseText: (value) => { responseText = value; },
+    setURL: (value) => { currentURL = value; },
     setMutateOnDelay: (value) => { mutateOnDelay = value; }
   };
 }
@@ -114,40 +129,96 @@ async function exerciseRecoveryAfterSubmit(unsafeDraft, decoratedTurn = false, c
   site.context.resolveWorkTab = async () => 7;
   site.context.waitForTabSlot = async () => {};
   site.context.sendHeartbeat = async () => true;
+  site.context.renewLease = async () => true;
   site.context.captureTabProgress = async () => ({ text: 'Completed answer', busy: false });
   site.context.reportProgress = async () => {};
-  site.context.completeWork = async () => {};
+  const completions = [];
+  site.context.completeWork = async (_cfg, jobID, decision, generation) => {
+    completions.push({ jobID, decision, generation });
+    return true;
+  };
   if (changingResponse) site.setMutateOnDelay(() => site.setResponseText('Changed during recovery'));
   await site.context.processWork({ useVisualProfile: false, preserveDrafts: false, pendingCompletions: {} }, site.work, 7);
-  return { site, automations };
+  return { site, automations, completion: completions.at(-1) };
 }
 
 {
-  const { site, automations } = await exerciseRecoveryAfterSubmit(true);
+  const site = await fixture();
+  site.setStopVisible(false);
+  site.work.job.output = { mode: 'text' };
+  const originalExecute = site.chrome.scripting.executeScript;
+  site.chrome.scripting.executeScript = async (request) => {
+    if (request.func !== site.context.automate) return originalExecute(request);
+    site.setTurnText('NEW-TURN');
+    site.setURL('https://chatgpt.com/c/a-different-conversation');
+    return [{ result: { ok: true, text: 'Answer from the wrong conversation', artifacts: [] } }];
+  };
+  site.context.resolveWorkTab = async () => 7;
+  site.context.waitForTabSlot = async () => {};
+  site.context.sendHeartbeat = async () => true;
+  site.context.renewLease = async () => true;
+  site.context.captureTabProgress = async () => ({ text: '', busy: false });
+  site.context.reportProgress = async () => {};
+  const completions = [];
+  site.context.completeWork = async (_cfg, _jobID, decision) => { completions.push(decision); return true; };
+  await site.context.processWork({ useVisualProfile: false, preserveDrafts: false, pendingCompletions: {} }, site.work, 7);
+  assert.equal(completions.at(-1).error, 'browser_session_changed');
+  assert.notEqual(completions.at(-1).text, 'Answer from the wrong conversation',
+    'an answer must be rejected if the tab leaves its exact bound URL before final acceptance');
+}
+
+{
+  const site = await fixture();
+  site.setStopVisible(false);
+  site.work.job.output = { mode: 'text' };
+  const originalExecute = site.chrome.scripting.executeScript;
+  site.chrome.scripting.executeScript = async (request) => {
+    if (request.func !== site.context.automate) return originalExecute(request);
+    site.setTurnText('NEW-TURN');
+    delete site.storage.sessionBindings[site.context.workSessionKey(site.work)];
+    return [{ result: { ok: true, text: 'Answer after binding release', artifacts: [] } }];
+  };
+  site.context.resolveWorkTab = async () => 7;
+  site.context.waitForTabSlot = async () => {};
+  site.context.sendHeartbeat = async () => true;
+  site.context.renewLease = async () => true;
+  site.context.captureTabProgress = async () => ({ text: '', busy: false });
+  site.context.reportProgress = async () => {};
+  const completions = [];
+  site.context.completeWork = async (_cfg, _jobID, decision) => { completions.push(decision); return true; };
+  await site.context.processWork({ useVisualProfile: false, preserveDrafts: false, pendingCompletions: {} }, site.work, 7);
+  assert.equal(completions.at(-1).error, 'browser_session_changed');
+  assert.notEqual(completions.at(-1).text, 'Answer after binding release',
+    'an answer must be rejected when the session binding is released even if the URL is unchanged');
+}
+
+{
+  const { site, automations, completion } = await exerciseRecoveryAfterSubmit(true);
   assert.equal(automations, 1);
   assert.equal(site.reloads(), 0);
-  assert.equal(site.storage.pendingCompletions['test-job'].error, 'browser_recovery_unsafe');
+  assert.equal(completion.decision.error, 'browser_recovery_unsafe');
+  assert.equal(site.storage.pendingCompletions, undefined, 'an acknowledged completion is not redundantly persisted');
 }
 
 {
-  const { site, automations } = await exerciseRecoveryAfterSubmit(false);
+  const { site, automations, completion } = await exerciseRecoveryAfterSubmit(false);
   assert.equal(automations, 2);
   assert.equal(site.reloads(), 1);
-  assert.equal(site.storage.pendingCompletions['test-job'].text, 'Recovered answer');
+  assert.equal(completion.decision.text, 'Recovered answer');
 }
 
 {
-  const { site, automations } = await exerciseRecoveryAfterSubmit(false, true);
+  const { site, automations, completion } = await exerciseRecoveryAfterSubmit(false, true);
   assert.equal(automations, 2);
   assert.equal(site.reloads(), 1);
-  assert.equal(site.storage.pendingCompletions['test-job'].text, 'Recovered answer');
+  assert.equal(completion.decision.text, 'Recovered answer');
 }
 
 {
-  const { site, automations } = await exerciseRecoveryAfterSubmit(false, false, true);
+  const { site, automations, completion } = await exerciseRecoveryAfterSubmit(false, false, true);
   assert.equal(automations, 1);
   assert.equal(site.reloads(), 0);
-  assert.equal(site.storage.pendingCompletions['test-job'].error, 'browser_recovery_unsafe');
+  assert.equal(completion.decision.error, 'browser_recovery_unsafe');
 }
 
 {

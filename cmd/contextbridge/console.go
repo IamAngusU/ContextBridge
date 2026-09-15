@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -54,16 +52,20 @@ func consoleCommand(args []string) error {
 	defer stop()
 	session := terminalui.NewWithStyle(os.Stdout, cfg.Terminal.Style)
 	defer session.Close()
+	session.EnableCommands()
 	session.Banner(version, "read-only · exit + Enter / Ctrl+C closes this view")
 	if cfg.Cluster.Relay.Enabled || cfg.Cluster.Worker.Enabled {
 		go watchPoolDisplay(ctx, cfg, session)
 	}
-	exitRequested := consoleExitRequested(os.Stdin)
+	commands, restoreInput := consoleCommandInput(os.Stdin, session.LiveCommandEditor(), session.SetCommandInput)
+	defer restoreInput()
 	client := &http.Client{Timeout: 5 * time.Second}
 	for {
 		select {
-		case <-exitRequested:
-			return nil
+		case command, ok := <-commands:
+			if !ok || session.HandleCommand(command) {
+				return nil
+			}
 		default:
 		}
 		status, err := fetchConsoleStatus(ctx, client, cfg)
@@ -81,33 +83,12 @@ func consoleCommand(args []string) error {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-exitRequested:
-			return nil
+		case command, ok := <-commands:
+			if !ok || session.HandleCommand(command) {
+				return nil
+			}
 		case <-time.After(3 * time.Second):
 		}
-	}
-}
-
-func consoleExitRequested(input io.Reader) <-chan struct{} {
-	exit := make(chan struct{})
-	go func() {
-		scanner := bufio.NewScanner(input)
-		for scanner.Scan() {
-			if isConsoleExitCommand(scanner.Text()) {
-				close(exit)
-				return
-			}
-		}
-	}()
-	return exit
-}
-
-func isConsoleExitCommand(command string) bool {
-	switch strings.ToLower(strings.TrimSpace(command)) {
-	case "exit", "quit", "q", ":q":
-		return true
-	default:
-		return false
 	}
 }
 
@@ -162,8 +143,15 @@ func toServiceSnapshot(status consoleStatus) terminalui.ServiceSnapshot {
 		}
 	}
 	if len(status.Runtime.Hardware.GPUs) > 0 {
-		gpu := status.Runtime.Hardware.GPUs[0]
-		snapshot.GPU, snapshot.GPUUtilization = gpu.Name, gpu.Utilization
+		snapshot.GPUUtilization = status.Runtime.Hardware.GPUs[0].Utilization
+		if len(status.Runtime.Hardware.GPUs) == 1 {
+			snapshot.GPU = status.Runtime.Hardware.GPUs[0].Name
+		} else {
+			snapshot.GPU = fmt.Sprintf("%d GPUs", len(status.Runtime.Hardware.GPUs))
+		}
+		for _, gpu := range status.Runtime.Hardware.GPUs[1:] {
+			snapshot.GPUUtilization = max(snapshot.GPUUtilization, gpu.Utilization)
+		}
 	} else {
 		snapshot.GPU = "Zero-GPU"
 	}

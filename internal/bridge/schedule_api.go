@@ -252,15 +252,15 @@ func (s *Server) handleScheduleAction(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "schedule not found"})
 			return
 		}
-		if s.activeJobs.Load() >= 4 {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "capacity unavailable"})
-			return
-		}
 		if reason := s.scheduleReadiness(item.Job); reason != "" {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": reason})
 			return
 		}
-		_, job, err := s.schedules.claim(id, time.Now().UTC(), true)
+		_, job, err := s.claimSchedule(id, time.Now().UTC(), true)
+		if errors.Is(err, errScheduleCapacity) {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "capacity unavailable"})
+			return
+		}
 		if err != nil {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 			return

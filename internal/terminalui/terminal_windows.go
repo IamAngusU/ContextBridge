@@ -18,11 +18,32 @@ var (
 	getConsoleWindow = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetConsoleWindow")
 	setWindowPos     = windows.NewLazySystemDLL("user32.dll").NewProc("SetWindowPos")
 	writeConsoleRow  = windows.NewLazySystemDLL("kernel32.dll").NewProc("WriteConsoleOutputW")
+	getSelectionInfo = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetConsoleSelectionInfo")
 )
 
 type consoleCell struct {
 	char       uint16
 	attributes uint16
+}
+
+type consoleSelectionInfo struct {
+	flags     uint32
+	anchor    windows.Coord
+	selection windows.SmallRect
+}
+
+// consoleSelectionActive prevents a panel refresh from invalidating text the
+// user is selecting or has selected in a classic Windows console/ConPTY.
+func consoleSelectionActive(_ *os.File) bool {
+	var info consoleSelectionInfo
+	ok, _, _ := getSelectionInfo.Call(uintptr(unsafe.Pointer(&info)))
+	if ok == 0 {
+		return false
+	}
+	const selectionInProgress = 0x0001
+	const selectionNotEmpty = 0x0002
+	const mouseDown = 0x0008
+	return info.flags&(selectionInProgress|selectionNotEmpty|mouseDown) != 0
 }
 
 // Topmost pins a classic console window only for this process's lifetime.

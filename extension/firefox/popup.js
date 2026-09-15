@@ -506,6 +506,7 @@ async function updateCurrentPageAction() {
   $('current-tab-state').textContent = !available
     ? 'Open ChatGPT or Gemini to connect it.'
     : `${tab.title || safeHost(tab.url)} · ${attached ? (binding?.legacy ? 'old chat; open a new empty chat' : binding ? `session ${binding.label || 'reserved'}` : (saved.running ? 'connected' : 'attached, connection stopped')) : (profile ? 'ready' : 'teach this page in Advanced setup')}`;
+  renderSessionAdvisory('session-health', attached ? liveTabState.get(tab?.id) : null);
 }
 
 function filterTabList(tabs, filter, attachedIDs) {
@@ -523,6 +524,39 @@ function tabDisplayState(attached, liveState) {
   if (liveState === 'working') return 'Working';
   if (liveState === 'rate_limited') return 'Cooling down';
   return 'Attached';
+}
+
+function sessionHealthAdvisory(live) {
+  const health = live?.pageHealth || {};
+  const turns = Math.max(Number(health.assistantTurns) || 0, Number(health.userTurns) || 0);
+  if (health.discarded) {
+    return { level: 'warning', text: 'The browser discarded this page. ContextBridge will not resend a job blindly. Show the tab once if a job is waiting, or detach it and attach a fresh chat.' };
+  }
+  if (['timeout', 'error'].includes(health.domStatus)) {
+    return { level: 'warning', text: 'This page is not answering the bounded control scan. ContextBridge keeps the connection alive but will not send blindly. Show the tab once if a job waits; otherwise detach it.' };
+  }
+  if (health.domStatus === 'unavailable') {
+    return { level: 'notice', text: 'The provider controls are not ready yet. A background page may still be loading or asleep; jobs wait instead of guessing.' };
+  }
+  if (Number(health.slowScans) >= 2) {
+    return { level: 'notice', text: `This provider page needed about ${(Number(health.diagnosticMs) / 1000).toFixed(1)}s for repeated control scans. It can still work, but a fresh chat is safer for unrelated new work.` };
+  }
+  if (turns >= 120) {
+    return { level: 'warning', text: `Long conversation: ${turns} provider turns were detected. ContextBridge reads only the newest matching answer and never hides old messages. For unrelated work, detach this page and attach a fresh chat.` };
+  }
+  if (turns >= 60) {
+    return { level: 'notice', text: `Growing conversation: ${turns} provider turns were detected. Existing context remains available, but a fresh chat may respond faster for unrelated work.` };
+  }
+  return null;
+}
+
+function renderSessionAdvisory(id, live) {
+  const element = $(id);
+  const advisory = sessionHealthAdvisory(live);
+  element.hidden = !advisory;
+  element.textContent = advisory?.text || '';
+  if (advisory) element.setAttribute('data-level', advisory.level);
+  else element.removeAttribute('data-level');
 }
 
 async function setAttachedTabIDs(values) {
@@ -563,6 +597,7 @@ function describeSelectedTab() {
     : attached && live?.lastFailure ? `Attached · last job: ${live.lastFailure.code} (${live.lastFailure.reason || 'other'}). Detach at any time.`
     : attached ? `Attached · ${tabDisplayState(true, live?.state)}${live?.currentModel ? ` · ${live.currentModel}` : ''}. Detach at any time.`
       : 'Not attached. Use Attach selected tab explicitly, including its existing conversation if present.';
+  renderSessionAdvisory('tab-session-health', attached ? live : null);
 }
 
 async function loadProfiles(saved) {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"net/http"
@@ -68,6 +69,27 @@ func TestConsoleExitCommandsOnlyCloseTheReadOnlyView(t *testing.T) {
 	for _, command := range []string{"", "status", "restart", "exit now"} {
 		if isConsoleExitCommand(command) {
 			t.Fatalf("unrelated input %q closed the console view", command)
+		}
+	}
+}
+
+func TestConsoleLineEditorPreservesTypedTextAndControlCommands(t *testing.T) {
+	commands := make(chan string, 8)
+	edits := []string{}
+	readConsoleCommands(bufio.NewReader(strings.NewReader("helx\bp\rabc\b\bde\r\f")), commands, func(value string) {
+		edits = append(edits, value)
+	})
+	got := []string{}
+	for command := range commands {
+		got = append(got, command)
+	}
+	if strings.Join(got, "|") != "help|ade|clear" {
+		t.Fatalf("unexpected commands: %#v", got)
+	}
+	joined := strings.Join(edits, "|")
+	for _, want := range []string{"helx", "hel", "help", "abc", "a", "ade"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("line editor lost %q in %#v", want, edits)
 		}
 	}
 }

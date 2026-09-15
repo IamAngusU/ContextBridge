@@ -1,9 +1,11 @@
 package cluster
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestPrepareLocalPayloadCarriesProviderAndSession(t *testing.T) {
@@ -42,6 +44,43 @@ func TestBrowserSessionBindingIsScopedToAuthenticatedProducer(t *testing.T) {
 	}
 	if first["contextbridge_session_key"] != followup["contextbridge_session_key"] {
 		t.Fatal("follow-up turn did not retain its producer-scoped browser session key")
+	}
+}
+
+func TestPrepareLocalPayloadNamespacesRAGTenantByProducer(t *testing.T) {
+	prepare := func(owner, authoritativeTenant, forgedTenant string) string {
+		raw, err := prepareLocalPayload(
+			[]byte(`{"tenant_id":"`+forgedTenant+`","documents":[{"id":"one","text":"hello"}]}`),
+			Requirements{Task: "rag_ingest", Provider: "ollama"},
+			"local-rag-job",
+			owner,
+			authoritativeTenant,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var job map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &job); err != nil {
+			t.Fatal(err)
+		}
+		var tenant string
+		if err := json.Unmarshal(job["tenant_id"], &tenant); err != nil {
+			t.Fatal(err)
+		}
+		return tenant
+	}
+	a := prepare("producer-a", "shared", "forged")
+	if a == "" || a == "shared" || a == "forged" {
+		t.Fatalf("tenant was not replaced with an opaque producer namespace: %q", a)
+	}
+	if again := prepare("producer-a", "shared", "other-forgery"); again != a {
+		t.Fatalf("same producer and tenant were not stable: %q != %q", again, a)
+	}
+	if b := prepare("producer-b", "shared", "forged"); b == a {
+		t.Fatal("different producers received the same RAG tenant partition")
+	}
+	if _, err := prepareLocalPayload([]byte(`{"query":"hello"}`), Requirements{Task: "rag_query", Provider: "ollama"}, "local-rag-job", "producer-a"); err == nil {
+		t.Fatal("cluster RAG job without a tenant was accepted")
 	}
 }
 
@@ -93,7 +132,10 @@ func TestWorkerConsoleLabelsDoNotExposePromptOrAssumeSelectedModel(t *testing.T)
 
 func TestCompactLocalSubmissionDoesNotEchoLargeInput(t *testing.T) {
 	raw := []byte(`{"job":{"id":"job-1","prompt":"private prompt","text":"private text","image_base64":"very-large-input","model":"qwen"},"output":{"mode":"text","text":"answer"},"status":"completed"}`)
-	compact := compactLocalSubmission(raw)
+	compact, err := compactLocalSubmission(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(compact) >= len(raw) || strings.Contains(string(compact), "private prompt") || strings.Contains(string(compact), "very-large-input") {
 		t.Fatalf("large input was echoed in the cluster result: %s", compact)
 	}
@@ -108,5 +150,64 @@ func TestCompactLocalSubmissionDoesNotEchoLargeInput(t *testing.T) {
 	}
 	if err := json.Unmarshal(compact, &submission); err != nil || submission.Job.ID != "job-1" || submission.Job.Model != "qwen" || submission.Output.Text != "answer" {
 		t.Fatalf("useful result metadata was lost: %#v, %v", submission, err)
+	}
+}
+
+func TestCompactLocalSubmissionNeverFallsBackToSensitiveRawInput(t *testing.T) {
+	// Encoding <>& expands the output via json.Marshal's HTML escaping. Before
+	// this regression test, that made the compact form larger and caused the
+	// original secret prompt to be returned.
+	raw := []byte(`{"job":{"prompt":"s"},"output":{"text":"<>&"}}`)
+	compact, err := compactLocalSubmission(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(compact) < len(raw) {
+		t.Fatalf("regression fixture no longer exercises the larger re-marshaled result: raw=%d compact=%d", len(raw), len(compact))
+	}
+	if strings.Contains(string(compact), `"prompt"`) {
+		t.Fatalf("sensitive input leaked after compaction: %s", compact)
+	}
+	var decoded struct {
+		Job    map[string]json.RawMessage `json:"job"`
+		Output struct {
+			Text string `json:"text"`
+		} `json:"output"`
+	}
+	if err := json.Unmarshal(compact, &decoded); err != nil || decoded.Output.Text != "<>&" {
+		t.Fatalf("result was not preserved: %#v, %v", decoded, err)
+	}
+	if _, exists := decoded.Job["prompt"]; exists {
+		t.Fatalf("sensitive prompt field survived compaction: %s", compact)
+	}
+}
+
+func TestCompactLocalSubmissionFailsClosedOnMalformedEnvelope(t *testing.T) {
+	if compact, err := compactLocalSubmission([]byte(`{"job":`)); err == nil || compact != nil {
+		t.Fatalf("malformed local response did not fail closed: %q, %v", compact, err)
+	}
+}
+
+func TestReadLocalSubmissionResponseAcceptsExactLimitAndRejectsOneByteMore(t *testing.T) {
+	exact := bytes.Repeat([]byte{'x'}, int(maximumLocalSubmissionBytes))
+	read, err := readLocalSubmissionResponse(bytes.NewReader(exact))
+	if err != nil || len(read) != len(exact) {
+		t.Fatalf("exact local response boundary was rejected: len=%d err=%v", len(read), err)
+	}
+	if _, err := readLocalSubmissionResponse(bytes.NewReader(append(exact, 'x'))); err == nil {
+		t.Fatal("local response one byte over the boundary was accepted")
+	}
+}
+
+func TestWorkerTruncatePreservesUTF8AtByteBoundary(t *testing.T) {
+	value := "ab😀cd"
+	for _, limit := range []int{3, 4, 5} {
+		got := truncate(value, limit)
+		if !utf8.ValidString(got) || len(got) > limit || got != "ab" {
+			t.Fatalf("truncate(%q, %d) = %q; want valid byte-bounded UTF-8", value, limit, got)
+		}
+	}
+	if got := truncate(value, 6); got != "ab😀" {
+		t.Fatalf("truncate at full rune boundary = %q", got)
 	}
 }

@@ -11,9 +11,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -33,6 +35,15 @@ type Release struct {
 
 type Progress func(message string, received, total int64)
 
+const (
+	maximumRuntimeArchiveBytes   int64 = 4 << 30
+	maximumRuntimeExtractedBytes int64 = 8 << 30
+	maximumRuntimeEntryBytes     int64 = 4 << 30
+	maximumRuntimeArchiveEntries       = 20000
+)
+
+var safeReleaseTagPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$`)
+
 func Install(ctx context.Context, directory string, progress Progress) (string, error) {
 	if progress == nil {
 		progress = func(string, int64, int64) {}
@@ -48,6 +59,15 @@ func Install(ctx context.Context, directory string, progress Progress) (string, 
 	if !strings.HasPrefix(asset.Digest, "sha256:") {
 		return "", fmt.Errorf("official release asset %s has no SHA256 digest", asset.Name)
 	}
+	if !safeReleaseTagPattern.MatchString(release.Tag) || strings.Contains(release.Tag, "..") {
+		return "", fmt.Errorf("official release returned an unsafe tag")
+	}
+	if asset.Name == "" || asset.Name != filepath.Base(asset.Name) || asset.Size <= 0 || asset.Size > maximumRuntimeArchiveBytes {
+		return "", fmt.Errorf("official release asset metadata is invalid or exceeds the %d GiB archive limit", maximumRuntimeArchiveBytes>>30)
+	}
+	if !secureDownloadURL(asset.URL) {
+		return "", fmt.Errorf("official release asset URL must use HTTPS")
+	}
 	if err := os.MkdirAll(directory, 0700); err != nil {
 		return "", err
 	}
@@ -61,6 +81,12 @@ func Install(ctx context.Context, directory string, progress Progress) (string, 
 	if err := os.MkdirAll(temporary, 0700); err != nil {
 		return "", err
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.RemoveAll(temporary)
+		}
+	}()
 	if strings.HasSuffix(asset.Name, ".zip") {
 		err = extractZip(archive, temporary)
 	} else {
@@ -80,6 +106,7 @@ func Install(ctx context.Context, directory string, progress Progress) (string, 
 	if err := os.Rename(temporary, versionDir); err != nil {
 		return "", err
 	}
+	committed = true
 	_ = os.Remove(archive)
 	final, err := findServer(versionDir)
 	if err != nil {
@@ -158,14 +185,32 @@ func selectAsset(assets []Asset) (Asset, error) {
 }
 
 func fetch(ctx context.Context, asset Asset, target string, progress Progress) error {
+	if asset.Size <= 0 || asset.Size > maximumRuntimeArchiveBytes {
+		return fmt.Errorf("runtime archive size must be between 1 byte and %d GiB", maximumRuntimeArchiveBytes>>30)
+	}
+	if !secureDownloadURL(asset.URL) {
+		return fmt.Errorf("runtime download URL must use HTTPS")
+	}
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, asset.URL, nil)
-	resp, err := (&http.Client{Timeout: 0}).Do(req)
+	client := &http.Client{Timeout: 0, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			return fmt.Errorf("too many runtime download redirects")
+		}
+		if !secureDownloadURL(req.URL.String()) {
+			return fmt.Errorf("runtime download redirect must use HTTPS")
+		}
+		return nil
+	}}
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("runtime download returned %s", resp.Status)
+	}
+	if resp.ContentLength > 0 && resp.ContentLength != asset.Size {
+		return fmt.Errorf("runtime download size differs from release metadata")
 	}
 	file, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
@@ -179,6 +224,10 @@ func fetch(ctx context.Context, asset Asset, target string, progress Progress) e
 	for {
 		n, readErr := resp.Body.Read(buffer)
 		if n > 0 {
+			if int64(n) > asset.Size-received || int64(n) > maximumRuntimeArchiveBytes-received {
+				file.Close()
+				return fmt.Errorf("runtime download exceeded its declared or configured size")
+			}
 			if _, err := writer.Write(buffer[:n]); err != nil {
 				file.Close()
 				return err
@@ -200,6 +249,9 @@ func fetch(ctx context.Context, asset Asset, target string, progress Progress) e
 	if err := file.Close(); err != nil {
 		return err
 	}
+	if received != asset.Size {
+		return fmt.Errorf("runtime download size differs from release metadata")
+	}
 	actual := hex.EncodeToString(hash.Sum(nil))
 	expected := strings.TrimPrefix(asset.Digest, "sha256:")
 	if !strings.EqualFold(actual, expected) {
@@ -215,6 +267,11 @@ func extractZip(path, target string) error {
 		return err
 	}
 	defer reader.Close()
+	if len(reader.File) > maximumRuntimeArchiveEntries {
+		return fmt.Errorf("runtime archive contains more than %d entries", maximumRuntimeArchiveEntries)
+	}
+	var extracted int64
+	seen := map[string]struct{}{}
 	for _, item := range reader.File {
 		path, ok := safeArchivePath(target, item.Name)
 		if !ok {
@@ -226,6 +283,18 @@ func extractZip(path, target string) error {
 			}
 			continue
 		}
+		if item.FileInfo().Mode()&os.ModeType != 0 {
+			return fmt.Errorf("unsupported special entry in runtime archive: %s", item.Name)
+		}
+		entrySize := int64(item.UncompressedSize64)
+		if entrySize < 0 || entrySize > maximumRuntimeEntryBytes || entrySize > maximumRuntimeExtractedBytes-extracted {
+			return fmt.Errorf("runtime archive exceeds extraction limits")
+		}
+		key := strings.ToLower(filepath.Clean(path))
+		if _, duplicate := seen[key]; duplicate {
+			return fmt.Errorf("duplicate path in runtime archive: %s", item.Name)
+		}
+		seen[key] = struct{}{}
 		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 			return err
 		}
@@ -238,12 +307,18 @@ func extractZip(path, target string) error {
 			source.Close()
 			return err
 		}
-		_, copyErr := io.Copy(destination, source)
+		written, copyErr := io.CopyN(destination, source, entrySize+1)
 		source.Close()
 		destination.Close()
 		if copyErr != nil {
-			return copyErr
+			if copyErr != io.EOF {
+				return copyErr
+			}
 		}
+		if written != entrySize {
+			return fmt.Errorf("runtime archive entry size mismatch: %s", item.Name)
+		}
+		extracted += written
 	}
 	return nil
 }
@@ -260,6 +335,9 @@ func extractTarGz(path, target string) error {
 	}
 	defer gzipReader.Close()
 	reader := tar.NewReader(gzipReader)
+	entries := 0
+	var extracted int64
+	seen := map[string]struct{}{}
 	for {
 		header, err := reader.Next()
 		if err == io.EOF {
@@ -267,6 +345,10 @@ func extractTarGz(path, target string) error {
 		}
 		if err != nil {
 			return err
+		}
+		entries++
+		if entries > maximumRuntimeArchiveEntries {
+			return fmt.Errorf("runtime archive contains more than %d entries", maximumRuntimeArchiveEntries)
 		}
 		path, ok := safeArchivePath(target, header.Name)
 		if !ok {
@@ -278,6 +360,14 @@ func extractTarGz(path, target string) error {
 				return err
 			}
 		case tar.TypeReg:
+			if header.Size < 0 || header.Size > maximumRuntimeEntryBytes || header.Size > maximumRuntimeExtractedBytes-extracted {
+				return fmt.Errorf("runtime archive exceeds extraction limits")
+			}
+			key := strings.ToLower(filepath.Clean(path))
+			if _, duplicate := seen[key]; duplicate {
+				return fmt.Errorf("duplicate path in runtime archive: %s", header.Name)
+			}
+			seen[key] = struct{}{}
 			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 				return err
 			}
@@ -285,14 +375,23 @@ func extractTarGz(path, target string) error {
 			if err != nil {
 				return err
 			}
-			_, copyErr := io.Copy(destination, reader)
+			written, copyErr := io.CopyN(destination, reader, header.Size+1)
 			destination.Close()
-			if copyErr != nil {
+			if copyErr != nil && copyErr != io.EOF {
 				return copyErr
 			}
+			if written != header.Size {
+				return fmt.Errorf("runtime archive entry size mismatch: %s", header.Name)
+			}
+			extracted += written
 		}
 	}
 	return nil
+}
+
+func secureDownloadURL(raw string) bool {
+	parsed, err := url.Parse(raw)
+	return err == nil && strings.EqualFold(parsed.Scheme, "https") && parsed.Host != "" && parsed.User == nil
 }
 
 func safeArchivePath(root, name string) (string, bool) {

@@ -77,17 +77,11 @@ func clusterChatCommand(args []string) error {
 	}
 	var imageBase64, imageMediaType string
 	if *attachImage != "" {
-		raw, err := os.ReadFile(*attachImage)
+		raw, mediaType, err := readChatImage(*attachImage)
 		if err != nil {
-			return fmt.Errorf("read attached image: %w", err)
+			return err
 		}
-		if len(raw) == 0 || len(raw) > 8<<20 {
-			return errors.New("--attach-image must be a non-empty file no larger than 8 MiB")
-		}
-		imageMediaType = http.DetectContentType(raw)
-		if imageMediaType != "image/png" && imageMediaType != "image/jpeg" && imageMediaType != "image/webp" && imageMediaType != "image/gif" {
-			return errors.New("--attach-image must be a PNG, JPEG, WebP, or GIF file")
-		}
+		imageMediaType = mediaType
 		imageBase64 = base64.StdEncoding.EncodeToString(raw)
 	}
 	cfg, err := config.Load(*path)
@@ -143,6 +137,21 @@ func clusterChatCommand(args []string) error {
 		}
 	}
 	return scanner.Err()
+}
+
+func readChatImage(path string) ([]byte, string, error) {
+	raw, err := readRegularFileBounded(path, 8<<20)
+	if err != nil {
+		return nil, "", fmt.Errorf("read attached image: %w", err)
+	}
+	if len(raw) == 0 {
+		return nil, "", errors.New("--attach-image must be a non-empty file no larger than 8 MiB")
+	}
+	mediaType := http.DetectContentType(raw)
+	if mediaType != "image/png" && mediaType != "image/jpeg" && mediaType != "image/webp" && mediaType != "image/gif" {
+		return nil, "", errors.New("--attach-image must be a PNG, JPEG, WebP, or GIF file")
+	}
+	return raw, mediaType, nil
 }
 
 func (s *chatState) command(line string) (bool, string) {
@@ -348,17 +357,25 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 		MaxAttempts:  1,
 	}
 	shared := ""
+	encryptionContext := cluster.EncryptionContext{}
 	if s.e2ee {
 		var reservation cluster.AssignmentResponse
-		if err := clusterPOST(ctx, s.relayURL+"/v1/cluster/assign", s.token, requirements, &reservation); err != nil {
+		assignmentRequest := cluster.AssignmentRequest{TenantID: input.TenantID, Requirements: requirements}
+		if err := clusterPOST(ctx, s.relayURL+"/v1/cluster/assign", s.token, assignmentRequest, &reservation); err != nil {
 			return fmt.Errorf("reserve E2EE worker: %w", err)
 		}
-		envelope, sharedKey, err := cluster.SealFor(reservation.Assignment.PublicKey, payload, []byte("job:"+reservation.Assignment.JobID+":"+reservation.Assignment.NodeID))
+		encryptionContext, err = cluster.ValidateAssignmentResponse(assignmentRequest, reservation, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		envelope, sharedKey, err := cluster.SealFor(reservation.Assignment.PublicKey, payload, cluster.JobAAD(encryptionContext))
 		if err != nil {
 			return err
 		}
 		shared = sharedKey
 		input.ID = reservation.Assignment.JobID
+		input.TenantID = reservation.Assignment.TenantID
+		input.Requirements = reservation.Assignment.Requirements
 		input.Payload = nil
 		input.Sealed = envelope
 		input.AssignmentID = reservation.Assignment.ID
@@ -367,6 +384,11 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 	var job cluster.Job
 	if err := clusterPOST(ctx, s.relayURL+"/v1/cluster/jobs?compact=1", s.token, input, &job); err != nil {
 		return err
+	}
+	if s.e2ee {
+		if err := cluster.ValidateEncryptedJobContext(encryptionContext, job); err != nil {
+			return err
+		}
 	}
 	spinner := newChatSpinner("Queued · waiting for a worker")
 	if s.e2ee {
@@ -385,6 +407,11 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 		}
 		if err := clusterGET(ctx, s.relayURL+"/v1/cluster/jobs/"+url.PathEscape(job.ID)+"?compact=1", s.token, &job); err != nil {
 			return err
+		}
+		if s.e2ee {
+			if err := cluster.ValidateEncryptedJobContext(encryptionContext, job); err != nil {
+				return err
+			}
 		}
 		if !s.e2ee && job.Progress != nil && job.Progress.Sequence > lastSequence {
 			spinner.update(job.Progress.Phase, job.Progress.Detail, job.Progress.Percent)
@@ -417,7 +444,7 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 				if job.SealedResult == nil {
 					return errors.New("worker returned no encrypted result")
 				}
-				rawResult, err = cluster.OpenResponse(shared, job.SealedResult, []byte("result:"+job.ID+":"+job.AssignedNode))
+				rawResult, err = cluster.OpenResponse(shared, job.SealedResult, cluster.ResultAAD(encryptionContext))
 				if err != nil {
 					return fmt.Errorf("decrypt result: %w", err)
 				}

@@ -97,6 +97,12 @@ assert.equal(await context.scanTargetTabID(), 31, 'an explicitly selected AI tab
 assert.equal(context.tabDisplayState(true, 'working'), 'Working');
 assert.equal(context.tabDisplayState(true, 'rate_limited'), 'Cooling down');
 assert.equal(context.tabDisplayState(false, 'working'), 'Available');
+assert.equal(context.sessionHealthAdvisory({ pageHealth: { domStatus: 'ready', assistantTurns: 59 } }), null);
+assert.match(context.sessionHealthAdvisory({ pageHealth: { domStatus: 'ready', assistantTurns: 60 } }).text, /Growing conversation: 60/);
+assert.match(context.sessionHealthAdvisory({ pageHealth: { domStatus: 'ready', assistantTurns: 120 } }).text, /Long conversation: 120/);
+assert.match(context.sessionHealthAdvisory({ pageHealth: { domStatus: 'ready', slowScans: 2, diagnosticMs: 2800 } }).text, /2\.8s/);
+assert.match(context.sessionHealthAdvisory({ pageHealth: { domStatus: 'timeout' } }).text, /not answering/);
+assert.match(context.sessionHealthAdvisory({ pageHealth: { domStatus: 'ready', discarded: true } }).text, /discarded/);
 assert.equal(context.permissionPattern('http://127.0.0.1:32145'), 'http://127.0.0.1/*');
 assert.deepEqual(Array.from(context.mediaOriginsFor([{ url: 'https://gemini.google.com/app' }])), ['https://contribution.usercontent.google.com/*']);
 context.updateActions(null, true);

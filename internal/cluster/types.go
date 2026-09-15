@@ -5,7 +5,25 @@ import (
 	"time"
 )
 
-const ProtocolVersion = 1
+const ProtocolVersion = 2
+
+// MaximumWorkerConcurrency is the protocol-level upper bound for slots a
+// worker may advertise. Local configuration already rejects larger values;
+// the relay must apply the same bound to untrusted hello and heartbeat frames.
+const MaximumWorkerConcurrency = 64
+
+// MaximumJobPayloadBytes is the largest cleartext job payload supported by
+// every relay/worker transport path. Encryption adds wire overhead but must not
+// reduce this usable budget.
+const MaximumJobPayloadBytes int64 = 12 << 20
+
+// MaximumJobResultBytes bounds the cleartext JSON result accepted from a
+// worker. MaximumJobResultWireBytes additionally covers AES-GCM and RawURL
+// base64 expansion for an encrypted result plus its small protocol envelope.
+// Keep client response readers and the relay websocket read limit aligned with
+// these constants.
+const MaximumJobResultBytes int64 = 24 << 20
+const MaximumJobResultWireBytes int64 = ((MaximumJobResultBytes+16)*4+2)/3 + (64 << 10)
 
 const (
 	JobReserved  = "reserved"
@@ -109,17 +127,21 @@ type Node struct {
 }
 
 type Usage struct {
-	InputTokens        uint64  `json:"input_tokens,omitempty"`
-	OutputTokens       uint64  `json:"output_tokens,omitempty"`
-	TotalTokens        uint64  `json:"total_tokens,omitempty"`
-	ComputeMS          uint64  `json:"compute_ms,omitempty"`
-	QueueMS            uint64  `json:"queue_ms,omitempty"`
-	EstimatedCostUSD   float64 `json:"estimated_cost_usd,omitempty"`
-	EquivalentCostUSD  float64 `json:"equivalent_cloud_cost_usd,omitempty"`
-	SavedCostUSD       float64 `json:"saved_cost_usd,omitempty"`
-	PeakVRAMBytes      uint64  `json:"peak_vram_bytes,omitempty"`
-	PeakRAMBytes       uint64  `json:"peak_ram_bytes,omitempty"`
-	PeakGPUUtilization int     `json:"peak_gpu_utilization_percent,omitempty"`
+	InputTokens       uint64  `json:"input_tokens,omitempty"`
+	OutputTokens      uint64  `json:"output_tokens,omitempty"`
+	TotalTokens       uint64  `json:"total_tokens,omitempty"`
+	ComputeMS         uint64  `json:"compute_ms,omitempty"`
+	QueueMS           uint64  `json:"queue_ms,omitempty"`
+	EstimatedCostUSD  float64 `json:"estimated_cost_usd,omitempty"`
+	EquivalentCostUSD float64 `json:"equivalent_cloud_cost_usd,omitempty"`
+	SavedCostUSD      float64 `json:"saved_cost_usd,omitempty"`
+	// Peak resource values are attributable measurements reported by the
+	// execution engine. Node-wide hardware snapshots must not populate them or
+	// set ResourceScope to "job".
+	ResourceScope      string `json:"resource_scope,omitempty"`
+	PeakVRAMBytes      uint64 `json:"peak_vram_bytes,omitempty"`
+	PeakRAMBytes       uint64 `json:"peak_ram_bytes,omitempty"`
+	PeakGPUUtilization int    `json:"peak_gpu_utilization_percent,omitempty"`
 }
 
 type JobProgress struct {
@@ -188,6 +210,9 @@ type Assignment struct {
 	NodeID       string       `json:"node_id"`
 	NodeName     string       `json:"node_name"`
 	PublicKey    string       `json:"public_key"`
+	Attempt      int          `json:"attempt"`
+	OwnerSubject string       `json:"owner_subject"`
+	TenantID     string       `json:"tenant_id,omitempty"`
 	ExpiresAt    time.Time    `json:"expires_at"`
 	Requirements Requirements `json:"requirements"`
 }
@@ -252,6 +277,7 @@ type WireMessage struct {
 	Capabilities *Capabilities   `json:"capabilities,omitempty"`
 	Job          *Job            `json:"job,omitempty"`
 	JobID        string          `json:"job_id,omitempty"`
+	Attempt      int             `json:"attempt,omitempty"`
 	Result       json.RawMessage `json:"result,omitempty"`
 	SealedResult *SealedEnvelope `json:"sealed_result,omitempty"`
 	Usage        Usage           `json:"usage,omitempty"`

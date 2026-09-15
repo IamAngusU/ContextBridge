@@ -274,21 +274,36 @@ func (w *Worker) connect(ctx context.Context, report WorkerReporter) error {
 		return err
 	}
 	conn.SetReadLimit(20 << 20)
-	defer conn.Close(websocket.StatusNormalClosure, "worker stopping")
+	connectionCtx, cancelConnection := context.WithCancel(ctx)
+	var connectionWG sync.WaitGroup
+	defer func() {
+		cancelConnection()
+		_ = conn.Close(websocket.StatusNormalClosure, "worker connection ended")
+		connectionWG.Wait()
+	}()
 	var writeMu sync.Mutex
+	var activeMu sync.Mutex
+	activeJobs := map[string]context.CancelFunc{}
+	// A cancellation can win the relay write race immediately before the
+	// corresponding job frame. Remember a small, bounded set so that frame is
+	// acknowledged but never executed. The relay is authenticated, nevertheless
+	// keeping this bounded prevents a broken peer from growing memory forever.
+	pendingCancels := map[string]time.Time{}
+	const maximumPendingCancels = 256
 	write := func(message WireMessage) error {
 		writeMu.Lock()
 		defer writeMu.Unlock()
 		message.Version = ProtocolVersion
-		return conn.Write(ctx, websocket.MessageText, mustJSON(message))
+		return conn.Write(connectionCtx, websocket.MessageText, mustJSON(message))
 	}
 	if err := write(WireMessage{Type: "hello", Node: &node}); err != nil {
 		return err
 	}
 	report(WorkerEvent{Kind: WorkerConnected, NodeID: node.ID, NodeName: node.Name, Slots: capabilities.MaxConcurrent, Capabilities: capabilities})
-	heartbeatCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	heartbeatCtx := connectionCtx
+	connectionWG.Add(1)
 	go func() {
+		defer connectionWG.Done()
 		ticker := time.NewTicker(w.cfg.HeartbeatEvery)
 		defer ticker.Stop()
 		for {
@@ -304,24 +319,76 @@ func (w *Worker) connect(ctx context.Context, report WorkerReporter) error {
 		}
 	}()
 	for {
-		_, raw, err := conn.Read(ctx)
+		_, raw, err := conn.Read(connectionCtx)
 		if err != nil {
 			return err
 		}
 		var message WireMessage
-		if json.Unmarshal(raw, &message) != nil || message.Type != "job" || message.Job == nil {
+		if json.Unmarshal(raw, &message) != nil || message.Version != ProtocolVersion {
+			continue
+		}
+		if message.Type == "cancel" {
+			activeMu.Lock()
+			cancelJob := activeJobs[message.JobID]
+			if cancelJob == nil && message.JobID != "" {
+				now := time.Now()
+				for jobID, recordedAt := range pendingCancels {
+					if now.Sub(recordedAt) > time.Minute {
+						delete(pendingCancels, jobID)
+					}
+				}
+				if len(pendingCancels) < maximumPendingCancels {
+					pendingCancels[message.JobID] = now
+				}
+			}
+			activeMu.Unlock()
+			if cancelJob != nil {
+				cancelJob()
+			}
+			continue
+		}
+		if message.Type != "job" || message.Job == nil {
 			continue
 		}
 		job := *message.Job
-		w.sem <- struct{}{}
+		select {
+		case w.sem <- struct{}{}:
+		default:
+			_ = write(WireMessage{Type: "result", JobID: job.ID, Attempt: job.Attempt, Error: "worker capacity exceeded"})
+			continue
+		}
+		jobCtx, cancelJob := context.WithCancel(connectionCtx)
+		activeMu.Lock()
+		_, cancelledBeforeDispatch := pendingCancels[job.ID]
+		delete(pendingCancels, job.ID)
+		if _, duplicate := activeJobs[job.ID]; duplicate {
+			activeMu.Unlock()
+			cancelJob()
+			<-w.sem
+			continue
+		}
+		activeJobs[job.ID] = cancelJob
+		activeMu.Unlock()
+		if cancelledBeforeDispatch {
+			cancelJob()
+		}
 		w.changeRunning(1)
-		go func() {
-			defer func() { <-w.sem; w.changeRunning(-1) }()
-			_ = write(WireMessage{Type: "started", JobID: job.ID})
+		connectionWG.Add(1)
+		go func(job Job, jobCtx context.Context, cancelJob context.CancelFunc) {
+			defer connectionWG.Done()
+			defer func() {
+				cancelJob()
+				activeMu.Lock()
+				delete(activeJobs, job.ID)
+				activeMu.Unlock()
+				<-w.sem
+				w.changeRunning(-1)
+			}()
+			_ = write(WireMessage{Type: "started", JobID: job.ID, Attempt: job.Attempt})
 			provider, profile, model, reasoning := jobRequestLabels(job)
 			report(WorkerEvent{Kind: WorkerJobStarted, NodeName: node.Name, JobID: job.ID, Task: job.Requirements.Task, Provider: provider, Profile: profile, Model: model, Reasoning: reasoning})
-			result, sealed, usage, runErr := w.execute(ctx, job, func(progress JobProgress) {
-				_ = write(WireMessage{Type: "progress", JobID: job.ID, Progress: &progress})
+			result, sealed, usage, runErr := w.execute(jobCtx, job, func(progress JobProgress) {
+				_ = write(WireMessage{Type: "progress", JobID: job.ID, Attempt: job.Attempt, Progress: &progress})
 				report(WorkerEvent{Kind: WorkerJobProgress, NodeName: node.Name, JobID: job.ID, Task: job.Requirements.Task, Phase: progress.Phase, Percent: progress.Percent, Detail: progress.Detail, Sequence: progress.Sequence, Text: progress.Text})
 			})
 			errorText := ""
@@ -332,8 +399,8 @@ func (w *Worker) connect(ctx context.Context, report WorkerReporter) error {
 				reportedProvider, reportedModel, reportedReasoning := localResultSelection(result)
 				report(WorkerEvent{Kind: WorkerJobCompleted, NodeName: node.Name, JobID: job.ID, Task: job.Requirements.Task, ComputeMS: usage.ComputeMS, ReportedProvider: reportedProvider, ReportedModel: reportedModel, ReportedReasoning: reportedReasoning})
 			}
-			_ = write(WireMessage{Type: "result", JobID: job.ID, Result: result, SealedResult: sealed, Usage: usage, Error: errorText})
-		}()
+			_ = write(WireMessage{Type: "result", JobID: job.ID, Attempt: job.Attempt, Result: result, SealedResult: sealed, Usage: usage, Error: errorText})
+		}(job, jobCtx, cancelJob)
 	}
 }
 
@@ -382,9 +449,14 @@ func (w *Worker) execute(ctx context.Context, job Job, emitProgress func(JobProg
 	started := time.Now()
 	payload := []byte(job.Payload)
 	shared := ""
+	encryptionContext := EncryptionContext{}
 	if job.SealedPayload != nil {
 		var err error
-		payload, shared, err = OpenWith(w.identity.PrivateKey, job.SealedPayload, jobAAD(job.ID, w.identity.NodeID))
+		encryptionContext, err = job.EncryptionContextForNode(w.identity.NodeID)
+		if err != nil {
+			return nil, nil, Usage{}, fmt.Errorf("validate encrypted job context: %w", err)
+		}
+		payload, shared, err = OpenWith(w.identity.PrivateKey, job.SealedPayload, JobAAD(encryptionContext))
 		if err != nil {
 			return nil, nil, Usage{}, fmt.Errorf("decrypt job: %w", err)
 		}
@@ -397,23 +469,10 @@ func (w *Worker) execute(ctx context.Context, job Job, emitProgress func(JobProg
 		return nil, nil, Usage{}, err
 	}
 	localJobID := localExecutionID(job)
-	payload, err = prepareLocalPayload(payload, requirements, localJobID, job.OwnerSubject)
+	payload, err = prepareLocalPayload(payload, requirements, localJobID, job.OwnerSubject, job.TenantID)
 	if err != nil {
 		return nil, nil, Usage{}, err
 	}
-	stopResourceMonitor := w.monitorResources(ctx)
-	defer func() {
-		peaks := stopResourceMonitor()
-		if peaks.PeakVRAMBytes > usage.PeakVRAMBytes {
-			usage.PeakVRAMBytes = peaks.PeakVRAMBytes
-		}
-		if peaks.PeakRAMBytes > usage.PeakRAMBytes {
-			usage.PeakRAMBytes = peaks.PeakRAMBytes
-		}
-		if peaks.PeakGPUUtilization > usage.PeakGPUUtilization {
-			usage.PeakGPUUtilization = peaks.PeakGPUUtilization
-		}
-	}()
 	progressCtx, stopProgress := context.WithCancel(ctx)
 	var progressWG sync.WaitGroup
 	if emitProgress != nil && job.SealedPayload == nil && strings.EqualFold(requirements.Provider, "browser") {
@@ -425,18 +484,23 @@ func (w *Worker) execute(ctx context.Context, job Job, emitProgress func(JobProg
 	}
 	defer progressWG.Wait()
 	defer stopProgress()
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(w.cfg.LocalURL, "/")+"/v1/jobs", bytes.NewReader(payload))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(w.cfg.LocalURL, "/")+"/v1/jobs?compact=1", bytes.NewReader(payload))
 	if err != nil {
 		return nil, nil, Usage{}, err
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer "+w.cfg.LocalToken)
+	// Bind the worker-approved task to the local execution boundary. The local
+	// service rejects a payload route whose authoritative task differs, so a
+	// producer cannot declare an allowed task while selecting a more privileged
+	// local route inside the opaque payload.
+	request.Header.Set("X-ContextBridge-Expected-Task", requirements.Task)
 	response, err := w.client.Do(request)
 	if err != nil {
 		return nil, nil, Usage{}, err
 	}
 	defer response.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(response.Body, 24<<20))
+	raw, err := readLocalSubmissionResponse(response.Body)
 	if err != nil {
 		return nil, nil, Usage{}, err
 	}
@@ -452,49 +516,64 @@ func (w *Worker) execute(ctx context.Context, job Job, emitProgress func(JobProg
 	// large or sensitive request fields (especially image_base64) back across
 	// the network a second time merely because the local bridge echoes its Job
 	// in the Submission envelope.
-	raw = compactLocalSubmission(raw)
-	for _, gpu := range w.hardwareSnapshot(ctx, 2*time.Second).GPUs {
-		used := uint64(0)
-		if gpu.MemoryTotal >= gpu.MemoryFree {
-			used = gpu.MemoryTotal - gpu.MemoryFree
-		}
-		if used > usage.PeakVRAMBytes {
-			usage.PeakVRAMBytes = used
-		}
+	raw, err = compactLocalSubmission(raw)
+	if err != nil {
+		// Fail closed: a successful local response must never cause the original
+		// prompt, documents, or image bytes to be echoed back to the relay merely
+		// because response compaction failed.
+		return nil, nil, usage, fmt.Errorf("compact local result: %w", err)
 	}
+	// Do not fill per-job resource fields from node-wide RAM, VRAM, or GPU
+	// utilization snapshots. Other processes and concurrent jobs share those
+	// counters, so attributing their totals to this job would be misleading.
+	// Peak resource fields remain available for engine-reported, attributable
+	// measurements.
 	if shared != "" {
-		sealed, sealErr := SealResponse(shared, raw, resultAAD(job.ID, w.identity.NodeID))
+		sealed, sealErr := SealResponse(shared, raw, ResultAAD(encryptionContext))
 		return nil, sealed, usage, sealErr
 	}
 	return json.RawMessage(raw), nil, usage, nil
 }
 
-func compactLocalSubmission(raw []byte) []byte {
+const maximumLocalSubmissionBytes int64 = MaximumJobResultBytes
+
+func readLocalSubmissionResponse(reader io.Reader) ([]byte, error) {
+	raw, err := io.ReadAll(io.LimitReader(reader, maximumLocalSubmissionBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(raw)) > maximumLocalSubmissionBytes {
+		return nil, fmt.Errorf("local bridge response exceeds %d MiB", maximumLocalSubmissionBytes>>20)
+	}
+	return raw, nil
+}
+
+func compactLocalSubmission(raw []byte) ([]byte, error) {
 	var envelope map[string]json.RawMessage
-	if json.Unmarshal(raw, &envelope) != nil {
-		return raw
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return nil, err
 	}
 	jobRaw, ok := envelope["job"]
 	if !ok {
-		return raw
+		return raw, nil
 	}
 	var job map[string]json.RawMessage
-	if json.Unmarshal(jobRaw, &job) != nil {
-		return raw
+	if err := json.Unmarshal(jobRaw, &job); err != nil {
+		return nil, err
 	}
 	for _, field := range []string{"prompt", "text", "texts", "documents", "query", "image_base64"} {
 		delete(job, field)
 	}
 	compactJob, err := json.Marshal(job)
 	if err != nil {
-		return raw
+		return nil, err
 	}
 	envelope["job"] = compactJob
 	compact, err := json.Marshal(envelope)
-	if err != nil || len(compact) >= len(raw) {
-		return raw
+	if err != nil {
+		return nil, err
 	}
-	return compact
+	return compact, nil
 }
 
 // applyPolicy is the worker-side boundary. A relay may suggest a job, but it
@@ -529,56 +608,6 @@ func (w *Worker) applyPolicy(requirements Requirements) (Requirements, error) {
 	return requirements, nil
 }
 
-func (w *Worker) monitorResources(parent context.Context) func() Usage {
-	ctx, cancel := context.WithCancel(parent)
-	done := make(chan Usage, 1)
-	go func() {
-		peaks := Usage{}
-		sample := func() {
-			hardware := w.hardwareSnapshot(ctx, 1500*time.Millisecond)
-			if hardware.MemoryTotal >= hardware.MemoryAvailable {
-				used := hardware.MemoryTotal - hardware.MemoryAvailable
-				if used > peaks.PeakRAMBytes {
-					peaks.PeakRAMBytes = used
-				}
-			}
-			for _, gpu := range hardware.GPUs {
-				used := uint64(0)
-				if gpu.MemoryTotal >= gpu.MemoryFree {
-					used = gpu.MemoryTotal - gpu.MemoryFree
-				}
-				if used > peaks.PeakVRAMBytes {
-					peaks.PeakVRAMBytes = used
-				}
-				if gpu.Utilization > peaks.PeakGPUUtilization {
-					peaks.PeakGPUUtilization = gpu.Utilization
-				}
-			}
-		}
-		sample()
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				done <- peaks
-				return
-			case <-ticker.C:
-				sample()
-			}
-		}
-	}()
-	var once sync.Once
-	peaks := Usage{}
-	return func() Usage {
-		once.Do(func() {
-			cancel()
-			peaks = <-done
-		})
-		return peaks
-	}
-}
-
 func prepareLocalPayload(payload []byte, requirements Requirements, localJobID string, owner ...string) ([]byte, error) {
 	provider := strings.TrimSpace(requirements.Provider)
 	var job map[string]json.RawMessage
@@ -588,6 +617,10 @@ func prepareLocalPayload(payload []byte, requirements Requirements, localJobID s
 	if provider != "" {
 		rawProvider, _ := json.Marshal(provider)
 		job["provider"] = rawProvider
+	}
+	if task := strings.TrimSpace(requirements.Task); task != "" {
+		rawTask, _ := json.Marshal(task)
+		job["task"] = rawTask
 	}
 	if model := strings.TrimSpace(requirements.Model); model != "" {
 		rawModel, _ := json.Marshal(model)
@@ -615,6 +648,29 @@ func prepareLocalPayload(payload []byte, requirements Requirements, localJobID s
 		sum := sha256.Sum256([]byte(producer + "\x00" + session))
 		key, _ := json.Marshal(fmt.Sprintf("cb:%x", sum[:]))
 		job["contextbridge_session_key"] = key
+	}
+	if strings.EqualFold(requirements.Task, "rag_ingest") || strings.EqualFold(requirements.Task, "rag_query") {
+		logicalTenant := ""
+		if len(owner) > 1 {
+			logicalTenant = strings.TrimSpace(owner[1])
+		}
+		if logicalTenant == "" {
+			_ = json.Unmarshal(job["tenant_id"], &logicalTenant)
+			logicalTenant = strings.TrimSpace(logicalTenant)
+		}
+		if logicalTenant == "" {
+			return nil, errors.New("cluster RAG jobs require tenant_id")
+		}
+		producer := "local"
+		if len(owner) > 0 && strings.TrimSpace(owner[0]) != "" {
+			producer = strings.TrimSpace(owner[0])
+		}
+		// The local vector store trusts tenant_id as its partition key. Namespace
+		// it with the authenticated producer so two relay clients cannot select
+		// each other's partition by supplying the same public tenant label.
+		sum := sha256.Sum256([]byte(producer + "\x00" + logicalTenant))
+		tenantKey, _ := json.Marshal(fmt.Sprintf("cbt:%x", sum[:]))
+		job["tenant_id"] = tenantKey
 	}
 	return json.Marshal(job)
 }
@@ -797,8 +853,8 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 					if !modelAllowed(model.Name) {
 						continue
 					}
-					vision, embedding := modelFeaturesFromCapabilities(model.Name, "generation", model.Capabilities)
-					if tasks := allowedModelTasks(modelTasks("generation", vision, embedding)); len(tasks) > 0 {
+					tasks, vision, embedding := modelTasksFromCapabilities(model.Name, model.Capabilities)
+					if tasks = allowedModelTasks(tasks); len(tasks) > 0 {
 						capability.Models = append(capability.Models, ModelCapability{Name: model.Name, Provider: provider, Size: model.Size, VRAM: model.VRAM, Loaded: model.Loaded, Vision: vision, Embedding: embedding, Tasks: tasks})
 					}
 				}
@@ -911,14 +967,9 @@ func websocketURL(value string) (string, error) {
 	return parsed.String(), nil
 }
 
-func endpoint(base, path string) string     { return strings.TrimRight(base, "/") + path }
-func jobAAD(jobID, nodeID string) []byte    { return []byte("job:" + jobID + ":" + nodeID) }
-func resultAAD(jobID, nodeID string) []byte { return []byte("result:" + jobID + ":" + nodeID) }
+func endpoint(base, path string) string { return strings.TrimRight(base, "/") + path }
 func truncate(value string, limit int) string {
-	if len(value) <= limit {
-		return value
-	}
-	return value[:limit]
+	return truncateUTF8Bytes(value, limit)
 }
 
 func extractUsage(raw []byte) Usage {
@@ -988,11 +1039,41 @@ func modelFeatures(name, task string) (bool, bool) {
 }
 
 func modelFeaturesFromCapabilities(name, task string, capabilities []string) (bool, bool) {
-	vision, embedding := modelFeatures(name, task)
 	if len(capabilities) == 0 {
-		return vision, embedding
+		return modelFeatures(name, task)
 	}
-	return containsFold(capabilities, "vision"), containsFold(capabilities, "embedding")
+	_, vision, embedding := modelTasksFromCapabilities(name, capabilities)
+	return vision, embedding
+}
+
+// modelTasksFromCapabilities derives schedulable tasks from a runtime's
+// authoritative model capabilities. In particular, an embedding-only model
+// must never inherit generation merely because generation is the common case.
+func modelTasksFromCapabilities(name string, capabilities []string) ([]string, bool, bool) {
+	if len(capabilities) == 0 {
+		vision, embedding := modelFeatures(name, "generation")
+		return modelTasks("generation", vision, embedding), vision, embedding
+	}
+	tasks := make([]string, 0, 3)
+	vision, embedding := false, false
+	appendTask := func(task string) {
+		if !containsFold(tasks, task) {
+			tasks = append(tasks, task)
+		}
+	}
+	for _, capability := range capabilities {
+		switch strings.ToLower(strings.TrimSpace(capability)) {
+		case "text", "completion", "generate", "generation":
+			appendTask("generation")
+		case "vision", "image_understanding", "image-analysis", "ocr":
+			vision = true
+			appendTask("vision")
+		case "embedding", "embeddings", "embed":
+			embedding = true
+			appendTask("embedding")
+		}
+	}
+	return tasks, vision, embedding
 }
 
 func modelTasks(task string, vision, embedding bool) []string {

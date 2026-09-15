@@ -2,6 +2,7 @@ package terminalui
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"regexp"
@@ -66,6 +67,47 @@ func TestPanelBannerAndEventHierarchy(t *testing.T) {
 	}
 }
 
+func TestNarrowPanelStartsConsistentlyWithBannerMetadata(t *testing.T) {
+	var output bytes.Buffer
+	session := &Session{out: &output, interactive: true, style: "panel", widthFn: func() int { return 40 }, heightFn: func() int { return 20 },
+		jobs: map[string]jobState{}, browserSelections: map[int]browserSelection{}, localModels: map[string]localModelSelection{}}
+	session.Banner("v0.narrow", "worker")
+	if !session.panelStarted || session.bannerVersion != "v0.narrow" || session.bannerComponents != "worker" {
+		t.Fatalf("narrow panel mixed classic and panel startup: started=%t version=%q components=%q output=%q", session.panelStarted, session.bannerVersion, session.bannerComponents, output.String())
+	}
+	if strings.Contains(output.String(), "\n  ContextBridge  v0.narrow\n") {
+		t.Fatalf("narrow panel emitted a classic banner before the panel: %q", output.String())
+	}
+}
+
+func TestVeryShortPanelNeverExceedsViewportAndKeepsCommand(t *testing.T) {
+	var output bytes.Buffer
+	session := &Session{out: &output, interactive: true, style: "panel", widthFn: func() int { return 80 }, heightFn: func() int { return 6 },
+		jobs: map[string]jobState{}, browserSelections: map[int]browserSelection{}, localModels: map[string]localModelSelection{}}
+	session.EnableCommands()
+	session.Banner("v0.short", "console")
+	session.SetCommandInput("models 1")
+	frames := strings.Split(output.String(), "\x1b[H\x1b[2J")
+	latest := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(frames[len(frames)-1], "")
+	rows := strings.Split(strings.TrimSuffix(latest, "\n"), "\n")
+	if len(rows) > 8 {
+		t.Fatalf("short panel rendered %d rows into an eight-row viewport: %q", len(rows), latest)
+	}
+	if !strings.Contains(latest, "+-- STATUS") || !strings.Contains(latest, "+-- COMMAND") || !strings.Contains(latest, "cb › models 1") {
+		t.Fatalf("short panel lost authoritative status or command input: %q", latest)
+	}
+}
+
+func TestMultiGPUSummaryUsesBestSingleDeviceInsteadOfSummingVRAM(t *testing.T) {
+	label := capabilityLabel(cluster.Capabilities{GPUs: []cluster.GPUCapability{
+		{Name: "GPU A", MemoryFree: 3 << 30},
+		{Name: "GPU B", MemoryFree: 5 << 30},
+	}})
+	if !strings.Contains(label, "beste GPU 5.0 GiB VRAM frei") || strings.Contains(label, "8.0 GiB") {
+		t.Fatalf("multi-GPU summary implies cross-device VRAM pooling: %q", label)
+	}
+}
+
 func TestAttachedConsoleOnlyLogsObservedChanges(t *testing.T) {
 	var output bytes.Buffer
 	session := &Session{out: &output, interactive: true, style: "panel", widthFn: func() int { return 90 },
@@ -95,6 +137,9 @@ func TestPanelFallsBackWhenTerminalTooNarrow(t *testing.T) {
 	if strings.Contains(output.String(), "+--") || !strings.Contains(output.String(), "ContextBridge  v0.test") {
 		t.Fatalf("narrow terminal did not use the classic fallback: %q", output.String())
 	}
+	if session.LiveCommandEditor() {
+		t.Fatal("narrow classic fallback would disable terminal echo without an input row")
+	}
 }
 
 func TestPanelDoesNotChangeRedirectedLogShape(t *testing.T) {
@@ -104,6 +149,9 @@ func TestPanelDoesNotChangeRedirectedLogShape(t *testing.T) {
 	session.writeEventLocked("✓", "connected")
 	if !strings.HasPrefix(output.String(), "ContextBridge v0.test · worker\n") || strings.Contains(output.String(), "+--") {
 		t.Fatalf("redirected panel output changed: %q", output.String())
+	}
+	if session.LiveCommandEditor() {
+		t.Fatal("redirected output cannot own a live command editor")
 	}
 }
 
@@ -384,8 +432,8 @@ func TestPanelLiveGroupsResizeAndHistoryStaySeparate(t *testing.T) {
 			t.Fatalf("resized panel row exceeds %d columns: %q", width, row)
 		}
 	}
-	if !strings.Contains(latest[historyIndex:], "[AI TABS]") {
-		t.Fatalf("history lost tab transitions: %s", latest)
+	if !strings.Contains(latest[historyIndex:], "[LOCAL MODELS]") {
+		t.Fatalf("history did not retain the newest transition: %s", latest)
 	}
 }
 
@@ -428,5 +476,132 @@ func TestPanelShowsRelayPoolColorsAndMovingJobCue(t *testing.T) {
 	latest = strings.Split(output.String(), "\x1b[H\x1b[2J")
 	if !strings.Contains(latest[len(latest)-1], ansiCyan+travelBar(session.frame, 16)+ansiReset) || travelBar(0, 16) == travelBar(4, 16) {
 		t.Fatal("working panel has no left-to-right activity cue")
+	}
+}
+
+func TestPanelHistoryIsNewestFirstAndBoxed(t *testing.T) {
+	var output bytes.Buffer
+	session := &Session{out: &output, interactive: true, style: "panel", widthFn: func() int { return 100 }, heightFn: func() int { return 35 },
+		jobs: map[string]jobState{}, browserSelections: map[int]browserSelection{}, localModels: map[string]localModelSelection{}}
+	session.Banner("v0.test", "console")
+	session.nextSection = "TEST"
+	session.writeEventLocked("◇", "older-event")
+	session.nextSection = "TEST"
+	session.writeEventWithDetailsLocked("✓", "newer-event", []string{"newer-detail"})
+	frames := strings.Split(output.String(), "\x1b[H\x1b[2J")
+	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(frames[len(frames)-1], "")
+	history := plain[strings.Index(plain, "+-- HISTORY"):]
+	if strings.Index(history, "newer-event") < 0 || strings.Index(history, "older-event") < 0 || strings.Index(history, "newer-event") > strings.Index(history, "older-event") {
+		t.Fatalf("history is not newest first: %s", history)
+	}
+	if strings.Index(history, "newer-detail") < strings.Index(history, "newer-event") || !strings.Contains(history, "older-event\n  +") {
+		t.Fatalf("history hierarchy or closing ASCII border is missing: %s", history)
+	}
+}
+
+func TestPanelCommandsPreserveInputAndToggleNodeDetails(t *testing.T) {
+	var output bytes.Buffer
+	selected := false
+	session := &Session{out: &output, interactive: true, style: "panel", widthFn: func() int { return 130 }, heightFn: func() int { return 48 },
+		jobs: map[string]jobState{}, browserSelections: map[int]browserSelection{}, localModels: map[string]localModelSelection{},
+		nodeDetails: map[string]nodeDetailVisibility{}, selectionActiveFn: func() bool { return selected }}
+	session.EnableCommands()
+	session.Banner("v0.test", "console")
+	session.SetRelayTarget("https://relay.example.test")
+	session.ObservePool([]PoolNode{{ID: "node_abc123", Name: "rack", Connected: true, Slots: 4,
+		GPUs:   []cluster.GPUCapability{{Name: "RTX A", Utilization: 91, MemoryFree: 2 << 30, MemoryTotal: 8 << 30}},
+		Models: []cluster.ModelCapability{{Name: "vision-model", Provider: "ollama", Loaded: true, Vision: true}}}}, nil)
+	session.SetCommandInput("hel")
+	if !strings.Contains(output.String(), "cb › hel▌") {
+		t.Fatalf("typed command is not rendered persistently: %s", output.String())
+	}
+	beforeSelection := output.Len()
+	selected = true
+	session.SetCommandInput("help")
+	if output.Len() != beforeSelection {
+		t.Fatal("panel redrew while terminal text was selected")
+	}
+	selected = false
+	session.SetCommandInput("help")
+	if session.HandleCommand("gpus 1") || session.HandleCommand("models 1") {
+		t.Fatal("detail commands unexpectedly requested exit")
+	}
+	frames := strings.Split(output.String(), "\x1b[H\x1b[2J")
+	latest := frames[len(frames)-1]
+	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(latest, "")
+	if !strings.Contains(plain, "System-GPU 1 · RTX A · 91%") || !strings.Contains(plain, "Worker-Modell · vision-model · geladen · ollama · vision") {
+		t.Fatalf("per-node GPU/model toggles did not reveal safe details: %s", plain)
+	}
+	if !strings.Contains(latest, ansiRed+"91%"+ansiReset) || !strings.Contains(plain, "+-- COMMAND") {
+		t.Fatalf("detail color or command box missing: %s", latest)
+	}
+	session.nextSection = "TEST"
+	session.writeEventLocked("◇", "clear-me")
+	session.HandleCommand("clear")
+	if len(session.history) != 0 || session.historyTotal != 0 || !strings.Contains(output.String(), "Dienst und Jobs laufen weiter") {
+		t.Fatalf("clear did not limit itself to console history: %#v", session.history)
+	}
+	if !session.HandleCommand("exit") {
+		t.Fatal("exit must close only the console caller")
+	}
+}
+
+func TestForegroundServiceCommandsCannotAccidentallyCloseTheirOwner(t *testing.T) {
+	var output bytes.Buffer
+	session := &Session{out: &output, interactive: true, style: "panel", widthFn: func() int { return 120 }, heightFn: func() int { return 30 },
+		jobs: map[string]jobState{}, browserSelections: map[int]browserSelection{}, localModels: map[string]localModelSelection{}}
+	session.EnableServiceCommands()
+	session.Banner("v0.test", "foreground worker")
+	if !session.LiveCommandEditor() {
+		t.Fatal("foreground panel did not expose its command editor")
+	}
+	if session.HandleCommand("exit") {
+		t.Fatal("exit in a foreground service requested process shutdown")
+	}
+	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(output.String(), "")
+	if !strings.Contains(plain, "Vordergrunddienst bleibt aktiv") || !strings.Contains(plain, "Ctrl+C stoppt ihn") || !strings.Contains(plain, "contextbridge console") {
+		t.Fatalf("foreground exit did not explain the safe lifecycle: %s", plain)
+	}
+	session.EnableCommands()
+	if !session.HandleCommand("exit") {
+		t.Fatal("an attached console must still be able to close its own view")
+	}
+}
+
+func TestMultiGPUCompactStatusUsesEveryDevice(t *testing.T) {
+	capabilities := cluster.Capabilities{GPUs: []cluster.GPUCapability{
+		{Name: "GPU A", Utilization: 0, MemoryFree: 4 << 30},
+		{Name: "GPU B", Utilization: 91, MemoryFree: 6 << 30},
+	}}
+	plainState := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(compactGPUState(capabilities), "")
+	if plainState != "2GPU+" {
+		t.Fatalf("compact multi-GPU state ignored an active device: %q", plainState)
+	}
+	label := capabilityLabel(capabilities)
+	if !strings.Contains(label, "2 GPUs") || !strings.Contains(label, "max 91%") || !strings.Contains(label, "beste GPU 6.0 GiB VRAM frei") || strings.Contains(label, "10.0 GiB") {
+		t.Fatalf("multi-GPU capability summary is incomplete: %q", label)
+	}
+}
+
+func TestNodeDetailCommandsRejectNodesOutsideVisiblePanel(t *testing.T) {
+	nodes := make([]PoolNode, 9)
+	for index := range nodes {
+		nodes[index] = PoolNode{ID: fmt.Sprintf("node-%02d", index+1), Name: fmt.Sprintf("node-%02d", index+1), Connected: true, Slots: 1}
+	}
+	session := &Session{poolNodes: nodes, nodeDetails: map[string]nodeDetailVisibility{}}
+	if got := session.toggleNodeDetailsLocked("gpus", "9"); !strings.Contains(got, "nur im Dashboard") {
+		t.Fatalf("hidden node index did not explain its visibility limit: %q", got)
+	}
+	if len(session.nodeDetails) != 0 {
+		t.Fatalf("hidden node command changed invisible state: %#v", session.nodeDetails)
+	}
+	if got := session.toggleNodeDetailsLocked("models", "all"); !strings.Contains(got, "1 weitere Node(s)") {
+		t.Fatalf("all command did not disclose hidden nodes: %q", got)
+	}
+	if len(session.nodeDetails) != maximumVisiblePoolNodes {
+		t.Fatalf("all command toggled %d nodes, want %d visible nodes", len(session.nodeDetails), maximumVisiblePoolNodes)
+	}
+	if _, ok := session.nodeDetails["node-09"]; ok {
+		t.Fatal("all command silently toggled a node that cannot be rendered")
 	}
 }

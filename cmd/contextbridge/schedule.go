@@ -40,12 +40,12 @@ func scheduleCommand(args []string) error {
 		}
 		method = http.MethodPost
 		if *file == "-" {
-			body, err = io.ReadAll(io.LimitReader(os.Stdin, 12<<20))
+			body, err = readScheduleInput(os.Stdin)
 		} else {
-			body, err = os.ReadFile(*file)
+			body, err = readRegularFileBounded(*file, 12<<20)
 		}
 		if err != nil {
-			return err
+			return fmt.Errorf("read schedule input: %w", err)
 		}
 	case "list":
 	case "show", "pause", "resume", "run", "delete":
@@ -88,6 +88,18 @@ func scheduleCommand(args []string) error {
 	}
 	_, err = os.Stdout.Write(raw)
 	return err
+}
+
+func readScheduleInput(reader io.Reader) ([]byte, error) {
+	const limit = int64(12 << 20)
+	body, err := io.ReadAll(io.LimitReader(reader, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > limit {
+		return nil, fmt.Errorf("schedule input exceeds %d bytes", limit)
+	}
+	return body, nil
 }
 
 func resultCommand(args []string) error {

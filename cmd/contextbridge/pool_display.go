@@ -27,7 +27,8 @@ func readPoolDisplay(ctx context.Context, cfg config.Config) ([]terminalui.PoolN
 	result := make([]terminalui.PoolNode, 0, len(nodes))
 	for _, node := range nodes {
 		result = append(result, terminalui.PoolNode{ID: node.ID, Name: node.Name, Connected: node.Connected,
-			Running: node.Capabilities.Running, Slots: node.Capabilities.MaxConcurrent})
+			Running: node.Capabilities.Running, Slots: node.Capabilities.MaxConcurrent,
+			GPUs: append([]cluster.GPUCapability(nil), node.Capabilities.GPUs...), Models: append([]cluster.ModelCapability(nil), node.Capabilities.Models...)})
 	}
 	return result, nil
 }

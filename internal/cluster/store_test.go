@@ -5,9 +5,88 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
+
+func TestCleanLabelPreservesUTF8AtByteBoundary(t *testing.T) {
+	for _, limit := range []int{3, 4, 5} {
+		got := cleanLabel("ab😀cd", limit)
+		if !utf8.ValidString(got) || len(got) > limit || got != "ab" {
+			t.Fatalf("cleanLabel at %d bytes = %q", limit, got)
+		}
+	}
+	if got := cleanLabel("ab😀cd", 6); got != "ab😀" {
+		t.Fatalf("cleanLabel at rune boundary = %q", got)
+	}
+}
+
+func TestTokenIdentityRejectsSharedEmptyProducerAndDisplayControls(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "cluster.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for _, test := range []struct {
+		role    string
+		subject string
+		groups  []string
+	}{
+		{role: "producer"},
+		{role: "node"},
+		{role: "producer", subject: "producer\u202eadmin"},
+		{role: "producer", subject: "producer", groups: []string{"safe", "bad\nline"}},
+	} {
+		if _, _, err := store.CreateToken(test.role, test.subject, test.groups, time.Hour); err == nil {
+			t.Fatalf("accepted invalid token identity: %#v", test)
+		}
+	}
+	if _, _, err := store.CreateToken("producer", "producer-a", []string{"default"}, time.Hour); err != nil {
+		t.Fatalf("valid producer identity rejected: %v", err)
+	}
+}
+
+func TestEstimateVRAMIgnoresLegacyNodeWideMeasurements(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "cluster.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for index := 0; index < 3; index++ {
+		job, createErr := store.CreateJob(SubmitRequest{Requirements: Requirements{Task: "generation", Model: "model-a"}, Payload: json.RawMessage(`{}`)})
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		assigned, assignErr := store.AssignJob(job.ID, "node-a")
+		if assignErr != nil {
+			t.Fatal(assignErr)
+		}
+		if _, completeErr := store.CompleteJob(job.ID, "node-a", assigned.Attempt, json.RawMessage(`{}`), nil, Usage{PeakVRAMBytes: 20 << 30}, ""); completeErr != nil {
+			t.Fatal(completeErr)
+		}
+	}
+	if got := store.EstimateVRAM(Requirements{Task: "generation", Model: "model-a"}); got != 0 {
+		t.Fatalf("legacy node-wide VRAM was reused as a job estimate: %d", got)
+	}
+	for index := 0; index < 3; index++ {
+		job, createErr := store.CreateJob(SubmitRequest{Requirements: Requirements{Task: "generation", Model: "model-b"}, Payload: json.RawMessage(`{}`)})
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		assigned, assignErr := store.AssignJob(job.ID, "node-b")
+		if assignErr != nil {
+			t.Fatal(assignErr)
+		}
+		if _, completeErr := store.CompleteJob(job.ID, "node-b", assigned.Attempt, json.RawMessage(`{}`), nil, Usage{ResourceScope: "job", PeakVRAMBytes: 4 << 30}, ""); completeErr != nil {
+			t.Fatal(completeErr)
+		}
+	}
+	if got, want := store.EstimateVRAM(Requirements{Task: "generation", Model: "model-b"}), uint64((4<<30)+(4<<30)/10); got != want {
+		t.Fatalf("job-attributed VRAM estimate = %d, want %d", got, want)
+	}
+}
 
 func TestNodesWithSameDisplayNameRemainDistinct(t *testing.T) {
 	store, err := OpenStore(filepath.Join(t.TempDir(), "cluster.db"))
@@ -52,12 +131,12 @@ func TestStorePersistsQueueAndOneTimePairing(t *testing.T) {
 		t.Fatal("assigned job remained in queue")
 	}
 	requeued, err := store.RequeueNode("node-one", "disconnect")
-	if err != nil || len(requeued) != 1 || requeued[0].Status != JobQueued {
-		t.Fatal("ordinary job was not requeued")
+	if err != nil || len(requeued) != 1 || requeued[0].Status != JobFailed {
+		t.Fatal("ambiguous disconnected job did not fail closed")
 	}
 	queued, _ = store.QueuedJobs(10)
-	if len(queued) != 2 || queued[0].ID != high.ID {
-		t.Fatal("requeued job lost its priority")
+	if len(queued) != 1 || queued[0].ID != low.ID {
+		t.Fatal("disconnected in-flight job was silently requeued")
 	}
 	_, publicKey, _ := NewIdentity()
 	pair, err := store.CreatePairing(PairRequest{NodeName: "workstation", PublicKey: publicKey}, "https://relay.test/#pair", time.Minute)
@@ -113,7 +192,7 @@ func TestStoreRecoversStaleJobsWithEncryptionBoundary(t *testing.T) {
 	}
 	normal, _ = store.GetJob(normal.ID)
 	sealed, _ = store.GetJob(sealed.ID)
-	if normal.Status != JobQueued || sealed.Status != JobFailed {
+	if normal.Status != JobFailed || sealed.Status != JobFailed {
 		t.Fatalf("unexpected recovery states: %s %s", normal.Status, sealed.Status)
 	}
 }
@@ -132,21 +211,21 @@ func TestStoreTracksProgressOnlyForAssignedPlaintextJob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.MarkRunning(job.ID, "node-a"); err != nil {
+	if _, err := store.MarkRunning(job.ID, "node-a", job.Attempt); err != nil {
 		t.Fatal(err)
 	}
 	progress := JobProgress{Sequence: 1, Text: "partial", Phase: "generating", Busy: true}
-	if _, err := store.UpdateJobProgress(job.ID, "node-a", progress); err != nil {
+	if _, err := store.UpdateJobProgress(job.ID, "node-a", job.Attempt, progress); err != nil {
 		t.Fatal(err)
 	}
 	job, err = store.GetJob(job.ID)
 	if err != nil || job.Progress == nil || job.Progress.Text != "partial" || job.Progress.Sequence != 1 {
 		t.Fatalf("progress was not stored: %#v %v", job.Progress, err)
 	}
-	if _, err := store.UpdateJobProgress(job.ID, "different-node", JobProgress{Sequence: 2, Text: "wrong"}); err == nil {
+	if _, err := store.UpdateJobProgress(job.ID, "different-node", job.Attempt, JobProgress{Sequence: 2, Text: "wrong"}); err == nil {
 		t.Fatal("a different node must not update job progress")
 	}
-	job, err = store.CompleteJob(job.ID, json.RawMessage(`{"ok":true}`), nil, Usage{}, "")
+	job, err = store.CompleteJob(job.ID, "node-a", job.Attempt, json.RawMessage(`{"ok":true}`), nil, Usage{}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,5 +252,153 @@ func TestStoreKeepsSessionAffinityPrivateToProducer(t *testing.T) {
 	}
 	if _, ok := store.RecentSessionNode("producer-b", "chat-42"); ok {
 		t.Fatal("session affinity leaked across producer identities")
+	}
+}
+
+func TestCompleteJobIsBoundToAssignedWorkerAndNeverRetriesAnError(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "cluster.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	job, err := store.CreateJob(SubmitRequest{Requirements: Requirements{Task: "generation"}, Payload: json.RawMessage(`{}`), MaxAttempts: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err = store.AssignJob(job.ID, "assigned-node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.CompleteJob(job.ID, "foreign-node", job.Attempt, json.RawMessage(`{"forged":true}`), nil, Usage{}, ""); err == nil {
+		t.Fatal("foreign worker completed another worker's job")
+	}
+	job, _ = store.GetJob(job.ID)
+	if job.Status != JobAssigned {
+		t.Fatalf("foreign completion mutated job state: %s", job.Status)
+	}
+	job, err = store.CompleteJob(job.ID, "assigned-node", job.Attempt, nil, nil, Usage{}, "browser_timeout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != JobFailed || !strings.Contains(job.Error, "browser_timeout") {
+		t.Fatalf("ambiguous worker error was retried or hidden: %#v", job)
+	}
+	queued, _ := store.QueuedJobs(10)
+	if len(queued) != 0 {
+		t.Fatal("failed worker completion was silently requeued")
+	}
+}
+
+func TestCompleteJobRejectsStaleAttemptFromSameWorker(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "cluster.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	job, err := store.CreateJob(SubmitRequest{Requirements: Requirements{Task: "generation"}, Payload: json.RawMessage(`{}`), MaxAttempts: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.AssignJob(job.ID, "node-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Status = JobQueued
+	if err := store.SaveJob(first); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.AssignJob(job.ID, "node-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Attempt != first.Attempt+1 {
+		t.Fatalf("assignment attempt did not advance: first=%d current=%d", first.Attempt, current.Attempt)
+	}
+	if _, err := store.CompleteJob(job.ID, "node-a", first.Attempt, json.RawMessage(`{"stale":true}`), nil, Usage{}, ""); err == nil {
+		t.Fatal("stale result from the same worker completed the current assignment")
+	}
+	latest, err := store.GetJob(job.ID)
+	if err != nil || latest.Status != JobAssigned || latest.Attempt != current.Attempt || len(latest.Result) != 0 {
+		t.Fatalf("stale completion mutated current assignment: %#v, %v", latest, err)
+	}
+	completed, err := store.CompleteJob(job.ID, "node-a", current.Attempt, json.RawMessage(`{"current":true}`), nil, Usage{}, "")
+	if err != nil || completed.Status != JobCompleted {
+		t.Fatalf("current assignment could not complete: %#v, %v", completed, err)
+	}
+}
+
+func TestCompleteJobEnforcesResultEnvelopeParity(t *testing.T) {
+	validSealedResult := &SealedEnvelope{
+		Algorithm:  sealedAlgorithm,
+		Nonce:      encode(make([]byte, 12)),
+		Ciphertext: encode(make([]byte, 16)),
+	}
+	tests := []struct {
+		name       string
+		sealedJob  bool
+		result     json.RawMessage
+		sealed     *SealedEnvelope
+		wantStatus string
+	}{
+		{name: "plaintext valid", result: json.RawMessage(`{"ok":true}`), wantStatus: JobCompleted},
+		{name: "plaintext malformed", result: json.RawMessage(`{"ok":`), wantStatus: JobFailed},
+		{name: "plaintext returned sealed", sealed: validSealedResult, wantStatus: JobFailed},
+		{name: "encrypted valid", sealedJob: true, sealed: validSealedResult, wantStatus: JobCompleted},
+		{name: "encrypted returned plaintext", sealedJob: true, result: json.RawMessage(`{"leak":true}`), wantStatus: JobFailed},
+		{name: "encrypted missing result", sealedJob: true, wantStatus: JobFailed},
+		{name: "encrypted malformed nonce", sealedJob: true, sealed: &SealedEnvelope{Algorithm: sealedAlgorithm, Nonce: encode(make([]byte, 11)), Ciphertext: encode(make([]byte, 16))}, wantStatus: JobFailed},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store, err := OpenStore(filepath.Join(t.TempDir(), "cluster.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			request := SubmitRequest{Requirements: Requirements{Task: "generation"}, Payload: json.RawMessage(`{}`)}
+			if test.sealedJob {
+				request.Payload = nil
+				request.Sealed = &SealedEnvelope{Algorithm: sealedAlgorithm}
+			}
+			job, err := store.CreateJob(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			job, err = store.AssignJob(job.ID, "node-a")
+			if err != nil {
+				t.Fatal(err)
+			}
+			job, err = store.CompleteJob(job.ID, "node-a", job.Attempt, test.result, test.sealed, Usage{}, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if job.Status != test.wantStatus {
+				t.Fatalf("completion status = %s, want %s (%s)", job.Status, test.wantStatus, job.Error)
+			}
+			if test.wantStatus == JobFailed && (len(job.Result) != 0 || job.SealedResult != nil || !strings.HasPrefix(job.Error, "worker result rejected:")) {
+				t.Fatalf("rejected result was retained or error hidden: %#v", job)
+			}
+		})
+	}
+}
+
+func TestWorkerResultSizeBoundary(t *testing.T) {
+	objectOfSize := func(size int64) json.RawMessage {
+		return json.RawMessage(`{"x":"` + strings.Repeat("a", int(size)-8) + `"}`)
+	}
+	if err := validateWorkerResult(Job{}, objectOfSize(MaximumJobResultBytes), nil, ""); err != nil {
+		t.Fatalf("exact plaintext result limit was rejected: %v", err)
+	}
+	if err := validateWorkerResult(Job{}, objectOfSize(MaximumJobResultBytes+1), nil, ""); err == nil {
+		t.Fatal("plaintext result one byte beyond the limit was accepted")
+	}
+	sealedJob := Job{SealedPayload: &SealedEnvelope{Algorithm: sealedAlgorithm}}
+	exact := &SealedEnvelope{Algorithm: sealedAlgorithm, Nonce: encode(make([]byte, 12)), Ciphertext: encode(make([]byte, int(MaximumJobResultBytes+16)))}
+	if err := validateWorkerResult(sealedJob, nil, exact, ""); err != nil {
+		t.Fatalf("exact encrypted result limit was rejected: %v", err)
+	}
+	over := &SealedEnvelope{Algorithm: sealedAlgorithm, Nonce: exact.Nonce, Ciphertext: encode(make([]byte, int(MaximumJobResultBytes+17)))}
+	if err := validateWorkerResult(sealedJob, nil, over, ""); err == nil {
+		t.Fatal("encrypted result one byte beyond the limit was accepted")
 	}
 }

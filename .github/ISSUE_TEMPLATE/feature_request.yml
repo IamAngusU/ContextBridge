@@ -23,12 +23,16 @@ body:
       label: Area
       options:
         - Source adapter
-        - Provider
-        - Browser teaching
+        - Local model or runtime
+        - Browser provider or teaching
+        - Artifact or media workflow
+        - Cluster, pooling, or scheduling
+        - Hardware detection or placement
+        - CLI or terminal interface
         - Dashboard
-        - Installer
-        - Protocol
-        - Documentation
+        - Installer, update, or deployment
+        - Protocol, security, or integration
+        - Website or documentation
     validations:
       required: true
   - type: textarea

@@ -19,4 +19,13 @@ The worker console reports the visible model for each attached tab and logs chan
 
 Browser jobs can opt in to response artifacts. The extension reads up to twelve generated images, audio/video files, download links, and code blocks only from the newly completed assistant turn, including image-only ChatGPT turns. Readable data is returned with a verified hash; protected or oversized HTTPS resources remain references. Set `output.min_artifacts` when files of any type are required, `output.min_images` for image bytes, or `output.min_media` for audio/video bytes. `cluster chat --image` requests images through the prompt without changing the web chat's tool selection; `--min-images 3` requires a three-image series, and `--attach-image` can send a reference image along with its prompt. `metadata.contextbridge_image_tool: true` remains an explicit option for selecting the visible ChatGPT image tool. `cluster chat --music --profile gemini` selects Gemini's visible Music tool and requires an audio/video file; Gemini may supply MP4. Connect asks for Gemini's media-host permission when a Gemini tab is attached. Hidden ChatGPT file inputs can receive `image_base64` alongside prompt text. Image progress, rate limits, provider errors, and reload recovery are reported separately from answer text. Follow-up jobs sent with the same cluster `session_id` are routed back to this browser conversation. `contextbridge browser inspect` reads the latest local, content-free selector snapshot without relaying the page DOM.
 
+The popup also shows a content-free session-health hint when an attached chat is
+growing large, its bounded control scan is repeatedly slow, the browser
+discarded it, or its controls cannot be reached. This never hides or removes
+provider-owned messages and does not block a legitimate follow-up. For
+unrelated work, detach the page and attach a fresh chat. A hidden but responsive
+tab is healthy; background operation is not treated as an error by itself.
+Details and the fixed safety-wrapper/editable-job-prompt boundary are in
+[`browser-sessions-and-prompts.de-en.md`](../docs/browser-sessions-and-prompts.de-en.md).
+
 Run `./scripts/package-extensions.sh` from the repository root after changing files in `extension/src` or either manifest.

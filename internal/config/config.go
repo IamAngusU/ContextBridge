@@ -132,15 +132,20 @@ type Cluster struct {
 }
 
 type ClusterRelay struct {
-	Enabled           bool     `yaml:"enabled" json:"enabled"`
-	Listen            string   `yaml:"listen" json:"listen"`
-	PublicURL         string   `yaml:"public_url" json:"public_url"`
-	Database          string   `yaml:"database" json:"database"`
-	AdminToken        string   `yaml:"admin_token" json:"-"`
-	AllowedOrigins    []string `yaml:"allowed_origins" json:"allowed_origins"`
-	MaxQueue          int      `yaml:"max_queue" json:"max_queue"`
-	MaxJobBytes       int64    `yaml:"max_job_bytes" json:"max_job_bytes"`
-	PairingTTLSeconds int      `yaml:"pairing_ttl_seconds" json:"pairing_ttl_seconds"`
+	Enabled                 bool     `yaml:"enabled" json:"enabled"`
+	Listen                  string   `yaml:"listen" json:"listen"`
+	PublicURL               string   `yaml:"public_url" json:"public_url"`
+	Database                string   `yaml:"database" json:"database"`
+	AdminToken              string   `yaml:"admin_token" json:"-"`
+	AllowedOrigins          []string `yaml:"allowed_origins" json:"allowed_origins"`
+	MaxQueue                int      `yaml:"max_queue" json:"max_queue"`
+	MaxJobBytes             int64    `yaml:"max_job_bytes" json:"max_job_bytes"`
+	PairingTTLSeconds       int      `yaml:"pairing_ttl_seconds" json:"pairing_ttl_seconds"`
+	RetentionDays           int      `yaml:"retention_days" json:"retention_days"`
+	MaxTerminalJobs         int      `yaml:"max_terminal_jobs" json:"max_terminal_jobs"`
+	MaxEvents               int      `yaml:"max_events" json:"max_events"`
+	MaxTerminalPipelineRuns int      `yaml:"max_terminal_pipeline_runs" json:"max_terminal_pipeline_runs"`
+	RetentionSweepSeconds   int      `yaml:"retention_sweep_seconds" json:"retention_sweep_seconds"`
 }
 
 type ClusterWorker struct {
@@ -213,8 +218,8 @@ func (c Config) Validate() error {
 	if c.Terminal.Style != "" && c.Terminal.Style != "classic" && c.Terminal.Style != "panel" {
 		return errors.New("terminal.style must be classic or panel")
 	}
-	if c.Cluster.Worker.MaxConcurrent > 64 {
-		return errors.New("cluster.worker.max_concurrent must not exceed 64")
+	if c.Cluster.Worker.MaxConcurrent > cluster.MaximumWorkerConcurrency {
+		return fmt.Errorf("cluster.worker.max_concurrent must not exceed %d", cluster.MaximumWorkerConcurrency)
 	}
 	if c.Server.Token == "" || strings.Contains(c.Server.Token, "change-me") || strings.Contains(c.Server.Token, "${") {
 		return errors.New("server.token must be a strong secret or environment reference")
@@ -317,9 +322,27 @@ func (c Config) Validate() error {
 		if len(c.Cluster.Relay.AdminToken) < 32 || strings.Contains(c.Cluster.Relay.AdminToken, "${") {
 			return errors.New("cluster.relay.admin_token must contain at least 32 resolved characters")
 		}
+		if c.Cluster.Relay.MaxJobBytes > cluster.MaximumJobPayloadBytes {
+			return fmt.Errorf("cluster.relay.max_job_bytes must not exceed %d MiB", cluster.MaximumJobPayloadBytes>>20)
+		}
 		if !strings.HasPrefix(c.Cluster.Relay.Listen, "127.0.0.1:") && !strings.HasPrefix(c.Cluster.Relay.Listen, "localhost:") {
 			return errors.New("cluster.relay.listen must use localhost; publish it through a TLS reverse proxy")
 		}
+	}
+	if c.Cluster.Relay.RetentionDays < 1 || c.Cluster.Relay.RetentionDays > cluster.MaximumRetentionDays {
+		return fmt.Errorf("cluster.relay.retention_days must be between 1 and %d", cluster.MaximumRetentionDays)
+	}
+	if c.Cluster.Relay.MaxTerminalJobs < 1 || c.Cluster.Relay.MaxTerminalJobs > cluster.MaximumRetainedTerminalJobs {
+		return fmt.Errorf("cluster.relay.max_terminal_jobs must be between 1 and %d", cluster.MaximumRetainedTerminalJobs)
+	}
+	if c.Cluster.Relay.MaxEvents < 1 || c.Cluster.Relay.MaxEvents > cluster.MaximumRetainedEvents {
+		return fmt.Errorf("cluster.relay.max_events must be between 1 and %d", cluster.MaximumRetainedEvents)
+	}
+	if c.Cluster.Relay.MaxTerminalPipelineRuns < 1 || c.Cluster.Relay.MaxTerminalPipelineRuns > cluster.MaximumRetainedTerminalPipelineRuns {
+		return fmt.Errorf("cluster.relay.max_terminal_pipeline_runs must be between 1 and %d", cluster.MaximumRetainedTerminalPipelineRuns)
+	}
+	if c.Cluster.Relay.RetentionSweepSeconds < cluster.MinimumRetentionSweepSeconds || c.Cluster.Relay.RetentionSweepSeconds > cluster.MaximumRetentionSweepSeconds {
+		return fmt.Errorf("cluster.relay.retention_sweep_seconds must be between %d and %d", cluster.MinimumRetentionSweepSeconds, cluster.MaximumRetentionSweepSeconds)
 	}
 	if c.Cluster.Worker.Enabled && !strings.HasPrefix(c.Cluster.Worker.RelayURL, "https://") && !strings.HasPrefix(c.Cluster.Worker.RelayURL, "http://127.0.0.1:") && !strings.HasPrefix(c.Cluster.Worker.RelayURL, "http://localhost:") {
 		return errors.New("cluster.worker.relay_url must use HTTPS or localhost")
@@ -489,6 +512,21 @@ func applyDefaults(cfg *Config, base string) {
 	}
 	if cfg.Cluster.Relay.PairingTTLSeconds <= 0 {
 		cfg.Cluster.Relay.PairingTTLSeconds = 600
+	}
+	if cfg.Cluster.Relay.RetentionDays == 0 {
+		cfg.Cluster.Relay.RetentionDays = cluster.DefaultRetentionDays
+	}
+	if cfg.Cluster.Relay.MaxTerminalJobs == 0 {
+		cfg.Cluster.Relay.MaxTerminalJobs = cluster.DefaultMaxTerminalJobs
+	}
+	if cfg.Cluster.Relay.MaxEvents == 0 {
+		cfg.Cluster.Relay.MaxEvents = cluster.DefaultMaxEvents
+	}
+	if cfg.Cluster.Relay.MaxTerminalPipelineRuns == 0 {
+		cfg.Cluster.Relay.MaxTerminalPipelineRuns = cluster.DefaultMaxTerminalPipelineRuns
+	}
+	if cfg.Cluster.Relay.RetentionSweepSeconds == 0 {
+		cfg.Cluster.Relay.RetentionSweepSeconds = cluster.DefaultRetentionSweepSeconds
 	}
 	if cfg.Cluster.Worker.IdentityFile == "" {
 		cfg.Cluster.Worker.IdentityFile = filepath.Join(cfg.Storage.Directory, "cluster-identity.json")
@@ -684,6 +722,11 @@ cluster:
     max_queue: 10000
     max_job_bytes: 12582912
     pairing_ttl_seconds: 600
+    retention_days: 30
+    max_terminal_jobs: 500
+    max_events: 5000
+    max_terminal_pipeline_runs: 200
+    retention_sweep_seconds: 300
   worker:
     enabled: false
     relay_url: ""

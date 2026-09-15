@@ -4,15 +4,22 @@ ContextBridge separates sources, routing, providers, and result validation so ea
 
 ## Cluster Topologies
 
-One relay protocol supports three useful shapes:
+One relay protocol supports four useful shapes:
 
 - 1:1: one producer routes to one private worker.
+- N:1: several scoped producers share one worker and its configured slots.
 - 1:N: one producer distributes work over a capability group.
 - N:N: scoped producer tokens share one pool of grouped workers.
 
+These describe routing relationships, not four deployment products. One relay
+can serve all of them at the same time. A browser tab is one serial UI slot;
+several tabs or local-model slots on one node and several paired nodes can run
+independent jobs concurrently. Producer ownership still separates job reads,
+cancellation, and session affinity when producers share that pool.
+
 Workers initiate an outbound WebSocket connection to the relay. This avoids inbound ports on private computers. Each heartbeat contains current CPU, RAM generation/speed, GPU utilization/temperature/free VRAM, ready models, task, group, tag, concurrency, queue, and browser-tab slot information. The scheduler filters incompatible nodes first, then ranks compatible nodes by active load, GPU pressure, and available memory.
 
-The relay stores tokens as SHA256 hashes, jobs and history in BoltDB, and queue order in a dedicated priority index. A disconnected normal job is requeued until its retry budget is exhausted. A sealed job is tied to the public key chosen during reservation and cannot move to another node without the producer encrypting a new submission.
+The relay stores tokens as SHA256 hashes, jobs and bounded history in BoltDB, and queue order in a dedicated priority index. A worker error, disconnect, or execution timeout is an ambiguous state because the provider may already have accepted the request. ContextBridge therefore fails that execution closed instead of transparently retrying it; the producer must submit a new job explicitly. A sealed job is additionally tied to the public key chosen during reservation and cannot move to another node without the producer encrypting a new submission.
 
 One BoltDB relay is a single durable coordination process, not an active-active database cluster. A future HA adapter can implement the same store contract with Postgres and a message broker.
 
@@ -34,6 +41,26 @@ The Ollama provider sends a trusted task wrapper and optional image to a configu
 
 GPU policy is explicit. `prefer` attempts full offload and records a visible CPU fallback warning. `require` fails the engine when GPU startup fails. `off` starts on CPU. ContextBridge does not report an engine as GPU-backed merely because a GPU exists.
 
+### Hardware reporting and placement
+
+A node heartbeat reports every detected GPU separately. With multiple GPUs,
+the scheduler evaluates the best single eligible device: an explicit
+`min_free_vram_bytes` passes only if at least one GPU has that much free VRAM;
+memory on several devices is not silently added together. When no hard minimum
+is set, a VRAM estimate learned from genuinely job-attributed history is a soft
+ranking hint. A GPU node with headroom is preferred when other signals are
+similar, but a compatible zero-GPU/CPU worker remains eligible.
+
+This is placement, not a GPU allocator. ContextBridge does not reserve VRAM,
+pin a job to a numbered GPU, infer one slot per GPU, or promise that Ollama or
+`llama.cpp` will split a model across devices in a particular way. The local
+runtime and its configuration decide actual device use; `max_concurrent`
+remains the node's admission limit. A rack is represented by its paired worker
+nodes. A multi-GPU host can report all of its devices as one node, but should
+not be multiplied into independent worker processes merely to manufacture
+slots: separate processes currently lack a shared machine-wide RAM/VRAM
+semaphore.
+
 ### Browser worker
 
 The extension holds explicitly attached tab IDs, origin grants, visual profiles, provider cooldowns, and private session-to-tab affinity in local extension storage. Optional fresh-tab discovery verifies the URL and an empty composer/conversation twice before attachment; existing or uncertain chats fail closed. Detaching removes a tab from future leases, though work already submitted to a website cannot be unsent. Every tab is a serial slot, while tabs operate concurrently. It receives leased jobs, applies an explicit model/reasoning choice when requested, writes the trusted prompt, and observes response DOM plus send/stop controls. Gemini's mode choices are read from its live picker rather than a fixed catalog. Image loaders and percentages remain progress; visible rate limits/errors become failures; a stable response with an idle composer becomes the final answer. Navigation reattaches to the in-flight conversation without resubmitting, and a generation stuck at 95% or above receives one controlled reload/recovery attempt.
@@ -44,11 +71,24 @@ Jobs and results are written under the configured data directory. Folder submiss
 
 Job counters, provider and model usage, latency, failures, and decision flags are stored atomically in `metrics.json`. Model artifacts use a separate models directory. The local RAG backend persists tenant-separated documents and vectors behind the `vectorstore.Store` interface.
 
+Hardware and job usage have deliberately different scopes. CPU load, free RAM,
+GPU utilization, temperature, and free VRAM in a node heartbeat are
+**system-wide snapshots**; browsers, model runtimes, and unrelated processes
+can all contribute to them. ContextBridge never labels a change in those
+snapshots as “this job used X MiB.” Per-job token counts, queue time, and
+elapsed compute time are recorded separately. Peak RAM/VRAM/GPU values are
+accepted and aggregated only when an execution engine explicitly marks them
+with `resource_scope: "job"`; missing attribution remains unknown instead of
+being guessed. The current console does not expose ContextBridge process RSS or
+reserve a requested amount of RAM per job.
+
 Cluster state uses a separate BoltDB file with owner-only permissions. Jobs have an owner subject derived from the producer token. Producer list, read, and cancel operations are filtered by that subject. Group scopes are enforced both when a producer submits work and when a worker advertises capabilities.
+
+Relay retention runs once during startup and periodically while the dispatcher is active. In one Bolt write transaction it removes only exact terminal job and pipeline-run states plus old/excess event rows. A terminal job's payload, result or sealed envelopes, time index, and any defensive queue entry are removed together; active and unrecognized states fail safe and remain. The newest configured count is retained only while it is also within the configured age, so age and count are independent upper bounds. Before deletion, the summary fields already exposed by the lifetime overview are added to a separate cumulative record. Node compute/cost counters remain sourced from cumulative node records and are not rewritten. Freed Bolt pages are reusable; retention bounds continued detail growth after the database high-water mark but is not an online file-compaction operation.
 
 ### Pipeline runner
 
-Pipelines are fixed YAML declarations. A step can reference the original JSON input, the previous output, or a named earlier output. Every rendered step must be valid JSON before it enters the queue. Runtime, retries, step count, and model-requested iterations have hard administrator limits. Model output cannot create a route, executable, or extra step.
+Pipelines are fixed YAML declarations. A step can reference the original JSON input, the previous output, or a named earlier output. Every rendered step must be valid JSON and fit the relay payload limit before it enters the queue. Runtime, step count, and model-requested iterations have hard administrator limits. A declared attempt budget never overrides the at-most-once rule after ambiguous execution; model output cannot create a route, executable, or extra step.
 
 ### Model registry
 
@@ -73,14 +113,15 @@ The managed `llama.cpp` installer selects an official release asset for the oper
 
 - Provider unavailable: try the next configured fallback.
 - Browser profile mismatch: return a browser automation error as `review`.
-- Browser result delivery interrupted: retain and retry the completion payload.
+- Browser result delivery interrupted: retain and retry the already produced
+  completion payload; do not execute the provider request again.
 - Browser tab reload/navigation during work: reattach to the same conversation and observe the existing in-flight response without submitting the prompt twice.
 - Provider rate limit or visible error: record an explicit failed state, cool down that tab, and never treat its error card as model output.
 - All providers unavailable: return `review` with `providers_unavailable`.
 - Service restart during a folder job: the processing file remains visible for operator recovery.
-- Worker disconnect during a normal cluster job: requeue on another compatible node within the retry budget.
-- Worker disconnect during an E2EE cluster job: fail the bound job so the producer can reserve a new key and encrypt again.
-- Relay restart: queued jobs, pairing state, history, token hashes, metrics, and pipeline runs reopen from BoltDB.
+- Worker error, disconnect, or execution timeout: fail the job because provider-side execution may already have happened; require an explicit new submission instead of an ambiguous automatic retry. This is an at-most-once execution policy, not an exactly-once guarantee—the provider may have completed work whose final result could not be observed.
+- E2EE resubmission after such a failure: reserve a new worker key and encrypt again.
+- Relay restart: queued jobs, pairing state, retained history, token hashes, metrics, and active/recent pipeline runs reopen from BoltDB; startup retention applies the configured detail bounds.
 
 ## Extension Builds
 

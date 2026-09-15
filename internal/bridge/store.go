@@ -151,22 +151,28 @@ type Activity struct {
 }
 
 type queuedJob struct {
-	job       Job
-	profile   interface{}
-	deadline  time.Time
-	leasedTil time.Time
-	done      chan Output
-	progress  *BrowserProgress
+	job             Job
+	profile         interface{}
+	deadline        time.Time
+	leasedTil       time.Time
+	leaseGeneration uint64
+	sentUnknown     bool
+	done            chan Output
+	progress        *BrowserProgress
 }
 
-func (s *Store) UpdateBrowserProgress(id string, progress BrowserProgress) bool {
+func (s *Store) UpdateBrowserProgress(id string, generation uint64, progress BrowserProgress) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	item, ok := s.queued[id]
-	if !ok || time.Now().After(item.deadline) {
+	now := time.Now()
+	if !ok || now.After(item.deadline) {
 		if ok {
 			delete(s.queued, id)
 		}
+		return false
+	}
+	if !validBrowserLease(item, generation, now) {
 		return false
 	}
 	if item.progress != nil && progress.Sequence <= item.progress.Sequence {
@@ -421,13 +427,18 @@ func (s *Store) NextBrowserJob(profile string, lease time.Duration) *browserJob 
 				}
 			}
 		}
+		item.leaseGeneration++
+		if item.leaseGeneration == 0 {
+			item.leaseGeneration = 1
+		}
 		item.leasedTil = now.Add(lease)
-		return &browserJob{Job: item.job, Profile: item.profile, Deadline: item.deadline}
+		return &browserJob{Job: item.job, Profile: item.profile, Deadline: item.deadline,
+			LeaseGeneration: item.leaseGeneration, LeaseExpiresAt: item.leasedTil, ObservationOnly: item.sentUnknown}
 	}
 	return nil
 }
 
-func (s *Store) Complete(id string, output Output) bool {
+func (s *Store) Complete(id string, generation uint64, output Output) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	item, ok := s.queued[id]
@@ -436,6 +447,9 @@ func (s *Store) Complete(id string, output Output) bool {
 	}
 	if time.Now().After(item.deadline) {
 		delete(s.queued, id)
+		return false
+	}
+	if !validBrowserLease(item, generation, time.Now()) {
 		return false
 	}
 	delete(s.queued, id)
@@ -470,25 +484,55 @@ func (s *Store) Cancel(id string) {
 	delete(s.queued, id)
 }
 
-func (s *Store) Renew(id string, lease time.Duration) bool {
+func (s *Store) Renew(id string, generation uint64, lease time.Duration) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	item, ok := s.queued[id]
-	if !ok || time.Now().After(item.deadline) {
+	now := time.Now()
+	if !ok || now.After(item.deadline) {
 		if ok {
 			delete(s.queued, id)
 		}
 		return false
 	}
-	item.leasedTil = time.Now().Add(lease)
+	if !validBrowserLease(item, generation, now) {
+		return false
+	}
+	item.leasedTil = now.Add(lease)
 	return true
 }
 
-func (s *Store) BrowserCompletionContext(id string) (OutputSpec, string, bool) {
+// MarkBrowserAction is the point of no automatic retry. It is called before
+// upload, edit, or send. If this worker disappears afterward, the next lease is
+// observation-only because the provider may already have accepted the action.
+func (s *Store) MarkBrowserAction(id string, generation uint64, lease time.Duration) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	item, ok := s.queued[id]
-	if !ok {
+	now := time.Now()
+	if !ok || now.After(item.deadline) {
+		if ok {
+			delete(s.queued, id)
+		}
+		return false
+	}
+	if !validBrowserLease(item, generation, now) {
+		return false
+	}
+	item.sentUnknown = true
+	item.leasedTil = now.Add(lease)
+	return true
+}
+
+func validBrowserLease(item *queuedJob, generation uint64, now time.Time) bool {
+	return generation != 0 && item.leaseGeneration == generation && now.Before(item.leasedTil)
+}
+
+func (s *Store) BrowserCompletionContext(id string, generation uint64) (OutputSpec, string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.queued[id]
+	if !ok || !validBrowserLease(item, generation, time.Now()) {
 		return OutputSpec{}, "", false
 	}
 	model := "browser-tab"

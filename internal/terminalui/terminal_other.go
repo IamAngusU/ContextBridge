@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build !windows && !linux && !darwin && !freebsd && !openbsd && !netbsd
 
 package terminalui
 
@@ -24,3 +24,5 @@ func terminalHeight(_ *os.File) int { return 0 }
 func drawConsoleStatus(_ *os.File, _ string) bool { return false }
 
 func clearConsoleStatus(_ *os.File) bool { return false }
+
+func consoleSelectionActive(_ *os.File) bool { return false }

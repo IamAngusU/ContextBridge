@@ -113,9 +113,12 @@ type Output struct {
 }
 
 type browserJob struct {
-	Job      Job         `json:"job"`
-	Profile  interface{} `json:"profile"`
-	Deadline time.Time   `json:"deadline"`
+	Job             Job         `json:"job"`
+	Profile         interface{} `json:"profile"`
+	Deadline        time.Time   `json:"deadline"`
+	LeaseGeneration uint64      `json:"lease_generation"`
+	LeaseExpiresAt  time.Time   `json:"lease_expires_at"`
+	ObservationOnly bool        `json:"observation_only,omitempty"`
 }
 
 type BrowserProgress struct {

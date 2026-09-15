@@ -358,7 +358,7 @@ func healthy(parent context.Context, base string) bool {
 
 func ollamaStatus(parent context.Context, name string, engine config.Engine) EngineStatus {
 	status := EngineStatus{Name: name, Type: "ollama", State: "offline", URL: engine.URL, Model: engine.Model, UpdatedAt: time.Now().UTC()}
-	ctx, cancel := context.WithTimeout(parent, 900*time.Millisecond)
+	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
 	defer cancel()
 	base := strings.TrimRight(engine.URL, "/")
 	var version struct {
@@ -372,13 +372,18 @@ func ollamaStatus(parent context.Context, name string, engine config.Engine) Eng
 	var cached struct {
 		Models []struct {
 			Name         string   `json:"name"`
+			Digest       string   `json:"digest"`
 			Size         int64    `json:"size"`
 			Capabilities []string `json:"capabilities"`
 		} `json:"models"`
 	}
 	if getJSON(ctx, base+"/api/tags", &cached) {
-		for _, model := range cached.Models {
-			status.Models = append(status.Models, RuntimeModel{Name: model.Name, Size: model.Size, Capabilities: modelregistry.OllamaCapabilities(model.Capabilities, model.Name)})
+		for index, model := range cached.Models {
+			if index >= 256 {
+				break
+			}
+			capabilities := modelregistry.ResolveOllamaCapabilities(ctx, http.DefaultClient, base, model.Name, model.Digest, model.Capabilities, model.Name)
+			status.Models = append(status.Models, RuntimeModel{Name: model.Name, Size: model.Size, Capabilities: capabilities})
 		}
 	}
 	var running struct {

@@ -2,11 +2,17 @@ package bridge
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -56,6 +62,187 @@ func TestDecodeJSONEnforcesExactBodyLimit(t *testing.T) {
 	}
 	if err := decodeJSON(bytes.NewBufferString(`{"ok":true}{"ok":false}`), &over, 64); err == nil {
 		t.Fatal("multiple JSON values were accepted")
+	}
+	if err := decodeJSON(bytes.NewReader([]byte{'{', '"', 'o', 'k', '"', ':', '"', 0xff, '"', '}'}), &over, 64); err == nil {
+		t.Fatal("invalid UTF-8 was accepted")
+	}
+}
+
+func TestInboxDecoderIsStrictAndBoundedBeforeProcessing(t *testing.T) {
+	dir := t.TempDir()
+	exactPath := filepath.Join(dir, "exact.processing.json")
+	overPath := filepath.Join(dir, "over.processing.json")
+	unknownPath := filepath.Join(dir, "unknown.processing.json")
+	prefix := []byte(`{"prompt":"`)
+	suffix := []byte(`"}`)
+	exact := append(append(append([]byte{}, prefix...), bytes.Repeat([]byte{'a'}, int(maximumJobRequestBytes)-len(prefix)-len(suffix))...), suffix...)
+	if err := os.WriteFile(exactPath, exact, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(overPath, append(append([]byte{}, exact...), ' '), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(unknownPath, []byte(`{"prompt":"ok","unexpected":true}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var exactJob Job
+	if err := decodeInboxJob(exactPath, &exactJob); err != nil {
+		t.Fatalf("exact inbox limit was rejected: %v", err)
+	}
+	if len(exactJob.Prompt) == 0 {
+		t.Fatal("exact inbox payload was not decoded")
+	}
+	if err := decodeInboxJob(overPath, &Job{}); err == nil {
+		t.Fatal("inbox payload one byte over the limit was accepted")
+	}
+	if err := decodeInboxJob(unknownPath, &Job{}); err == nil {
+		t.Fatal("unknown inbox field was accepted")
+	}
+}
+
+func TestInboxFilesDoNotFollowLinksOrOverwriteExistingResults(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "outside.txt")
+	if err := os.WriteFile(target, []byte("keep-me"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "linked.processing.json")
+	if err := os.Symlink(target, link); err == nil {
+		if err := decodeInboxJob(link, &Job{}); err == nil {
+			t.Fatal("inbox decoder followed a symbolic link")
+		}
+	} else {
+		t.Logf("symbolic-link input check skipped on this host: %v", err)
+	}
+
+	result := filepath.Join(dir, "job.result.json")
+	if err := os.WriteFile(result, []byte("existing"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeInboxResult(result, []byte("replacement")); err == nil {
+		t.Fatal("existing result was overwritten")
+	}
+	value, err := os.ReadFile(result)
+	if err != nil || string(value) != "existing" {
+		t.Fatalf("existing result changed: %q, %v", value, err)
+	}
+
+	fresh := filepath.Join(dir, "fresh.result.json")
+	if err := writeInboxResult(fresh, []byte("safe")); err != nil {
+		t.Fatalf("safe result could not be written: %v", err)
+	}
+	value, err = os.ReadFile(fresh)
+	if err != nil || string(value) != "safe" {
+		t.Fatalf("fresh result = %q, %v", value, err)
+	}
+	value, err = os.ReadFile(target)
+	if err != nil || string(value) != "keep-me" {
+		t.Fatalf("outside target changed: %q, %v", value, err)
+	}
+}
+
+func TestInboxResultDoesNotFollowSymbolicLink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "outside.txt")
+	if err := os.WriteFile(target, []byte("keep-me"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	resultLink := filepath.Join(dir, "job.result.json")
+	if err := os.Symlink(target, resultLink); err != nil {
+		t.Skipf("symbolic-link result check is unavailable on this host: %v", err)
+	}
+	if err := writeInboxResult(resultLink, []byte("replacement")); err == nil {
+		t.Fatal("inbox result writer followed or replaced a pre-existing symbolic link")
+	}
+	value, err := os.ReadFile(target)
+	if err != nil || string(value) != "keep-me" {
+		t.Fatalf("symbolic-link target changed: %q, %v", value, err)
+	}
+	info, err := os.Lstat(resultLink)
+	if err != nil {
+		t.Fatalf("result link disappeared: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("result link was replaced: mode=%v", info.Mode())
+	}
+}
+
+func TestInboxWatcherBoundsConcurrentFanout(t *testing.T) {
+	directory := t.TempDir()
+	inbox := filepath.Join(directory, "inbox")
+	cfg := config.Config{
+		Version: 1,
+		Server:  config.Server{Listen: "127.0.0.1:32145", Token: "test-token-that-is-long-enough"},
+		Storage: config.Storage{Directory: directory, Inbox: inbox},
+		Routes: map[string]config.Route{
+			"default": {Provider: "browser", TimeoutSeconds: 30},
+		},
+		Providers: config.Providers{Browser: config.BrowserProvider{LeaseSeconds: 5}},
+	}
+	server, err := NewServer(cfg, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const jobs = maximumInboxScanBatch + 17
+	for index := 0; index < jobs; index++ {
+		path := filepath.Join(inbox, fmt.Sprintf("job-%03d.json", index))
+		payload := []byte(fmt.Sprintf(`{"id":"inbox-%03d","prompt":"block","route":"default","output":{"mode":"text"}}`, index))
+		if err := os.WriteFile(path, payload, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		server.watchInbox(ctx)
+	}()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Error("inbox watcher did not stop")
+		}
+		deadline := time.Now().Add(3 * time.Second)
+		for len(server.inboxSlots) > 0 && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if active := len(server.inboxSlots); active != 0 {
+			t.Errorf("%d inbox workers did not stop", active)
+		}
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && len(server.inboxSlots) < maximumInboxConcurrent {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if active := len(server.inboxSlots); active != maximumInboxConcurrent {
+		t.Fatalf("inbox started %d workers, want %d", active, maximumInboxConcurrent)
+	}
+	// Let the watcher cross another tick and directory scan boundary while all
+	// workers remain blocked in the browser provider.
+	time.Sleep(1200 * time.Millisecond)
+	if active := len(server.inboxSlots); active != maximumInboxConcurrent {
+		t.Fatalf("inbox fanout changed to %d while all slots were occupied", active)
+	}
+	entries, err := os.ReadDir(inbox)
+	if err != nil {
+		t.Fatal(err)
+	}
+	processing := 0
+	pending := 0
+	for _, entry := range entries {
+		switch {
+		case strings.HasSuffix(entry.Name(), ".processing.json"):
+			processing++
+		case strings.HasSuffix(entry.Name(), ".json"):
+			pending++
+		}
+	}
+	if processing != maximumInboxConcurrent || pending != jobs-maximumInboxConcurrent {
+		t.Fatalf("inbox state has %d processing and %d pending jobs, want %d and %d", processing, pending, maximumInboxConcurrent, jobs-maximumInboxConcurrent)
 	}
 }
 
@@ -122,6 +309,7 @@ func TestBrowserJobRoundTrip(t *testing.T) {
 	}
 	leaseReq, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/browser/jobs/"+work.Job.ID+"/lease", nil)
 	leaseReq.Header.Set("Authorization", "Bearer "+cfg.Server.Token)
+	leaseReq.Header.Set("X-ContextBridge-Lease-Generation", strconv.FormatUint(work.LeaseGeneration, 10))
 	leaseResp, leaseErr := http.DefaultClient.Do(leaseReq)
 	if leaseErr != nil {
 		t.Fatal(leaseErr)
@@ -130,10 +318,23 @@ func TestBrowserJobRoundTrip(t *testing.T) {
 	if leaseResp.StatusCode != http.StatusOK {
 		t.Fatalf("lease renewal returned %s", leaseResp.Status)
 	}
+	claimReq, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/browser/jobs/"+work.Job.ID+"/claim", bytes.NewReader([]byte(`{"action":"send"}`)))
+	claimReq.Header.Set("Authorization", "Bearer "+cfg.Server.Token)
+	claimReq.Header.Set("Content-Type", "application/json")
+	claimReq.Header.Set("X-ContextBridge-Lease-Generation", strconv.FormatUint(work.LeaseGeneration, 10))
+	claimResp, claimErr := http.DefaultClient.Do(claimReq)
+	if claimErr != nil {
+		t.Fatal(claimErr)
+	}
+	claimResp.Body.Close()
+	if claimResp.StatusCode != http.StatusOK {
+		t.Fatalf("send claim returned %s", claimResp.Status)
+	}
 	progressRaw := []byte(`{"sequence":1,"text":"partial answer","phase":"generating","busy":true}`)
 	progressReq, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/browser/jobs/"+work.Job.ID+"/progress", bytes.NewReader(progressRaw))
 	progressReq.Header.Set("Authorization", "Bearer "+cfg.Server.Token)
 	progressReq.Header.Set("Content-Type", "application/json")
+	progressReq.Header.Set("X-ContextBridge-Lease-Generation", strconv.FormatUint(work.LeaseGeneration, 10))
 	progressResp, progressErr := http.DefaultClient.Do(progressReq)
 	if progressErr != nil {
 		t.Fatal(progressErr)
@@ -161,6 +362,7 @@ func TestBrowserJobRoundTrip(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/browser/jobs/"+work.Job.ID+"/complete", bytes.NewReader(decisionRaw))
 	req.Header.Set("Authorization", "Bearer "+cfg.Server.Token)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-ContextBridge-Lease-Generation", strconv.FormatUint(work.LeaseGeneration, 10))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -388,6 +590,7 @@ func TestBrowserJSONOutputRoundTrip(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/browser/jobs/"+work.Job.ID+"/complete", bytes.NewReader(outputRaw))
 	req.Header.Set("Authorization", "Bearer "+cfg.Server.Token)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-ContextBridge-Lease-Generation", strconv.FormatUint(work.LeaseGeneration, 10))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -416,10 +619,14 @@ func TestExpiredBrowserLeaseCannotComplete(t *testing.T) {
 		t.Fatal(err)
 	}
 	job := Job{ID: "expired-job", Prompt: "Review"}
-	store.Queue(job, nil, time.Millisecond)
+	store.Queue(job, nil, time.Second)
+	work := store.NextBrowserJob("", time.Millisecond)
+	if work == nil {
+		t.Fatal("browser job was not leased")
+	}
 	time.Sleep(5 * time.Millisecond)
 	decision := ReviewDecision("browser", "test", "late", 0)
-	if store.Complete(job.ID, Output{Mode: "decision", Decision: &decision}) {
+	if store.Complete(job.ID, work.LeaseGeneration, Output{Mode: "decision", Decision: &decision}) {
 		t.Fatal("an expired browser lease must not accept a late result")
 	}
 }

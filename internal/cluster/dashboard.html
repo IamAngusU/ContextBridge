@@ -62,13 +62,13 @@ const renderIndicators=c=>{
 };
 function renderNodes(nodes){
   $('#nodes').innerHTML=nodes.length?nodes.map(n=>{
-    const c=n.capabilities||{},g=(c.gpus||[])[0],cap=Math.max(1,c.max_concurrent||1),busy=Math.min(100,Math.round((c.running||0)/cap*100));
-    const models=(c.models||[]).slice(0,4).map(m=>m.name).join(' · ');
+    const c=n.capabilities||{},gpus=c.gpus||[],cap=Math.max(1,c.max_concurrent||1),busy=Math.min(100,Math.round((c.running||0)/cap*100));
+    const modelItems=c.models||[],models=modelItems.slice(0,4).map(m=>m.name).join(' · ')+(modelItems.length>4?` · +${modelItems.length-4} more`:``);
     const ram=`${bytes(c.memory_free_bytes)} / ${bytes(c.memory_total_bytes)} RAM${c.memory_type?' · '+c.memory_type:''}`;
     const cpu=`${c.cpu_cores||0} cores${c.cpu_frequency_mhz?' · '+(c.cpu_frequency_mhz/1000).toFixed(2)+' GHz':''} · ${c.cpu_utilization_percent||0}% CPU`;
     const system=c.os_version||`${c.os||'unknown'}/${c.architecture||'unknown'}`;
     const uptime=c.uptime_seconds?duration(c.uptime_seconds*1000):'unknown';
-    const gpu=g?`${esc(g.name)}<br><span class="muted">GPU ${g.utilization_percent>0?'active':'ready'} · ${g.utilization_percent||0}% · ${bytes(g.memory_free_bytes)} / ${bytes(g.memory_total_bytes)} free${g.temperature_c?' · '+g.temperature_c+'°C':''}${g.driver?' · driver '+esc(g.driver):''}</span>`:'Zero-GPU / CPU worker';
+    const gpu=gpus.length?gpus.slice(0,8).map((g,index)=>`<b>GPU ${index+1}</b> · ${esc(g.name)}<br><span class="muted">${g.utilization_percent>0?'active':'ready'} · ${g.utilization_percent||0}% · ${bytes(g.memory_free_bytes)} / ${bytes(g.memory_total_bytes)} free${g.temperature_c?' · '+g.temperature_c+'°C':''}${g.driver?' · driver '+esc(g.driver):''}</span>`).join('<br>')+(gpus.length>8?`<br><span class="muted">+${gpus.length-8} more GPUs</span>`:''):'Zero-GPU / CPU worker';
     const clockAt=Date.parse(c.clock_time||''),seen=Date.parse(n.last_seen||''),relayAt=relayClock?.time||Date.now();
     const nodeClock=Number.isFinite(clockAt)&&Number.isFinite(seen)?` · node clock ${clockFace(clockAt+Math.max(0,relayAt-seen),c.utc_offset_seconds||0)} · ≈${signedMS(n.clock_offset_ms||0)} vs relay`:'';
     return `<tr><td><span class="dot ${n.connected?'online':''}"></span><b>${nodeBadge(n)}</b>${renderIndicators(c)}<span class="muted">${esc(n.state)} · ${esc(ram)}<br>${esc(system)} · ${esc(cpu)} · uptime ${esc(uptime)}${c.agent_version?' · agent '+esc(c.agent_version):''}${esc(nodeClock)}</span></td><td>${esc((c.groups||[]).join(', ')||'default')}<br><span class="muted">${esc(models||'no ready models reported')}</span></td><td>${gpu}</td><td>${c.running||0} / ${cap} · ${busy}%<div class="meter"><i style="width:${busy}%"></i></div></td><td>${compact(n.jobs_total)}<br><span class="muted">${compact(n.jobs_failed)} failed</span></td></tr>`;

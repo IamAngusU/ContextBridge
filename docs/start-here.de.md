@@ -31,7 +31,7 @@ Falls dir die Begriffe neu sind: Ein **Auftrag** ist ein Prompt mit Regeln für 
 
 Dieser Weg braucht **keinen VPS und keine eigene GPU**. Du brauchst Windows, Opera/Chrome/Edge oder einen anderen Chromium-Browser, einen angemeldeten ChatGPT- oder Gemini-Tab und die Berechtigung, dort Aufträge zu senden. Der Test schickt einen kurzen Prompt an diesen Anbieter.
 
-> **Versionshinweis, bitte lesen:** Der Installer lädt die [neueste veröffentlichte GitHub-Release](https://github.com/IamAngusU/ContextBridge/releases/latest), nicht automatisch den neuesten Commit auf `main`. Beim Schreiben dieses Guides am 14.09.2026 war das [v0.5.51](https://github.com/IamAngusU/ContextBridge/releases/tag/v0.5.51), während der Quellcode bereits 0.5.64 enthielt. Der einfache Texttest unten ist der Einstieg. Die späteren `--new-chat`- und Bild-Upload-Demobefehle benötigen mindestens 0.5.61 beziehungsweise die Bildkorrekturen aus 0.5.64; führe sie erst aus, wenn `contextbridge version` eine passende **installierte** Version meldet. Eine Release ist kein Commit, und eine lokal getestete Version ist nicht automatisch öffentlich installierbar.
+> **Versionshinweis, bitte lesen:** Der Installer lädt die [neueste veröffentlichte GitHub-Release](https://github.com/IamAngusU/ContextBridge/releases/latest), nicht automatisch den neuesten Commit auf `main`. Dieser Guide wird für **v0.5.66** vorbereitet. Der einfache Texttest unten funktioniert mit älteren 0.5.x-Ständen; das vollständige Demo-Runbook mit frischen Chats, verifizierter Bildübergabe und den aktuellen Sicherheitsgrenzen benötigt mindestens **0.5.66**. Prüfe vor der Demo mit `contextbridge version`, was wirklich installiert ist. Falls die verlinkte neueste Release noch darunter liegt, ist 0.5.66 noch nicht öffentlich veröffentlicht – ein Commit oder lokal geladener Ordner ist keine Release.
 
 ### Schritt 1: Installieren
 
@@ -52,6 +52,17 @@ curl -fsSL https://angusu.de/contextbridge/install.sh | sh
 ```
 
 Auch dort für den ersten lokalen Browser-Test Ziel **3** und Gerätemodus **1** wählen. Die folgenden Klicks beschreiben Opera; bei anderen Browsern heißen die Menüs ähnlich.
+
+Linux ist ein nativer Relay-, Worker- und CLI-Einsatz mit AMD64/ARM64-Builds,
+systemd-Setup und Ubuntu-CI – nicht nur ein Fernsteuer-Terminal für Windows.
+macOS hat native Builds, LaunchAgent, Metal-Erkennung und eine macOS-CI-Matrix;
+die heutige Evidenz umfasst aber noch keine gepflegte physische Mac-E2E-Matrix
+für Metal, Ollama und alle Browser-Lifecycle-Fälle. Safari wird von der
+Erweiterung derzeit nicht beansprucht. Details stehen im
+[Plattformabschnitt des README](../README.md#platform-support-and-evidence).
+Für unbeaufsichtigte Linux-/macOS-Worker gibt es außerdem eine
+[nichtinteraktive Installation mit expliziten Umgebungsvariablen](headless-worker-install.md);
+auch dort bleibt die Freigabe am Relay ein eigener Schritt.
 
 ### Schritt 2: Die Erweiterung laden
 
@@ -82,6 +93,12 @@ contextbridge console
 ```
 
 Tippe dort `exit` und Enter: **nur die Ansicht** schließt sich, der verwaltete Dienst läuft weiter. `contextbridge run` startet dagegen einen Dienst im Vordergrund; starte ihn nicht zusätzlich, nur um das Terminal zu sehen. Für die grafische Ansicht öffnet `contextbridge dashboard` das lokale Dashboard.
+
+Im Panel sind lange GPU- und Modelllisten pro Worker zunächst eingeklappt.
+`details 1` blendet beides für Node 1 ein, `gpus 1` oder `models 1` nur den
+jeweiligen Teil. Mit `all` statt `1` gilt der Toggle für alle angezeigten
+Nodes. `help` zeigt die Befehle, `clear` leert nur die sichtbare
+Sitzungshistorie und `exit` beendet ausschließlich diese Ansicht.
 
 > **🖼️ Bild hier:** aktueller Terminalausschnitt mit Online-Dienst, einem angebundenen Tab, belegten/freien Slots und getrenntem Verlauf. Einen leeren/„unknown“-Modellstatus nicht retuschieren. Dateivorschlag `docs/assets/first-connected-console.png`.
 
@@ -119,6 +136,20 @@ Dieser zweite Auftrag enthält nur einen erfundenen Satz und fordert keine Datei
 
 Auch dieser Test ist ein echter Website-Auftrag und kann auf das Kontingent deines KI-Anbieters zählen. Ein Anbieterlimit ist kein Grund, denselben Prompt blind immer wieder abzusenden.
 
+### Wo du den eigentlichen Prompt bearbeitest
+
+`prompt` enthält deine vertrauenswürdige Aufgabe und ist je Job frei
+bearbeitbar – in `cluster chat --prompt`, einer Job-JSON oder einem geplanten
+Job. Von Endnutzern gelieferter Inhalt gehört in `text`. Der Core setzt davor
+immer einen defensiven Safety-Wrapper und ergänzt den gewählten
+Ausgabevertrag; die Extension kann diesen Rahmen nicht abschalten und die
+visuelle Anlernung ändert nur Bedienelement-Selektoren. Strenges JSON ist
+trotzdem möglich, wenn du `output.mode: "json"`, erforderliche Top-Level-Keys
+und Typen/Bedeutung im Job-Prompt angibst. Diese Grenze ist Defense in Depth,
+kein Versprechen, dass eine einzelne Modellanweisung jede Prompt Injection
+verhindert. Ein vollständiges Beispiel steht unter
+[Browser-Sessions und Prompt-Verträge](browser-sessions-and-prompts.de-en.md).
+
 ## Was du danach ausprobieren kannst
 
 Die folgenden **lesenden** Befehle sind ein guter Rundgang, auch wenn noch keine eigene GPU oder kein Modell installiert ist:
@@ -143,7 +174,7 @@ contextbridge update status
 | Ein täglicher Job erzeugt einen Text und ein zweiter prüft ihn | Uhrzeit/Zeitzone, Pause/Fortsetzen, Verlauf, begrenzte Folgeschritte | lokaler [Schedule](schedules.md) und passender Provider |
 | Eigene Ollama-/GGUF-Modelle liefern Text, Vision oder Embeddings | lokaler Route- und Hardwarestatus | Modell tatsächlich installiert und bereit |
 
-Wenn **mindestens 0.5.64 installiert** ist und du ein Relay mit ChatGPT- und Gemini-Worker verbunden hast, führt das [copy-paste-fertige Demo-Runbook](demo-de-en.md) die Bild→VPS→Gemini-Kette Schritt für Schritt aus. Das kürzere [Video-Skript](demo-video-de-en.md) zeigt, welche Teile für eine Aufnahme wirklich stark sind. Bild und Text in einem Auftrag können je nach Webanbieter unterschiedlich priorisiert werden; das Runbook trennt Bildgenerierung und OCR deshalb bewusst in zwei Jobs.
+Wenn **mindestens 0.5.66 installiert** ist und du ein Relay mit ChatGPT- und Gemini-Worker verbunden hast, führt das [copy-paste-fertige Demo-Runbook](demo-de-en.md) die Bild→VPS→Gemini-Kette Schritt für Schritt aus. Das kürzere [Video-Skript](demo-video-de-en.md) zeigt, welche Teile für eine Aufnahme wirklich stark sind. Bild und Text in einem Auftrag können je nach Webanbieter unterschiedlich priorisiert werden; das Runbook trennt Bildgenerierung und OCR deshalb bewusst in zwei Jobs.
 
 > **🎬 Längeres Demo-Video hier einfügen:** ungefähr 3 Minuten, ehrlich geschnitten, mit sichtbarer echter Jobdauer; erst Konsole/Attach und lokaler Ollama-Text, dann ChatGPT-Bilddatei, lokales Vision-Modell und Gemini-OCR, danach Textjob bei minimiertem Opera, zuletzt Dashboard. Tonspur DE oder EN; Untertitel für die andere Sprache. Dateivorschlag `docs/assets/contextbridge-demo.mp4`, Vorschaubild `docs/assets/contextbridge-demo-poster.webp`. In der Video-Beschreibung auf [Befehle und DE/EN-Sprechtext](demo-video-de-en.md) verlinken.
 
@@ -190,7 +221,13 @@ Beim ersten Cluster-Setup wählst du auf dem Server **Relay** und gibst ihm eine
 - **1:N:** eine App verteilt unabhängige Jobs auf mehrere PCs oder Tabs. Anforderungen an Modell, Aufgabe, Gruppe und gegebenenfalls freien VRAM filtern Kandidaten.
 - **N:N:** mehrere Apps nutzen einen Pool mehrerer Worker über **ein** Relay. Jobs und Ergebnisse gehören weiterhin ihrem Producer; ein öffentlicher `session_id` allein berechtigt nicht zum Lesen fremder Gespräche.
 
-Ein einzelner PC darf mehreren **getrennten** Relays beitreten. Dabei laufen derzeit getrennte Worker-Prozesse ohne gemeinsamen hardwareweiten Slot-Zähler; du musst ihre Summen selbst so wählen, dass RAM/VRAM nicht überbucht werden. Zwei Relays sind auch **keine** automatisch replizierte Hochverfügbarkeits-Installation. Innerhalb eines Relays zählt ein PC mit zwei GPUs nicht automatisch als zwei unabhängige Browser-Tabs: Der Scheduler sieht die gemeldete Hardware, freie Ressourcen und die tatsächlichen Provider-Slots. Browser-Tabs laufen seriell **je Tab**, mehrere Tabs können parallel arbeiten. Lokale Modelle können andere Nebenläufigkeit haben.
+Ein einzelner PC darf mehreren **getrennten** Relays beitreten. Dabei laufen derzeit getrennte Worker-Prozesse ohne gemeinsamen hardwareweiten Slot-Zähler; du musst ihre Summen selbst so wählen, dass RAM/VRAM nicht überbucht werden. Zwei Relays sind auch **keine** automatisch replizierte Hochverfügbarkeits-Installation. Innerhalb eines Relays zählt ein PC mit zwei GPUs nicht automatisch als zwei unabhängige Browser-Tabs: Der Scheduler meldet jede GPU, prüft eine harte `min_free_vram_bytes`-Anforderung gegen **eine** ausreichend freie Karte und nutzt sonst VRAM nur als weiche Präferenz. Er reserviert keine nummerierte GPU und addiert VRAM nicht still über Karten hinweg. Ohne harte VRAM-Anforderung bleibt ein kompatibler Zero-GPU-/CPU-Worker zulässig. Browser-Tabs laufen seriell **je Tab**, mehrere Tabs können parallel arbeiten. Lokale Modelle können andere Nebenläufigkeit haben; ein Rack wird als mehrere gepaarte Nodes abgebildet.
+
+CPU-Last, freie RAM-Menge, Temperatur, GPU-Auslastung und freier VRAM sind
+Live-Werte des ganzen Geräts. Sie gehören nicht automatisch ContextBridge oder
+einem einzelnen Job. Per-Job-Peaks werden nur gezeigt, wenn eine Engine sie
+ausdrücklich mit `resource_scope: "job"` als zurechenbar liefert; fehlende
+Messungen bleiben unbekannt.
 
 ### Sobald ein VPS verbunden ist: ein kleiner Fern-Test
 
@@ -245,6 +282,7 @@ ContextBridge beschleunigt **nicht** magisch die Inferenz von ChatGPT, Gemini od
 - **Nicht jede Fähigkeit ist verifiziert.** ChatGPT/Gemini sind automatisch erkannt, andere Seiten benötigen ein visuell gelehrtes Profil. Die separate Gemini-Videoerzeugung ist noch ungetestet. Gemini Music hat in früheren Tests echte MP4-Audiodateien geliefert, ein späterer Lauf lieferte aber trotz „Generating your track“ keine verifizierte Datei; fordere `min_media` an und behandle einen Fehlschlag als Fehlschlag.
 - **„Connected“ ist keine Fertigmeldung.** Die Erweiterung kann verbunden sein, während ein bestimmter Tab lädt, ein Modell unbekannt ist oder ein Job am Anbieter scheitert. Diagnostics und Status zeigen diese Unterschiede.
 - **Geplante Aufträge laufen nicht auf gut Glück doppelt.** Nach einem Neustart kann ein bereits an eine Website gesendeter Lauf `interrupted` sein; er wird nicht blind erneut gesendet. Pause verhindert künftige Starts, stoppt aber keinen schon gesendeten Prompt. Fallback auf ein anderes Browser-Modell passiert nur vor Send, wenn das Menü den verlangten Eintrag ausdrücklich als nicht verfügbar zeigt; es gibt keine universelle automatische „eine Denkstufe tiefer“.
+- **Cluster-Ausführung ist at-most-once, nicht exactly-once.** Ein Workerfehler, Disconnect oder Execution-Timeout ist nach möglichem Provider-Send mehrdeutig und führt deshalb zum Fehlschlag statt zur automatischen Neuausführung. Der Provider kann den Auftrag trotzdem beendet haben, obwohl ContextBridge das Ergebnis nicht sicher bekam. Prüfe den Status und reiche bewusst einen neuen Job ein; nur die Zustellung eines bereits erzeugten Completion-Payloads darf wiederholt werden, ohne den Provider erneut auszuführen.
 - **Verschlüsselung hat Grenzen.** TLS schützt den Weg zum Relay; optionales E2EE kann dessen Einblick in Prompt/Ergebnis verhindern. Ein ChatGPT- oder Gemini-Job muss trotzdem beim jeweiligen Webanbieter lesbar ankommen. E2EE macht transparentes Failover auf einen anderen Worker unmöglich und deaktiviert Klartext-Live-Streaming.
 - **Ein Relay ist kein Hochverfügbarkeits-Cluster.** Eine einzelne BoltDB-Relay-Instanz ist dauerhaft, aber nicht active-active repliziert. Mehrere unabhängige Relays koordinieren aktuell keine gemeinsame Hardware-Budgetgrenze.
 - **Fehler sind sichtbar.** Ein Providerfehler, eine nicht sicher zugeordnete Antwort oder eine nicht abgeholte Datei werden nicht zu einem erfolgreichen Ergebnis umetikettiert. Für Moderation wird unsichere/ungültige Ausgabe zu `review`, nicht zu `allow`.

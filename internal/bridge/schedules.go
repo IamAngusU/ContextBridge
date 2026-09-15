@@ -16,6 +16,10 @@ import (
 	"time"
 )
 
+const defaultJobAdmissionLimit = 4
+
+var errScheduleCapacity = errors.New("schedule capacity unavailable")
+
 // A schedule is local, durable, and at-most-once: a due occurrence is recorded
 // before its job is handed to a provider. An interrupted browser send is never
 // repeated automatically after a service restart.
@@ -84,13 +88,17 @@ type ScheduleStepRun struct {
 }
 
 type scheduleStore struct {
-	mu    sync.Mutex
-	path  string
-	items map[string]Schedule
+	mu             sync.Mutex
+	path           string
+	items          map[string]Schedule
+	admissionLimit int
 }
 
-func newScheduleStore(dir string) (*scheduleStore, error) {
-	ss := &scheduleStore{path: filepath.Join(dir, "schedules.json"), items: map[string]Schedule{}}
+func newScheduleStore(dir string, admissionLimit int) (*scheduleStore, error) {
+	if admissionLimit <= 0 {
+		admissionLimit = defaultJobAdmissionLimit
+	}
+	ss := &scheduleStore{path: filepath.Join(dir, "schedules.json"), items: map[string]Schedule{}, admissionLimit: admissionLimit}
 	raw, err := os.ReadFile(ss.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return ss, nil
@@ -226,6 +234,18 @@ func (ss *scheduleStore) claim(id string, now time.Time, manual bool) (Schedule,
 	}
 	if item.CurrentRunID != "" {
 		return Schedule{}, Job{}, errors.New("schedule is already running")
+	}
+	running := 0
+	for _, candidate := range ss.items {
+		if candidate.CurrentRunID != "" {
+			running++
+		}
+	}
+	// Manual runs and the due dispatcher share this atomic bound. Checking a
+	// separate counter before claim allowed concurrent requests to all observe
+	// a free slot and over-admit runs.
+	if running >= ss.admissionLimit {
+		return Schedule{}, Job{}, errScheduleCapacity
 	}
 	if !manual && (!item.Enabled || item.NextRun.IsZero() || item.NextRun.After(now)) {
 		return Schedule{}, Job{}, errors.New("schedule is not due")
@@ -551,20 +571,19 @@ func parseCronField(field string, minValue, maxValue int) (map[int]bool, bool, e
 
 func (s *Server) dispatchSchedules(ctx context.Context) {
 	now := time.Now().UTC()
-	capacity := 4 - max(int(s.activeJobs.Load()), s.schedules.runningCount())
 	for _, item := range s.schedules.list() {
 		if !item.Enabled || item.NextRun.IsZero() || item.NextRun.After(now) || item.CurrentRunID != "" {
-			continue
-		}
-		if capacity <= 0 {
-			s.schedules.waiting(item.ID, "capacity")
 			continue
 		}
 		if reason := s.scheduleReadiness(item.Job); reason != "" {
 			s.schedules.waiting(item.ID, reason)
 			continue
 		}
-		claimed, job, err := s.schedules.claim(item.ID, now, false)
+		claimed, job, err := s.claimSchedule(item.ID, now, false)
+		if errors.Is(err, errScheduleCapacity) {
+			s.schedules.waiting(item.ID, "capacity")
+			continue
+		}
 		if err != nil {
 			s.logger.Printf("schedule %s claim failed: %v", item.ID, err)
 			continue
@@ -572,8 +591,19 @@ func (s *Server) dispatchSchedules(ctx context.Context) {
 		s.store.AddActivity("scheduled", "Scheduled job started: "+claimed.Name, job.ID)
 		s.logger.Printf("schedule %s started as job %s", claimed.ID, job.ID)
 		go s.executeSchedule(ctx, claimed.ID, job)
-		capacity--
 	}
+}
+
+// claimSchedule makes the combined ordinary-job + scheduled-run limit one
+// critical section. A schedule remains counted for its complete multi-step
+// lifetime through CurrentRunID, including the gaps between provider calls.
+func (s *Server) claimSchedule(id string, now time.Time, manual bool) (Schedule, Job, error) {
+	s.scheduleAdmissionMu.Lock()
+	defer s.scheduleAdmissionMu.Unlock()
+	if s.regularActiveJobs+s.schedules.runningCount() >= s.jobAdmissionLimit {
+		return Schedule{}, Job{}, errScheduleCapacity
+	}
+	return s.schedules.claim(id, now, manual)
 }
 
 func (s *Server) scheduleReadiness(job Job) string {
@@ -624,7 +654,7 @@ func (s *Server) executeSchedule(ctx context.Context, id string, job Job) {
 	if !ok {
 		return
 	}
-	outcome, detail := s.runScheduleSteps(ctx, id, job, item.Steps)
+	outcome, detail := s.runScheduleSteps(withScheduledExecution(ctx), id, job, item.Steps)
 	s.schedules.finish(id, job.ID, outcome, detail)
 	s.store.AddActivity("scheduled", "Scheduled job "+outcome, job.ID)
 }

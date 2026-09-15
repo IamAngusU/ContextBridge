@@ -2,6 +2,39 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.66 - 2026-09-15
+
+### Security
+
+- worker group scopes and paired node public keys remain bound to the approved identity instead of accepting later heartbeat or hello replacements
+- E2EE job and result envelopes authenticate their job, producer, node, assignment, and direction context, and result submission verifies the active assignment
+- browser jobs re-check the exact authorized conversation before every irreversible action; navigation, cancellation, and uncertain-send recovery fail closed without duplicating prompts
+- inbox result creation rejects link/reparse-point targets, browser artifact downloads are origin-bound and streaming-size-limited, and model/runtime downloads enforce bounded authenticated metadata
+- per-owner queue and pipeline admission, bounded worker concurrency, retention, pairing cleanup, and fair scheduling prevent one producer or node from exhausting the relay
+
+### Fixed
+
+- browser completions are delivered directly to the relay before using the bounded recovery cache, so valid large artifacts are not rejected by extension storage quotas
+- a fresh ChatGPT or Gemini chat may adopt its permanent conversation URL only after the exact ContextBridge-owned turn is observed; unrelated same-origin navigation is rejected
+- completion requires an assistant response after the exact owned user turn, including chats with more than 10,000 rendered message nodes
+- diagnostic and progress scripts have deadlines and per-tab in-flight guards, preventing unresolved browser calls from accumulating during provider hangs
+- observation-only checks never reload or modify a provider page, and local cache cleanup cannot turn an acknowledged completion into a failure
+- local result compaction never restores removed prompts or source inputs, Ollama image generation is distinct from vision, and embedding-only models are never routed for text generation
+- ordinary, scheduled, and pipeline work share atomic admission limits; queue scans stay fair when many incompatible jobs precede a routeable one
+- scheduler telemetry clamps invalid percentages and free-memory counters, and a model's single-GPU VRAM requirement must fit one GPU rather than the aggregate across cards
+
+### Improved
+
+- the live terminal accepts commands in foreground `run` and `worker` panels, keeps history newest-first in its own ASCII section, and exposes bounded per-node model/GPU detail views
+- terminal status retains readable grouping, load-aware colors, activity animation, zero-GPU nodes, multiple GPUs, node clocks, and honest unknown/degraded metadata
+- headless worker installation has explicit noninteractive relay, name, and public-URL inputs with fail-closed validation
+- release builds verify stable-version metadata and byte-for-byte extension package parity before atomically publishing a complete artifact set
+
+### Tested
+
+- exact and one-byte-over prompt, text, image, output, and aggregate artifact boundaries, including plaintext and E2EE 8 MiB input plus two 6 MiB result artifacts
+- Windows live Ollama routing from a VPS with no Ollama UI, minimized browser operation, queue/admission stress, fuzzed relay identifiers, and Linux/macOS cross-builds
+
 ## 0.5.65 - 2026-09-15
 
 ### Fixed

@@ -1,11 +1,13 @@
 # ContextBridge: short video script (DE / EN)
 
-This is the **edited roughly 3-minute video**, not a claim that all provider jobs finish within fixed seconds. Keep the terminal's real elapsed times visible; cut waiting footage honestly. The full [technical runbook](demo-de-en.md) retains identity research, relativity, safety notes, and troubleshooting. The story now starts with **a local Ollama model controlled from the VPS**, then moves a real image between ChatGPT, a local vision model, and Gemini.
+This is the **edited roughly 3-minute video**, not a claim that all provider jobs finish within fixed seconds. It requires **ContextBridge 0.5.66 or newer** on the VPS and worker, plus a compatible 0.5.66-or-newer extension. Keep the terminal's real elapsed times visible; cut waiting footage honestly. The full [technical runbook](demo-de-en.md) retains identity research, relativity, safety notes, and troubleshooting. The story starts with **a local Ollama model controlled from the VPS**, then moves a real image from ChatGPT to Gemini, with an optional local-vision step when enough worker resources are free.
+
+The Windows commands intentionally show the recording PC's custom `C:\ContextBridge\config.yml`. The installer default is `%LOCALAPPDATA%\ContextBridge\config.yml`; default installations can omit `--config` or substitute that path. The visible VPS directory remains exactly `/root/contextbridge-demo`; these commands do not clear it.
 
 ## Before recording
 
 - Verify the PC service, VPS relay, and Opera extension are connected and compatible. Leave enough capacity: **at most eight attached tabs before attaching the three fresh demo pages**. Those three pages plus three new-chat jobs then stay below the 16-tab safety limit. Close or detach only finished test chats, never personal or active ones.
-- Start Ollama on the Windows PC if it is offline. Check `contextbridge models` locally: this recorded setup has `qwen2.5:latest` for text and `qwen2.5vl:7b` for text+vision. These names are **demo prerequisites**, not universal bundled models. Confirm both are ready before recording; neither must remain loaded in VRAM. `models` reports advertised/inferred capabilities, parameter count and quantization where available—not an intelligence score or proof that every image will be read correctly.
+- Start Ollama on the Windows PC if it is offline. Check `contextbridge models` locally: this recorded setup uses `qwen2.5:1.5b` for the reliable text step. The optional local-vision step uses `qwen2.5vl:7b`; include it only if that model is installed and enough RAM/VRAM is free, otherwise skip Shot 5. These names are **demo prerequisites for the steps that use them**, not universal bundled models. A model need not remain loaded in VRAM between jobs. `models` reports advertised/inferred capabilities, parameter count and quantization where available—not an intelligence score or proof that every image will be read correctly.
 - Use a fresh ChatGPT page and two fresh Gemini pages for the on-camera attach sequence. Keep the browser visible for image creation and upload. Do **not** include Gemini music: the latest test did not return verified media bytes.
 - Use one VPS shell throughout the recording; shell variables below must persist. Open the PC dashboard at `http://127.0.0.1:32145` **before** recording and authenticate privately if it asks for the local token. Never show or read out that token. Check that Queue, Schedules, and Recent activity load, then switch back to the console. An empty queue is an empty queue—do not present it as a live queue demonstration.
 - If ChatGPT or Gemini shows a rate-limit dialog, wait for it to clear before recording. Never dismiss a provider error and imply that the job succeeded.
@@ -24,7 +26,7 @@ This attaches to the managed service; it does not start another service process.
 contextbridge models --config "C:\ContextBridge\config.yml"
 ```
 
-Point to `qwen2.5:latest` (text) and `qwen2.5vl:7b` (text+vision). Show the console status line. In Opera, show **Attach this page** on the fresh ChatGPT and Gemini pages, then click **Connect** once and wait for **Connected**.
+Point to `qwen2.5:1.5b` (text) and, when you include the optional vision segment, `qwen2.5vl:7b` (text+vision). Show the console status line. In Opera, show **Attach this page** on the fresh ChatGPT and Gemini pages, then click **Connect** once and wait for **Connected**.
 
 **DE:** „Mein Windows-PC ist der Worker. Hier laufen eigene Ollama-Modelle: eines für Text, eines mit Bildverständnis. Zusätzlich wähle ich ChatGPT- und Gemini-Seiten bewusst einzeln aus.“
 
@@ -35,6 +37,7 @@ Point to `qwen2.5:latest` (text) and `qwen2.5vl:7b` (text+vision). Show the cons
 In **one** VPS shell:
 
 ```bash
+contextbridge version
 contextbridge cluster status --config /var/lib/contextbridge/config.yml
 DEMO_DIR=/root/contextbridge-demo
 mkdir -p "$DEMO_DIR"
@@ -51,10 +54,10 @@ Show the PC online, its free slots, providers/models, and hardware. Mention the 
 ## Shot 3 — VPS controls a local Ollama text model
 
 ```bash
-contextbridge cluster chat --config /var/lib/contextbridge/config.yml --provider ollama --model qwen2.5:latest --session "demo-$DEMO_ID-local-text" --artifacts off --prompt 'Antworte exakt mit CB-LOCAL-OK und keinen weiteren Zeichen.'
+contextbridge cluster chat --config /var/lib/contextbridge/config.yml --provider ollama --model qwen2.5:1.5b --session "demo-$DEMO_ID-local-text" --artifacts off --prompt 'Antworte exakt mit CB-LOCAL-OK und keinen weiteren Zeichen.'
 ```
 
-Wait for `CB-LOCAL-OK` and `↳ verwendet: ollama · qwen2.5:latest`. The marker alone is not the proof of execution; the **provider/model/node metadata** in the VPS terminal is. This exact rehearsal finished in **5.9 s**, but keep the actual time on camera. Do not confuse the Windows GPU with hosted ChatGPT/Gemini inference.
+Wait for `CB-LOCAL-OK` and `↳ verwendet: ollama · qwen2.5:1.5b`. The marker alone is not the proof of execution; the **provider/model/node metadata** in the VPS terminal is. This exact live rehearsal finished in **6.4 s**, but keep the actual time on camera. Do not confuse the Windows GPU with hosted ChatGPT/Gemini inference.
 
 **DE:** „Der Befehl kommt vom VPS, aber die Rechnung läuft auf meinem Windows-PC. ContextBridge zeigt mir den tatsächlich verwendeten Anbieter, das Modell und den Worker.“
 
@@ -63,30 +66,48 @@ Wait for `CB-LOCAL-OK` and `↳ verwendet: ollama · qwen2.5:latest`. The marker
 ## Shot 4 — Hero flow: ChatGPT returns a real image file
 
 ```bash
-contextbridge cluster chat --config /var/lib/contextbridge/config.yml --profile chatgpt --new-chat --foreground-new-chat --session "demo-$DEMO_ID-image" --image --artifacts "$DEMO_DIR" --prompt 'Erstelle genau ein quadratisches Bild: reinweißer Hintergrund, mittig die klare schwarze Aufschrift „IamAngusU“ und direkt darunter deutlich kleiner „ContextBridge“. Keine weiteren Wörter, Symbole oder Verzierungen. Gib nur das Bild aus.'
-```
-
-Briefly show ChatGPT working on Windows. Return to the VPS for `Saved artifact:`; show the returned file and validate that it is an image:
-
-```bash
-IMAGE_FILE=$(find "$DEMO_DIR" -maxdepth 1 -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.webp' \) -printf '%T@ %p\n' | sort -nr | head -n 1 | cut -d' ' -f2-)
-test -n "$IMAGE_FILE" && file "$IMAGE_FILE"
+unset IMAGE_FILE
+ARTIFACT_LOG=$(mktemp /tmp/contextbridge-demo-artifact.XXXXXX.log)
+set -o pipefail
+contextbridge cluster chat --config /var/lib/contextbridge/config.yml --profile chatgpt --new-chat --foreground-new-chat --session "demo-$DEMO_ID-image" --image --artifacts "$DEMO_DIR" --prompt 'Erstelle genau ein quadratisches Bild: reinweißer Hintergrund, mittig die klare schwarze Aufschrift „IamAngusU“ und direkt darunter deutlich kleiner „ContextBridge“. Keine weiteren Wörter, Symbole oder Verzierungen. Gib nur das Bild aus.' 2>&1 | tee "$ARTIFACT_LOG"
+IMAGE_JOB_STATUS=${PIPESTATUS[0]}
+mapfile -t IMAGE_PATHS < <(sed -n 's/^Saved artifact: //p' "$ARTIFACT_LOG")
+rm -f -- "$ARTIFACT_LOG"
+unset ARTIFACT_LOG
+if [ "$IMAGE_JOB_STATUS" -eq 0 ] && [ "${#IMAGE_PATHS[@]}" -eq 1 ]; then
+  IMAGE_FILE=${IMAGE_PATHS[0]}
+fi
+unset IMAGE_PATHS IMAGE_JOB_STATUS
+case "${IMAGE_FILE:-}" in
+  "$DEMO_DIR"/*) ;;
+  *) printf 'STOP: this run did not return exactly one artifact inside %s\n' "$DEMO_DIR" >&2; unset IMAGE_FILE ;;
+esac
+if [ -n "${IMAGE_FILE:-}" ] && [ -f "$IMAGE_FILE" ]; then
+  IMAGE_MIME=$(file -b --mime-type -- "$IMAGE_FILE")
+  case "$IMAGE_MIME" in
+    image/png|image/jpeg|image/webp) file -- "$IMAGE_FILE" ;;
+    *) printf 'STOP: returned artifact is not a supported image: %s\n' "$IMAGE_MIME" >&2; unset IMAGE_FILE ;;
+  esac
+else
+  unset IMAGE_FILE
+fi
+test -n "${IMAGE_FILE:-}" || { printf 'Do not continue; no verified image belongs to this run.\n' >&2; false; }
 printf 'Saved image: %s\n' "$IMAGE_FILE"
 ```
 
-If `IMAGE_FILE` is empty, stop the demo here; do not continue with a guessed path.
+Briefly show ChatGPT working on Windows. Return to the VPS for `Saved artifact:`. The temporary `/tmp` log binds the next steps to the artifact path emitted by **this run**; it is deleted immediately. The persistent `/root/contextbridge-demo` directory is neither cleared nor searched for a merely newest file. If `IMAGE_FILE` is empty, stop the demo here; never continue with a guessed or stale path.
 
 **DE:** „Der Job gilt erst als erfolgreich, wenn die tatsächliche Bilddatei auf dem VPS gespeichert wurde – nicht bloß, weil ein Modell sagt, es habe ein Bild erstellt.“
 
 **EN:** “The job succeeds only when the actual image file is saved on the VPS—not merely because a model says it created one.”
 
-## Shot 5 — The same file goes to the local vision model
+## Shot 5 — Optional: the same file goes to the local vision model
 
 ```bash
 contextbridge cluster chat --config /var/lib/contextbridge/config.yml --provider ollama --model qwen2.5vl:7b --session "demo-$DEMO_ID-local-vision" --attach-image "$IMAGE_FILE" --artifacts off --prompt 'Lies nur den sichtbaren Text im angehängten Bild. Nenne die große und die kleine Zeile, ohne zu raten.'
 ```
 
-Look for `↳ verwendet: ollama · qwen2.5vl:7b` and check the actual OCR answer. In a measured run the local model read `IamAngusU` and `ContextBridge` in **18.1 s**. This is one tested image, not a general OCR accuracy guarantee. `--attach-image` creates a hard vision requirement, and the named model itself must advertise that capability.
+Include this shot only when `qwen2.5vl:7b` is installed and the worker has enough free RAM/VRAM; otherwise continue directly with Gemini. Look for `↳ verwendet: ollama · qwen2.5vl:7b` and check the actual OCR answer. In a measured run the local model read `IamAngusU` and `ContextBridge` in **18.1 s**. This is one tested image, not a general OCR accuracy guarantee. `--attach-image` creates a hard vision requirement, and the named model itself must advertise that capability.
 
 **DE:** „Jetzt bekommt mein eigenes Vision-Modell dieselbe gespeicherte Datei. Der VPS steuert es fern, und das Ergebnis kommt zurück – ohne ChatGPT oder Gemini für diesen Schritt.“
 

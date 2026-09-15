@@ -3,27 +3,34 @@ declare(strict_types=1);
 
 const CONTEXTBRIDGE_REPOSITORY = 'IamAngusU/ContextBridge';
 const CONTEXTBRIDGE_BASE = '/contextbridge';
+const CONTEXTBRIDGE_METRIC_RETENTION_DAYS = 31;
+const CONTEXTBRIDGE_METRIC_REQUESTS_PER_CLIENT_DAY = 8;
+const CONTEXTBRIDGE_METRIC_UNIQUES_PER_KIND_DAY = 10000;
 
-$requestPath = parse_url((string) ($_SERVER['REQUEST_URI'] ?? CONTEXTBRIDGE_BASE . '/'), PHP_URL_PATH) ?: CONTEXTBRIDGE_BASE . '/';
+if (!defined('CONTEXTBRIDGE_LIBRARY_ONLY')) {
+    $requestPath = parse_url((string) ($_SERVER['REQUEST_URI'] ?? CONTEXTBRIDGE_BASE . '/'), PHP_URL_PATH) ?: CONTEXTBRIDGE_BASE . '/';
 
-if ($requestPath === CONTEXTBRIDGE_BASE . '/api/stats') {
-    respondWithStats();
-}
-if ($requestPath === CONTEXTBRIDGE_BASE . '/install.sh') {
-    respondWithInstaller('install.sh', 'text/x-shellscript; charset=utf-8');
-}
-if ($requestPath === CONTEXTBRIDGE_BASE . '/install.ps1') {
-    respondWithInstaller('install.ps1', 'text/plain; charset=utf-8');
-}
-if ($requestPath === CONTEXTBRIDGE_BASE . '/favicon.svg') {
-    respondWithFile(dirname(__DIR__) . '/extension/assets/contextbridge-mark.svg', 'image/svg+xml; charset=utf-8', true);
+    if ($requestPath === CONTEXTBRIDGE_BASE . '/api/stats') {
+        respondWithStats();
+    }
+    if ($requestPath === CONTEXTBRIDGE_BASE . '/install.sh') {
+        respondWithInstaller('install.sh', 'text/x-shellscript; charset=utf-8');
+    }
+    if ($requestPath === CONTEXTBRIDGE_BASE . '/install.ps1') {
+        respondWithInstaller('install.ps1', 'text/plain; charset=utf-8');
+    }
+    if ($requestPath === CONTEXTBRIDGE_BASE . '/favicon.svg') {
+        respondWithFile(dirname(__DIR__) . '/extension/assets/contextbridge-mark.svg', 'image/svg+xml; charset=utf-8', true);
+    }
 }
 
-header('Content-Type: text/html; charset=utf-8');
-header("Content-Security-Policy: default-src 'self'; base-uri 'none'; connect-src 'self'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'");
-header('Referrer-Policy: strict-origin-when-cross-origin');
-header('X-Content-Type-Options: nosniff');
-header('X-Frame-Options: DENY');
+if (!defined('CONTEXTBRIDGE_LIBRARY_ONLY')) {
+    header('Content-Type: text/html; charset=utf-8');
+    header("Content-Security-Policy: default-src 'self'; base-uri 'none'; connect-src 'self'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'");
+    header('Referrer-Policy: strict-origin-when-cross-origin');
+    header('X-Content-Type-Options: nosniff');
+    header('X-Frame-Options: DENY');
+}
 
 function respondWithStats(): never
 {
@@ -35,6 +42,7 @@ function respondWithStats(): never
         'release_downloads' => $github['release_downloads'],
         'installer_requests' => $downloads['total'],
         'unique_installers' => $downloads['unique'],
+        'unique_window' => 'current UTC day',
         'updated_at' => $github['updated_at'],
     ]);
 }
@@ -135,37 +143,94 @@ function githubRequest(string $url): ?array
     return is_array($decoded) ? $decoded : null;
 }
 
-function recordDownload(string $kind): void
+function recordDownload(string $kind, ?int $now = null): void
 {
+    if (!in_array($kind, ['install.sh', 'install.ps1'], true)) {
+        return;
+    }
+    $now ??= time();
+    $bucket = gmdate('Y-m-d', $now);
+    $cutoff = gmdate('Y-m-d', $now - ((CONTEXTBRIDGE_METRIC_RETENTION_DAYS - 1) * 86400));
+    $transactionStarted = false;
     try {
         $database = siteDatabase();
-        $fingerprint = clientFingerprint();
+        $fingerprint = clientFingerprint($bucket);
         $database->exec('BEGIN IMMEDIATE');
-        $statement = $database->prepare('INSERT INTO download_totals (kind, total) VALUES (:kind, 1) ON CONFLICT(kind) DO UPDATE SET total = total + 1');
-        $statement->bindValue(':kind', $kind, SQLITE3_TEXT);
-        $statement->execute();
-        $unique = $database->prepare('INSERT OR IGNORE INTO download_uniques (kind, fingerprint, first_seen) VALUES (:kind, :fingerprint, :first_seen)');
-        $unique->bindValue(':kind', $kind, SQLITE3_TEXT);
-        $unique->bindValue(':fingerprint', $fingerprint, SQLITE3_TEXT);
-        $unique->bindValue(':first_seen', gmdate(DATE_ATOM), SQLITE3_TEXT);
-        $unique->execute();
+        $transactionStarted = true;
+
+        $prune = $database->prepare('DELETE FROM download_unique_windows WHERE bucket < :cutoff');
+        $prune->bindValue(':cutoff', $cutoff, SQLITE3_TEXT);
+        $prune->execute();
+
+        $lookup = $database->prepare('SELECT request_count FROM download_unique_windows WHERE kind = :kind AND bucket = :bucket AND fingerprint = :fingerprint');
+        bindMetricIdentity($lookup, $kind, $bucket, $fingerprint);
+        $existing = $lookup->execute()->fetchArray(SQLITE3_ASSOC);
+        $count = is_array($existing) ? max(0, (int) ($existing['request_count'] ?? 0)) : -1;
+
+        if ($count < 0) {
+            $cardinality = $database->prepare('SELECT COUNT(*) FROM download_unique_windows WHERE kind = :kind AND bucket = :bucket');
+            $cardinality->bindValue(':kind', $kind, SQLITE3_TEXT);
+            $cardinality->bindValue(':bucket', $bucket, SQLITE3_TEXT);
+            $uniqueCount = (int) $cardinality->execute()->fetchArray(SQLITE3_NUM)[0];
+            if ($uniqueCount >= CONTEXTBRIDGE_METRIC_UNIQUES_PER_KIND_DAY) {
+                $database->exec('COMMIT');
+                $transactionStarted = false;
+                $database->close();
+                return;
+            }
+            $insert = $database->prepare('INSERT INTO download_unique_windows (kind, bucket, fingerprint, request_count, last_seen) VALUES (:kind, :bucket, :fingerprint, 1, :last_seen)');
+            bindMetricIdentity($insert, $kind, $bucket, $fingerprint);
+            $insert->bindValue(':last_seen', gmdate(DATE_ATOM, $now), SQLITE3_TEXT);
+            $insert->execute();
+            incrementDownloadTotal($database, $kind);
+        } elseif ($count < CONTEXTBRIDGE_METRIC_REQUESTS_PER_CLIENT_DAY) {
+            $update = $database->prepare('UPDATE download_unique_windows SET request_count = request_count + 1, last_seen = :last_seen WHERE kind = :kind AND bucket = :bucket AND fingerprint = :fingerprint AND request_count < :request_limit');
+            bindMetricIdentity($update, $kind, $bucket, $fingerprint);
+            $update->bindValue(':last_seen', gmdate(DATE_ATOM, $now), SQLITE3_TEXT);
+            $update->bindValue(':request_limit', CONTEXTBRIDGE_METRIC_REQUESTS_PER_CLIENT_DAY, SQLITE3_INTEGER);
+            $update->execute();
+            if ($database->changes() === 1) {
+                incrementDownloadTotal($database, $kind);
+            }
+        }
         $database->exec('COMMIT');
+        $transactionStarted = false;
         $database->close();
     } catch (Throwable $error) {
         if (isset($database) && $database instanceof SQLite3) {
-            $database->exec('ROLLBACK');
+            if ($transactionStarted) {
+                $database->exec('ROLLBACK');
+            }
             $database->close();
         }
         error_log('ContextBridge download metric failed: ' . $error->getMessage());
     }
 }
 
-function localDownloadStatistics(): array
+function bindMetricIdentity(SQLite3Stmt $statement, string $kind, string $bucket, string $fingerprint): void
 {
+    $statement->bindValue(':kind', $kind, SQLITE3_TEXT);
+    $statement->bindValue(':bucket', $bucket, SQLITE3_TEXT);
+    $statement->bindValue(':fingerprint', $fingerprint, SQLITE3_TEXT);
+}
+
+function incrementDownloadTotal(SQLite3 $database, string $kind): void
+{
+    $statement = $database->prepare('INSERT INTO download_totals (kind, total) VALUES (:kind, 1) ON CONFLICT(kind) DO UPDATE SET total = total + 1');
+    $statement->bindValue(':kind', $kind, SQLITE3_TEXT);
+    $statement->execute();
+}
+
+function localDownloadStatistics(?int $now = null): array
+{
+    $now ??= time();
     try {
         $database = siteDatabase();
         $total = (int) $database->querySingle('SELECT COALESCE(SUM(total), 0) FROM download_totals');
-        $unique = (int) $database->querySingle('SELECT COUNT(*) FROM download_uniques');
+        $bucket = gmdate('Y-m-d', $now);
+        $statement = $database->prepare('SELECT COUNT(DISTINCT fingerprint) FROM download_unique_windows WHERE bucket = :bucket');
+        $statement->bindValue(':bucket', $bucket, SQLITE3_TEXT);
+        $unique = (int) $statement->execute()->fetchArray(SQLITE3_NUM)[0];
         $database->close();
         return ['total' => max(0, $total), 'unique' => max(0, $unique)];
     } catch (Throwable $error) {
@@ -182,16 +247,23 @@ function siteDatabase(): SQLite3
     $database->busyTimeout(3000);
     $database->exec('PRAGMA journal_mode = WAL');
     $database->exec('PRAGMA synchronous = NORMAL');
+    $database->exec('PRAGMA secure_delete = ON');
     $database->exec('CREATE TABLE IF NOT EXISTS download_totals (kind TEXT PRIMARY KEY, total INTEGER NOT NULL) WITHOUT ROWID');
-    $database->exec('CREATE TABLE IF NOT EXISTS download_uniques (kind TEXT NOT NULL, fingerprint TEXT NOT NULL, first_seen TEXT NOT NULL, PRIMARY KEY (kind, fingerprint)) WITHOUT ROWID');
+    $database->exec('CREATE TABLE IF NOT EXISTS download_unique_windows (kind TEXT NOT NULL, bucket TEXT NOT NULL, fingerprint TEXT NOT NULL, request_count INTEGER NOT NULL CHECK(request_count BETWEEN 1 AND 8), last_seen TEXT NOT NULL, PRIMARY KEY (kind, bucket, fingerprint)) WITHOUT ROWID');
+    $database->exec('CREATE INDEX IF NOT EXISTS download_unique_windows_bucket ON download_unique_windows (bucket)');
+    // Legacy rows combined full user-agent strings into permanent variants.
+    // They cannot be safely migrated into the rotating privacy model.
+    $database->exec('DROP TABLE IF EXISTS download_uniques');
     return $database;
 }
 
-function clientFingerprint(): string
+function clientFingerprint(?string $bucket = null): string
 {
+    $bucket ??= gmdate('Y-m-d');
     $address = maskedAddress((string) ($_SERVER['REMOTE_ADDR'] ?? 'unknown'));
-    $agent = strtolower(substr((string) ($_SERVER['HTTP_USER_AGENT'] ?? 'unknown'), 0, 180));
-    return hash_hmac('sha256', $address . "\n" . $agent, siteSecret());
+    // User-Agent is intentionally excluded: it is attacker-controlled,
+    // high-cardinality, and unnecessary for the coarse installer metric.
+    return hash_hmac('sha256', "installer-network-v2\n" . $bucket . "\n" . $address, siteSecret());
 }
 
 function maskedAddress(string $address): string
@@ -213,19 +285,29 @@ function maskedAddress(string $address): string
 function siteSecret(): string
 {
     $path = siteDataDirectory() . '/fingerprint-secret';
-    $existing = @file_get_contents($path);
-    if (is_string($existing) && strlen($existing) >= 32) {
-        return $existing;
+    $handle = @fopen($path, 'c+b');
+    if ($handle === false || !flock($handle, LOCK_EX)) {
+        if (is_resource($handle)) {
+            fclose($handle);
+        }
+        throw new RuntimeException('metric secret is unavailable');
     }
-    $secret = random_bytes(32);
-    $temporary = $path . '.' . bin2hex(random_bytes(6)) . '.tmp';
-    file_put_contents($temporary, $secret, LOCK_EX);
-    @chmod($temporary, 0600);
-    if (!@rename($temporary, $path)) {
-        @unlink($temporary);
+    try {
+        rewind($handle);
+        $existing = stream_get_contents($handle);
+        if (is_string($existing) && strlen($existing) >= 32) {
+            return $existing;
+        }
+        $secret = random_bytes(32);
+        if (!ftruncate($handle, 0) || rewind($handle) === false || fwrite($handle, $secret) !== strlen($secret) || !fflush($handle)) {
+            throw new RuntimeException('metric secret could not be saved');
+        }
+        @chmod($path, 0600);
+        return $secret;
+    } finally {
+        flock($handle, LOCK_UN);
+        fclose($handle);
     }
-    $saved = @file_get_contents($path);
-    return is_string($saved) && strlen($saved) >= 32 ? $saved : $secret;
 }
 
 function siteDataDirectory(): string
@@ -264,6 +346,10 @@ function jsonResponse(array $value): never
     echo json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n";
     exit;
 }
+
+if (defined('CONTEXTBRIDGE_LIBRARY_ONLY')) {
+    return;
+}
 ?>
 <!doctype html>
 <html lang="en">
@@ -272,7 +358,7 @@ function jsonResponse(array $value): never
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="color-scheme" content="light" />
   <meta name="description" content="ContextBridge connects private computers and local AI runtimes through one secure relay." />
-  <title>ContextBridge | One private AI cloud across every GPU</title>
+  <title>ContextBridge | Route AI jobs across the compute you control</title>
   <link rel="icon" href="/contextbridge/favicon.svg" type="image/svg+xml" />
   <style>
     :root {
@@ -533,6 +619,28 @@ function jsonResponse(array $value): never
       transform: translateY(14px);
       animation: reveal .82s .54s var(--ease-out) forwards;
     }
+
+    .install-platforms {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin: 0 0 8px 4px;
+    }
+    .install-platform {
+      border: 0;
+      border-radius: 999px;
+      padding: 6px 10px;
+      background: transparent;
+      color: var(--muted);
+      font: 700 11px/1 var(--sans);
+      cursor: pointer;
+      transition: color .2s ease, background .2s ease;
+    }
+    .install-platform[aria-pressed="true"] {
+      background: var(--accent-soft);
+      color: var(--accent-deep);
+    }
+    .install-platform:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
     .install-bar {
       min-height: 58px;
@@ -986,8 +1094,8 @@ function jsonResponse(array $value): never
 
     <main>
       <section class="hero" aria-labelledby="hero-title">
-        <h1 id="hero-title"><span class="hero-line">Turn every GPU</span><span class="hero-line">you own into one</span><span class="hero-line accent">private AI cloud.</span></h1>
-        <p class="subhead">Connect private PCs and servers through one relay, without opening worker ports.</p>
+        <h1 id="hero-title"><span class="hero-line">Route AI jobs</span><span class="hero-line">across the compute</span><span class="hero-line accent">you control.</span></h1>
+        <p class="subhead">Connect selected AI tabs, local models, private PCs, and servers through one relay—without opening worker ports.</p>
 
         <div class="actions">
           <a class="primary" href="https://github.com/IamAngusU/ContextBridge#quick-start" target="_blank" rel="noreferrer">
@@ -1001,8 +1109,12 @@ function jsonResponse(array $value): never
         </div>
 
         <div class="install-wrap">
+          <div class="install-platforms" role="group" aria-label="Choose installer platform">
+            <button class="install-platform" type="button" data-install-platform="unix" aria-pressed="true">Linux / macOS</button>
+            <button class="install-platform" type="button" data-install-platform="windows" aria-pressed="false">Windows PowerShell</button>
+          </div>
           <div class="install-bar" aria-label="Install command">
-            <code class="install-code" id="installText"><span class="command">curl</span> -fsSL <span class="url">https://angusu.de/contextbridge/install.sh</span> | sh</code>
+            <code class="install-code" id="installText">curl -fsSL https://angusu.de/contextbridge/install.sh | sh</code>
             <button class="copy-button" type="button" id="copyInstall" aria-label="Copy install command" title="Copy command">
               <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2" stroke="currentColor" stroke-width="1.7"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" stroke="currentColor" stroke-width="1.7"/></svg>
             </button>
@@ -1071,10 +1183,31 @@ function jsonResponse(array $value): never
 
   <script>
     (() => {
-      const installCommand = 'curl -fsSL https://angusu.de/contextbridge/install.sh | sh';
+      const installCommands = {
+        unix: 'curl -fsSL https://angusu.de/contextbridge/install.sh | sh',
+        windows: 'irm https://angusu.de/contextbridge/install.ps1 | iex'
+      };
+      let installCommand = installCommands.unix;
+      const installText = document.getElementById('installText');
+      const installPlatforms = [...document.querySelectorAll('[data-install-platform]')];
       const copyButton = document.getElementById('copyInstall');
       const toast = document.getElementById('toast');
       let toastTimer = 0;
+
+      function selectInstallPlatform(platform) {
+        if (!Object.prototype.hasOwnProperty.call(installCommands, platform)) return;
+        installCommand = installCommands[platform];
+        installText.textContent = installCommand;
+        for (const button of installPlatforms) {
+          button.setAttribute('aria-pressed', button.dataset.installPlatform === platform ? 'true' : 'false');
+        }
+        copyButton.setAttribute('aria-label', `Copy ${platform === 'windows' ? 'Windows PowerShell' : 'Linux or macOS'} install command`);
+      }
+
+      for (const button of installPlatforms) {
+        button.addEventListener('click', () => selectInstallPlatform(button.dataset.installPlatform));
+      }
+      selectInstallPlatform(/Windows/i.test(navigator.userAgent) ? 'windows' : 'unix');
 
       function showToast(message) {
         window.clearTimeout(toastTimer);
@@ -1134,8 +1267,8 @@ function jsonResponse(array $value): never
           try { localStorage.setItem(starCacheKey, String(count)); } catch {}
           const downloads = Number(stats.release_downloads || 0);
           const unique = Number(stats.unique_installers || 0);
-          releaseDownloads.textContent = `${formatStars(downloads)} verified release download${downloads === 1 ? '' : 's'}`;
-          uniqueInstallers.textContent = `${formatStars(unique)} unique installer${unique === 1 ? '' : 's'}`;
+          releaseDownloads.textContent = `${formatStars(downloads)} release asset download${downloads === 1 ? '' : 's'}`;
+          uniqueInstallers.textContent = `${formatStars(unique)} installer network${unique === 1 ? '' : 's'} today`;
           installMeta.classList.add('ready');
         })
         .catch(() => {
