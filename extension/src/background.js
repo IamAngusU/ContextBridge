@@ -667,16 +667,30 @@ async function processWork(cfg, work, claimedTabId) {
       failureCode = 'browser_lease_lost';
       throw new Error('The browser job did not include a valid lease generation');
     }
-    tabId = await resolveWorkTab(cfg, work, claimedTabId);
-    leaseState = { jobId: String(work.job.id || ''), generation: leaseGeneration, tabId, cancelled: false,
+    // Own and renew the lease before a fresh background tab is created. A
+    // provider page can take tens of seconds to mount, and that setup time is
+    // part of this claimed job rather than an unleased pre-processing phase.
+    // The routing tab is not yet the owned execution tab when per-job mode
+    // creates a new page, so do not bind removal cancellation until resolve.
+    leaseState = { jobId: String(work.job.id || ''), generation: leaseGeneration, tabId: 0, cancelled: false,
       sessionKey: workSessionKey(work), prompt: String(work.job.prompt || ''),
       profileName: String(work.profile?.name || ''), sentUnknown: observationOnly };
     activeBrowserLeases.set(leaseState.jobId, leaseState);
-    if (!await renewLease(cfg, leaseState.jobId, leaseGeneration)) {
-      leaseState.cancelled = true;
-      failureCode = 'browser_lease_lost';
-      throw new Error('The browser job lease was lost before page processing began');
-    }
+    failureCode = 'browser_lease_lost';
+    await requireActiveBrowserLease(cfg, leaseState);
+    const initialLeaseMilliseconds = Math.max(3000, (Date.parse(work.lease_expires_at || '') || Date.now() + 75000) - Date.now());
+    leaseTimer = setInterval(() => {
+      if (leaseState.cancelled || leaseState.renewing) return;
+      leaseState.renewing = true;
+      renewLease(cfg, work.job.id, leaseGeneration)
+        .then((ok) => { if (!ok) leaseState.cancelled = true; })
+        // A transport failure is not authoritative lease loss. The next
+        // renewal or action gate retries, while a real HTTP 409 cancels.
+        .catch((error) => { leaseState.lastRenewalError = error?.message || String(error); })
+        .finally(() => { leaseState.renewing = false; });
+    }, Math.max(1000, Math.min(25000, Math.floor(initialLeaseMilliseconds / 3))));
+    tabId = await resolveWorkTab(cfg, work, claimedTabId);
+    leaseState.tabId = tabId;
     await waitForTabSlot(tabId, work.deadline);
     tabSlotHeld = true;
     await assertSessionTab(workSessionKey(work), tabId);
@@ -707,15 +721,6 @@ async function processWork(cfg, work, claimedTabId) {
     if (!effectiveProfile?.selectors) throw new Error('No usable page profile is available');
     if (!matches(tab.url || '', effectiveProfile.match_url || '')) throw new Error('The selected tab no longer matches its taught page');
     await sendHeartbeat('working');
-    const initialLeaseMilliseconds = Math.max(3000, (Date.parse(work.lease_expires_at || '') || Date.now() + 75000) - Date.now());
-    leaseTimer = setInterval(() => {
-      if (leaseState.cancelled || leaseState.renewing) return;
-      leaseState.renewing = true;
-      renewLease(cfg, work.job.id, leaseGeneration)
-        .then((ok) => { if (!ok) leaseState.cancelled = true; })
-        .catch(() => { leaseState.cancelled = true; })
-        .finally(() => { leaseState.renewing = false; });
-    }, Math.max(1000, Math.min(25000, Math.floor(initialLeaseMilliseconds / 3))));
     const rejectVisibleRateLimit = async () => {
       const snapshot = await captureTabProgress(tabId, effectiveProfile.selectors, leaseState);
       if (snapshot.blocking_provider_error_code !== 'browser_rate_limited') return;
@@ -824,6 +829,9 @@ async function processWork(cfg, work, claimedTabId) {
           { jobId: work.job.id, generation: leaseGeneration }] });
       answer = results?.[0]?.result;
     } catch (error) {
+      // Lease authority failures are not navigation. Preserve their exact,
+      // fail-closed diagnosis instead of entering reload recovery.
+      if (error?.code === 'browser_lease_lost' || error?.code === 'browser_bridge_unavailable') throw error;
       failureCode = 'browser_navigation_interrupted';
       progressSequence += 1;
       await reportProgress(cfg, work.job.id, { sequence: progressSequence, text: '', phase: 'recovering', detail: 'The tab navigated; reattaching to the conversation', busy: true });
@@ -960,6 +968,7 @@ async function processWork(cfg, work, claimedTabId) {
     if (!editTarget) await releaseOwnedDraftIfEmpty(tabId, effectiveProfile);
     jobCompleted = true;
   } catch (error) {
+    if (/^browser_[a-z_]+$/.test(String(error?.code || ''))) failureCode = error.code;
     const mode = outputMode(work.job.output || {});
     decision = mode === 'decision'
       ? { verdict: 'review', flags: [failureCode], confidence: 0.4, model: effectiveProfile?.label || 'browser' }
@@ -1008,6 +1017,7 @@ function shouldForegroundStalledTab(binding, profile, answer) {
 
 function classifyFailureReason(message) {
   const text = String(message || '');
+  if (/local ContextBridge service could not verify/i.test(text)) return 'local_bridge_unavailable';
   if (/ChatGPT still shows Stop/i.test(text)) return 'provider_busy';
   if (/model selector is not visible/i.test(text)) return 'model_selector_missing';
   if (/Requested model.+is not available in this chat \(0 candidates, 0 model choices, pill trigger/i.test(text)) return 'model_candidates_empty_pill';
@@ -1656,37 +1666,74 @@ async function reportProgress(cfg, jobId, progress) {
   } catch (_) {}
 }
 
+function browserBridgeUnavailable(message = 'The local ContextBridge service could not verify the browser job lease') {
+  const error = new Error(message);
+  error.code = 'browser_bridge_unavailable';
+  return error;
+}
+
+function browserLeaseLost(message) {
+  const error = new Error(message);
+  error.code = 'browser_lease_lost';
+  return error;
+}
+
+async function browserLeaseControlRequest(cfg, path, options) {
+  let lastFailure = '';
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      // A reconnect can rotate the saved endpoint or token while a provider
+      // tab is still finishing. Read the current connection on every retry
+      // instead of using only the long-poll's earlier settings snapshot.
+      const latest = await settings().catch(() => cfg);
+      const bridgeUrl = String(latest?.bridgeUrl || cfg.bridgeUrl || '').replace(/\/$/, '');
+      const token = String(latest?.token || cfg.token || '');
+      const response = await fetchWithTimeout(`${bridgeUrl}${path}`, {
+        ...options,
+        headers: { ...(options.headers || {}), Authorization: `Bearer ${token}` }
+      }, 3000);
+      if (response.ok || response.status === 409) return response;
+      lastFailure = `HTTP ${response.status}`;
+      // Authentication, malformed requests, and missing endpoints require an
+      // operator/update fix. Server and throttling failures may be transient.
+      if (response.status < 500 && response.status !== 408 && response.status !== 429) break;
+    } catch (error) {
+      lastFailure = error?.message || String(error);
+    }
+    if (attempt < 2) await delay(150 * (2 ** attempt));
+  }
+  throw browserBridgeUnavailable(lastFailure
+    ? `The local ContextBridge service could not verify the browser job lease (${lastFailure})`
+    : undefined);
+}
+
 async function renewLease(cfg, jobId, generation) {
-  try {
-    if (!Number.isSafeInteger(generation) || generation <= 0) return false;
-    const response = await fetch(`${cfg.bridgeUrl}/v1/browser/jobs/${encodeURIComponent(jobId)}/lease`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${cfg.token}`, 'X-ContextBridge-Lease-Generation': String(generation) },
-      cache: 'no-store'
-    });
-    return response.ok;
-  } catch (_) { return false; }
+  if (!Number.isSafeInteger(generation) || generation <= 0) return false;
+  const response = await browserLeaseControlRequest(cfg, `/v1/browser/jobs/${encodeURIComponent(jobId)}/lease`, {
+    method: 'POST',
+    headers: { 'X-ContextBridge-Lease-Generation': String(generation) },
+    cache: 'no-store'
+  });
+  return response.ok;
 }
 
 async function requireActiveBrowserLease(cfg, lease) {
-  if (!lease || lease.cancelled || stopRequested) throw new Error('The browser job lease was cancelled');
+  if (!lease || lease.cancelled || stopRequested) throw browserLeaseLost('The browser job lease was cancelled');
   if (!await renewLease(cfg, lease.jobId, lease.generation)) {
     lease.cancelled = true;
-    throw new Error('The browser job lease was lost');
+    throw browserLeaseLost('The browser job lease was lost');
   }
 }
 
 async function claimBrowserAction(cfg, jobId, generation, action) {
-  try {
-    const response = await fetch(`${cfg.bridgeUrl}/v1/browser/jobs/${encodeURIComponent(jobId)}/claim`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${cfg.token}`, 'Content-Type': 'application/json',
-        'X-ContextBridge-Lease-Generation': String(generation) },
-      cache: 'no-store',
-      body: JSON.stringify({ action })
-    });
-    return response.ok;
-  } catch (_) { return false; }
+  const response = await browserLeaseControlRequest(cfg, `/v1/browser/jobs/${encodeURIComponent(jobId)}/claim`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json',
+      'X-ContextBridge-Lease-Generation': String(generation) },
+    cache: 'no-store',
+    body: JSON.stringify({ action })
+  });
+  return response.ok;
 }
 
 async function authorizeBrowserJobAction(message, sender) {
@@ -1727,13 +1774,19 @@ async function authorizeBrowserJobAction(message, sender) {
     }
   }
   if (action === 'observe') {
-    if (!await renewLease(cfg, jobId, generation)) {
+    let renewed;
+    try { renewed = await renewLease(cfg, jobId, generation); }
+    catch (error) { return { ok: false, error: error?.code || 'browser_bridge_unavailable' }; }
+    if (!renewed) {
       lease.cancelled = true;
       return { ok: false, error: 'browser_job_lease_lost' };
     }
     return { ok: true, expectedURL: lease.expectedURL };
   }
-  if (!await claimBrowserAction(cfg, jobId, generation, action)) {
+  let claimed;
+  try { claimed = await claimBrowserAction(cfg, jobId, generation, action); }
+  catch (error) { return { ok: false, error: error?.code || 'browser_bridge_unavailable' }; }
+  if (!claimed) {
     lease.cancelled = true;
     return { ok: false, error: 'browser_job_lease_lost' };
   }
@@ -2234,6 +2287,9 @@ function automate(job, profile, jobDeadline, editTarget = null, expectedConversa
     if (!response?.ok) {
       if (response?.error === 'browser_conversation_changed') {
         throw new Error('The conversation URL changed; no provider content was observed');
+      }
+      if (response?.error === 'browser_bridge_unavailable') {
+        throw new Error('The local ContextBridge service could not verify the browser job lease; no further provider action was performed');
       }
       throw new Error('The browser job lease was lost; no further provider action was performed');
     }
@@ -3557,6 +3613,7 @@ function automate(job, profile, jobDeadline, editTarget = null, expectedConversa
     } catch (error) {
 	      const message = error.message || String(error);
 	      const failureRules = [
+	        [/local ContextBridge service could not verify/i, 'browser_bridge_unavailable'],
 	        [/browser job lease|lease cannot be verified/i, 'browser_lease_lost'],
 	        [/conversation URL|expected conversation URL/i, 'browser_session_changed'],
 	        [/requested model|model selector/i, 'browser_model_unavailable'],

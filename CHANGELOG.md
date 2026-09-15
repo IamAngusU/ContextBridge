@@ -2,6 +2,24 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.69 - 2026-09-15
+
+### Fixed
+
+- browser lease and pre-action claim checks now retry bounded transient network
+  and HTTP 5xx failures without misreporting them as an authoritative lease
+  loss; HTTP 409 still fails closed before any further provider action
+- lease renewal now begins before a fresh background AI tab is created, so a
+  slow provider page cannot consume an unrenewed setup window
+- reconnecting jobs read the current local bridge URL and token on each retry,
+  and indeterminate bridge failures remain distinct in bounded diagnostics
+
+### Tested
+
+- regression coverage now exercises network-error and HTTP 503 recovery,
+  authoritative HTTP 409 cancellation, pre-tab lease ownership, and confirms
+  that a terminal failed self-test is never followed by a cancellation request
+
 ## 0.5.68 - 2026-09-15
 
 ### Fixed

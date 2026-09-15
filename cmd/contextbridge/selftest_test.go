@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/IamAngusU/ContextBridge/internal/bridge"
 	"github.com/IamAngusU/ContextBridge/internal/cluster"
+	"github.com/IamAngusU/ContextBridge/internal/config"
 )
 
 func TestSelftestTimingSummaryShowsMeasuredScopes(t *testing.T) {
@@ -54,6 +56,35 @@ func TestCancelSelftestJobUsesScopedDelete(t *testing.T) {
 	defer server.Close()
 	if err := cancelSelftestJob(server.URL, "producer-token", "job_123"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRunSelftestJobDoesNotCancelTerminalFailure(t *testing.T) {
+	deletes := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch req.Method {
+		case http.MethodPost:
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(cluster.Job{ID: "job_terminal_failure", Status: cluster.JobQueued})
+		case http.MethodGet:
+			_ = json.NewEncoder(w).Encode(cluster.Job{ID: "job_terminal_failure", Status: cluster.JobFailed, Error: "browser_lease_lost"})
+		case http.MethodDelete:
+			deletes++
+			_ = json.NewEncoder(w).Encode(cluster.Job{ID: "job_terminal_failure", Status: cluster.JobCancelled})
+		default:
+			t.Fatalf("unexpected self-test request: %s %s", req.Method, req.URL.Path)
+		}
+	}))
+	defer server.Close()
+	cfg := config.Config{Cluster: config.Cluster{Relay: config.ClusterRelay{PublicURL: server.URL}}}
+	_, job, err := runSelftestJob(context.Background(), cfg, "producer-token",
+		selftestTarget{Kind: selftestChatGPT, NodeID: "node-a"}, selftestJobSpec{Prompt: "fixed"})
+	if err == nil || !strings.Contains(err.Error(), "browser_lease_lost") || job.Status != cluster.JobFailed {
+		t.Fatalf("terminal worker failure was not surfaced: job=%#v err=%v", job, err)
+	}
+	if deletes != 0 {
+		t.Fatalf("terminal self-test failure triggered %d cancellation request(s)", deletes)
 	}
 }
 

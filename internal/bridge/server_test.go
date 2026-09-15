@@ -498,7 +498,7 @@ func TestBrowserHeartbeatAndDashboardStatus(t *testing.T) {
 	if visibility := server.store.BrowserStatus().Tabs[0].DOM.PageVisibility; visibility != "" {
 		t.Fatalf("unrecognized page visibility was retained: %q", visibility)
 	}
-	for _, reason := range []string{"upload_input_missing", "upload_preview_missing", "attachment_busy", "submitted_prompt_unverified"} {
+	for _, reason := range []string{"upload_input_missing", "upload_preview_missing", "attachment_busy", "submitted_prompt_unverified", "local_bridge_unavailable"} {
 		updated := bytes.Replace(heartbeat, []byte(`"raw private page content"`), []byte(`"`+reason+`"`), 1)
 		req, _ = http.NewRequest(http.MethodPost, httpServer.URL+"/v1/browser/heartbeat", bytes.NewReader(updated))
 		req.Header.Set("Authorization", "Bearer "+cfg.Server.Token)

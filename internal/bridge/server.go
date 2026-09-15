@@ -817,7 +817,7 @@ func (s *Server) handleBrowserHeartbeat(w http.ResponseWriter, r *http.Request) 
 				status.Tabs[index].LastFailure = nil
 			} else {
 				switch failure.Reason {
-				case "prompt_not_retained", "send_disabled", "send_missing", "composer_draft", "incompatible_tool", "provider_busy", "model_selector_missing", "model_candidates_empty", "model_candidates_empty_pill", "model_candidates_empty_form", "model_choices_empty", "model_choice_missing", "model_choice_disabled", "model_not_retained", "recovery_turn_unverified", "recovery_turn_mismatch", "recovery_draft", "recovery_attachment", "recovery_answer_unfinished", "recovery_input_missing", "recovery_editor_open", "recovery_image_busy", "recovery_response_changed", "upload_input_missing", "upload_preview_missing", "attachment_busy", "submitted_prompt_unverified", "other":
+				case "prompt_not_retained", "send_disabled", "send_missing", "composer_draft", "incompatible_tool", "provider_busy", "model_selector_missing", "model_candidates_empty", "model_candidates_empty_pill", "model_candidates_empty_form", "model_choices_empty", "model_choice_missing", "model_choice_disabled", "model_not_retained", "recovery_turn_unverified", "recovery_turn_mismatch", "recovery_draft", "recovery_attachment", "recovery_answer_unfinished", "recovery_input_missing", "recovery_editor_open", "recovery_image_busy", "recovery_response_changed", "upload_input_missing", "upload_preview_missing", "attachment_busy", "submitted_prompt_unverified", "local_bridge_unavailable", "other":
 				default:
 					failure.Reason = "other"
 				}

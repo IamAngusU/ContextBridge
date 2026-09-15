@@ -40,6 +40,73 @@ const context = vm.createContext({ chrome, console, URL, TextEncoder, AbortContr
 vm.runInContext(source, context);
 context.crypto = webcrypto;
 {
+  const previousResolve = context.resolveWorkTab;
+  const previousRenew = context.renewLease;
+  const previousComplete = context.completeWork;
+  const previousHeartbeat = context.sendHeartbeat;
+  const activeLeases = vm.runInContext('activeBrowserLeases', context);
+  let renewals = 0;
+  context.renewLease = async () => { renewals += 1; return true; };
+  context.resolveWorkTab = async () => {
+    assert.ok(activeLeases.has('lease-before-tab'), 'a claimed job must be tracked before slow fresh-tab setup');
+    assert.equal(renewals, 1, 'the claimed job must renew before slow fresh-tab setup');
+    throw new Error('ordering check complete');
+  };
+  context.completeWork = async () => true;
+  context.sendHeartbeat = async () => true;
+  try {
+    await context.processWork({ pendingCompletions: {} }, {
+      job: { id: 'lease-before-tab', prompt: 'bounded test', metadata: {}, output: { mode: 'text' } },
+      profile: { name: 'chatgpt' }, lease_generation: 3,
+      lease_expires_at: new Date(Date.now() + 90000).toISOString(), deadline: new Date(Date.now() + 180000).toISOString()
+    }, 7);
+    assert.equal(activeLeases.has('lease-before-tab'), false, 'failed setup must release in-memory lease tracking');
+  } finally {
+    context.resolveWorkTab = previousResolve;
+    context.renewLease = previousRenew;
+    context.completeWork = previousComplete;
+    context.sendHeartbeat = previousHeartbeat;
+  }
+}
+{
+  const previousFetch = context.fetch;
+  const previousDelay = context.delay;
+  const cfg = { bridgeUrl: 'http://127.0.0.1:32145', token: 'token' };
+  let calls = 0;
+  context.delay = async () => {};
+  try {
+    context.fetch = async () => {
+      calls += 1;
+      if (calls === 1) throw new TypeError('temporary network failure');
+      return { ok: true, status: 200 };
+    };
+    assert.equal(await context.renewLease(cfg, 'retry-renew', 4), true);
+    assert.equal(calls, 2, 'an idempotent renewal should retry one transient network failure');
+
+    calls = 0;
+    context.fetch = async (_url, options) => {
+      calls += 1;
+      assert.equal(JSON.parse(options.body).action, 'send');
+      return calls === 1 ? { ok: false, status: 503 } : { ok: true, status: 200 };
+    };
+    assert.equal(await context.claimBrowserAction(cfg, 'retry-claim', 5, 'send'), true);
+    assert.equal(calls, 2, 'the idempotent pre-send claim should retry a transient server failure');
+
+    calls = 0;
+    context.fetch = async () => { calls += 1; return { ok: false, status: 409 }; };
+    assert.equal(await context.renewLease(cfg, 'lost-renew', 6), false);
+    assert.equal(calls, 1, 'an authoritative lease conflict must not be retried');
+
+    calls = 0;
+    context.fetch = async () => { calls += 1; return { ok: false, status: 401 }; };
+    await assert.rejects(context.renewLease(cfg, 'bad-auth', 7), (error) => error?.code === 'browser_bridge_unavailable');
+    assert.equal(calls, 1, 'an authentication failure needs an operator fix, not repeated requests');
+  } finally {
+    context.fetch = previousFetch;
+    context.delay = previousDelay;
+  }
+}
+{
   const small = { state: 'waiting', active_tabs: 1, tabs: [{ id: 1, profile: 'chatgpt', state: 'waiting' }] };
   assert.equal(context.browserHeartbeatBody(small), JSON.stringify(small),
     'a normal heartbeat must retain its complete diagnostic payload');
@@ -2282,6 +2349,7 @@ for (const disabled of [true, false]) {
 {
   const previousSettings = context.settings;
   const previousFetch = context.fetch;
+  const previousDelay = context.delay;
   const previousTabGet = chrome.tabs.get;
   const previousStorageSet = chrome.storage.local.set;
   const activeLeases = vm.runInContext('activeBrowserLeases', context);
@@ -2306,6 +2374,18 @@ for (const disabled of [true, false]) {
   assert.equal(authorized.ok, true);
   assert.equal(state.browserJobClaims['claimed-job'].state, 'sent_unknown');
   assert.equal(claims, 1);
+  context.delay = async () => {};
+  context.fetch = async () => { throw new TypeError('temporary local bridge outage'); };
+  const unavailable = await context.authorizeBrowserJobAction(
+    { jobId: 'claimed-job', generation: 11, action: 'observe', expectedURL }, { tab: { id: 22 } });
+  assert.equal(unavailable.error, 'browser_bridge_unavailable');
+  assert.equal(activeLeases.get('claimed-job').cancelled, false,
+    'an indeterminate transport failure must fail closed without inventing authoritative lease loss');
+  context.fetch = async () => ({ ok: false, status: 409 });
+  const lost = await context.authorizeBrowserJobAction(
+    { jobId: 'claimed-job', generation: 11, action: 'observe', expectedURL }, { tab: { id: 22 } });
+  assert.equal(lost.error, 'browser_job_lease_lost');
+  assert.equal(activeLeases.get('claimed-job').cancelled, true, 'an HTTP 409 must cancel the in-memory lease');
   const stale = await context.authorizeBrowserJobAction(
     { jobId: 'claimed-job', generation: 10, action: 'send', expectedURL }, { tab: { id: 22 } });
   assert.equal(stale.ok, false);
@@ -2313,6 +2393,7 @@ for (const disabled of [true, false]) {
   activeLeases.delete('claimed-job');
   context.settings = previousSettings;
   context.fetch = previousFetch;
+  context.delay = previousDelay;
   chrome.tabs.get = previousTabGet;
   chrome.storage.local.set = previousStorageSet;
 }
