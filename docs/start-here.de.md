@@ -92,12 +92,19 @@ contextbridge status
 contextbridge console
 ```
 
-Tippe dort `exit` und Enter: **nur die Ansicht** schließt sich, der verwaltete Dienst läuft weiter. `contextbridge run` startet dagegen einen Dienst im Vordergrund; starte ihn nicht zusätzlich, nur um das Terminal zu sehen. Für die grafische Ansicht öffnet `contextbridge dashboard` das lokale Dashboard.
+Der Installer richtet außerdem den kurzen, identischen Befehl `cb` ein, sofern
+dieser Name nicht bereits einem anderen Programm gehört. Er überschreibt nie
+einen fremden `cb`-Befehl. In einer neu geöffneten PowerShell, Bash oder Zsh
+ergänzt Tab die bekannten Befehle, Unterbefehle und Optionen; die statischen,
+prüfbaren Skripte lassen sich mit
+`contextbridge completion powershell|bash|zsh` auch nur ausgeben.
+
+Tippe dort `exit` und Enter: **nur die Ansicht** schließt sich, der verwaltete Dienst läuft weiter. Soll der normale lokale Dienst wirklich beendet werden, nutze `contextbridge stop`; der authentifizierte lokale Befehl verweigert das Stoppen, solange lokale, Relay- oder Worker-Arbeit läuft. Nur `contextbridge stop --force` unterbricht ausdrücklich laufende Arbeit. Ein eigenständig gestarteter `relay`- oder `worker`-Prozess ohne lokalen Bridge-Dienst wird weiter über seinen Service-Manager oder Ctrl+C beendet. `contextbridge run` startet einen Dienst im Vordergrund; starte ihn nicht zusätzlich, nur um das Terminal zu sehen. Für die grafische Ansicht öffnet `contextbridge dashboard` das lokale Dashboard.
 
 Im Panel sind lange GPU- und Modelllisten pro Worker zunächst eingeklappt.
 `details 1` blendet beides für Node 1 ein, `gpus 1` oder `models 1` nur den
 jeweiligen Teil. Mit `all` statt `1` gilt der Toggle für alle angezeigten
-Nodes. `help` zeigt die Befehle, `clear` leert nur die sichtbare
+Nodes. `help` zeigt die Befehle lesbar auf mehreren Zeilen, `clear` leert nur die sichtbare
 Sitzungshistorie und `exit` beendet ausschließlich diese Ansicht.
 
 > **🖼️ Bild hier:** aktueller Terminalausschnitt mit Online-Dienst, einem angebundenen Tab, belegten/freien Slots und getrenntem Verlauf. Einen leeren/„unknown“-Modellstatus nicht retuschieren. Dateivorschlag `docs/assets/first-connected-console.png`.
@@ -245,14 +252,17 @@ Erscheint bei `cluster status` kein Online-Worker oder ist kein Gemini-Tab berei
 | Befehl | Wann er hilft |
 | --- | --- |
 | `contextbridge help` | Alle Hauptbefehle anzeigen. |
+| `contextbridge completion powershell\|bash\|zsh` | Statische Autovervollständigung ausgeben; der Installer aktiviert sie standardmäßig für neue Shells. |
 | `contextbridge doctor` | Eine konkrete fehlende Setup-Voraussetzung finden. |
 | `contextbridge console` | Live-Ansicht an den laufenden Dienst anhängen; `exit` schließt nur diese Ansicht. |
+| `contextbridge stop` | Normalen lokalen Dienst idle-sicher beenden; `--force` ist der bewusste Unterbrechungs-Override. |
 | `contextbridge status` | Einmaliger lokaler Status mit Routen und Messwerten. |
 | `contextbridge dashboard` | Lokales Dashboard mit Browser, Modellen, Hardware, Queue, Schedules und Verlauf öffnen. |
 | `contextbridge hardware` / `contextbridge models` | Eigene Ressourcen und Modellbereitschaft lesen, ohne ein Modell zu laden. |
 | `contextbridge submit --file job.json` | Einen strukturierten lokalen Auftrag abgeben; `--file -` liest Standard-Eingabe. |
 | `contextbridge schedule list` | Geplante lokale Jobs und nächste Ausführung sehen. [Details](schedules.md). |
 | `contextbridge cluster status` | Nach Relay-Konfiguration alle verbundenen PCs/Slots sehen. |
+| `cb selftest` | Begrenzt auf lokale Engine, passende Tabs und freie Slots warten; standardmäßig keine KI-Anfrage senden. `contextbridge cluster selftest` ist die identische Langform. [Details](selftest.md). |
 | `contextbridge cluster chat` | Nach Relay-Konfiguration einen Terminal-Chat an einen ausgewählten Provider senden. |
 | `contextbridge browser inspect` | Kleine, inhaltsarme Diagnose für einen angehängten Browser-Tab lesen. |
 | `contextbridge update status` | Updatezustand lesen; `enable` ist eine eigene bewusste Entscheidung. |

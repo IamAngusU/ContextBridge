@@ -22,9 +22,9 @@ contextbridge models --config "C:\ContextBridge\config.yml"
 
 For the reliable local text command below, `qwen2.5:1.5b` must be present. The optional local-vision step uses `qwen2.5vl:7b` and should run only when the worker has enough free RAM/VRAM; otherwise skip that step and continue with Gemini OCR. Those models belong to this demo PC; they are **not** bundled with every ContextBridge installation. `models` shows Ollama-advertised modalities, parameters, quantization and loaded state where available, with model-name inference only as a compatibility fallback for older runtimes. It does not measure intelligence or guarantee OCR accuracy. Type `exit` and Enter to close only the console view; the service and jobs continue.
 
-**DE:** „ContextBridge läuft als lokaler Dienst. Hier sieht man meine installierten Ollama-Modelle: Text und Bildverständnis sind getrennte Fähigkeiten. Das Terminal kann ich später schließen, ohne Jobs zu stoppen.“
+**DE:** „ContextBridge läuft als lokaler Dienst. Für den sicheren Basistest nutze ich ein kleines lokales Textmodell. Wenn genug Ressourcen frei sind, zeige ich zusätzlich ein eigenes Vision-Modell. Das Terminal kann ich später schließen, ohne Jobs zu stoppen.“
 
-**EN:** “ContextBridge runs as a local service. These are my installed Ollama models: text and vision are distinct capabilities. I can close the terminal later without stopping jobs.”
+**EN:** “ContextBridge runs as a local service. I use a small local text model for the reliable baseline. If enough resources are free, I will also show my own vision model. I can close the terminal later without stopping jobs.”
 
 ## 2. Attach the AI pages, then connect
 
@@ -41,13 +41,25 @@ Before recording, close or detach finished **test** chats you no longer need. Au
 ```bash
 contextbridge version
 contextbridge cluster status --config /var/lib/contextbridge/config.yml
+cb selftest --config /var/lib/contextbridge/config.yml
+contextbridge cluster status --config /var/lib/contextbridge/config.yml --json |
+  python3 -c 'import json,sys; d=json.load(sys.stdin); wanted={"qwen2.5:1.5b","qwen2.5vl:7b"}; rows=[(n,m) for n in d.get("nodes",[]) for m in n.get("capabilities",{}).get("models",[]) if m.get("provider")=="ollama" and m.get("name") in wanted]; [print("{}: {} [{}]".format(n.get("name","node"),m.get("name","unknown"),"+".join(m.get("tasks",[])))) for n,m in rows]'
 DEMO_DIR=/root/contextbridge-demo
 mkdir -p "$DEMO_DIR"
 DEMO_ID=$(date +%Y%m%d-%H%M%S)
 printf 'Demo ID: %s\nFiles: %s\n' "$DEMO_ID" "$DEMO_DIR"
 ```
 
-Check that the PC is online and that the named Ollama models and at least one browser worker are available. The ordinary status view lists model names but **does not rank model quality**. The VPS saves returned artifacts in the printed `$DEMO_DIR`, **not** in the Windows inbox. The models and browser run on the PC; the CLI and saved results run on the VPS.
+Check that the PC is online. `cb selftest` waits for a schedulable local
+generation model, an idle attached ChatGPT page, an idle attached Gemini page,
+and a free worker slot. It reports what is missing and sends **no AI prompt**
+unless `--run` is added; do not add it for this preflight. The compact status
+view may shorten a long model list, so the JSON command prints the two demo
+models explicitly; no output for the required `qwen2.5:1.5b` means stop and fix
+the worker before recording. The optional `qwen2.5vl:7b` line may be absent
+when you skip local vision. Neither view ranks model quality. The VPS saves
+returned artifacts in the printed `$DEMO_DIR`, **not** in the Windows inbox.
+The models and browser run on the PC; the CLI and saved results run on the VPS.
 
 **DE:** „Jetzt wechsle ich auf meinen VPS. Der Relay sieht den PC, die freien Slots und die Modelle. Zuerst spreche ich ein lokales Ollama-Modell auf dem PC an – ganz ohne Browser-KI.“
 
@@ -65,10 +77,54 @@ Check the VPS output for `CB-LOCAL-OK`, `↳ verwendet: ollama · qwen2.5:1.5b`,
 
 **EN:** “I submit from the VPS; my Windows PC computes with its local model. The result names the provider and model actually used.”
 
+## 4A. Put a copy-paste JSON job through the durable queue
+
+This second small local-model job uses the lower-level submission path. It prints a real `Queued:` job ID before waiting for the worker and returning the verified result. A free slot may claim it almost immediately; that is a healthy fast queue, not evidence that the queue was bypassed.
+
+```bash
+QUEUE_JOB=$(mktemp /tmp/contextbridge-demo-queue.XXXXXX.json)
+cat > "$QUEUE_JOB" <<JSON
+{
+  "source": "contextbridge-demo-queue",
+  "requirements": {
+    "task": "generation",
+    "provider": "ollama",
+    "model": "qwen2.5:1.5b",
+    "session_id": "demo-$DEMO_ID-queue"
+  },
+  "payload": {
+    "source": "contextbridge-demo-queue",
+    "route": "default",
+    "task": "generation",
+    "prompt": "Antworte exakt mit CB-QUEUE-OK und keinen weiteren Zeichen.",
+    "output": {"mode": "text", "max_bytes": 4096}
+  },
+  "max_attempts": 1
+}
+JSON
+if contextbridge cluster submit --config /var/lib/contextbridge/config.yml --file "$QUEUE_JOB"; then
+  rm -f -- "$QUEUE_JOB"
+  unset QUEUE_JOB
+  printf 'Queue demo completed. The Queued job ID remains visible above.\n'
+else
+  QUEUE_STATUS=$?
+  rm -f -- "$QUEUE_JOB"
+  unset QUEUE_JOB
+  printf 'STOP: the queue demo failed; do not present it as successful.\n' >&2
+  (exit "$QUEUE_STATUS")
+fi
+```
+
+The final command status remains nonzero on failure without enabling global `set -e` or closing the VPS shell. The authenticated **relay cluster dashboard** can now be matched to the printed outer job ID. The Windows local dashboard may show a separate local execution ID for the same work; do not claim that those two IDs are identical.
+
+**DE:** „Hier sende ich denselben kleinen Test über die niedrigere JSON-Schnittstelle. Der Relay legt ihn dauerhaft in die Queue, gibt eine Job-ID aus und ein kompatibler freier Worker übernimmt ihn.“
+
+**EN:** “Here I submit the same small test through the lower-level JSON interface. The relay durably queues it, prints a job ID, and a compatible free worker claims it.”
+
 ## 5. Create and save a real image with ChatGPT
 
 ```bash
-unset IMAGE_FILE
+unset IMAGE_FILE IMAGE_SHA256 GEMINI_INPUT_SHA256
 ARTIFACT_LOG=$(mktemp /tmp/contextbridge-demo-artifact.XXXXXX.log)
 set -o pipefail
 contextbridge cluster chat --config /var/lib/contextbridge/config.yml --profile chatgpt --new-chat --foreground-new-chat --session "demo-$DEMO_ID-image" --image --artifacts "$DEMO_DIR" --prompt 'Erstelle genau ein quadratisches Bild: reinweißer Hintergrund, mittig die klare schwarze Aufschrift „IamAngusU“ und direkt darunter deutlich kleiner „ContextBridge“. Keine weiteren Wörter, Symbole oder Verzierungen. Gib nur das Bild aus.' 2>&1 | tee "$ARTIFACT_LOG"
@@ -93,11 +149,23 @@ if [ -n "${IMAGE_FILE:-}" ] && [ -f "$IMAGE_FILE" ]; then
 else
   unset IMAGE_FILE
 fi
-test -n "${IMAGE_FILE:-}" || { printf 'Do not run the OCR steps; no verified image belongs to this run.\n' >&2; false; }
-printf 'Image for Gemini: %s\n' "$IMAGE_FILE"
+if [ -n "${IMAGE_FILE:-}" ]; then
+  printf 'Image for Gemini: %s\n' "$IMAGE_FILE"
+  IMAGE_SHA256=$(sha256sum -- "$IMAGE_FILE" | cut -d ' ' -f1)
+  if [ "${#IMAGE_SHA256}" -ne 64 ]; then
+    printf 'STOP: could not compute a valid SHA-256 for %s\n' "$IMAGE_FILE" >&2
+    unset IMAGE_FILE IMAGE_SHA256
+  else
+    printf 'Artifact SHA-256: %s\n' "$IMAGE_SHA256"
+  fi
+else
+  printf 'STOP: do not run the OCR steps; no verified image belongs to this run.\n' >&2
+  false
+fi
+if [ -z "${IMAGE_FILE:-}" ] || [ -z "${IMAGE_SHA256:-}" ]; then false; fi
 ```
 
-The job succeeds only if real image bytes are received and saved. This block captures the `Saved artifact:` path emitted by **this command** in a temporary `/tmp` log, requires exactly one supported image under the persistent demo directory, and then deletes only the temporary log. It never chooses the newest pre-existing file from `/root/contextbridge-demo`; on any ambiguity it unsets `IMAGE_FILE` and stops the sequence before OCR.
+The job succeeds only if real image bytes are received and saved. This block captures the `Saved artifact:` path emitted by **this command** in a temporary `/tmp` log, requires exactly one supported image under the persistent demo directory, and then deletes only the temporary log. It never chooses the newest pre-existing file from `/root/contextbridge-demo`; on any ambiguity it unsets `IMAGE_FILE`, prints `STOP`, and leaves the block with a nonzero status. Do not paste the next block after that failure.
 
 **DE:** „ChatGPT erstellt jetzt ein schlichtes Bild. ContextBridge akzeptiert nicht bloß die Behauptung ‚Bild erstellt‘: Der Job gilt erst als erfolgreich, wenn die tatsächliche Bilddatei auf dem VPS gespeichert wurde.“
 
@@ -115,17 +183,28 @@ Run this optional step only when `qwen2.5vl:7b` is installed and the worker has 
 
 **EN:** “The same picture now goes first to my own vision model. I control that from the VPS too; this step sends no prompt to ChatGPT or Gemini.”
 
+**DE, wenn übersprungen:** „Die lokale Bildanalyse ist optional. Auf diesem Rechner sind gerade nicht genug Ressourcen frei, deshalb gehe ich mit derselben verifizierten Datei direkt zu Gemini weiter.“
+
+**EN, when skipped:** “Local image analysis is optional. This machine does not have enough free resources right now, so I will take the same verified file directly to Gemini.”
+
 ## 7. Give that image to Gemini for OCR only
 
 ```bash
-contextbridge cluster chat --config /var/lib/contextbridge/config.yml --profile gemini --new-chat --session "demo-$DEMO_ID-ocr" --attach-image "$IMAGE_FILE" --artifacts off --prompt 'Lies ausschließlich die Schrift im angehängten Bild. Nenne zuerst die große und dann die kleine Aufschrift. Keine Recherche, keine Identitätsprüfung und kein neues Bild.'
+GEMINI_INPUT_SHA256=$(sha256sum -- "$IMAGE_FILE" | cut -d ' ' -f1)
+if [ "$GEMINI_INPUT_SHA256" != "$IMAGE_SHA256" ]; then
+  printf 'STOP: image bytes changed before the Gemini handoff.\n' >&2
+  false
+else
+  printf 'Gemini input SHA-256: %s\n' "$GEMINI_INPUT_SHA256"
+  contextbridge cluster chat --config /var/lib/contextbridge/config.yml --profile gemini --new-chat --session "demo-$DEMO_ID-ocr" --attach-image "$IMAGE_FILE" --artifacts off --prompt 'Lies ausschließlich die Schrift im angehängten Bild. Nenne zuerst die große und dann die kleine Aufschrift. Keine Recherche, keine Identitätsprüfung und kein neues Bild.'
+fi
 ```
 
 `--attach-image` carries the **saved VPS file** into a new Gemini chat. The image job automatically opens its new tab in the foreground because Opera can suspend uploads in inactive tabs. Gemini's wording may vary; verify that it recognizes `IamAngusU` and `ContextBridge`.
 
-**DE:** „Das gespeicherte Bild geht jetzt an Gemini. Der Auftrag ist absichtlich eng: nur die zwei Aufschriften lesen. Recherche und Identitätsabgleich kommen erst im nächsten, getrennten Job.“
+**DE:** „Der Hash ist noch identisch. Genau diese gespeicherte Datei geht jetzt an Gemini. Der Auftrag ist absichtlich eng: nur die zwei Aufschriften lesen. Recherche und Identitätsabgleich kommen erst im nächsten, getrennten Job.“
 
-**EN:** “The saved image now goes to Gemini. This task is deliberately narrow: read only the two inscriptions. Research and identity checks come in the next, separate job.”
+**EN:** “The hash is still identical. That exact saved file now goes to Gemini. This task is deliberately narrow: read only the two inscriptions. Research and identity checks come in the next, separate job.”
 
 ## 8. Research identity in a separate Gemini chat
 
@@ -168,5 +247,13 @@ The expected ship time is approximately **1.4 years**, not exactly one year, neg
 **DE:** „Zum Schluss ein kleiner Faktencheck: Ein anderer Provider kann denselben Pool nutzen, aber in einem eigenen Chat. Die Rechnung liefert hier ungefähr 1,4 Jahre Eigenzeit statt genau eines Jahres.“
 
 **EN:** “Finally, a small fact-check: another provider can use the same pool in its own chat. The calculation gives about 1.4 years of proper time here, not exactly one year.”
+
+## 11. Close with the queue and dashboards
+
+Open the authenticated relay cluster dashboard in a browser tab prepared off camera. Never reveal its admin token. Match the `Queued:` ID from step 4A to the completed job row; its Queue counter will normally be back at zero because the worker already claimed it. Then show the Windows local dashboard at `http://127.0.0.1:32145` for its local providers, Schedules, and Recent activity. A local execution may have a different internal ID from its outer relay job.
+
+**DE:** „Im Relay-Dashboard sehe ich denselben Queue-Auftrag mit seiner Job-ID. Null wartende Jobs bedeutet nach dem Erfolg: Der Worker hat ihn übernommen. Das lokale Dashboard zeigt zusätzlich Provider, Zeitpläne und den Verlauf auf diesem PC.“
+
+**EN:** “The relay dashboard shows the same queued job by its job ID. After success, zero waiting jobs means the worker claimed it. The local dashboard also shows providers, schedules, and activity on this PC.”
 
 The separate Gemini music mode is **not** part of the reliable live sequence yet. In the current test Gemini reported “Generating your track”, but no verified media file reached the VPS. Do not promise a downloadable song or use an unverified file in the recording. Likewise, do not claim that an unfocused image upload was tested: the verified minimized-window test is text-only.

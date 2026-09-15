@@ -12,6 +12,11 @@ type Candidate struct {
 	Score float64 `json:"score"`
 }
 
+// NodeFreshnessWindow is the hard scheduler boundary for worker telemetry.
+// Readiness tools must use the same value so they cannot report capacity that
+// the scheduler itself would reject.
+const NodeFreshnessWindow = 30 * time.Second
+
 func Rank(nodes []Node, requirements Requirements) []Candidate {
 	return RankWithEstimate(nodes, requirements, 0)
 }
@@ -22,7 +27,7 @@ func Rank(nodes []Node, requirements Requirements) []Candidate {
 func RankWithEstimate(nodes []Node, requirements Requirements, estimatedVRAM uint64) []Candidate {
 	candidates := make([]Candidate, 0, len(nodes))
 	for _, node := range nodes {
-		if !node.Connected || time.Since(node.LastSeen) > 30*time.Second || !matchesNode(node, requirements) {
+		if !node.Connected || time.Since(node.LastSeen) > NodeFreshnessWindow || !matchesNode(node, requirements) {
 			continue
 		}
 		capacity := node.Capabilities.MaxConcurrent
@@ -96,17 +101,35 @@ func matchesNode(node Node, requirements Requirements) bool {
 	if requirements.Provider != "" && !containsFold(capability.Providers, requirements.Provider) {
 		return false
 	}
-	if strings.EqualFold(requirements.Provider, "browser") && capability.BrowserTabs > 0 && capability.BrowserBusy >= capability.BrowserTabs {
+	if requirements.BrowserProfile != "" {
+		if !strings.EqualFold(requirements.Provider, "browser") || !hasReadyBrowserProfile(capability.BrowserSessions, requirements.BrowserProfile) {
+			return false
+		}
+	}
+	if strings.EqualFold(requirements.Provider, "browser") && ((capability.BrowserTabs > 0 && capability.BrowserBusy >= capability.BrowserTabs) || (capability.AutomaticTasks != nil && capability.BrowserTabs <= 0)) {
 		return false
 	}
-	if requirements.Model != "" {
+	explicitModel := strings.TrimSpace(requirements.Model) != "" && !strings.EqualFold(strings.TrimSpace(requirements.Model), "auto")
+	if explicitModel {
 		if !selectedModelSupports(capability.Models, requirements) {
 			return false
 		}
-	} else if requirements.Task != "" && !containsFold(capability.Tasks, requirements.Task) && !modelSupports(capability.Models, requirements) {
-		return false
-	}
-	if (requirements.Vision || requirements.Embedding) && !modelFeature(capability.Models, requirements.Model, requirements.Provider, requirements.Vision, requirements.Embedding) {
+	} else if requirements.Task != "" {
+		automaticTasksAreAuthoritative := strings.TrimSpace(requirements.Provider) != "" && capability.AutomaticTasks != nil
+		if automaticTasksAreAuthoritative && !providerTaskSupported(capability.AutomaticTasks, requirements.Provider, requirements.Task) {
+			return false
+		}
+		modelsAreAuthoritative := hasProviderModelInventory(capability.Models, requirements.Provider)
+		if modelsAreAuthoritative && !modelSupports(capability.Models, requirements) {
+			return false
+		}
+		if !modelsAreAuthoritative && (requirements.Vision || requirements.Embedding) && !modelSupports(capability.Models, requirements) {
+			return false
+		}
+		if !automaticTasksAreAuthoritative && !modelsAreAuthoritative && !requirements.Vision && !requirements.Embedding && !containsFold(capability.Tasks, requirements.Task) && !modelSupports(capability.Models, requirements) {
+			return false
+		}
+	} else if (requirements.Vision || requirements.Embedding) && !modelFeature(capability.Models, requirements.Model, requirements.Provider, requirements.Vision, requirements.Embedding) {
 		return false
 	}
 	if requirements.MinFreeVRAM > 0 {
@@ -124,9 +147,39 @@ func matchesNode(node Node, requirements Requirements) bool {
 	return true
 }
 
+func providerTaskSupported(tasks map[string][]string, provider, task string) bool {
+	for name, advertised := range tasks {
+		if strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(provider)) {
+			return containsFold(advertised, task)
+		}
+	}
+	return false
+}
+
+func hasReadyBrowserProfile(sessions []BrowserSessionCapability, wanted string) bool {
+	for _, session := range sessions {
+		if strings.EqualFold(strings.TrimSpace(session.Profile), strings.TrimSpace(wanted)) && strings.EqualFold(strings.TrimSpace(session.State), "waiting") {
+			return true
+		}
+	}
+	return false
+}
+
 func modelSupports(models []ModelCapability, requirements Requirements) bool {
 	for _, model := range models {
-		if modelMatchesProvider(model, requirements.Provider) && requirements.Task != "" && containsFold(model.Tasks, requirements.Task) {
+		if modelMatchesProvider(model, requirements.Provider) && requirements.Task != "" && containsFold(model.Tasks, requirements.Task) && (!requirements.Vision || model.Vision) && (!requirements.Embedding || model.Embedding) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasProviderModelInventory(models []ModelCapability, provider string) bool {
+	if strings.TrimSpace(provider) == "" {
+		return false
+	}
+	for _, model := range models {
+		if strings.TrimSpace(model.Provider) != "" && strings.EqualFold(model.Provider, provider) {
 			return true
 		}
 	}
@@ -142,7 +195,7 @@ func selectedModelSupports(models []ModelCapability, requirements Requirements) 
 		if strings.EqualFold(requirements.Provider, "browser") {
 			matches = browserModelEqual(model.Name, requirements.Model)
 		}
-		if matches && (requirements.Task == "" || containsFold(model.Tasks, requirements.Task)) {
+		if matches && (requirements.Task == "" || containsFold(model.Tasks, requirements.Task)) && (!requirements.Vision || model.Vision) && (!requirements.Embedding || model.Embedding) {
 			return true
 		}
 	}
@@ -188,7 +241,7 @@ func modelFeature(models []ModelCapability, name, provider string, vision, embed
 }
 
 func modelMatchesProvider(model ModelCapability, provider string) bool {
-	return provider == "" || model.Provider == "" || strings.EqualFold(model.Provider, provider)
+	return provider == "" || strings.EqualFold(model.Provider, provider)
 }
 
 func bestVRAMHeadroom(node Node, required uint64) float64 {

@@ -655,6 +655,22 @@ func (s *Store) GarbageCollectReservations(now time.Time) (int, error) {
 	return removed, err
 }
 
+// maintenanceCandidates reports whether the relay has any reservation or
+// queued-job records that can require periodic cleanup. It deliberately reads
+// only the first key in each small index bucket: terminal Job values may embed
+// multi-megabyte artifacts and must not be decoded merely to prove that an
+// otherwise idle relay has no stale work.
+func (s *Store) maintenanceCandidates() (reservations, queued bool, err error) {
+	err = s.db.View(func(tx *bolt.Tx) error {
+		assignmentKey, _ := tx.Bucket(bucketAssignments).Cursor().First()
+		queueKey, _ := tx.Bucket(bucketQueue).Cursor().First()
+		reservations = assignmentKey != nil
+		queued = queueKey != nil
+		return nil
+	})
+	return reservations, queued, err
+}
+
 func garbageCollectReservations(bucket *bolt.Bucket, now time.Time) error {
 	_, err := garbageCollectReservationsCount(bucket, now)
 	return err
@@ -1425,6 +1441,27 @@ func activePipelineCounts(bucket *bolt.Bucket, owner string) (global, owned int,
 		return nil
 	})
 	return global, owned, err
+}
+
+// HasActivePipelineRuns scans the authoritative pipeline bucket without a
+// presentation limit. ListPipelineRuns is intentionally capped and therefore
+// cannot safely answer lifecycle or updater-idle decisions.
+func (s *Store) HasActivePipelineRuns() (bool, error) {
+	active := false
+	err := s.db.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketPipelineRuns)
+		return bucket.ForEach(func(_, value []byte) error {
+			var run PipelineRun
+			if err := json.Unmarshal(value, &run); err != nil {
+				return err
+			}
+			if run.Status == "running" {
+				active = true
+			}
+			return nil
+		})
+	})
+	return active, err
 }
 
 // FailActivePipelineRuns closes orphaned admission slots on relay startup.

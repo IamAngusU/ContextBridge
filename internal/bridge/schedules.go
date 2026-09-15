@@ -600,6 +600,9 @@ func (s *Server) dispatchSchedules(ctx context.Context) {
 func (s *Server) claimSchedule(id string, now time.Time, manual bool) (Schedule, Job, error) {
 	s.scheduleAdmissionMu.Lock()
 	defer s.scheduleAdmissionMu.Unlock()
+	if s.lifecycleStopping {
+		return Schedule{}, Job{}, errServiceStopping
+	}
 	if s.regularActiveJobs+s.schedules.runningCount() >= s.jobAdmissionLimit {
 		return Schedule{}, Job{}, errScheduleCapacity
 	}

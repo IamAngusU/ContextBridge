@@ -8,7 +8,8 @@ param(
     [switch]$NoAutostart,
     [switch]$NoStart,
     [switch]$NoDashboard,
-    [switch]$NoPath
+    [switch]$NoPath,
+    [switch]$NoCompletion
 )
 
 $ErrorActionPreference = "Stop"
@@ -17,6 +18,70 @@ $repo = "IamAngusU/ContextBridge"
 function Info($Text) { Write-Host $Text -ForegroundColor Cyan }
 function Good($Text) { Write-Host $Text -ForegroundColor Green }
 function Muted($Text) { Write-Host $Text -ForegroundColor DarkGray }
+
+function Get-ContextBridgeCompletionCommands {
+    param([bool]$AliasInstalled)
+    if ($AliasInstalled) { return 'contextbridge and cb' }
+    return 'contextbridge'
+}
+
+function Test-ContextBridgeCommandPath {
+    param(
+        $CommandInfo,
+        [Parameter(Mandatory = $true)][string]$ExpectedPath
+    )
+    if (-not $CommandInfo -or -not $CommandInfo.Path) { return $false }
+    try {
+        return [IO.Path]::GetFullPath([string]$CommandInfo.Path).Equals(
+            [IO.Path]::GetFullPath($ExpectedPath),
+            [StringComparison]::OrdinalIgnoreCase
+        )
+    } catch {
+        return $false
+    }
+}
+
+function Update-ContextBridgeCompletionProfile {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProfilePath,
+        [Parameter(Mandatory = $true)][string]$CompletionPath
+    )
+
+    $beginMarker = '# >>> ContextBridge completion >>>'
+    $endMarker = '# <<< ContextBridge completion <<<'
+    $profileText = if (Test-Path -LiteralPath $ProfilePath) { [IO.File]::ReadAllText($ProfilePath) } else { '' }
+    $beginMatches = [regex]::Matches($profileText, '(?m)^# >>> ContextBridge completion >>>\r?$')
+    $endMatches = [regex]::Matches($profileText, '(?m)^# <<< ContextBridge completion <<<\r?$')
+
+    # Ownership markers are authority to replace content only when there is
+    # exactly one complete, ordered block. Ambiguous or malformed markers must
+    # never cause a shell profile rewrite; the caller treats this optional
+    # integration as fail-soft and leaves ContextBridge itself installed.
+    if ($beginMatches.Count -ne $endMatches.Count -or $beginMatches.Count -gt 1 -or
+        ($beginMatches.Count -eq 1 -and $beginMatches[0].Index -ge $endMatches[0].Index)) {
+        throw 'The PowerShell profile contains malformed ContextBridge completion markers; it was left unchanged.'
+    }
+
+    $newline = if ($profileText.Contains("`r`n")) { "`r`n" } elseif ($profileText.Contains("`n")) { "`n" } else { [Environment]::NewLine }
+    $escapedCompletionPath = $CompletionPath.Replace("'", "''")
+    $completionBlock = $beginMarker + $newline + ". '$escapedCompletionPath'" + $newline + $endMarker
+
+    if ($beginMatches.Count -eq 1) {
+        $blockStart = $beginMatches[0].Index
+        $blockEnd = $endMatches[0].Index + $endMatches[0].Length
+        # The end-marker match includes a CR on CRLF input. Exclude it because
+        # the replacement block already supplies its own line ending semantics.
+        if ($profileText[$blockEnd - 1] -eq "`r") { $blockEnd-- }
+        $profileText = $profileText.Substring(0, $blockStart) + $completionBlock + $profileText.Substring($blockEnd)
+    } else {
+        if ($profileText -and -not $profileText.EndsWith("`n")) { $profileText += $newline }
+        $profileText += $completionBlock + $newline
+    }
+
+    $profileDirectory = Split-Path -Parent $ProfilePath
+    if ($profileDirectory) { New-Item -ItemType Directory -Path $profileDirectory -Force | Out-Null }
+    [IO.File]::WriteAllText($ProfilePath, $profileText, (New-Object Text.UTF8Encoding($false)))
+}
 
 Info "ContextBridge installer"
 Muted "A local bridge for Ollama and explicitly paired browser tabs."
@@ -106,6 +171,63 @@ if (-not $NoPath) {
         }
     } catch {
         Muted "Could not update the user PATH. Run ContextBridge from $InstallDir or add that folder manually."
+    }
+}
+
+# `contextbridge` remains the canonical executable. The short `cb` launcher is
+# a tiny path-stable shim, so an in-place executable update cannot leave a stale
+# copied cb.exe behind. Never replace an unrelated command or user-owned file.
+$cbAlias = Join-Path $InstallDir 'cb.cmd'
+$cbAliasMarker = ':: ContextBridge managed cb alias'
+$cbAliasInstalled = $false
+try {
+    $writeAlias = $true
+    if (Test-Path -LiteralPath $cbAlias) {
+        $writeAlias = ([IO.File]::ReadAllText($cbAlias)).StartsWith($cbAliasMarker, [StringComparison]::Ordinal)
+        if (-not $writeAlias) {
+            Muted "Skipped the short 'cb' command because $cbAlias is not managed by ContextBridge."
+        }
+    } else {
+        $existingCb = Get-Command cb -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($existingCb) {
+            $writeAlias = $false
+            Muted "Skipped the short 'cb' command because it already belongs to $($existingCb.Source)."
+        }
+    }
+    if ($writeAlias) {
+        $aliasText = "$cbAliasMarker`r`n@echo off`r`n`"%~dp0contextbridge.exe`" %*`r`n"
+        [IO.File]::WriteAllText($cbAlias, $aliasText, [Text.Encoding]::ASCII)
+        $resolvedCb = Get-Command cb -ErrorAction SilentlyContinue | Select-Object -First 1
+        $cbAliasInstalled = Test-ContextBridgeCommandPath -CommandInfo $resolvedCb -ExpectedPath $cbAlias
+        if ($cbAliasInstalled) {
+            Good "Commands ready: contextbridge and cb"
+        } elseif ($resolvedCb) {
+            Muted "The managed cb launcher remains at $cbAlias, but the active cb command belongs to $($resolvedCb.Source)."
+        } else {
+            Muted "The managed cb launcher is at $cbAlias but is not on PATH; use contextbridge or its full path."
+        }
+    }
+} catch {
+    Muted "Could not create the optional 'cb' command; use contextbridge."
+}
+
+if (-not $NoCompletion) {
+    try {
+        $completionPath = Join-Path $InstallDir 'contextbridge-completion.ps1'
+        $completionText = (& $exe completion powershell | Out-String)
+        if ($LASTEXITCODE -ne 0 -or -not $completionText.Trim()) {
+            throw 'The ContextBridge completion generator returned no script.'
+        }
+        if (-not $cbAliasInstalled) {
+            $completionText = $completionText.Replace('-CommandName contextbridge, cb', '-CommandName contextbridge')
+        }
+        [IO.File]::WriteAllText($completionPath, $completionText, (New-Object Text.UTF8Encoding($false)))
+
+        Update-ContextBridgeCompletionProfile -ProfilePath $PROFILE.CurrentUserAllHosts -CompletionPath $completionPath
+        $completionCommands = Get-ContextBridgeCompletionCommands -AliasInstalled $cbAliasInstalled
+        Good "PowerShell completion installed for $completionCommands (open a new shell)."
+    } catch {
+        Muted "PowerShell completion could not be activated automatically. Run: contextbridge completion powershell"
     }
 }
 if (-not (Test-Path $config)) {

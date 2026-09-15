@@ -3,6 +3,8 @@ param()
 $ErrorActionPreference = "Stop"
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $releaseScript = Join-Path $repoRoot "scripts\build-release.ps1"
+$releaseHelpers = Join-Path $repoRoot "scripts\release-helpers.ps1"
+. $releaseHelpers
 $manifest = Get-Content -LiteralPath (Join-Path $repoRoot "extension\manifests\chromium.json") -Raw | ConvertFrom-Json
 $currentVersion = "v$($manifest.version)"
 $shell = (Get-Process -Id $PID).Path
@@ -25,6 +27,31 @@ function Invoke-Check([string]$Script, [string]$Version, [string]$OutputPath) {
 
 try {
     New-Item -ItemType Directory -Path $testRoot | Out-Null
+
+    $checksumFixture = Join-Path $testRoot "checksum-format"
+    New-Item -ItemType Directory -Path $checksumFixture | Out-Null
+    [IO.File]::WriteAllText((Join-Path $checksumFixture "alpha.txt"), "alpha")
+    [IO.File]::WriteAllText((Join-Path $checksumFixture "beta.txt"), "beta")
+    $checksumPath = Join-Path $checksumFixture "SHA256SUMS"
+    Write-ContextBridgeChecksumFile -Directory $checksumFixture -Path $checksumPath
+    $checksumBytes = [IO.File]::ReadAllBytes($checksumPath)
+    if ($checksumBytes -contains 13) {
+        throw "SHA256SUMS contains a CR byte and is not portable to POSIX checksum tools."
+    }
+    if ($checksumBytes.Count -eq 0 -or $checksumBytes[$checksumBytes.Count - 1] -ne 10) {
+        throw "SHA256SUMS must end with an LF delimiter."
+    }
+    $checksumLines = @([IO.File]::ReadAllText($checksumPath).Split("`n", [StringSplitOptions]::RemoveEmptyEntries))
+    if ($checksumLines.Count -ne 2) {
+        throw "SHA256SUMS did not contain exactly one entry per fixture asset."
+    }
+    foreach ($assetName in @("alpha.txt", "beta.txt")) {
+        $assetPath = Join-Path $checksumFixture $assetName
+        $expectedLine = "{0}  {1}" -f (Get-FileHash -LiteralPath $assetPath -Algorithm SHA256).Hash.ToLowerInvariant(), $assetName
+        if ($checksumLines -notcontains $expectedLine) {
+            throw "SHA256SUMS contains an incorrect entry for $assetName."
+        }
+    }
 
     $successOutput = Join-Path $testRoot "success-output"
     $success = Invoke-Check $releaseScript $currentVersion $successOutput
@@ -49,6 +76,7 @@ try {
     $fixtureRoot = Join-Path $testRoot "fixture"
     New-Item -ItemType Directory -Path (Join-Path $fixtureRoot "scripts") -Force | Out-Null
     Copy-Item -LiteralPath $releaseScript -Destination (Join-Path $fixtureRoot "scripts\build-release.ps1")
+    Copy-Item -LiteralPath $releaseHelpers -Destination (Join-Path $fixtureRoot "scripts\release-helpers.ps1")
     Copy-Item -LiteralPath (Join-Path $repoRoot "extension") -Destination (Join-Path $fixtureRoot "extension") -Recurse
     Add-Content -LiteralPath (Join-Path $fixtureRoot "extension\chromium\popup.js") -Value "// stale package fixture"
     $staleOutput = Join-Path $testRoot "stale-output"

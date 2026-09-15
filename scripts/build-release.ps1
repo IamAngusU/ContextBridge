@@ -9,6 +9,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $extensionRoot = Join-Path $repoRoot "extension"
 $expectedExtensionVersion = $Version.Substring(1)
+. (Join-Path $PSScriptRoot "release-helpers.ps1")
 
 function Get-RelativeFileNames([string]$Root) {
     $prefix = [IO.Path]::GetFullPath($Root).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
@@ -163,10 +164,7 @@ try {
         Compress-Archive -Path (Join-Path $source "*") -DestinationPath $asset -CompressionLevel Optimal
     }
 
-    $checksumLines = Get-ChildItem -LiteralPath $releaseStage -File |
-        Sort-Object Name |
-        ForEach-Object { "{0}  {1}" -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name }
-    [IO.File]::WriteAllLines((Join-Path $releaseStage "SHA256SUMS"), $checksumLines, (New-Object Text.UTF8Encoding($false)))
+    Write-ContextBridgeChecksumFile -Directory $releaseStage -Path (Join-Path $releaseStage "SHA256SUMS")
     if (Test-Path -LiteralPath $outputPath) {
         throw "Release output appeared while the build was running: $outputPath"
     }

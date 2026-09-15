@@ -50,6 +50,7 @@ const (
 	maxQueuedJobsPerOwner         = 64
 	maxActivePipelineRuns         = 64
 	maxActivePipelineRunsPerOwner = 8
+	maximumMaintenanceInterval    = 5 * time.Second
 )
 
 type Relay struct {
@@ -61,11 +62,18 @@ type Relay struct {
 	rateMu          sync.Mutex
 	rate            map[string]*rateWindow
 	wake            chan struct{}
+	maintenanceMu   sync.Mutex
+	nextMaintenance time.Time
 	retentionMu     sync.Mutex
 	nextRetention   time.Time
 	fairnessMu      sync.Mutex
 	lastOwner       map[int]string
 	queueScanOffset int
+	lifecycleMu     sync.RWMutex
+	lifecycleCtx    context.Context
+	pipelineWG      sync.WaitGroup
+	admissionMu     sync.RWMutex
+	quiescing       bool
 }
 
 func (r *Relay) Idle() bool {
@@ -73,20 +81,95 @@ func (r *Relay) Idle() bool {
 	if err != nil {
 		return false
 	}
-	return overview.JobsByState[JobQueued] == 0 && overview.JobsByState[JobAssigned] == 0 && overview.JobsByState[JobRunning] == 0
+	return r.idleWithOverview(overview)
+}
+
+func (r *Relay) idleWithOverview(overview Overview) bool {
+	if overview.JobsByState[JobQueued] != 0 || overview.JobsByState[JobAssigned] != 0 || overview.JobsByState[JobRunning] != 0 {
+		return false
+	}
+	activePipelines, err := r.store.HasActivePipelineRuns()
+	if err != nil || activePipelines {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, worker := range r.workers {
+		if running, _ := worker.load(); running != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func (r *Relay) pipelineContext() context.Context {
+	r.lifecycleMu.RLock()
+	ctx := r.lifecycleCtx
+	r.lifecycleMu.RUnlock()
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
+}
+
+// QuiesceForStop closes relay admission at a linearization point shared with
+// job and pipeline creation. If a concurrent request won first, the idle check
+// observes it and this method reopens admission before returning false.
+func (r *Relay) QuiesceForStop(force bool) bool {
+	r.admissionMu.Lock()
+	defer r.admissionMu.Unlock()
+	if r.quiescing {
+		return true
+	}
+	r.quiescing = true
+	if !force && !r.Idle() {
+		r.quiescing = false
+		return false
+	}
+	return true
+}
+
+func (r *Relay) ResumeAfterRejectedStop() {
+	r.admissionMu.Lock()
+	r.quiescing = false
+	r.admissionMu.Unlock()
+}
+
+func (r *Relay) beginAdmission() bool {
+	r.admissionMu.RLock()
+	if r.quiescing {
+		r.admissionMu.RUnlock()
+		return false
+	}
+	return true
+}
+
+func (r *Relay) endAdmission() {
+	r.admissionMu.RUnlock()
 }
 
 type workerConnection struct {
 	conn     *websocket.Conn
 	writeMu  sync.Mutex
 	stateMu  sync.Mutex
-	inFlight map[string]struct{}
+	inFlight map[string]workerReservation
 	capacity int
+}
+
+// workerReservation deliberately outlives the persisted job's active state.
+// A relay timeout proves only that the producer must stop waiting; it does not
+// prove that a side-effecting worker execution stopped. Keep counting that slot
+// until the matching result or connection teardown, while remembering that a
+// terminalized job no longer requires another stale-jobs store scan.
+type workerReservation struct {
+	storeTerminal   bool
+	dispatchStarted bool
+	attempt         int
 }
 
 func newWorkerConnection(conn *websocket.Conn, capacity int) *workerConnection {
 	capacity = boundedWorkerCapacity(capacity)
-	return &workerConnection{conn: conn, capacity: capacity, inFlight: map[string]struct{}{}}
+	return &workerConnection{conn: conn, capacity: capacity, inFlight: map[string]workerReservation{}}
 }
 
 func (w *workerConnection) reserve(jobID string) bool {
@@ -98,8 +181,43 @@ func (w *workerConnection) reserve(jobID string) bool {
 	if len(w.inFlight) >= w.capacity {
 		return false
 	}
-	w.inFlight[jobID] = struct{}{}
+	w.inFlight[jobID] = workerReservation{}
 	return true
+}
+
+func (w *workerConnection) markStoreTerminal(jobID string) bool {
+	w.stateMu.Lock()
+	defer w.stateMu.Unlock()
+	reservation, exists := w.inFlight[jobID]
+	if exists {
+		reservation.storeTerminal = true
+		w.inFlight[jobID] = reservation
+	}
+	// A capacity reservation is created before the durable assignment. It is
+	// not execution evidence until dispatchStarted is set. Returning false in
+	// that pre-dispatch window prevents a phantom worker cancel; beginDispatch
+	// will observe storeTerminal and suppress the job frame itself.
+	return exists && reservation.dispatchStarted
+}
+
+func (w *workerConnection) beginDispatch(jobID string, attempt int) bool {
+	w.stateMu.Lock()
+	defer w.stateMu.Unlock()
+	reservation, exists := w.inFlight[jobID]
+	if !exists || reservation.storeTerminal || attempt <= 0 {
+		return false
+	}
+	reservation.dispatchStarted = true
+	reservation.attempt = attempt
+	w.inFlight[jobID] = reservation
+	return true
+}
+
+func (w *workerConnection) matchesDispatch(jobID string, attempt int) bool {
+	w.stateMu.Lock()
+	defer w.stateMu.Unlock()
+	reservation, exists := w.inFlight[jobID]
+	return exists && reservation.dispatchStarted && attempt > 0 && reservation.attempt == attempt
 }
 
 func (w *workerConnection) release(jobID string) {
@@ -112,6 +230,17 @@ func (w *workerConnection) load() (running, capacity int) {
 	w.stateMu.Lock()
 	defer w.stateMu.Unlock()
 	return len(w.inFlight), w.capacity
+}
+
+func (w *workerConnection) needsStaleRecovery() bool {
+	w.stateMu.Lock()
+	defer w.stateMu.Unlock()
+	for _, reservation := range w.inFlight {
+		if !reservation.storeTerminal {
+			return true
+		}
+	}
+	return false
 }
 
 func (w *workerConnection) updateCapacity(capacity int) {
@@ -269,18 +398,24 @@ func (r *Relay) Handler() http.Handler {
 }
 
 func (r *Relay) Run(ctx context.Context) error {
-	server := &http.Server{Addr: r.cfg.Listen, Handler: r.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 32 << 10}
+	r.lifecycleMu.Lock()
+	r.lifecycleCtx = ctx
+	r.lifecycleMu.Unlock()
+	server := &http.Server{Addr: r.cfg.Listen, Handler: r.Handler(), BaseContext: func(net.Listener) context.Context { return ctx }, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 32 << 10}
 	go r.dispatchLoop(ctx)
+	shutdownDone := make(chan error, 1)
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
-		_ = server.Shutdown(shutdown)
+		shutdownDone <- server.Shutdown(shutdown)
 	}()
 	r.logger.Printf("relay listening on http://%s", r.cfg.Listen)
 	err := server.ListenAndServe()
 	if errors.Is(err, http.ErrServerClosed) {
-		return nil
+		shutdownErr := <-shutdownDone
+		r.pipelineWG.Wait()
+		return shutdownErr
 	}
 	return err
 }
@@ -291,7 +426,7 @@ func (r *Relay) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	idle := overview.JobsByState[JobQueued] == 0 && overview.JobsByState[JobAssigned] == 0 && overview.JobsByState[JobRunning] == 0
+	idle := r.idleWithOverview(overview)
 	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "service": "contextbridge-relay", "version": r.cfg.Version, "protocol": ProtocolVersion, "overview": overview, "idle": idle})
 }
 
@@ -429,7 +564,17 @@ func (r *Relay) handleCancel(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusConflict, err)
 		return
 	}
-	r.cancelWorkerExecution(job.AssignedNode, job.ID)
+	// Cancellation makes the durable record terminal, but it does not prove a
+	// side-effecting worker execution has stopped. Retain the occupied slot
+	// until the matching result or disconnect while excluding this reservation
+	// from future stale-record scans.
+	if r.markWorkerReservationTerminal(job.AssignedNode, job.ID) {
+		// AssignedNode can also be an E2EE queue binding that has never been
+		// dispatched. Only a live reservation proves there is worker execution
+		// to cancel; otherwise a phantom cancel could poison the worker's bounded
+		// cancel-before-dispatch cache.
+		r.cancelWorkerExecution(job.AssignedNode, job.ID)
+	}
 	writeJSON(w, http.StatusOK, job)
 }
 
@@ -440,7 +585,7 @@ func (r *Relay) cancelWorkerExecution(nodeID, jobID string) {
 	r.mu.RLock()
 	worker := r.workers[nodeID]
 	r.mu.RUnlock()
-	if worker == nil {
+	if worker == nil || worker.conn == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -487,6 +632,10 @@ func (r *Relay) handleSubmit(w http.ResponseWriter, req *http.Request) {
 		input.MaxAttempts = r.cfg.MaxAttempts
 	}
 	input.OwnerSubject = record.Subject
+	if !r.beginAdmission() {
+		writeError(w, http.StatusServiceUnavailable, errors.New("relay is stopping"))
+		return
+	}
 	var job Job
 	var err error
 	if input.AssignmentID != "" {
@@ -494,6 +643,7 @@ func (r *Relay) handleSubmit(w http.ResponseWriter, req *http.Request) {
 	} else {
 		job, err = r.store.CreateJobAdmitted(input, r.cfg.MaxQueuedJobs, r.ownerQueueLimit())
 	}
+	r.endAdmission()
 	if err != nil {
 		status := http.StatusUnprocessableEntity
 		if errors.Is(err, ErrQueueFull) {
@@ -608,7 +758,13 @@ func (r *Relay) handleReserve(w http.ResponseWriter, req *http.Request) {
 	if r.cfg.MaxQueuedJobs < ownerLimit {
 		ownerLimit = r.cfg.MaxQueuedJobs
 	}
-	if err := r.store.CreateReservationAdmitted(assignment, secret, record.Subject, r.cfg.MaxQueuedJobs, ownerLimit); err != nil {
+	if !r.beginAdmission() {
+		writeError(w, http.StatusServiceUnavailable, errors.New("relay is stopping"))
+		return
+	}
+	err := r.store.CreateReservationAdmitted(assignment, secret, record.Subject, r.cfg.MaxQueuedJobs, ownerLimit)
+	r.endAdmission()
+	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, ErrOwnerReservationCapacity) {
 			status = http.StatusTooManyRequests
@@ -750,10 +906,11 @@ func (r *Relay) handleWorker(w http.ResponseWriter, req *http.Request) {
 			job, completeErr := r.store.CompleteJob(message.JobID, node.ID, message.Attempt, message.Result, message.SealedResult, usage, message.Error)
 			// Only the current assignment generation may release the worker slot.
 			// A final job can still receive its matching late result after a producer
-			// cancellation, in which case execution really has ended and the slot is
-			// safe to release even though the store rejects the state transition.
+			// cancellation or relay timeout. That matching result proves execution
+			// really ended, so the slot is safe to release even though the store
+			// rejects the state transition. The timeout itself is not such proof.
 			final := job.Status == JobCompleted || job.Status == JobFailed || job.Status == JobCancelled
-			if completeErr == nil || (final && job.AssignedNode == node.ID && job.Attempt == message.Attempt) {
+			if completeErr == nil || (final && job.AssignedNode == node.ID && job.Attempt == message.Attempt) || worker.matchesDispatch(message.JobID, message.Attempt) {
 				worker.release(message.JobID)
 				r.signalDispatch()
 			}
@@ -784,13 +941,8 @@ func (r *Relay) dispatchLoop(ctx context.Context) {
 
 func (r *Relay) dispatch() {
 	now := time.Now().UTC()
-	if _, err := r.store.GarbageCollectReservations(now); err != nil {
-		r.logger.Printf("assignment reservation cleanup failed: %v", err)
-	}
-	if recovered, err := r.store.RecoverStaleJobs(now, r.cfg.AssignmentTTL, r.cfg.JobTimeout); err == nil {
-		for _, job := range recovered {
-			_ = r.store.AddEvent(Event{Kind: "job." + job.Status, Message: job.Error, JobID: job.ID, NodeID: job.AssignedNode})
-		}
+	if r.maintenanceDue(now) {
+		r.runMaintenance(now)
 	}
 	r.pruneRetentionIfDue(now)
 	owners, offset := r.dispatchScanSnapshot()
@@ -829,18 +981,33 @@ func (r *Relay) dispatch() {
 			if worker == nil {
 				continue
 			}
+			if !r.beginAdmission() {
+				return
+			}
 			if !worker.reserve(queued.ID) {
+				r.endAdmission()
 				continue
 			}
 			job, assignErr := r.store.AssignJob(queued.ID, candidate.Node.ID)
 			if assignErr != nil {
 				worker.release(queued.ID)
+				r.endAdmission()
+				break
+			}
+			// Cancellation may win after the slot reservation but before the
+			// durable assignment. In that case markStoreTerminal records the win
+			// without emitting a phantom cancel, and this gate ensures the already
+			// cancelled job is never written to the worker afterward.
+			if !worker.beginDispatch(job.ID, job.Attempt) {
+				worker.release(job.ID)
+				r.endAdmission()
 				break
 			}
 			message := WireMessage{Version: ProtocolVersion, Type: "job", Job: &job}
 			writeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			writeErr := worker.write(writeCtx, mustJSON(message))
 			cancel()
+			r.endAdmission()
 			if writeErr != nil {
 				worker.release(queued.ID)
 				_, _ = r.store.RequeueNode(candidate.Node.ID, "worker connection failed")
@@ -858,6 +1025,95 @@ func (r *Relay) dispatch() {
 			break
 		}
 	}
+}
+
+func (r *Relay) runMaintenance(now time.Time) {
+	hasReservations, hasQueuedJobs, err := r.store.maintenanceCandidates()
+	if err != nil {
+		// Preserve the fail-safe behavior on an unhealthy store. The operations
+		// below will surface their more specific errors through the existing log.
+		hasReservations = true
+		hasQueuedJobs = true
+		r.logger.Printf("relay maintenance preflight failed: %v", err)
+	}
+	if hasReservations {
+		if _, err := r.store.GarbageCollectReservations(now); err != nil {
+			r.logger.Printf("assignment reservation cleanup failed: %v", err)
+		}
+	}
+	// Assigned/running jobs are represented by a reserved worker slot. Queued
+	// encrypted reservations remain in the queue. If neither exists, a full
+	// jobs-bucket scan cannot recover anything and would only decode retained
+	// payloads/results (which may include large artifacts). Relay startup still
+	// performs the unconditional crash-recovery scan. A stored timeout keeps its
+	// capacity reservation but is no longer a stale-recovery candidate.
+	if !hasQueuedJobs && !r.hasStaleRecoveryCandidates() {
+		return
+	}
+	if recovered, err := r.store.RecoverStaleJobs(now, r.cfg.AssignmentTTL, r.cfg.JobTimeout); err == nil {
+		for _, job := range recovered {
+			if r.markWorkerReservationTerminal(job.AssignedNode, job.ID) {
+				// A live reservation proves this was dispatched execution, not merely
+				// an expired encrypted queue binding. Best-effort cancellation bounds
+				// hung provider work; the slot remains occupied until the matching
+				// result or connection teardown proves execution has actually ended.
+				r.cancelWorkerExecution(job.AssignedNode, job.ID)
+			}
+			_ = r.store.AddEvent(Event{Kind: "job." + job.Status, Message: job.Error, JobID: job.ID, NodeID: job.AssignedNode})
+		}
+	} else {
+		r.logger.Printf("stale job recovery failed: %v", err)
+	}
+}
+
+func (r *Relay) hasStaleRecoveryCandidates() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, worker := range r.workers {
+		if worker.needsStaleRecovery() {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *Relay) markWorkerReservationTerminal(nodeID, jobID string) bool {
+	if nodeID == "" || jobID == "" {
+		return false
+	}
+	r.mu.RLock()
+	worker := r.workers[nodeID]
+	r.mu.RUnlock()
+	if worker != nil {
+		return worker.markStoreTerminal(jobID)
+	}
+	return false
+}
+
+func (r *Relay) maintenanceDue(now time.Time) bool {
+	r.maintenanceMu.Lock()
+	defer r.maintenanceMu.Unlock()
+	if !r.nextMaintenance.IsZero() && now.Before(r.nextMaintenance) {
+		return false
+	}
+	r.nextMaintenance = now.Add(relayMaintenanceInterval(r.cfg))
+	return true
+}
+
+func relayMaintenanceInterval(cfg RelayConfig) time.Duration {
+	interval := maximumMaintenanceInterval
+	for _, deadline := range []time.Duration{cfg.AssignmentTTL, cfg.JobTimeout} {
+		if candidate := deadline / 4; candidate > 0 && candidate < interval {
+			interval = candidate
+		}
+	}
+	if interval < cfg.DispatchEvery {
+		interval = cfg.DispatchEvery
+	}
+	if interval <= 0 {
+		return 250 * time.Millisecond
+	}
+	return interval
 }
 
 func (r *Relay) fairnessSnapshot() map[int]string {
@@ -952,9 +1208,10 @@ func (r *Relay) validateRequirements(requirements Requirements) error {
 		return errors.New("too many routing selectors")
 	}
 	for name, value := range map[string]string{
-		"task":  requirements.Task,
-		"model": requirements.Model,
-		"group": requirements.Group,
+		"task":            requirements.Task,
+		"model":           requirements.Model,
+		"group":           requirements.Group,
+		"browser_profile": requirements.BrowserProfile,
 	} {
 		if name != "task" && value == "" {
 			continue
@@ -978,6 +1235,14 @@ func (r *Relay) validateRequirements(requirements Requirements) error {
 	}
 	if requirements.Provider != "" && (!validRoutingLabel(requirements.Provider, 80) || strings.Contains(requirements.Provider, "..")) {
 		return errors.New("requirements.provider is invalid")
+	}
+	if requirements.BrowserProfile != "" {
+		if !strings.EqualFold(requirements.Provider, "browser") {
+			return errors.New("requirements.browser_profile requires provider browser")
+		}
+		if !validRoutingLabel(requirements.BrowserProfile, 80) {
+			return errors.New("requirements.browser_profile must be at most 80 bytes without surrounding whitespace or control characters")
+		}
 	}
 	return nil
 }

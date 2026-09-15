@@ -3,11 +3,13 @@
   "requirements": {
     "task": "generation",
     "provider": "browser",
+    "browser_profile": "chatgpt",
     "session_id": "campaign-image-1"
   },
   "payload": {
     "source": "creative-terminal",
     "task": "generation",
+    "browser_profile": "chatgpt",
     "prompt": "Create a coherent series of three polished editorial illustrations showing a bridge connecting local devices to a private AI compute cloud. Keep the visual language consistent across all three images and do not add text.",
     "output": {
       "mode": "text",

@@ -205,6 +205,23 @@ route is eligible only while its extension heartbeat and taught selectors are
 ready. Omit the field to let the scheduler choose any live provider for the
 requested task.
 
+Capability frames may also include `automatic_tasks_by_provider`. This map is
+the authoritative set of model-less tasks the worker can route automatically
+for each provider; an empty provider entry deliberately means "no automatic
+task". A missing field identifies an older worker and keeps the legacy
+capability interpretation. Concrete entries in `models` remain authoritative:
+an incompatible or missing fixed model is never upgraded by a generic fallback,
+and all requested properties (for example `task: vision`) must be satisfied by
+the same model on the selected provider.
+
+For a provider-specific browser job, also set
+`requirements.browser_profile` to `chatgpt`, `gemini`, or the exact learned
+profile name and repeat the value in the local job payload's
+`browser_profile`. The requirement is a hard scheduler filter: a node without
+an attached waiting tab of that profile is not eligible. `cluster chat
+--profile` and `cluster selftest` set both fields automatically. A browser
+profile is rejected with any provider other than `browser`.
+
 The worker binds the relay-approved `requirements.task` to local execution;
 the effective local route task must match it. A worker error, disconnect, or
 execution timeout is terminal because the provider may already have accepted

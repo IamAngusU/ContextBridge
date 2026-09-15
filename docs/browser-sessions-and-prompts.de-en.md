@@ -106,6 +106,12 @@ Das [Demo-Runbook](demo-video-de-en.md#shot-7--minimized-opera-text-job-still-re
 dokumentiert einen erfolgreichen Text-Folgejob bei minimiertem Opera. Das ist
 ein konkreter Nachweis für diese Konfiguration, aber keine Verallgemeinerung
 auf Datei-Uploads, Medienwerkzeuge oder jeden Browser-Energiesparmodus.
+Zusätzlich blieben in einem Dogfood-Lauf vom 14. bis 15. September 2026 bereits
+geladene Opera-Tabs über Nacht minimiert und waren beim nächsten Check noch
+über authentifizierte Heartbeats erreichbar; ContextBridge konnte danach einen
+angehängten Tab in den Vordergrund holen. Start, Ende und jeder dazwischenliegende
+Heartbeat wurden nicht lückenlos gemessen. Das ist daher kein Dauerlauf- oder
+Uptime-Nachweis; ein später ausgeschalteter PC beendet den Worker erwartbar.
 
 ## English
 
@@ -163,3 +169,9 @@ The [demo runbook](demo-video-de-en.md#shot-7--minimized-opera-text-job-still-re
 records a successful text follow-up while Opera remained minimized. That is
 concrete evidence for the tested configuration, not a general claim about file
 uploads, media tools, or every browser power-saving mode.
+In a separate 14–15 September 2026 dogfood run, already loaded Opera tabs stayed
+minimized overnight and still produced authenticated liveness at the next
+operator check; ContextBridge could then foreground an attached tab. The exact
+start, end, and every intervening heartbeat were not continuously captured, so
+this is not an uptime or endurance benchmark. A later PC power-off naturally
+stops the worker.

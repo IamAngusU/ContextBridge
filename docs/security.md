@@ -41,3 +41,15 @@ Job IDs are validated before they become file names and are sanitized again at t
 The local RAG backend partitions records by `tenant_id`. Applications must authenticate users and derive tenant IDs server-side rather than accepting an arbitrary tenant from an untrusted browser. For large or replicated indexes, use a dedicated vector database adapter with its own authorization boundary.
 
 The relay database and worker identity file contain sensitive material. The database contains token hashes and short-lived pairing delivery state. The identity file contains a node token and X25519 private key. Keep both owner-only, exclude them from backups shared with other tenants, and rotate pairing by removing the identity and pairing again if a device is lost.
+
+## Privacy and compliance boundary
+
+These mechanisms can support an operator's security and privacy program, but
+they do not make every deployment legally compliant or audited. Ordinary relay
+jobs are visible to the relay, browser providers receive content submitted to
+their pages, several local stores need an operator-defined lifecycle, and SOC 2
+requires independent organizational evidence over a defined scope and period.
+See [Privacy and compliance readiness](compliance-readiness.md) for the data
+inventory, current retention boundaries, DSAR runbook, recipient register, and
+readiness mapping. The MIT software license is separate from compliance and
+attestation.

@@ -15,6 +15,7 @@ All notable changes are documented here. ContextBridge follows semantic versioni
 ### Fixed
 
 - browser completions are delivered directly to the relay before using the bounded recovery cache, so valid large artifacts are not rejected by extension storage quotas
+- Chromium MV3 reconnect startup now reconciles the actual persistent heartbeat alarm instead of trusting process-local state after worker suspension or browser restart; explicit disconnect and rejected credentials still fail closed
 - a fresh ChatGPT or Gemini chat may adopt its permanent conversation URL only after the exact ContextBridge-owned turn is observed; unrelated same-origin navigation is rejected
 - completion requires an assistant response after the exact owned user turn, including chats with more than 10,000 rendered message nodes
 - diagnostic and progress scripts have deadlines and per-tab in-flight guards, preventing unresolved browser calls from accumulating during provider hangs
@@ -22,18 +23,26 @@ All notable changes are documented here. ContextBridge follows semantic versioni
 - local result compaction never restores removed prompts or source inputs, Ollama image generation is distinct from vision, and embedding-only models are never routed for text generation
 - ordinary, scheduled, and pipeline work share atomic admission limits; queue scans stay fair when many incompatible jobs precede a routeable one
 - scheduler telemetry clamps invalid percentages and free-memory counters, and a model's single-GPU VRAM requirement must fit one GPU rather than the aggregate across cards
+- idle relay maintenance checks the small queue and reservation indexes before scanning retained jobs, avoiding repeated decoding of large completed artifacts while preserving startup and active-job recovery
+- release checksum manifests use UTF-8 without BOM and LF delimiters on Windows, while the POSIX installer remains compatible with older CRLF manifests
 
 ### Improved
 
 - the live terminal accepts commands in foreground `run` and `worker` panels, keeps history newest-first in its own ASCII section, and exposes bounded per-node model/GPU detail views
-- terminal status retains readable grouping, load-aware colors, activity animation, zero-GPU nodes, multiple GPUs, node clocks, and honest unknown/degraded metadata
+- terminal status retains readable grouping, load-aware colors, activity animation, zero-GPU nodes, multiple GPUs, node clocks, honest unknown/degraded metadata, and distinct loaded/unloaded local-model colors
+- terminal help distinguishes closing an attached view from stopping work; `contextbridge stop` is an authenticated loopback-only, idle-safe shutdown for the standard local service, with an explicit `--force` override
+- installers provide a collision-safe, update-stable `cb` shorthand plus PowerShell, bash, and zsh completion; `help` in the terminal panel expands into readable command rows instead of one clipped status line
+- `cb selftest` (also `contextbridge cluster selftest`) waits with bounded live progress for local generation, exact attached browser profiles, and free capacity; its default sends nothing, while `--run` uses isolated per-job chats and `--image` separately opts into verified artifact bytes
+- `requirements.browser_profile` is a hard scheduler boundary, so N:N pools cannot send a ChatGPT/Gemini-specific job to a worker that lacks a waiting tab of that exact profile
 - headless worker installation has explicit noninteractive relay, name, and public-URL inputs with fail-closed validation
 - release builds verify stable-version metadata and byte-for-byte extension package parity before atomically publishing a complete artifact set
+- the documentation now separates measured protocol limits, performance overhead, compliance readiness, and non-binding roadmap candidates from shipped capabilities
 
 ### Tested
 
 - exact and one-byte-over prompt, text, image, output, and aggregate artifact boundaries, including plaintext and E2EE 8 MiB input plus two 6 MiB result artifacts
 - Windows live Ollama routing from a VPS with no Ollama UI, minimized browser operation, queue/admission stress, fuzzed relay identifiers, and Linux/macOS cross-builds
+- Windows and Linux benchmarks isolate queue, scheduler, encryption, hashing, and artifact-normalization overhead from third-party model latency; an idle production relay with retained large artifacts was re-measured after the maintenance fix
 
 ## 0.5.65 - 2026-09-15
 

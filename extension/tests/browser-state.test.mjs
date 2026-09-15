@@ -17,32 +17,44 @@ assert.match(source, /add\(href,[\s\S]{0,300}'generic_link', false\)/,
 const listeners = { addListener() {} };
 let alarmListener;
 const alarmCalls = [];
+let activeHeartbeatAlarm;
 const chrome = {
   runtime: { onInstalled: listeners, onStartup: listeners, onMessage: listeners, getManifest: () => ({ version: 'test' }) },
   storage: { local: { get: async (defaults) => defaults, set: async () => {} } },
   tabs: {}, scripting: {}, i18n: { getMessage: () => '' },
   alarms: {
     onAlarm: { addListener(fn) { alarmListener = fn; } },
-    create: (name, schedule) => alarmCalls.push(['create', name, schedule.periodInMinutes]),
-    clear: (name) => alarmCalls.push(['clear', name])
+    get: async (name) => name === activeHeartbeatAlarm?.name ? activeHeartbeatAlarm : undefined,
+    create: async (name, schedule) => {
+      activeHeartbeatAlarm = { name, ...schedule };
+      alarmCalls.push(['create', name, schedule.periodInMinutes, schedule.delayInMinutes]);
+    },
+    clear: async (name) => {
+      if (name === activeHeartbeatAlarm?.name) activeHeartbeatAlarm = undefined;
+      alarmCalls.push(['clear', name]);
+      return true;
+    }
   }
 };
 const context = vm.createContext({ chrome, console, URL, TextEncoder, AbortController, setTimeout, clearTimeout, setInterval, clearInterval, Date, Promise });
 vm.runInContext(source, context);
 context.crypto = webcrypto;
 {
+  assert.equal(alarmCalls.length, 0,
+    'loading a worker must wait for its startup/install/alarm event instead of racing lifecycle policy');
   assert.equal(typeof alarmListener, 'function', 'a suspended worker must have an alarm wake listener');
-  context.startHeartbeat();
-  assert.ok(alarmCalls.some(([action, name, minutes]) => action === 'create' && name === 'contextbridge-heartbeat' && minutes === 0.5));
-  context.startHeartbeat();
+  await context.startHeartbeat();
+  assert.ok(alarmCalls.some(([action, name, minutes, delay]) => action === 'create'
+    && name === 'contextbridge-heartbeat' && minutes === 0.5 && delay === 0.5));
+  await context.startHeartbeat();
   assert.equal(alarmCalls.filter(([action]) => action === 'create').length, 1, 'restarting an active worker must not postpone the alarm');
-  context.stopHeartbeat();
+  await context.stopHeartbeat();
   assert.ok(alarmCalls.some(([action, name]) => action === 'clear' && name === 'contextbridge-heartbeat'));
   const originalResume = context.resume;
   let wakes = 0;
   context.resume = () => { wakes += 1; };
   alarmListener({ name: 'unrelated' });
-  alarmListener({ name: 'contextbridge-heartbeat' });
+  await alarmListener({ name: 'contextbridge-heartbeat' });
   assert.equal(wakes, 1);
   context.resume = originalResume;
 }

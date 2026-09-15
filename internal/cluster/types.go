@@ -39,6 +39,7 @@ type Requirements struct {
 	Task           string   `json:"task,omitempty" yaml:"task,omitempty"`
 	SessionID      string   `json:"session_id,omitempty" yaml:"session_id,omitempty"`
 	Provider       string   `json:"provider,omitempty" yaml:"provider,omitempty"`
+	BrowserProfile string   `json:"browser_profile,omitempty" yaml:"browser_profile,omitempty"`
 	Model          string   `json:"model,omitempty" yaml:"model,omitempty"`
 	Group          string   `json:"group,omitempty" yaml:"group,omitempty"`
 	RequiredTags   []string `json:"required_tags,omitempty" yaml:"required_tags,omitempty"`
@@ -80,34 +81,39 @@ type BrowserSessionCapability struct {
 }
 
 type Capabilities struct {
-	ClockTime        time.Time                  `json:"clock_time,omitempty"`
-	UTCOffsetSeconds int                        `json:"utc_offset_seconds,omitempty"`
-	OS               string                     `json:"os"`
-	OSVersion        string                     `json:"os_version,omitempty"`
-	Architecture     string                     `json:"architecture"`
-	CPU              string                     `json:"cpu"`
-	CPUCores         int                        `json:"cpu_cores"`
-	CPUFrequency     int                        `json:"cpu_frequency_mhz,omitempty"`
-	CPUUtilization   int                        `json:"cpu_utilization_percent,omitempty"`
-	UptimeSeconds    uint64                     `json:"uptime_seconds,omitempty"`
-	AgentVersion     string                     `json:"agent_version,omitempty"`
-	MemoryTotal      uint64                     `json:"memory_total_bytes"`
-	MemoryFree       uint64                     `json:"memory_free_bytes"`
-	MemoryType       string                     `json:"memory_type,omitempty"`
-	GPUs             []GPUCapability            `json:"gpus,omitempty"`
-	Models           []ModelCapability          `json:"models,omitempty"`
-	Providers        []string                   `json:"providers,omitempty"`
-	Tasks            []string                   `json:"tasks,omitempty"`
-	Tags             []string                   `json:"tags,omitempty"`
-	Groups           []string                   `json:"groups,omitempty"`
-	MaxConcurrent    int                        `json:"max_concurrent"`
-	Running          int                        `json:"running"`
-	BrowserTabs      int                        `json:"browser_tabs,omitempty"`
-	BrowserBusy      int                        `json:"browser_busy_tabs,omitempty"`
-	BrowserSessions  []BrowserSessionCapability `json:"browser_sessions,omitempty"`
-	Sources          []string                   `json:"sources,omitempty"`
-	Modes            []string                   `json:"modes,omitempty"`
-	QueueDepth       int                        `json:"queue_depth"`
+	ClockTime        time.Time         `json:"clock_time,omitempty"`
+	UTCOffsetSeconds int               `json:"utc_offset_seconds,omitempty"`
+	OS               string            `json:"os"`
+	OSVersion        string            `json:"os_version,omitempty"`
+	Architecture     string            `json:"architecture"`
+	CPU              string            `json:"cpu"`
+	CPUCores         int               `json:"cpu_cores"`
+	CPUFrequency     int               `json:"cpu_frequency_mhz,omitempty"`
+	CPUUtilization   int               `json:"cpu_utilization_percent,omitempty"`
+	UptimeSeconds    uint64            `json:"uptime_seconds,omitempty"`
+	AgentVersion     string            `json:"agent_version,omitempty"`
+	MemoryTotal      uint64            `json:"memory_total_bytes"`
+	MemoryFree       uint64            `json:"memory_free_bytes"`
+	MemoryType       string            `json:"memory_type,omitempty"`
+	GPUs             []GPUCapability   `json:"gpus,omitempty"`
+	Models           []ModelCapability `json:"models,omitempty"`
+	Providers        []string          `json:"providers,omitempty"`
+	Tasks            []string          `json:"tasks,omitempty"`
+	// AutomaticTasks reports provider-scoped tasks that the worker's configured
+	// route can execute without a producer selecting a concrete model. A nil map
+	// identifies an older worker; a present map is authoritative even when a
+	// provider has no automatically routable task.
+	AutomaticTasks  map[string][]string        `json:"automatic_tasks_by_provider"`
+	Tags            []string                   `json:"tags,omitempty"`
+	Groups          []string                   `json:"groups,omitempty"`
+	MaxConcurrent   int                        `json:"max_concurrent"`
+	Running         int                        `json:"running"`
+	BrowserTabs     int                        `json:"browser_tabs,omitempty"`
+	BrowserBusy     int                        `json:"browser_busy_tabs,omitempty"`
+	BrowserSessions []BrowserSessionCapability `json:"browser_sessions,omitempty"`
+	Sources         []string                   `json:"sources,omitempty"`
+	Modes           []string                   `json:"modes,omitempty"`
+	QueueDepth      int                        `json:"queue_depth"`
 }
 
 type Node struct {

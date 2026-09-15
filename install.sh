@@ -9,6 +9,8 @@ cluster_mode="${CONTEXTBRIDGE_CLUSTER_MODE:-ask}"
 relay_url="${CONTEXTBRIDGE_RELAY_URL:-}"
 public_url="${CONTEXTBRIDGE_PUBLIC_URL:-}"
 worker_name="${CONTEXTBRIDGE_WORKER_NAME:-auto}"
+completion_enabled=1
+if [ "${CONTEXTBRIDGE_NO_COMPLETION:-0}" = "1" ]; then completion_enabled=0; fi
 interactive=0
 if [ "${CONTEXTBRIDGE_NONINTERACTIVE:-0}" != "1" ] && [ -r /dev/tty ]; then
   interactive=1
@@ -66,7 +68,7 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
 echo "Downloading ContextBridge for $os $arch..."
 curl -fsSL "$url" -o "$tmp/$asset"
 curl -fsSL "$checksums_url" -o "$tmp/SHA256SUMS"
-expected="$(awk -v name="$asset" '$2 == name || $2 ~ ("/" name "$") {print $1}' "$tmp/SHA256SUMS")"
+expected="$(awk -v name="$asset" '{sub(/\r$/, "", $2)} $2 == name || $2 ~ ("/" name "$") {print $1}' "$tmp/SHA256SUMS")"
 [ -n "$expected" ] || { echo "No checksum was published for $asset." >&2; exit 1; }
 if command -v sha256sum >/dev/null 2>&1; then
   actual="$(sha256sum "$tmp/$asset" | awk '{print $1}')"
@@ -78,6 +80,175 @@ echo "Download checksum verified."
 mkdir -p "$INSTALL_DIR" "$BIN_DIR"
 tar -xzf "$tmp/$asset" -C "$INSTALL_DIR"
 install -m 0755 "$INSTALL_DIR/contextbridge" "$BIN_DIR/contextbridge"
+
+# Keep one canonical executable and a path-stable launcher for the short name.
+# A copied binary could become stale after an update. Never replace an
+# unrelated `cb` command or a user-owned file.
+cb_path="$BIN_DIR/cb"
+cb_alias_installed=0
+if [ -L "$cb_path" ]; then
+  cb_target="$(readlink "$cb_path" 2>/dev/null || true)"
+  if [ "$cb_target" = "contextbridge" ] || [ "$cb_target" = "$BIN_DIR/contextbridge" ]; then
+    ln -sfn contextbridge "$cb_path"
+    cb_alias_installed=1
+  else
+    echo "Skipped the short 'cb' command because $cb_path points elsewhere."
+  fi
+elif [ -e "$cb_path" ]; then
+  if [ "$(sed -n '2p' "$cb_path" 2>/dev/null || true)" = "# ContextBridge managed cb alias" ]; then
+    printf '#!/bin/sh\n# ContextBridge managed cb alias\nexec "$(dirname -- "$0")/contextbridge" "$@"\n' > "$tmp/cb"
+    install -m 0755 "$tmp/cb" "$cb_path"
+    cb_alias_installed=1
+  else
+    echo "Skipped the short 'cb' command because $cb_path is not managed by ContextBridge."
+  fi
+else
+  existing_cb="$(command -v cb 2>/dev/null || true)"
+  if [ -n "$existing_cb" ] && [ "$existing_cb" != "$cb_path" ]; then
+    echo "Skipped the short 'cb' command because it already belongs to $existing_cb."
+  else
+    printf '#!/bin/sh\n# ContextBridge managed cb alias\nexec "$(dirname -- "$0")/contextbridge" "$@"\n' > "$tmp/cb"
+    install -m 0755 "$tmp/cb" "$cb_path"
+    cb_alias_installed=1
+  fi
+fi
+if [ "$cb_alias_installed" = "1" ]; then
+  resolved_cb="$(command -v cb 2>/dev/null || true)"
+  if [ -n "$resolved_cb" ] && [ "$resolved_cb" != "$cb_path" ]; then
+    # An owned launcher can survive a later PATH reorder. Do not let its mere
+    # presence claim completion ownership for the different command that the
+    # user's shell would actually execute.
+    echo "The managed cb launcher remains at $cb_path, but the active cb command belongs to $resolved_cb."
+    cb_alias_installed=0
+  fi
+fi
+if [ "$cb_alias_installed" = "1" ]; then
+  echo "Commands ready: contextbridge and cb"
+fi
+
+install_shell_completion() {
+  # bash-completion lazy-loads files from this per-user XDG directory without
+  # a shell profile rewrite on standard installations.
+  bash_completion_dir="${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions"
+  mkdir -p "$bash_completion_dir" || return 1
+  zsh_completion_dir="$HOME/.zfunc"
+  if [ "$cb_alias_installed" != "1" ]; then
+    # Ownership cleanup is independent from generating a new script. Do it
+    # first so a missing/older generator cannot leave our stale registration
+    # attached to a foreign command.
+    if [ -f "$bash_completion_dir/cb" ] && grep -Fqx '# ContextBridge managed completion' "$bash_completion_dir/cb"; then
+      rm -f "$bash_completion_dir/cb" || return 1
+    fi
+    if [ -f "$zsh_completion_dir/_cb" ] && grep -Fqx '# ContextBridge managed completion' "$zsh_completion_dir/_cb"; then
+      rm -f "$zsh_completion_dir/_cb" || return 1
+    fi
+  fi
+  "$BIN_DIR/contextbridge" completion bash > "$tmp/contextbridge-completion.bash" || return 1
+  if [ "$cb_alias_installed" != "1" ]; then
+    sed 's/^complete -o default -F _contextbridge_complete contextbridge cb$/complete -o default -F _contextbridge_complete contextbridge/' \
+      "$tmp/contextbridge-completion.bash" > "$tmp/contextbridge-completion-scoped.bash" || return 1
+    grep -Fqx 'complete -o default -F _contextbridge_complete contextbridge' "$tmp/contextbridge-completion-scoped.bash" || return 1
+    if grep -Fqx 'complete -o default -F _contextbridge_complete contextbridge cb' "$tmp/contextbridge-completion-scoped.bash"; then return 1; fi
+    mv "$tmp/contextbridge-completion-scoped.bash" "$tmp/contextbridge-completion.bash" || return 1
+  fi
+  install -m 0644 "$tmp/contextbridge-completion.bash" "$bash_completion_dir/contextbridge" || return 1
+  if [ "$cb_alias_installed" = "1" ]; then
+    install -m 0644 "$tmp/contextbridge-completion.bash" "$bash_completion_dir/cb" || return 1
+  fi
+
+  if command -v zsh >/dev/null 2>&1; then
+    mkdir -p "$zsh_completion_dir" || return 1
+    "$BIN_DIR/contextbridge" completion zsh > "$tmp/_contextbridge" || return 1
+    if [ "$cb_alias_installed" != "1" ]; then
+      sed 's/^#compdef contextbridge cb$/#compdef contextbridge/' "$tmp/_contextbridge" > "$tmp/_contextbridge-scoped" || return 1
+      grep -Fqx '#compdef contextbridge' "$tmp/_contextbridge-scoped" || return 1
+      if grep -Fqx '#compdef contextbridge cb' "$tmp/_contextbridge-scoped"; then return 1; fi
+      mv "$tmp/_contextbridge-scoped" "$tmp/_contextbridge" || return 1
+    fi
+    install -m 0644 "$tmp/_contextbridge" "$zsh_completion_dir/_contextbridge" || return 1
+    zsh_completion_commands="contextbridge"
+    if [ "$cb_alias_installed" = "1" ]; then
+      install -m 0644 "$tmp/_contextbridge" "$zsh_completion_dir/_cb" || return 1
+      zsh_completion_commands="contextbridge cb"
+    fi
+    zsh_rc="${ZDOTDIR:-$HOME}/.zshrc"
+    zsh_rc_target="$zsh_rc"
+    zsh_link_depth=0
+    while [ -L "$zsh_rc_target" ]; do
+      zsh_link_depth=$((zsh_link_depth + 1))
+      [ "$zsh_link_depth" -le 16 ] || return 1
+      zsh_link_value="$(readlink "$zsh_rc_target")" || return 1
+      case "$zsh_link_value" in
+        /*) zsh_rc_target="$zsh_link_value" ;;
+        *) zsh_rc_target="$(dirname -- "$zsh_rc_target")/$zsh_link_value" ;;
+      esac
+    done
+    zsh_rc_dir="$(dirname -- "$zsh_rc_target")"
+    [ -d "$zsh_rc_dir" ] || return 1
+    zsh_rc_stage="$(mktemp "$zsh_rc_dir/.contextbridge-zshrc.XXXXXX")" || return 1
+    zsh_rc_content="$tmp/contextbridge-zshrc-content"
+    zsh_marker_state="none"
+    if [ -f "$zsh_rc_target" ]; then
+      if awk '
+        BEGIN { state = 0; starts = 0; ends = 0; invalid = 0 }
+        $0 == "# >>> ContextBridge completion >>>" { starts++; if (state != 0) invalid = 1; state = 1; next }
+        $0 == "# <<< ContextBridge completion <<<" { ends++; if (state != 1) invalid = 1; state = 0; next }
+        END {
+          if (state != 0) invalid = 1
+          if (starts == 0 && ends == 0) exit 2
+          if (starts != 1 || ends != 1 || invalid) exit 3
+        }
+      ' "$zsh_rc_target"; then
+        zsh_marker_state="valid"
+      else
+        zsh_marker_exit=$?
+        if [ "$zsh_marker_exit" -ne 2 ]; then
+          # Ambiguous ownership markers are never authority to rewrite a shell
+          # profile. Leave it byte-for-byte intact and skip optional completion.
+          rm -f "$zsh_rc_stage"
+          return 1
+        fi
+      fi
+    fi
+    if [ "$zsh_marker_state" = "valid" ]; then
+      # Replace only ContextBridge's exact managed block. This also removes an
+      # older `cb` compdef when that command now belongs to another program.
+      awk '
+        $0 == "# >>> ContextBridge completion >>>" { managed = 1; next }
+        $0 == "# <<< ContextBridge completion <<<" { managed = 0; next }
+        !managed { print }
+      ' "$zsh_rc_target" > "$zsh_rc_content" || { rm -f "$zsh_rc_stage"; return 1; }
+    elif [ -f "$zsh_rc_target" ]; then
+      cp "$zsh_rc_target" "$zsh_rc_content" || { rm -f "$zsh_rc_stage"; return 1; }
+    else
+      : > "$zsh_rc_content" || { rm -f "$zsh_rc_stage"; return 1; }
+    fi
+    if [ -f "$zsh_rc_target" ]; then
+      # Copy metadata first, then replace only the staging file's contents. The
+      # eventual atomic rename keeps an existing regular file's mode, and the
+      # symlink resolution above keeps dotfile-manager links intact.
+      cp -p "$zsh_rc_target" "$zsh_rc_stage" || { rm -f "$zsh_rc_stage"; return 1; }
+    fi
+    cp "$zsh_rc_content" "$zsh_rc_stage" || { rm -f "$zsh_rc_stage"; return 1; }
+    {
+      printf '\n# >>> ContextBridge completion >>>\n'
+      printf 'fpath=("$HOME/.zfunc" $fpath)\n'
+      printf 'autoload -Uz _contextbridge\n'
+      printf 'if (( $+functions[compdef] )); then compdef _contextbridge %s; else autoload -Uz compinit && compinit; fi\n' "$zsh_completion_commands"
+      printf '# <<< ContextBridge completion <<<\n'
+    } >> "$zsh_rc_stage" || { rm -f "$zsh_rc_stage"; return 1; }
+    mv -f "$zsh_rc_stage" "$zsh_rc_target" || { rm -f "$zsh_rc_stage"; return 1; }
+  fi
+  return 0
+}
+
+if [ "$completion_enabled" = "1" ]; then
+  if install_shell_completion; then
+    echo "Shell completion installed (open a new shell)."
+  else
+    echo "Shell completion could not be installed; ContextBridge itself is ready. Run: contextbridge completion bash|zsh" >&2
+  fi
+fi
 
 config="${CONTEXTBRIDGE_CONFIG:-$HOME/.config/contextbridge/config.yml}"
 if [ ! -f "$config" ]; then

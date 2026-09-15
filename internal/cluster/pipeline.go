@@ -54,7 +54,13 @@ func (r *Relay) handlePipelineRun(w http.ResponseWriter, req *http.Request) {
 	}
 	run := PipelineRun{ID: randomID("run"), Pipeline: name, Status: "running", Input: input, CreatedAt: time.Now().UTC()}
 	run.OwnerSubject = record.Subject
-	if err := r.store.CreatePipelineRunAdmitted(run, maxActivePipelineRuns, maxActivePipelineRunsPerOwner); err != nil {
+	if !r.beginAdmission() {
+		writeError(w, http.StatusServiceUnavailable, errors.New("relay is stopping"))
+		return
+	}
+	err := r.store.CreatePipelineRunAdmitted(run, maxActivePipelineRuns, maxActivePipelineRunsPerOwner)
+	r.endAdmission()
+	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, ErrOwnerPipelineCapacity) {
 			status = http.StatusTooManyRequests
@@ -64,7 +70,11 @@ func (r *Relay) handlePipelineRun(w http.ResponseWriter, req *http.Request) {
 		writeError(w, status, err)
 		return
 	}
-	go r.executePipeline(run, pipeline)
+	r.pipelineWG.Add(1)
+	go func() {
+		defer r.pipelineWG.Done()
+		r.executePipeline(r.pipelineContext(), run, pipeline)
+	}()
 	writeJSON(w, http.StatusAccepted, run)
 }
 
@@ -81,7 +91,7 @@ func (r *Relay) handlePipelineRunStatus(w http.ResponseWriter, req *http.Request
 	writeJSON(w, http.StatusOK, run)
 }
 
-func (r *Relay) executePipeline(run PipelineRun, pipeline Pipeline) {
+func (r *Relay) executePipeline(parent context.Context, run PipelineRun, pipeline Pipeline) {
 	runtimeLimit := r.cfg.MaxPipelineRuntime
 	if pipeline.MaxRuntimeSeconds > 0 {
 		runtimeLimit = time.Duration(pipeline.MaxRuntimeSeconds) * time.Second
@@ -89,7 +99,7 @@ func (r *Relay) executePipeline(run PipelineRun, pipeline Pipeline) {
 	if runtimeLimit <= 0 {
 		runtimeLimit = 30 * time.Minute
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), runtimeLimit)
+	ctx, cancel := context.WithTimeout(parent, runtimeLimit)
 	defer cancel()
 	values := map[string]json.RawMessage{"input": run.Input, "previous": run.Input}
 	globalIterations := pipeline.MaxIterations
@@ -114,7 +124,12 @@ func (r *Relay) executePipeline(run PipelineRun, pipeline Pipeline) {
 				return
 			}
 			requirements := step.Requirements
+			if !r.beginAdmission() {
+				r.failPipeline(&run, errors.New("relay is stopping"))
+				return
+			}
 			job, err := r.store.CreateJobAdmitted(SubmitRequest{OwnerSubject: run.OwnerSubject, Source: "pipeline:" + run.Pipeline, Requirements: requirements, Payload: payload, MaxAttempts: step.Retries + 1}, r.cfg.MaxQueuedJobs, r.ownerQueueLimit())
+			r.endAdmission()
 			if err != nil {
 				r.failPipeline(&run, err)
 				return
@@ -218,7 +233,13 @@ func (r *Relay) cancelTimedOutPipelineJob(id string, timeoutErr error) (Job, err
 	}
 	cancelled, err := r.store.CancelJob(id)
 	if err == nil {
-		r.cancelWorkerExecution(cancelled.AssignedNode, cancelled.ID)
+		// A pipeline deadline makes the durable job terminal, but the worker may
+		// still be executing a side-effecting browser/model request. Keep that
+		// slot reserved until its matching result or disconnect while removing it
+		// from future stale-record scans, exactly like the public cancel endpoint.
+		if r.markWorkerReservationTerminal(cancelled.AssignedNode, cancelled.ID) {
+			r.cancelWorkerExecution(cancelled.AssignedNode, cancelled.ID)
+		}
 		_ = r.store.AddEvent(Event{Kind: "job.cancelled", Message: "Pipeline step timed out", JobID: id})
 		return cancelled, timeoutErr
 	}

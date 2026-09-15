@@ -13,8 +13,12 @@ let heartbeatRequestId = 0;
 let lastAppliedHeartbeatId = 0;
 const HEARTBEAT_ALARM = 'contextbridge-heartbeat';
 let heartbeatAlarmRegistered = false;
+let heartbeatAlarmWanted = false;
+let heartbeatAlarmSync = Promise.resolve(false);
 let finishedTabCleanup = null;
 let pairingInFlight = null;
+let lifecycleGeneration = 0;
+let lifecycleWrite = Promise.resolve();
 const diagnosticsInFlight = new Map();
 const diagnosticScriptsInFlight = new Map();
 const progressScriptsInFlight = new Map();
@@ -36,17 +40,23 @@ const activeBrowserLeases = new Map();
 const PENDING_COMPLETION_MAX_BYTES = 512 * 1024;
 const acceptedModelLabel = /^(?:gpt[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:astra|sol|terra|luna|pro|mini|nano|codex|thinking|instant))?|gemini(?:[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:pro|flash|lite|thinking|preview|experimental))*)?|astra|sol|terra|luna|\d+(?:\.\d+)?\s+(?:pro|flash|astra|sol|terra|luna))$/i;
 
+// Do not resume eagerly while this module is being evaluated. On Chromium an
+// MV3 worker is loaded before the event that woke it is dispatched; an eager
+// normal resume can therefore race the stricter restart policy and briefly
+// reconnect even when the user disabled automatic reconnect. Each wake path
+// below supplies the lifecycle intent that applies to it.
 api.runtime.onInstalled.addListener(() => resume(true));
 api.runtime.onStartup.addListener(() => resume(true));
 // Chromium MV3 may suspend the service worker despite an interval or a
 // pending long poll. An alarm wakes a fresh worker so it can re-register the
 // tabs and restart pollers without requiring the user to reopen the popup.
-api.alarms?.onAlarm?.addListener((alarm) => {
+api.alarms?.onAlarm?.addListener(async (alarm) => {
   if (alarm.name === HEARTBEAT_ALARM) {
-    // The recurring alarm survives worker suspension. Do not recreate it on
-    // each wake: that pushes the next signal back and creates offline gaps.
+    // A delivered periodic alarm is known to exist in this worker instance.
+    // resume() still verifies it through alarms.get(), because Chromium may
+    // discard alarms when the browser restarts.
     heartbeatAlarmRegistered = true;
-    void resume();
+    await resume();
   }
 });
 api.tabs.onUpdated?.addListener((tabId, changeInfo, tab) => {
@@ -138,6 +148,7 @@ function startPairing() {
 }
 
 async function startPairingOnce() {
+  const pendingGeneration = lifecycleGeneration;
   const cfg = await settings();
   if (!cfg.token) throw new Error('Enter the pairing token once in Advanced settings');
   const tabIds = configuredTabIDs(cfg);
@@ -155,16 +166,24 @@ async function startPairingOnce() {
     const ready = await testBridge();
     if (!ready.ok) throw new Error(ready.error || 'Local ContextBridge service is unavailable');
 
+    if (pendingGeneration !== lifecycleGeneration) throw new Error('The connection attempt was cancelled');
+    const generation = ++lifecycleGeneration;
     stopRequested = false;
-    await api.storage.local.set({ running: true, relayConnected: false, teachingTabId: 0, lastError: '' });
+    if (!await persistLifecycleState(generation, { running: true, relayConnected: false, teachingTabId: 0, lastError: '' })) {
+      throw new Error('The connection attempt was cancelled');
+    }
     const heartbeatReady = await sendHeartbeat('waiting', true);
     if (!heartbeatReady) {
+      if (generation !== lifecycleGeneration) throw new Error('The connection attempt was cancelled');
       stopRequested = true;
-      await api.storage.local.set({ running: false, relayConnected: false });
+      const stopGeneration = ++lifecycleGeneration;
+      await persistLifecycleState(stopGeneration, { running: false, relayConnected: false });
       const reason = (await api.storage.local.get({ connectionError: '' })).connectionError;
       throw new Error(reason || 'Local ContextBridge did not accept the browser connection; check the service status');
     }
-    startHeartbeat();
+    if (generation !== lifecycleGeneration) throw new Error('The connection attempt was cancelled');
+    await startHeartbeat();
+    if (generation !== lifecycleGeneration) throw new Error('The connection attempt was cancelled');
     poll();
     void sendHeartbeat('waiting'); // Fill in model and DOM diagnostics after the confirmed handshake.
     void discoverFreshTabs();
@@ -182,34 +201,57 @@ async function reportConnectionProgress(phase, done, total) {
   await api.storage.local.set({ connectionProgress: { phase, done, total, etaSeconds } });
 }
 
+function persistLifecycleState(generation, changes) {
+  // chrome.storage has no compare-and-swap and promises may settle out of
+  // order. Serialize lifecycle writes, then discard an operation whose intent
+  // was superseded before it reached storage. A newer queued lifecycle write
+  // therefore always becomes the final persisted running/relay state.
+  const operation = lifecycleWrite.catch(() => {}).then(async () => {
+    if (generation !== lifecycleGeneration) return false;
+    await api.storage.local.set(changes);
+    return generation === lifecycleGeneration;
+  });
+  lifecycleWrite = operation.catch(() => false);
+  return operation;
+}
+
 async function stopPairing() {
+  const generation = ++lifecycleGeneration;
   stopRequested = true;
   for (const lease of activeBrowserLeases.values()) lease.cancelled = true;
-  stopHeartbeat();
-  await api.storage.local.set({ running: false, relayConnected: false, teachingTabId: 0 });
+  if (!await persistLifecycleState(generation, { running: false, relayConnected: false, teachingTabId: 0 })) return { ok: true };
+  await stopHeartbeat();
+  if (generation !== lifecycleGeneration) return { ok: true };
   await sendHeartbeat('paused');
   return { ok: true };
 }
 
 async function resume(afterExtensionOrBrowserRestart = false) {
+  const generation = lifecycleGeneration;
   const { running, autoReconnect } = await api.storage.local.get({ running: false, autoReconnect: true });
+  if (generation !== lifecycleGeneration) return;
   if (!running) {
-    stopHeartbeat();
+    await stopHeartbeat();
+    if (generation !== lifecycleGeneration) return;
     await api.storage.local.set({ connectionProgress: null });
     return;
   }
   if (afterExtensionOrBrowserRestart && !autoReconnect) {
+    const stopGeneration = ++lifecycleGeneration;
     stopRequested = true;
-    stopHeartbeat();
-    await api.storage.local.set({ running: false, relayConnected: false, connectionProgress: null,
-      connectionError: 'Automatic reconnect is off. Click Connect when you are ready.' });
+    if (!await persistLifecycleState(stopGeneration, { running: false, relayConnected: false, connectionProgress: null,
+      connectionError: 'Automatic reconnect is off. Click Connect when you are ready.' })) return;
+    await stopHeartbeat();
+    if (stopGeneration !== lifecycleGeneration) return;
     await sendHeartbeat('paused');
     return;
   }
   stopRequested = false;
-  startHeartbeat();
+  await startHeartbeat();
+  if (generation !== lifecycleGeneration) return;
   poll();
-  void sendHeartbeat('waiting');
+  await sendHeartbeat('waiting');
+  if (generation !== lifecycleGeneration) return;
   void discoverFreshTabs();
 }
 
@@ -403,9 +445,13 @@ async function startTeaching(tabId) {
     existing,
     extensionName: api.i18n.getMessage('extensionName') || 'ContextBridge'
   });
-  await api.storage.local.set({ tabId, tabIds: [tabId], teachingTabId: tabId, running: false });
+  const generation = ++lifecycleGeneration;
   stopRequested = true;
-  stopHeartbeat();
+  if (!await persistLifecycleState(generation, { tabId, tabIds: [tabId], teachingTabId: tabId, running: false })) {
+    return { ok: true, tab: tabSummary(tab), existing: Boolean(existing) };
+  }
+  await stopHeartbeat();
+  if (generation !== lifecycleGeneration) return { ok: true, tab: tabSummary(tab), existing: Boolean(existing) };
   await sendHeartbeat('teaching');
   return { ok: true, tab: tabSummary(tab), existing: Boolean(existing) };
 }
@@ -3775,27 +3821,70 @@ function matches(url, pattern) {
 function startHeartbeat() {
   if (heartbeatTimer) clearInterval(heartbeatTimer);
   heartbeatTimer = setInterval(() => sendHeartbeat('waiting'), 5000);
-  if (!heartbeatAlarmRegistered && api.alarms?.create) {
-    heartbeatAlarmRegistered = true;
-    try { Promise.resolve(api.alarms.create(HEARTBEAT_ALARM, { periodInMinutes: 0.5 })).catch(() => { heartbeatAlarmRegistered = false; }); }
-    catch (_) { heartbeatAlarmRegistered = false; }
-  }
+  heartbeatAlarmWanted = true;
+  return reconcileHeartbeatAlarm();
 }
 
 function stopHeartbeat() {
   if (heartbeatTimer) clearInterval(heartbeatTimer);
   heartbeatTimer = 0;
-  heartbeatAlarmRegistered = false;
-  try { Promise.resolve(api.alarms?.clear?.(HEARTBEAT_ALARM)).catch(() => {}); } catch (_) {}
+  heartbeatAlarmWanted = false;
+  return reconcileHeartbeatAlarm();
 }
 
-function sendHeartbeat(state, connecting = false) {
+function reconcileHeartbeatAlarm() {
+  // Alarms usually survive MV3 worker suspension, but Chromium explicitly
+  // permits clearing them on a browser restart. A process-local boolean cannot
+  // prove that the persistent alarm still exists, so serialize an alarms.get()
+  // check every time this worker resumes. Re-reading the desired state after
+  // each await also prevents a late create from undoing an explicit Disconnect.
+  heartbeatAlarmSync = heartbeatAlarmSync.catch(() => false).then(async () => {
+    if (!api.alarms) {
+      heartbeatAlarmRegistered = false;
+      return false;
+    }
+    let existing = null;
+    if (api.alarms.get) {
+      try { existing = await api.alarms.get(HEARTBEAT_ALARM); } catch (_) { existing = null; }
+    } else if (heartbeatAlarmRegistered) {
+      existing = { name: HEARTBEAT_ALARM };
+    }
+    if (!heartbeatAlarmWanted) {
+      if ((existing || heartbeatAlarmRegistered) && api.alarms.clear) {
+        try { await Promise.resolve(api.alarms.clear(HEARTBEAT_ALARM)); } catch (_) {}
+      }
+      heartbeatAlarmRegistered = false;
+      return false;
+    }
+    if (!existing && api.alarms.create) {
+      try {
+        await Promise.resolve(api.alarms.create(HEARTBEAT_ALARM, {
+          delayInMinutes: 0.5,
+          periodInMinutes: 0.5
+        }));
+      } catch (_) {
+        heartbeatAlarmRegistered = false;
+        return false;
+      }
+    }
+    if (!heartbeatAlarmWanted) {
+      try { await Promise.resolve(api.alarms.clear?.(HEARTBEAT_ALARM)); } catch (_) {}
+      heartbeatAlarmRegistered = false;
+      return false;
+    }
+    heartbeatAlarmRegistered = Boolean(existing || api.alarms.create);
+    return heartbeatAlarmRegistered;
+  });
+  return heartbeatAlarmSync;
+}
+
+function sendHeartbeat(state, connecting = false, generation = lifecycleGeneration) {
   // A Connect click must not queue behind an older, slow diagnostic heartbeat.
-  if (connecting) return sendHeartbeatOnce(state, true);
+  if (connecting) return sendHeartbeatOnce(state, true, generation);
   if (state !== 'paused' && Date.now() < nextHeartbeatAt) return false;
-  if (state === 'paused' && heartbeatInFlight) return heartbeatInFlight.finally(() => sendHeartbeatOnce('paused'));
+  if (state === 'paused' && heartbeatInFlight) return heartbeatInFlight.finally(() => sendHeartbeatOnce('paused', false, generation));
   if (heartbeatInFlight) return heartbeatInFlight;
-  heartbeatInFlight = sendHeartbeatOnce(state, connecting).finally(() => { heartbeatInFlight = null; });
+  heartbeatInFlight = sendHeartbeatOnce(state, connecting, generation).finally(() => { heartbeatInFlight = null; });
   return heartbeatInFlight;
 }
 
@@ -3810,10 +3899,12 @@ function capabilityScanInterval(profileName, capabilities) {
   return 5 * 60 * 1000;
 }
 
-async function sendHeartbeatOnce(state, connecting = false) {
+async function sendHeartbeatOnce(state, connecting = false, generation = lifecycleGeneration) {
   const requestId = ++heartbeatRequestId;
   const cfg = await settings();
+  if (generation !== lifecycleGeneration) return false;
   if (!cfg.token) return false;
+  if (!connecting && state !== 'paused' && !cfg.running) return false;
   if (stopRequested && state !== 'paused' && !connecting) return false;
   const tabs = [];
   const tabIds = configuredTabIDs(cfg);
@@ -3846,6 +3937,7 @@ async function sendHeartbeatOnce(state, connecting = false) {
   const effectiveState = state === 'paused' ? 'paused' : (busyTabs.size ? 'working' : state);
   if (connecting) await reportConnectionProgress('Registering with local service', 0, 1);
   if (stopRequested && state !== 'paused') return false;
+  if (generation !== lifecycleGeneration) return false;
   try {
     const response = await fetchWithTimeout(`${cfg.bridgeUrl}/v1/browser/heartbeat`, {
       method: 'POST',
@@ -3863,7 +3955,8 @@ async function sendHeartbeatOnce(state, connecting = false) {
         tabs
       })
     }, 5000);
-    if (state !== 'paused') await recordHeartbeatResult(cfg, response.ok, response.status, requestId);
+    if (generation !== lifecycleGeneration) return false;
+    if (state !== 'paused') await recordHeartbeatResult(cfg, response.ok, response.status, requestId, generation);
     if (response.ok && state !== 'paused' && !finishedTabCleanup) {
       finishedTabCleanup = closeFinishedOwnedTabs().catch(() => {}).finally(() => { finishedTabCleanup = null; });
     }
@@ -3872,35 +3965,40 @@ async function sendHeartbeatOnce(state, connecting = false) {
     }
     return response.ok;
   } catch (_) {
-    if (state !== 'paused') await recordHeartbeatResult(cfg, false, 0, requestId);
+    if (generation !== lifecycleGeneration) return false;
+    if (state !== 'paused') await recordHeartbeatResult(cfg, false, 0, requestId, generation);
     return false;
   }
 }
 
-async function recordHeartbeatResult(cfg, ok, status, requestId) {
-  if (stopRequested || requestId < lastAppliedHeartbeatId) return;
+async function recordHeartbeatResult(cfg, ok, status, requestId, generation = lifecycleGeneration) {
+  if (generation !== lifecycleGeneration || stopRequested || requestId < lastAppliedHeartbeatId) return;
   lastAppliedHeartbeatId = requestId;
   if (ok) {
     heartbeatFailures = 0;
     nextHeartbeatAt = 0;
     if (cfg.relayConnected !== true || cfg.connectionError || Date.now() - Number(cfg.lastHeartbeatAt || 0) >= 20000) {
-      await api.storage.local.set({ relayConnected: true, connectionError: '', lastHeartbeatAt: Date.now() });
+      await persistLifecycleState(generation, { relayConnected: true, connectionError: '', lastHeartbeatAt: Date.now() });
     }
     return;
   }
   heartbeatFailures += 1;
   if (status === 401 || status === 403) {
+    const stopGeneration = ++lifecycleGeneration;
     stopRequested = true;
-    stopHeartbeat();
-    await api.storage.local.set({ running: false, relayConnected: false,
-      connectionError: 'The local service rejected this connection. Check the pairing token or access permissions, then click Connect.' });
+    if (!await persistLifecycleState(stopGeneration, { running: false, relayConnected: false,
+      connectionError: 'The local service rejected this connection. Check the pairing token or access permissions, then click Connect.' })) return;
+    if (stopGeneration !== lifecycleGeneration) return;
+    await stopHeartbeat();
     return;
   }
   if (!cfg.autoReconnect && heartbeatFailures >= 3) {
+    const stopGeneration = ++lifecycleGeneration;
     stopRequested = true;
-    stopHeartbeat();
-    await api.storage.local.set({ running: false, relayConnected: false,
-      connectionError: 'Connection lost. Automatic reconnect is off; click Connect to retry.' });
+    if (!await persistLifecycleState(stopGeneration, { running: false, relayConnected: false,
+      connectionError: 'Connection lost. Automatic reconnect is off; click Connect to retry.' })) return;
+    if (stopGeneration !== lifecycleGeneration) return;
+    await stopHeartbeat();
     return;
   }
   nextHeartbeatAt = Date.now() + Math.min(60000, 5000 * 2 ** Math.min(heartbeatFailures - 1, 4));
@@ -3909,7 +4007,7 @@ async function recordHeartbeatResult(cfg, ok, status, requestId) {
     ? `Local service rejected a status update (HTTP ${status}). Check that the service and extension are compatible; ContextBridge will retry after an update.`
     : '';
   if (cfg.relayConnected !== false || cfg.connectionError !== connectionError) {
-    await api.storage.local.set({ relayConnected: false, connectionError });
+    await persistLifecycleState(generation, { relayConnected: false, connectionError });
   }
 }
 
@@ -4533,5 +4631,3 @@ function tabSummary(tab) {
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-
-resume();

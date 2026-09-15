@@ -28,3 +28,13 @@ Reports are especially useful for:
 - model output bypassing decision normalization
 
 Provider account rules, upstream browser behavior, and unsupported public exposure of the localhost service are outside the direct project boundary, but actionable hardening reports are still welcome.
+
+## Privacy And Compliance Status
+
+This security policy is a vulnerability-reporting channel, not a privacy
+notice, data processing agreement, or audit report. The
+[privacy and compliance readiness guide](docs/compliance-readiness.md) maps
+current technical controls, data flows, retention, DSAR responsibilities, and
+remaining operational gaps. ContextBridge is MIT licensed; GDPR/DSGVO
+compliance and SOC 2 attestation are not software licenses, and the project
+does not claim GDPR certification or a SOC 2 attestation.

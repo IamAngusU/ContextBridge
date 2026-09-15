@@ -66,6 +66,9 @@ func clusterChatCommand(args []string) error {
 	if (*newChat || *newChatPerJob) && !strings.EqualFold(*provider, "browser") {
 		return errors.New("--new-chat and --new-chat-per-job require --provider browser")
 	}
+	if strings.TrimSpace(*profile) != "" && !strings.EqualFold(*provider, "browser") {
+		return errors.New("--profile requires --provider browser")
+	}
 	if *foregroundNewChat && (!strings.EqualFold(*provider, "browser") || (!*newChat && !*newChatPerJob)) {
 		return errors.New("--foreground-new-chat requires --provider browser and --new-chat or --new-chat-per-job")
 	}
@@ -345,7 +348,7 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 	if err != nil {
 		return err
 	}
-	requirements := cluster.Requirements{Task: "generation", Provider: s.provider, Group: s.group, SessionID: s.sessionID}
+	requirements := cluster.Requirements{Task: "generation", Provider: s.provider, BrowserProfile: s.profile, Group: s.group, SessionID: s.sessionID}
 	requirements.Vision = s.imageBase64 != ""
 	if !strings.EqualFold(s.provider, "browser") {
 		requirements.Model = s.model

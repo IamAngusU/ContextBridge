@@ -85,6 +85,34 @@ func TestProviderRequirementSelectsReadyBrowserWorker(t *testing.T) {
 	}
 }
 
+func TestBrowserProfileRequirementIsAHardReadyTabFilter(t *testing.T) {
+	now := time.Now().UTC()
+	nodes := []Node{
+		{ID: "chatgpt", Connected: true, LastSeen: now, Capabilities: Capabilities{
+			Tasks: []string{"generation"}, Providers: []string{"browser"}, MaxConcurrent: 2,
+			BrowserTabs: 1, BrowserSessions: []BrowserSessionCapability{{Profile: "chatgpt", State: "waiting"}},
+		}},
+		{ID: "gemini-busy", Connected: true, LastSeen: now, Capabilities: Capabilities{
+			Tasks: []string{"generation"}, Providers: []string{"browser"}, MaxConcurrent: 2,
+			BrowserTabs: 1, BrowserBusy: 1, BrowserSessions: []BrowserSessionCapability{{Profile: "gemini", State: "working"}},
+		}},
+		{ID: "gemini-ready", Connected: true, LastSeen: now, Capabilities: Capabilities{
+			Tasks: []string{"generation"}, Providers: []string{"browser"}, MaxConcurrent: 2,
+			BrowserTabs: 1, BrowserSessions: []BrowserSessionCapability{{Profile: "GeMiNi", State: "waiting"}},
+		}},
+	}
+	ranked := Rank(nodes, Requirements{Task: "generation", Provider: "browser", BrowserProfile: "gemini"})
+	if len(ranked) != 1 || ranked[0].Node.ID != "gemini-ready" {
+		t.Fatalf("profile-specific job escaped to a wrong or busy tab: %#v", ranked)
+	}
+	if got := Rank(nodes[:2], Requirements{Task: "generation", Provider: "browser", BrowserProfile: "gemini"}); len(got) != 0 {
+		t.Fatalf("busy requested profile was treated as ready: %#v", got)
+	}
+	if got := Rank(nodes, Requirements{Task: "generation", Provider: "ollama", BrowserProfile: "gemini"}); len(got) != 0 {
+		t.Fatalf("browser profile crossed the provider boundary: %#v", got)
+	}
+}
+
 func TestBusyBrowserTabsDoNotHideLocalModelCapacity(t *testing.T) {
 	now := time.Now().UTC()
 	node := Node{ID: "mixed", Connected: true, LastSeen: now, Capabilities: Capabilities{
@@ -133,6 +161,62 @@ func TestRequestedModelMustProvideRequestedModality(t *testing.T) {
 	}
 }
 
+func TestModelLessRequestRequiresOneModelToSatisfyTaskAndModality(t *testing.T) {
+	node := Node{ID: "split", Connected: true, LastSeen: time.Now().UTC(), Capabilities: Capabilities{
+		Tasks: []string{"generation", "vision"}, Providers: []string{"ollama"}, MaxConcurrent: 2,
+		Models: []ModelCapability{
+			{Name: "text-only", Provider: "ollama", Tasks: []string{"generation"}},
+			{Name: "vision-only", Provider: "ollama", Vision: true, Tasks: []string{"vision"}},
+		},
+	}}
+	if got := Rank([]Node{node}, Requirements{Task: "generation", Provider: "ollama", Vision: true}); len(got) != 0 {
+		t.Fatalf("task and modality were incorrectly combined across two models: %#v", got)
+	}
+	node.Capabilities.Models[1].Tasks = []string{"generation", "vision"}
+	if got := Rank([]Node{node}, Requirements{Task: "generation", Provider: "ollama", Vision: true}); len(got) != 1 {
+		t.Fatalf("one genuinely compatible automatic model was rejected: %#v", got)
+	}
+}
+
+func TestAutomaticModelSelectorUsesCompatibleAuthoritativeModel(t *testing.T) {
+	node := Node{ID: "auto", Connected: true, LastSeen: time.Now().UTC(), Capabilities: Capabilities{
+		Tasks: []string{"generation", "vision"}, Providers: []string{"ollama"}, MaxConcurrent: 2,
+		Models: []ModelCapability{
+			{Name: "text-only", Provider: "ollama", Tasks: []string{"generation"}},
+			{Name: "vision-model", Provider: "ollama", Vision: true, Tasks: []string{"generation", "vision"}},
+		},
+	}}
+	if got := Rank([]Node{node}, Requirements{Task: "generation", Provider: "ollama", Model: "auto", Vision: true}); len(got) != 1 {
+		t.Fatalf("auto selector did not use a compatible authoritative model: %#v", got)
+	}
+}
+
+func TestBrowserProviderRequiresAnAvailableTab(t *testing.T) {
+	node := Node{ID: "relay-only", Connected: true, LastSeen: time.Now().UTC(), Capabilities: Capabilities{
+		Tasks: []string{"generation"}, Providers: []string{"browser"}, AutomaticTasks: map[string][]string{"browser": {"generation"}}, MaxConcurrent: 2,
+	}}
+	if got := Rank([]Node{node}, Requirements{Task: "generation", Provider: "browser"}); len(got) != 0 {
+		t.Fatalf("browser job was routed without any attached tab: %#v", got)
+	}
+	node.Capabilities.BrowserTabs = 1
+	if got := Rank([]Node{node}, Requirements{Task: "generation", Provider: "browser"}); len(got) != 1 {
+		t.Fatalf("available browser tab was rejected: %#v", got)
+	}
+}
+
+func TestUnscopedModelCannotSatisfyExplicitProvider(t *testing.T) {
+	node := Node{ID: "legacy-mixed", Connected: true, LastSeen: time.Now().UTC(), Capabilities: Capabilities{
+		Tasks: []string{"generation"}, Providers: []string{"browser", "ollama"}, MaxConcurrent: 2,
+		Models: []ModelCapability{{Name: "ambiguous", Tasks: []string{"generation"}}},
+	}}
+	if got := Rank([]Node{node}, Requirements{Task: "generation", Provider: "ollama", Model: "ambiguous"}); len(got) != 0 {
+		t.Fatalf("unscoped model crossed an explicit provider boundary: %#v", got)
+	}
+	if got := Rank([]Node{node}, Requirements{Task: "generation", Model: "ambiguous"}); len(got) != 1 {
+		t.Fatalf("unscoped legacy model was rejected for an unscoped request: %#v", got)
+	}
+}
+
 func TestRequestedModelMustProvideRequestedTask(t *testing.T) {
 	node := Node{ID: "mixed-local", Connected: true, LastSeen: time.Now().UTC(), Capabilities: Capabilities{
 		Tasks: []string{"generation", "embedding"}, Providers: []string{"ollama"}, MaxConcurrent: 2,
@@ -146,6 +230,29 @@ func TestRequestedModelMustProvideRequestedTask(t *testing.T) {
 	}
 	if got := Rank([]Node{node}, Requirements{Task: "embedding", Provider: "ollama", Model: "embed-model", Embedding: true}); len(got) != 1 {
 		t.Fatalf("embedding model was rejected for its supported task: %#v", got)
+	}
+}
+
+func TestModelLessTaskUsesAuthoritativeProviderInventory(t *testing.T) {
+	base := Capabilities{
+		Tasks: []string{"generation"}, Providers: []string{"browser", "ollama"}, MaxConcurrent: 2,
+	}
+	node := Node{ID: "mixed", Connected: true, LastSeen: time.Now().UTC()}
+
+	node.Capabilities = base
+	node.Capabilities.Models = []ModelCapability{{Name: "embed-only", Provider: "ollama", Embedding: true, Tasks: []string{"embedding"}}}
+	if got := Rank([]Node{node}, Requirements{Task: "generation", Provider: "ollama"}); len(got) != 0 {
+		t.Fatalf("global task advertisement bypassed authoritative embedding-only inventory: %#v", got)
+	}
+
+	node.Capabilities.Models = []ModelCapability{{Name: "text-model", Provider: "ollama", Tasks: []string{"generation"}}}
+	if got := Rank([]Node{node}, Requirements{Task: "generation", Provider: "ollama"}); len(got) != 1 {
+		t.Fatalf("capable provider inventory was rejected: %#v", got)
+	}
+
+	node.Capabilities.Models = nil
+	if got := Rank([]Node{node}, Requirements{Task: "generation", Provider: "ollama"}); len(got) != 1 {
+		t.Fatalf("unavailable inventory did not fall back to worker task advertisement: %#v", got)
 	}
 }
 

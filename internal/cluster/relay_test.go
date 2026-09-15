@@ -86,6 +86,99 @@ func TestWorkerConnectionRejectsDuplicateReservation(t *testing.T) {
 	}
 }
 
+func TestWorkerReservationCancellationBeforeDispatchSuppressesBothFrames(t *testing.T) {
+	worker := newWorkerConnection(nil, 1)
+	if !worker.reserve("job-before-dispatch") {
+		t.Fatal("test reservation was rejected")
+	}
+	if worker.markStoreTerminal("job-before-dispatch") {
+		t.Fatal("pre-dispatch reservation was falsely reported as worker execution")
+	}
+	if worker.beginDispatch("job-before-dispatch", 1) {
+		t.Fatal("terminalized pre-dispatch reservation still allowed a job frame")
+	}
+	running, capacity := worker.load()
+	if running != 1 || capacity != 1 {
+		t.Fatalf("terminalized reservation was released without dispatch proof: %d/%d", running, capacity)
+	}
+	worker.release("job-before-dispatch")
+}
+
+func TestWorkerReservationCancellationAfterDispatchRequiresWorkerCancel(t *testing.T) {
+	worker := newWorkerConnection(nil, 1)
+	if !worker.reserve("job-after-dispatch") || !worker.beginDispatch("job-after-dispatch", 3) {
+		t.Fatal("test dispatch could not begin")
+	}
+	if !worker.markStoreTerminal("job-after-dispatch") {
+		t.Fatal("dispatched reservation did not retain worker-cancel evidence")
+	}
+	if worker.needsStaleRecovery() {
+		t.Fatal("terminalized dispatched reservation remained a stale-store candidate")
+	}
+	running, capacity := worker.load()
+	if running != 1 || capacity != 1 {
+		t.Fatalf("dispatched reservation released before worker completion: %d/%d", running, capacity)
+	}
+	if worker.matchesDispatch("job-after-dispatch", 2) || !worker.matchesDispatch("job-after-dispatch", 3) {
+		t.Fatal("reservation did not preserve the exact dispatched assignment attempt")
+	}
+}
+
+func TestMatchingResultReleasesReservationAfterCancelledRecordIsPruned(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	job, err := store.CreateJob(SubmitRequest{Payload: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err = store.AssignJob(job.ID, "node-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := newWorkerConnection(nil, 1)
+	if !worker.reserve(job.ID) || !worker.beginDispatch(job.ID, job.Attempt) {
+		t.Fatal("test dispatch could not begin")
+	}
+	cancelled, err := store.CancelJob(job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelled.FinishedAt = time.Now().UTC().Add(-time.Minute)
+	if err := store.SaveJob(cancelled); err != nil {
+		t.Fatal(err)
+	}
+
+	newer, err := store.CreateJob(SubmitRequest{Payload: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CancelJob(newer.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PruneRetention(time.Now().UTC(), RetentionPolicy{
+		MaxAge: 24 * time.Hour, MaxTerminalJobs: 1, MaxEvents: 1, MaxTerminalPipelineRuns: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetJob(job.ID); err == nil {
+		t.Fatal("older cancelled job was not pruned by the bounded retention policy")
+	}
+	if _, err := store.CompleteJob(job.ID, "node-a", job.Attempt, nil, nil, Usage{}, "cancelled"); err == nil {
+		t.Fatal("pruned job unexpectedly accepted a persisted result")
+	}
+	if !worker.matchesDispatch(job.ID, job.Attempt) {
+		t.Fatal("matching result lost the in-memory proof needed to release the slot")
+	}
+	worker.release(job.ID)
+	if running, _ := worker.load(); running != 0 {
+		t.Fatal("matching result could not release the retained slot")
+	}
+}
+
 func TestCompactJobResponseOmitsKnownInputButKeepsResult(t *testing.T) {
 	job := Job{ID: "job-1", Payload: json.RawMessage(`{"prompt":"private"}`), SealedPayload: &SealedEnvelope{Ciphertext: "secret"}, Result: json.RawMessage(`{"output":{"text":"answer"}}`), Status: JobCompleted}
 	full := jobResponse(job, false)
@@ -258,6 +351,112 @@ func TestNewWorkerConnectionSurvivesReplacedConnectionCleanup(t *testing.T) {
 	relay.mu.RUnlock()
 	if current == nil {
 		t.Fatal("replacement worker connection was removed")
+	}
+}
+
+func TestRelayCancellationDoesNotSendPhantomCancelForQueuedSealedBinding(t *testing.T) {
+	admin := "admin_012345678901234567890123456789012345"
+	relay, err := NewRelay(RelayConfig{Database: filepath.Join(t.TempDir(), "relay.db"), AdminToken: admin, AllowedTasks: []string{"generation"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+	server := httptest.NewServer(relay.Handler())
+	defer server.Close()
+
+	_, publicKey, err := NewIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeID := "queued-sealed-cancel-worker"
+	nodeToken, _, err := relay.store.CreateToken("node", nodeID, nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/cluster/workers/connect"
+	connection, _, err := websocket.Dial(context.Background(), wsURL, &websocket.DialOptions{HTTPHeader: http.Header{"Authorization": []string{"Bearer " + nodeToken}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.CloseNow()
+	node := Node{ID: nodeID, Name: nodeID, PublicKey: publicKey, Capabilities: Capabilities{Tasks: []string{"generation"}, MaxConcurrent: 1}}
+	if err := connection.Write(context.Background(), websocket.MessageText, mustJSON(WireMessage{Version: ProtocolVersion, Type: "hello", Node: &node})); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 2*time.Second, func() bool {
+		saved, loadErr := relay.store.GetNode(nodeID)
+		return loadErr == nil && saved.Connected
+	}, "worker did not connect")
+
+	job, err := relay.store.CreateJob(SubmitRequest{
+		OwnerSubject: "producer",
+		Requirements: Requirements{Task: "generation"},
+		Sealed:       &SealedEnvelope{Algorithm: sealedAlgorithm},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Consuming an E2EE reservation creates this durable queue binding before
+	// dispatch. It names a worker but deliberately has no live slot reservation.
+	job.AssignedNode = nodeID
+	if err := relay.store.SaveJob(job); err != nil {
+		t.Fatal(err)
+	}
+
+	request, err := http.NewRequest(http.MethodDelete, server.URL+"/v1/cluster/jobs/"+job.ID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+admin)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("cancel status = %d", response.StatusCode)
+	}
+
+	readContext, cancelRead := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancelRead()
+	if _, raw, readErr := connection.Read(readContext); readErr == nil {
+		t.Fatalf("queued sealed binding emitted a phantom worker message: %s", raw)
+	}
+	cancelled, err := relay.store.GetJob(job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cancelled.Status != JobCancelled {
+		t.Fatalf("job status = %q, want %q", cancelled.Status, JobCancelled)
+	}
+}
+
+func TestRelayMaintenanceCadenceAvoidsIdleWriteTransactions(t *testing.T) {
+	cfg := RelayConfig{
+		DispatchEvery: 250 * time.Millisecond,
+		AssignmentTTL: 2 * time.Minute,
+		JobTimeout:    15 * time.Minute,
+	}
+	if got := relayMaintenanceInterval(cfg); got != 5*time.Second {
+		t.Fatalf("default maintenance interval = %s, want 5s", got)
+	}
+
+	short := cfg
+	short.AssignmentTTL = time.Second
+	if got := relayMaintenanceInterval(short); got != 250*time.Millisecond {
+		t.Fatalf("short reservation maintenance interval = %s, want dispatch cadence", got)
+	}
+
+	relay := &Relay{cfg: cfg}
+	now := time.Now().UTC()
+	if !relay.maintenanceDue(now) {
+		t.Fatal("first maintenance opportunity was skipped")
+	}
+	if relay.maintenanceDue(now.Add(time.Second)) {
+		t.Fatal("idle dispatcher repeated maintenance before its cadence")
+	}
+	if !relay.maintenanceDue(now.Add(5 * time.Second)) {
+		t.Fatal("maintenance did not become due at its cadence")
 	}
 }
 

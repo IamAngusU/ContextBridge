@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -46,22 +47,61 @@ type Server struct {
 	regularActiveJobs   int
 	jobAdmissionLimit   int
 	inboxSlots          chan struct{}
+	lifecycleMu         sync.RWMutex
+	lifecycleIdle       func() bool
+	lifecycleQuiesce    func(bool) bool
+	lifecycleStop       func()
+	lifecycleStopOnce   sync.Once
+	stopRequestMu       sync.Mutex
+	lifecycleStopping   bool
 }
 
 const (
-	maximumJobRequestBytes int64 = 12 << 20
-	maximumInboxConcurrent       = 4
-	maximumInboxScanBatch        = 256
+	maximumJobRequestBytes     int64 = 12 << 20
+	maximumInboxConcurrent           = 4
+	maximumInboxScanBatch            = 256
+	maximumControlRequestBytes       = 4 << 10
 )
 
 var browserScanDiagnosticPattern = regexp.MustCompile(`^(?:no trigger \([0-9]{1,3} composer menus\)|(?:composer|other) trigger, expanded=(?:true|false), submenu=(?:true|false), [0-9]{1,4} candidates(?:, open=(?:already|pointer|mouse|click))?)$`)
 var browserModeControlTextPattern = regexp.MustCompile(`(?i)^(?:(?:gemini|gpt)[ ._-]*)?(?:[0-9]+(?:\.[0-9]+)?[ ._-]*)?(?:flash|pro|advanced|erweitert|schnell|fast|thinking|nachdenken|auto)(?:[ ._-]*(?:lite|flash|pro|advanced|erweitert|preview))?$`)
 var browserModeControlIDPattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]{0,99}$`)
+var errServiceStopping = errors.New("service is stopping")
 
 // Idle reports whether replacing this process would interrupt local work.
 func (s *Server) Idle() bool {
 	queued, _ := s.store.Stats()
 	return s.activeJobs.Load() == 0 && s.schedules.runningCount() == 0 && queued == 0 && s.store.BrowserStatus().BusyTabs == 0
+}
+
+// SetLifecycleControl connects this local HTTP service to the root lifecycle
+// owned by serve or run. The idle callback may include relay and worker state;
+// it is deliberately supplied by the owner because Server itself does not own
+// those optional components. Configure it before exposing Handler or Run.
+func (s *Server) SetLifecycleControl(idle func() bool, stop func()) {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	s.lifecycleIdle = idle
+	s.lifecycleStop = stop
+}
+
+// SetLifecycleQuiesce installs an optional atomic admission gate for sibling
+// components owned by a composite run. It is called only by an accepted stop
+// attempt; false means a concurrent job won and the stop must be rejected.
+func (s *Server) SetLifecycleQuiesce(quiesce func(force bool) bool) {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	s.lifecycleQuiesce = quiesce
+}
+
+func (s *Server) lifecycleIsIdle() bool {
+	s.lifecycleMu.RLock()
+	idle := s.lifecycleIdle
+	s.lifecycleMu.RUnlock()
+	if idle != nil {
+		return idle()
+	}
+	return s.Idle()
 }
 
 func (s *Server) SetUpdater(manager *updater.Manager) {
@@ -117,6 +157,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/v1/status", s.auth(s.handleStatus))
+	mux.HandleFunc("/v1/system/stop", s.localOnly(s.auth(s.handleSystemStop)))
 	mux.HandleFunc("/v1/jobs", s.auth(s.handleJobs))
 	mux.HandleFunc("/v1/jobs/", s.auth(s.handleJobResult))
 	mux.HandleFunc("/v1/schedules", s.auth(s.handleSchedules))
@@ -136,6 +177,7 @@ func (s *Server) Run(ctx context.Context) error {
 	httpServer := &http.Server{
 		Addr:              s.cfg.Server.Listen,
 		Handler:           s.Handler(),
+		BaseContext:       func(net.Listener) context.Context { return ctx },
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       20 * time.Second,
 		IdleTimeout:       60 * time.Second,
@@ -144,18 +186,19 @@ func (s *Server) Run(ctx context.Context) error {
 	go s.watchInbox(ctx)
 	go s.runSchedules(ctx)
 	s.runtime.Run(ctx)
+	shutdownDone := make(chan error, 1)
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		httpServer.Shutdown(shutdown)
+		shutdownDone <- httpServer.Shutdown(shutdown)
 	}()
 	s.logger.Printf("listening on http://%s", s.cfg.Server.Listen)
 	s.logger.Printf("dashboard: http://%s", s.cfg.Server.Listen)
 	s.logger.Printf("folder inbox: %s", s.cfg.Storage.Inbox)
 	err := httpServer.ListenAndServe()
 	if errors.Is(err, http.ErrServerClosed) {
-		return nil
+		return <-shutdownDone
 	}
 	return err
 }
@@ -199,6 +242,10 @@ func isScheduledExecution(ctx context.Context) bool {
 // used by a caller to masquerade as an already-reserved scheduled run.
 func (s *Server) beginJobAccounting(ctx context.Context) (func(), error) {
 	s.scheduleAdmissionMu.Lock()
+	if s.lifecycleStopping {
+		s.scheduleAdmissionMu.Unlock()
+		return nil, errServiceStopping
+	}
 	regular := !isScheduledExecution(ctx)
 	if regular && s.regularActiveJobs+s.schedules.runningCount() >= s.jobAdmissionLimit {
 		s.scheduleAdmissionMu.Unlock()
@@ -269,11 +316,72 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		"version":     Version,
 		"queued":      queued,
 		"active_jobs": s.activeJobs.Load(),
-		"idle":        s.Idle(),
+		"idle":        s.lifecycleIsIdle(),
 		"completed":   completed,
 		"browser":     browser.Connected,
 		"server_time": serverNow.UTC(),
 	})
+}
+
+func (s *Server) handleSystemStop(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+		return
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maximumControlRequestBytes+1))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "could not read request"})
+		return
+	}
+	if int64(len(raw)) > maximumControlRequestBytes {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "control request is too large"})
+		return
+	}
+	request := struct {
+		Force bool `json:"force"`
+	}{}
+	if len(bytes.TrimSpace(raw)) > 0 {
+		if err := decodeJSON(bytes.NewReader(raw), &request, maximumControlRequestBytes); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+	}
+	s.lifecycleMu.RLock()
+	stop := s.lifecycleStop
+	quiesce := s.lifecycleQuiesce
+	s.lifecycleMu.RUnlock()
+	if stop == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "this process has no local stop controller"})
+		return
+	}
+	s.stopRequestMu.Lock()
+	defer s.stopRequestMu.Unlock()
+	s.scheduleAdmissionMu.Lock()
+	alreadyStopping := s.lifecycleStopping
+	s.lifecycleStopping = true
+	s.scheduleAdmissionMu.Unlock()
+	if !alreadyStopping {
+		if !request.Force && !s.lifecycleIsIdle() {
+			s.scheduleAdmissionMu.Lock()
+			s.lifecycleStopping = false
+			s.scheduleAdmissionMu.Unlock()
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "ContextBridge is busy; wait for active or queued jobs to finish, or retry with --force"})
+			return
+		}
+		if quiesce != nil && !quiesce(request.Force) {
+			s.scheduleAdmissionMu.Lock()
+			s.lifecycleStopping = false
+			s.scheduleAdmissionMu.Unlock()
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "ContextBridge became busy while stopping; work was preserved, retry when idle or use --force"})
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true, "stopping": true, "forced": request.Force})
+	// The root cancellation starts only after the complete response has been
+	// written. http.Server.Shutdown then waits for this handler to return, so a
+	// successful CLI response is not sacrificed to the shutdown it requested.
+	s.lifecycleStopOnce.Do(stop)
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -419,7 +527,7 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		status := http.StatusInternalServerError
 		if errors.Is(err, os.ErrExist) {
 			status = http.StatusConflict
-		} else if errors.Is(err, errScheduleCapacity) {
+		} else if errors.Is(err, errScheduleCapacity) || errors.Is(err, errServiceStopping) {
 			status = http.StatusServiceUnavailable
 		}
 		writeJSON(w, status, map[string]string{"error": "job could not be reserved: " + err.Error()})
@@ -770,6 +878,25 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 		expected := s.cfg.Server.Token
 		if len(provided) != len(expected) || subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "valid bearer token required"})
+			return
+		}
+		next(w, r)
+	}
+}
+
+func (s *Server) localOnly(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "local access required"})
+			return
+		}
+		if zone := strings.LastIndexByte(host, '%'); zone >= 0 {
+			host = host[:zone]
+		}
+		ip := net.ParseIP(host)
+		if ip == nil || !ip.IsLoopback() {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "local access required"})
 			return
 		}
 		next(w, r)
@@ -1139,6 +1266,14 @@ func validateJob(job Job) error {
 	}
 	if job.Output.MinMedia > 0 && mode != "text" && mode != "json" {
 		return errors.New("output.min_media requires text or json output")
+	}
+	// Images and audio/video are disjoint verified types, while one response
+	// can contain at most twelve artifacts total. Reject an impossible mixed
+	// requirement before dispatch instead of waiting for a provider response
+	// that can never satisfy the contract. MinArtifacts is not added here: it
+	// counts the same transferred files and may overlap either typed minimum.
+	if job.Output.MinImages+job.Output.MinMedia > 12 {
+		return errors.New("combined output.min_images and output.min_media must not exceed 12")
 	}
 	if len(job.Output.RequiredKeys) > 50 {
 		return errors.New("output.required_keys accepts at most 50 keys")

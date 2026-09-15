@@ -46,4 +46,5 @@ jobs:
       - run: node --test extension/tests/*.test.mjs
       - run: bash scripts/verify-extensions.sh
       - run: bash scripts/test-install-headless.sh
+      - run: pwsh -NoProfile -File scripts/test-install-powershell.ps1
       - run: pwsh -NoProfile -File scripts/test-build-release.ps1

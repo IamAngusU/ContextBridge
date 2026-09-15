@@ -47,6 +47,22 @@ func TestBrowserSessionBindingIsScopedToAuthenticatedProducer(t *testing.T) {
 	}
 }
 
+func TestBrowserProfileRequirementOverridesPayloadClaim(t *testing.T) {
+	raw, err := prepareLocalPayload([]byte(`{"browser_profile":"gemini","prompt":"safe"}`), Requirements{
+		Task: "generation", Provider: "browser", BrowserProfile: "chatgpt",
+	}, "local-job", "producer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var job map[string]interface{}
+	if err := json.Unmarshal(raw, &job); err != nil {
+		t.Fatal(err)
+	}
+	if job["browser_profile"] != "chatgpt" {
+		t.Fatalf("payload profile escaped hard routing requirement: %#v", job)
+	}
+}
+
 func TestPrepareLocalPayloadNamespacesRAGTenantByProducer(t *testing.T) {
 	prepare := func(owner, authoritativeTenant, forgedTenant string) string {
 		raw, err := prepareLocalPayload(

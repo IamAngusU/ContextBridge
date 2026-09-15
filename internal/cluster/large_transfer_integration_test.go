@@ -202,19 +202,32 @@ func TestMaximumVisualInputAndArtifactResultRoundTrip(t *testing.T) {
 			// encoding and copying the intentional 8 MiB in / 12 MiB out boundary
 			// fixture. This is a test-observation deadline, not a product execution
 			// timeout.
-			waitFor(t, 180*time.Second, func() bool {
+			deadline := time.Now().Add(180 * time.Second)
+			for time.Now().Before(deadline) {
 				req, _ := http.NewRequest(http.MethodGet, relayHTTP.URL+"/v1/cluster/jobs/"+submitted.ID+"?compact=1", nil)
 				req.Header.Set("Authorization", "Bearer "+producer)
 				response, getErr := http.DefaultClient.Do(req)
 				if getErr != nil {
-					return false
+					time.Sleep(10 * time.Millisecond)
+					continue
 				}
-				defer response.Body.Close()
-				if response.StatusCode != http.StatusOK || json.NewDecoder(response.Body).Decode(&completed) != nil {
-					return false
+				decodeErr := json.NewDecoder(response.Body).Decode(&completed)
+				response.Body.Close()
+				if response.StatusCode != http.StatusOK || decodeErr != nil {
+					time.Sleep(10 * time.Millisecond)
+					continue
 				}
-				return completed.Status == JobCompleted
-			}, "maximum-size cluster round trip did not complete")
+				if completed.Status == JobFailed || completed.Status == JobCancelled {
+					t.Fatalf("maximum-size cluster round trip ended as %s: %s", completed.Status, completed.Error)
+				}
+				if completed.Status == JobCompleted {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if completed.Status != JobCompleted {
+				t.Fatalf("maximum-size cluster round trip did not complete: status=%q attempt=%d node=%q error=%q", completed.Status, completed.Attempt, completed.AssignedNode, completed.Error)
+			}
 			if len(completed.Payload) != 0 || completed.SealedPayload != nil {
 				t.Fatal("compact poll response echoed the maximum-size input")
 			}

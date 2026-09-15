@@ -90,52 +90,53 @@ type ServiceSnapshot struct {
 // Session renders an animated single-line status in a real terminal and
 // concise transition logs when stdout is redirected to a service log.
 type Session struct {
-	out               io.Writer
-	console           *os.File
-	interactive       bool
-	style             string
-	section           string
-	nextSection       string
-	mu                sync.Mutex
-	partial           string
-	status            string
-	statusSince       time.Time
-	frame             int
-	retries           int
-	jobs              map[string]jobState
-	node              string
-	nodeID            string
-	slots             int
-	hardware          string
-	capabilities      cluster.Capabilities
-	browserSelections map[int]browserSelection
-	localModels       map[string]localModelSelection
-	localProviders    []string
-	serviceLines      []string
-	connectionLine    string
-	relayHost         string
-	poolNodes         []PoolNode
-	poolKnown         bool
-	poolError         bool
-	nodeDetails       map[string]nodeDetailVisibility
-	bannerVersion     string
-	bannerComponents  string
-	history           []historyEntry
-	historyTotal      int
-	panelStarted      bool
-	width             int
-	widthFn           func() int
-	heightFn          func() int
-	done              chan struct{}
-	closed            chan struct{}
-	observing         bool
-	observedOnline    bool
-	observed          ServiceSnapshot
-	commandEnabled    bool
-	commandClosesView bool
-	commandInput      string
-	commandNotice     string
-	selectionActiveFn func() bool
+	out                io.Writer
+	console            *os.File
+	interactive        bool
+	style              string
+	section            string
+	nextSection        string
+	mu                 sync.Mutex
+	partial            string
+	status             string
+	statusSince        time.Time
+	frame              int
+	retries            int
+	jobs               map[string]jobState
+	node               string
+	nodeID             string
+	slots              int
+	hardware           string
+	capabilities       cluster.Capabilities
+	browserSelections  map[int]browserSelection
+	localModels        map[string]localModelSelection
+	localProviders     []string
+	serviceLines       []string
+	connectionLine     string
+	relayHost          string
+	poolNodes          []PoolNode
+	poolKnown          bool
+	poolError          bool
+	nodeDetails        map[string]nodeDetailVisibility
+	bannerVersion      string
+	bannerComponents   string
+	history            []historyEntry
+	historyTotal       int
+	panelStarted       bool
+	width              int
+	widthFn            func() int
+	heightFn           func() int
+	done               chan struct{}
+	closed             chan struct{}
+	observing          bool
+	observedOnline     bool
+	observed           ServiceSnapshot
+	commandEnabled     bool
+	commandClosesView  bool
+	serviceStopCommand string
+	commandInput       string
+	commandNotice      string
+	selectionActiveFn  func() bool
 }
 
 func (s *Session) SetRelayTarget(rawURL string) {
@@ -174,9 +175,23 @@ func (s *Session) EnableCommands() {
 	defer s.mu.Unlock()
 	s.commandEnabled = true
 	s.commandClosesView = true
+	s.serviceStopCommand = backgroundServiceStopCommand()
 	if s.nodeDetails == nil {
 		s.nodeDetails = map[string]nodeDetailVisibility{}
 	}
+	if s.panelStarted {
+		s.renderPanelLocked()
+	}
+}
+
+// EnableServiceStopCommand advertises the authenticated local lifecycle
+// command only in sessions backed by a local bridge HTTP service. Standalone
+// worker/relay processes intentionally do not claim that this command can stop
+// them.
+func (s *Session) EnableServiceStopCommand() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.serviceStopCommand = backgroundServiceStopCommand()
 	if s.panelStarted {
 		s.renderPanelLocked()
 	}
@@ -261,11 +276,64 @@ func (s *Session) HandleCommand(command string) bool {
 }
 
 func (s *Session) commandHelpLocked() string {
-	commands := "help · clear · details [all|N] · gpus [all|N] · models [all|N]"
+	lines := []string{
+		"help | ?         Diese Hilfe anzeigen",
+		"clear | cls      Nur den sichtbaren Sitzungsverlauf leeren",
+		"details all|N    GPU- und Modelldetails einer Node umschalten",
+		"gpus all|N       GPU-Details einer Node umschalten",
+		"models all|N     Modelldetails einer Node umschalten",
+	}
+	if s.commandClosesView {
+		lines = append(lines, "exit | quit | q   Nur diese Ansicht schließen; Dienst läuft weiter")
+	} else {
+		lines = append(lines, "Ctrl+C            Diesen Vordergrunddienst stoppen")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (s *Session) commandHintLocked() string {
+	commands := "help · clear · details all|N · gpus all|N · models all|N"
 	if s.commandClosesView {
 		return commands + " · exit"
 	}
 	return commands + " · Ctrl+C stoppt den Vordergrunddienst"
+}
+
+func (s *Session) commandNoticeLinesLocked() []string {
+	notice := s.commandNotice
+	if notice == "" {
+		notice = s.commandHintLocked()
+	}
+	parts := strings.Split(notice, "\n")
+	lines := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if line := cleanTerminalLabel(part, 0); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) == 0 {
+		return []string{s.commandHintLocked()}
+	}
+	return lines
+}
+
+func (s *Session) commandLifecycleHintLocked() string {
+	if s.commandClosesView {
+		return "exit = nur diese Ansicht schließen; Dienst und Jobs laufen weiter"
+	}
+	return "exit = Dienst bleibt aktiv; Ctrl+C = diesen Vordergrunddienst stoppen"
+}
+
+func backgroundServiceStopCommand() string {
+	return "contextbridge stop"
+}
+
+func backgroundServiceStopCommandForOS(_ string) string {
+	return backgroundServiceStopCommand()
+}
+
+func (s *Session) commandServiceStopHintLocked() string {
+	return "Hintergrunddienst stoppen (in CMD/Shell)"
 }
 
 func (s *Session) renderCommandResultLocked() {
@@ -275,7 +343,9 @@ func (s *Session) renderCommandResultLocked() {
 	}
 	if s.interactive {
 		s.clearStatusLocked()
-		fmt.Fprintln(s.out, "  "+s.commandNotice)
+		for _, line := range s.commandNoticeLinesLocked() {
+			fmt.Fprintln(s.out, "  "+line)
+		}
 		s.drawStatusLocked()
 	}
 }
@@ -1120,7 +1190,7 @@ func nodeModelRows(node PoolNode, line func(string) string) []string {
 			rows = append(rows, "  |    "+line(fmt.Sprintf("… %d weitere Worker-Modelle", len(models)-index)))
 			break
 		}
-		state := "bereit"
+		state := "bereit · nicht geladen"
 		if model.Loaded {
 			state = "geladen"
 		}
@@ -1138,9 +1208,39 @@ func nodeModelRows(node PoolNode, line func(string) string) []string {
 		if len(modes) > 0 {
 			parts = append(parts, strings.Join(modes, ","))
 		}
-		rows = append(rows, "  |    "+line(strings.Join(parts, " · ")+suffix))
+		rows = append(rows, "  |    "+colorModelLoadState(line(strings.Join(parts, " · ")+suffix), model.Loaded))
 	}
 	return rows
+}
+
+func colorModelLoadState(value string, loaded bool) string {
+	if loaded {
+		return colorDelimitedModelState(value, "geladen", ansiGreen)
+	}
+	for _, state := range []string{"bereit · nicht geladen", "bereit"} {
+		if colored := colorDelimitedModelState(value, state, ansiDim); colored != value {
+			return colored
+		}
+	}
+	return value
+}
+
+func colorDelimitedModelState(value, state, color string) string {
+	needle := " · " + state
+	index := strings.LastIndex(value, needle)
+	if index < 0 {
+		return value
+	}
+	stateIndex := index + len(needle) - len(state)
+	return value[:stateIndex] + color + state + ansiReset + value[stateIndex+len(state):]
+}
+
+func localModelPanelRow(value string, loaded bool) string {
+	marker := ansiDim + "◇" + ansiReset
+	if loaded {
+		marker = ansiGreen + "◇" + ansiReset
+	}
+	return "  | " + marker + "  " + colorModelLoadState(value, loaded)
 }
 
 func (s *Session) panelStatusLocked() string {
@@ -1333,11 +1433,11 @@ func (s *Session) renderPanelLocked() {
 		rows = gap(rows)
 		rows = append(rows, panelSection("[Lokal · "+provider+"]", width))
 		models := []localModelSelection{}
-		loaded := false
+		anyLoaded := false
 		for _, model := range s.localModels {
 			if strings.EqualFold(model.provider, provider) {
 				models = append(models, model)
-				loaded = loaded || model.loaded
+				anyLoaded = anyLoaded || model.loaded
 			}
 		}
 		sort.Slice(models, func(i, j int) bool {
@@ -1346,15 +1446,18 @@ func (s *Session) renderPanelLocked() {
 			}
 			return strings.ToLower(models[i].name) < strings.ToLower(models[j].name)
 		})
-		if !loaded {
-			rows = append(rows, "  | ◇  erreichbar · kein Modell geladen")
+		if len(models) == 0 {
+			rows = append(rows, "  | "+ansiDim+"◇  erreichbar · kein Modell geladen"+ansiReset)
 		} else {
+			if !anyLoaded {
+				rows = append(rows, "  | "+ansiDim+"◇  erreichbar · kein Modell geladen"+ansiReset)
+			}
 			for _, model := range models {
 				state := "bereit · nicht geladen"
 				if model.loaded {
 					state = "geladen"
 				}
-				rows = append(rows, "  | ◇  "+line(model.name+" · "+state))
+				rows = append(rows, localModelPanelRow(line(model.name+" · "+state), model.loaded))
 			}
 		}
 	}
@@ -1367,6 +1470,18 @@ func (s *Session) renderPanelLocked() {
 	}
 	if s.observing {
 		if s.observedOnline {
+			observedCapabilities := cluster.Capabilities{
+				Providers: append([]string(nil), s.observed.LocalProviders...),
+				Models:    append([]cluster.ModelCapability(nil), s.observed.LocalModels...),
+			}
+			if s.observed.BrowserConnected {
+				observedCapabilities.BrowserSessions = append([]cluster.BrowserSessionCapability(nil), s.observed.Tabs...)
+			}
+			indicators := indicatorLabel(observedCapabilities)
+			if width < 130 {
+				indicators = compactIndicatorLabel(observedCapabilities)
+			}
+			statusDetails = append(statusDetails, "  | "+indicators)
 			statusDetails = append(statusDetails, "  | "+colorGPUPercent(fmt.Sprintf("GPU · %s · %d%%", empty(s.observed.GPU, "unbekannt"), s.observed.GPUUtilization), s.observed.GPUUtilization))
 		}
 	} else {
@@ -1387,9 +1502,14 @@ func (s *Session) renderPanelLocked() {
 			statusDetails = append(statusDetails, "  | "+hardware)
 		}
 	}
+	commandNoticeLines := []string{}
 	commandReserve := 0
 	if s.commandEnabled {
-		commandReserve = 4 // heading, input, hint/result, closing border
+		commandNoticeLines = s.commandNoticeLinesLocked()
+		commandReserve = len(commandNoticeLines) + 4 // heading, input, results, lifecycle, border
+		if s.serviceStopCommand != "" {
+			commandReserve += 2 // stop label and exact command
+		}
 	}
 	tailReserve := 5 + len(statusDetails) + commandReserve // status plus a boxed history row
 	if spacious {
@@ -1449,16 +1569,21 @@ func (s *Session) renderPanelLocked() {
 	rows = append(rows, historyRows...)
 	rows = append(rows, panelBorder(width))
 	if s.commandEnabled {
-		notice := s.commandNotice
-		if notice == "" {
-			notice = s.commandHelpLocked()
-		}
 		rows = append(rows,
 			panelSection("COMMAND", width),
 			"  | "+line("cb › "+s.commandInput+"▌"),
-			"  | "+ansiDim+line(notice)+ansiReset,
-			panelBorder(width),
 		)
+		for _, noticeLine := range commandNoticeLines {
+			rows = append(rows, "  | "+ansiDim+line(noticeLine)+ansiReset)
+		}
+		rows = append(rows, "  | "+ansiDim+line(s.commandLifecycleHintLocked())+ansiReset)
+		if s.serviceStopCommand != "" {
+			rows = append(rows,
+				"  | "+ansiDim+line(s.commandServiceStopHintLocked())+ansiReset,
+				"  |   "+ansiDim+line(s.serviceStopCommand)+ansiReset,
+			)
+		}
+		rows = append(rows, panelBorder(width))
 	}
 	// A heavily zoomed or split terminal can be only a handful of rows tall.
 	// Keep the authoritative status and command line visible without letting a
@@ -1471,16 +1596,22 @@ func (s *Session) renderPanelLocked() {
 			status,
 		}
 		if s.commandEnabled {
-			notice := s.commandNotice
-			if notice == "" {
-				notice = s.commandHelpLocked()
-			}
 			compactRows = append(compactRows,
 				panelSection("COMMAND", width),
 				"  | "+line("cb › "+s.commandInput+"▌"),
-				"  | "+ansiDim+line(notice)+ansiReset,
-				panelBorder(width),
 			)
+			notices := commandNoticeLines
+			noticeCapacity := max(1, height-len(compactRows)-1)
+			if len(notices) > noticeCapacity && noticeCapacity == 1 {
+				notices = []string{s.commandHintLocked()}
+			}
+			for index, noticeLine := range notices {
+				if index == noticeCapacity {
+					break
+				}
+				compactRows = append(compactRows, "  | "+ansiDim+line(noticeLine)+ansiReset)
+			}
+			compactRows = append(compactRows, panelBorder(width))
 		} else {
 			if len(statusDetails) > 0 {
 				compactRows = append(compactRows, statusDetails[0])

@@ -51,6 +51,8 @@ func main() {
 		err = serveCommand(os.Args[2:])
 	case "run":
 		err = runCommand(os.Args[2:])
+	case "stop":
+		err = stopCommand(os.Args[2:])
 	case "console":
 		err = consoleCommand(os.Args[2:])
 	case "submit":
@@ -87,8 +89,17 @@ func main() {
 		err = workerCommand(os.Args[2:])
 	case "cluster":
 		err = clusterCommand(os.Args[2:])
+	case "selftest":
+		// Operator-friendly shortcut for the identical cluster command. It works
+		// on a worker PC, relay VPS, or any configured producer.
+		err = clusterSelftestCommand(os.Args[2:])
 	case "update":
 		err = updateCommand(os.Args[2:])
+	case "completion":
+		err = completionCommand(os.Args[2:])
+	case "help", "--help", "-h":
+		usage()
+		return
 	case "version", "--version", "-version":
 		fmt.Println(version)
 		return
@@ -114,6 +125,7 @@ Usage:
   contextbridge init [--config path]
   contextbridge serve [--config path]
   contextbridge run [--config path] [--slots N] [--topmost]
+  contextbridge stop [--config path] [--force]
   contextbridge console [--config path] # read-only view; type exit + Enter to close
   contextbridge submit --file job.json [--config path]
   contextbridge schedule add --file schedule.json [--config path]
@@ -132,8 +144,10 @@ Usage:
   contextbridge relay [--config path]
   contextbridge pair [--config path] [--relay URL] [--identity path] [--name NAME]
   contextbridge worker [--config path] [--relay URL] [--identity path] [--name NAME] [--slots N] [--providers LIST] [--models LIST] [--tasks LIST] [--topmost]
-  contextbridge cluster status|submit|chat|login|token|pairing [options]
+  contextbridge selftest [options]
+  contextbridge cluster status|submit|chat|selftest|login|token|pairing [options]
   contextbridge update status|check|apply|enable|disable|auto [options]
+  contextbridge completion powershell|bash|zsh
   contextbridge version`)
 }
 
@@ -177,6 +191,7 @@ func serveCommand(args []string) error {
 	updateManager.SetHealthURL(localHealthURL(cfg.Server.Listen))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	server.SetLifecycleControl(server.Idle, stop)
 	startUpdater(ctx, updateManager, logger, func(context.Context) bool { return server.Idle() })
 	logger.Printf("version %s", version)
 	logger.Printf("routes: %d, browser profiles: %d", len(cfg.Routes), len(cfg.BrowserProfiles))
@@ -243,17 +258,36 @@ func runCommand(args []string) error {
 		}
 		components++
 	}
-	startUpdater(ctx, updateManager, logger, func(context.Context) bool {
+	allIdle := func() bool {
 		if !local.Idle() || (relay != nil && !relay.Idle()) || (worker != nil && !worker.Idle()) {
 			return false
 		}
 		return true
+	}
+	local.SetLifecycleControl(allIdle, stop)
+	local.SetLifecycleQuiesce(func(force bool) bool {
+		relayQuiesced := false
+		if relay != nil {
+			if !relay.QuiesceForStop(force) {
+				return false
+			}
+			relayQuiesced = true
+		}
+		if worker != nil && !worker.QuiesceForStop(force) {
+			if relayQuiesced {
+				relay.ResumeAfterRejectedStop()
+			}
+			return false
+		}
+		return true
 	})
+	startUpdater(ctx, updateManager, logger, func(context.Context) bool { return allIdle() })
 	session.Banner(version, fmt.Sprintf("%d components · local bridge%s%s", components, enabledLabel(cfg.Cluster.Relay.Enabled, " · relay"), enabledLabel(cfg.Cluster.Worker.Enabled, " · worker")))
 	if cfg.Cluster.Relay.Enabled || cfg.Cluster.Worker.Enabled {
 		go watchPoolDisplay(ctx, cfg, session)
 	}
 	session.EnableServiceCommands()
+	session.EnableServiceStopCommand()
 	commands, restoreInput := foregroundServiceCommandInput(os.Stdin, session)
 	defer restoreInput()
 	go func() { errorsCh <- local.Run(ctx) }()
@@ -1215,7 +1249,7 @@ func freeLocalAddress() (string, error) {
 
 func clusterCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: contextbridge cluster status|submit|chat|login|token|pairing")
+		return errors.New("usage: contextbridge cluster status|submit|chat|selftest|login|token|pairing")
 	}
 	switch args[0] {
 	case "status":
@@ -1224,6 +1258,8 @@ func clusterCommand(args []string) error {
 		return clusterSubmitCommand(args[1:])
 	case "chat":
 		return clusterChatCommand(args[1:])
+	case "selftest":
+		return clusterSelftestCommand(args[1:])
 	case "login":
 		return clusterLoginCommand(args[1:])
 	case "token":

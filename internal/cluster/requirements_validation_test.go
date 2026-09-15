@@ -10,6 +10,7 @@ func TestValidateRequirementsRejectsUnsafeRoutingLabels(t *testing.T) {
 	valid := Requirements{
 		Task:           "generation",
 		Provider:       "browser",
+		BrowserProfile: "chatgpt",
 		Model:          "GPT-5.6 Sol",
 		Group:          "demo",
 		RequiredTags:   []string{"vision"},
@@ -27,6 +28,8 @@ func TestValidateRequirementsRejectsUnsafeRoutingLabels(t *testing.T) {
 		"oversized tag":     func(value *Requirements) { value.RequiredTags = []string{strings.Repeat("t", 81)} },
 		"node control":      func(value *Requirements) { value.PreferredNodes = []string{"node\rspoof"} },
 		"oversized model":   func(value *Requirements) { value.Model = strings.Repeat("m", 161) },
+		"profile newline":   func(value *Requirements) { value.BrowserProfile = "chatgpt\nspoof" },
+		"oversized profile": func(value *Requirements) { value.BrowserProfile = strings.Repeat("p", 81) },
 		"oversized node id": func(value *Requirements) { value.PreferredNodes = []string{strings.Repeat("n", 161)} },
 	}
 	for name, mutate := range cases {
@@ -37,5 +40,10 @@ func TestValidateRequirementsRejectsUnsafeRoutingLabels(t *testing.T) {
 				t.Fatal("unsafe routing label was accepted")
 			}
 		})
+	}
+	nonBrowser := valid
+	nonBrowser.Provider = "ollama"
+	if err := relay.validateRequirements(nonBrowser); err == nil {
+		t.Fatal("browser profile was accepted for a non-browser provider")
 	}
 }

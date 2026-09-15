@@ -110,22 +110,30 @@ func TestMultiGPUSummaryUsesBestSingleDeviceInsteadOfSummingVRAM(t *testing.T) {
 
 func TestAttachedConsoleOnlyLogsObservedChanges(t *testing.T) {
 	var output bytes.Buffer
-	session := &Session{out: &output, interactive: true, style: "panel", widthFn: func() int { return 90 },
+	session := &Session{out: &output, interactive: true, style: "panel", widthFn: func() int { return 140 },
 		jobs: map[string]jobState{}, browserSelections: map[int]browserSelection{}}
 	snapshot := ServiceSnapshot{Version: "v0.test", BrowserConnected: true, ActiveTabs: 1,
-		Tabs: []cluster.BrowserSessionCapability{{TabID: 7, Profile: "chatgpt", CurrentModel: "GPT-5.6 Sol"}}}
+		Tabs:           []cluster.BrowserSessionCapability{{TabID: 7, Profile: "chatgpt", CurrentModel: "GPT-5.6 Sol"}},
+		LocalProviders: []string{"ollama"},
+		LocalModels:    []cluster.ModelCapability{{Name: "local-text", Provider: "ollama", Loaded: true, Tasks: []string{"generation"}}}}
 	session.ObserveService(snapshot)
 	session.ObserveService(snapshot)
 	snapshot.Completed, snapshot.JobsTotal = 1, 1
 	session.ObserveService(snapshot)
 	frames := strings.Split(output.String(), "\x1b[H\x1b[2J")
 	got := frames[len(frames)-1]
-	if len(session.history) != 4 || strings.Count(got, "Attached to running service") < 1 ||
+	if len(session.history) != 5 || strings.Count(got, "Attached to running service") < 1 ||
 		!strings.Contains(got, "Completed total 1 (+1 since last check)") || !strings.Contains(got, "[ACTIVITY]") {
 		t.Fatalf("attached console emitted duplicate or missing events: %q", got)
 	}
 	if !strings.Contains(got, "Warteschlange 0 · Browser 0/1 belegt") {
 		t.Fatalf("attached console live status is missing: %q", got)
+	}
+	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(got, "")
+	for _, indicator := range []string{"◉GPT", "▣LOC", "TXT", "VIS", "IMG", "AUD", "MUS", "VID", "FIL", "EMB"} {
+		if !strings.Contains(plain, indicator) {
+			t.Fatalf("attached console lost stable indicator %q: %q", indicator, plain)
+		}
 	}
 }
 
@@ -382,8 +390,10 @@ func TestLocalProviderRemainsVisibleWithoutLoadedModel(t *testing.T) {
 	models[2].Loaded = true
 	session.recordLocalModelsLocked(models, []string{"ollama"})
 	got := output.String()
-	if !strings.Contains(got, "+-- [Lokal · ollama]") || !strings.Contains(got, "loaded-model · geladen") ||
-		strings.Index(got, "loaded-model · geladen") > strings.Index(got, "ready-model · bereit · nicht geladen") {
+	frames := strings.Split(got, "\x1b[H\x1b[2J")
+	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(frames[len(frames)-1], "")
+	if !strings.Contains(plain, "+-- [Lokal · ollama]") || !strings.Contains(plain, "loaded-model · geladen") ||
+		strings.Index(plain, "loaded-model · geladen") > strings.Index(plain, "ready-model · bereit · nicht geladen") {
 		t.Fatalf("loaded local model not shown: %s", got)
 	}
 	previous := len(session.history)
@@ -535,6 +545,9 @@ func TestPanelCommandsPreserveInputAndToggleNodeDetails(t *testing.T) {
 	if !strings.Contains(latest, ansiRed+"91%"+ansiReset) || !strings.Contains(plain, "+-- COMMAND") {
 		t.Fatalf("detail color or command box missing: %s", latest)
 	}
+	if !strings.Contains(plain, "exit = nur diese Ansicht schließen") || !strings.Contains(plain, backgroundServiceStopCommand()) {
+		t.Fatalf("command footer does not distinguish view exit from the exact managed-service stop command: %s", plain)
+	}
 	session.nextSection = "TEST"
 	session.writeEventLocked("◇", "clear-me")
 	session.HandleCommand("clear")
@@ -543,6 +556,71 @@ func TestPanelCommandsPreserveInputAndToggleNodeDetails(t *testing.T) {
 	}
 	if !session.HandleCommand("exit") {
 		t.Fatal("exit must close only the console caller")
+	}
+}
+
+func TestBackgroundServiceStopCommandIsCrossPlatformControlClient(t *testing.T) {
+	for _, goos := range []string{"windows", "linux", "darwin", "plan9"} {
+		if got := backgroundServiceStopCommandForOS(goos); got != "contextbridge stop" {
+			t.Errorf("stop command for %s = %q, want contextbridge stop", goos, got)
+		}
+	}
+}
+
+func TestPanelCommandFooterKeepsExactStopCommandAtOrdinaryWidths(t *testing.T) {
+	for _, item := range []struct {
+		goos  string
+		width int
+	}{
+		{"windows", 80},
+		{"linux", 80},
+		{"darwin", 80},
+	} {
+		command := backgroundServiceStopCommandForOS(item.goos)
+		row := "  |   " + command
+		if got := clipANSIColumns(row, item.width-2); !strings.Contains(got, command) {
+			t.Errorf("%s stop command is clipped at %d columns: %q", item.goos, item.width, got)
+		}
+	}
+}
+
+func TestCompactPanelPreservesLatestCommandFeedback(t *testing.T) {
+	var output bytes.Buffer
+	session := &Session{out: &output, interactive: true, style: "panel", widthFn: func() int { return 80 }, heightFn: func() int { return 8 },
+		jobs: map[string]jobState{}, browserSelections: map[int]browserSelection{}, localModels: map[string]localModelSelection{}}
+	session.EnableCommands()
+	session.Banner("v0.test", "console")
+	session.HandleCommand("definitely-unknown")
+	frames := strings.Split(output.String(), "\x1b[H\x1b[2J")
+	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(frames[len(frames)-1], "")
+	if !strings.Contains(plain, "Unbekannter Befehl: definitely-unknown") {
+		t.Fatalf("compact panel hid command feedback: %s", plain)
+	}
+}
+
+func TestHelpCommandRendersReadableRowsInsteadOfOneClippedLine(t *testing.T) {
+	var output bytes.Buffer
+	session := &Session{out: &output, interactive: true, style: "panel", widthFn: func() int { return 80 }, heightFn: func() int { return 40 },
+		jobs: map[string]jobState{}, browserSelections: map[int]browserSelection{}, localModels: map[string]localModelSelection{}}
+	session.EnableCommands()
+	session.Banner("v0.test", "console")
+	session.HandleCommand("help")
+	frames := strings.Split(output.String(), "\x1b[H\x1b[2J")
+	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(frames[len(frames)-1], "")
+	for _, want := range []string{
+		"help | ?         Diese Hilfe anzeigen",
+		"clear | cls      Nur den sichtbaren Sitzungsverlauf leeren",
+		"details all|N    GPU- und Modelldetails einer Node umschalten",
+		"gpus all|N       GPU-Details einer Node umschalten",
+		"models all|N     Modelldetails einer Node umschalten",
+		"exit | quit | q   Nur diese Ansicht schließen; Dienst läuft weiter",
+	} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("multi-line help is missing %q:\n%s", want, plain)
+		}
+	}
+	if got := strings.Count(plain, "  | help | ?"); got != 1 {
+		t.Fatalf("help output was duplicated or flattened: count=%d\n%s", got, plain)
 	}
 }
 
@@ -559,8 +637,17 @@ func TestForegroundServiceCommandsCannotAccidentallyCloseTheirOwner(t *testing.T
 		t.Fatal("exit in a foreground service requested process shutdown")
 	}
 	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(output.String(), "")
-	if !strings.Contains(plain, "Vordergrunddienst bleibt aktiv") || !strings.Contains(plain, "Ctrl+C stoppt ihn") || !strings.Contains(plain, "contextbridge console") {
+	if !strings.Contains(plain, "Vordergrunddienst bleibt aktiv") || !strings.Contains(plain, "Ctrl+C stoppt ihn") || !strings.Contains(plain, "contextbridge console") ||
+		!strings.Contains(plain, "Ctrl+C = diesen Vordergrunddienst stoppen") {
 		t.Fatalf("foreground exit did not explain the safe lifecycle: %s", plain)
+	}
+	if strings.Contains(plain, backgroundServiceStopCommand()) {
+		t.Fatalf("standalone worker falsely advertised a local bridge stop endpoint: %s", plain)
+	}
+	session.EnableServiceStopCommand()
+	plain = regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(output.String(), "")
+	if !strings.Contains(plain, backgroundServiceStopCommand()) {
+		t.Fatalf("run-style service did not advertise its authenticated stop command: %s", plain)
 	}
 	session.EnableCommands()
 	if !session.HandleCommand("exit") {
@@ -603,5 +690,75 @@ func TestNodeDetailCommandsRejectNodesOutsideVisiblePanel(t *testing.T) {
 	}
 	if _, ok := session.nodeDetails["node-09"]; ok {
 		t.Fatal("all command silently toggled a node that cannot be rendered")
+	}
+}
+
+func TestPanelPerNodeDetailsDistinguishZeroGPUMultiGPUAndModelLoadState(t *testing.T) {
+	var output bytes.Buffer
+	session := &Session{out: &output, interactive: true, style: "panel", widthFn: func() int { return 170 }, heightFn: func() int { return 80 },
+		jobs: map[string]jobState{}, browserSelections: map[int]browserSelection{}, localModels: map[string]localModelSelection{},
+		nodeDetails: map[string]nodeDetailVisibility{}}
+	session.EnableCommands()
+	session.Banner("v0.test", "console")
+	session.SetRelayTarget("https://relay.example.test")
+	session.ObservePool([]PoolNode{
+		{ID: "node-rack", Name: "rack", Connected: true, Slots: 4,
+			GPUs: []cluster.GPUCapability{
+				{Name: "GPU A", Utilization: 2, MemoryFree: 3 << 30, MemoryTotal: 8 << 30},
+				{Name: "GPU B", Utilization: 92, MemoryFree: 5 << 30, MemoryTotal: 12 << 30},
+			},
+			Models: []cluster.ModelCapability{
+				{Name: "loaded-model", Provider: "ollama", Loaded: true, Tasks: []string{"generation"}},
+				{Name: "cold-model", Provider: "ollama", Loaded: false, Vision: true, Tasks: []string{"vision"}},
+			}},
+		{ID: "node-cpu", Name: "cpu-only", Connected: true, Slots: 2},
+	}, nil)
+
+	session.HandleCommand("details 2")
+	frames := strings.Split(output.String(), "\x1b[H\x1b[2J")
+	latest := frames[len(frames)-1]
+	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(latest, "")
+	for _, want := range []string{
+		"System-GPU 1 · GPU A · 2% · 3.0 GiB/8.0 GiB frei",
+		"System-GPU 2 · GPU B · 92% · 5.0 GiB/12.0 GiB frei",
+		"Worker-Modell · loaded-model · geladen · ollama · generation",
+		"Worker-Modell · cold-model · bereit · nicht geladen · ollama · vision",
+	} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("rack details are missing %q: %s", want, plain)
+		}
+	}
+	if strings.Contains(plain, "System-GPU · Zero-GPU") {
+		t.Fatalf("details from the untoggled zero-GPU node leaked into the rack view: %s", plain)
+	}
+	if !strings.Contains(latest, ansiGreen+"geladen"+ansiReset) || !strings.Contains(latest, ansiDim+"bereit · nicht geladen"+ansiReset) || !strings.Contains(latest, ansiRed+"92%"+ansiReset) {
+		t.Fatalf("GPU/model state colors are not authoritative: %q", latest)
+	}
+
+	session.HandleCommand("gpus 1")
+	frames = strings.Split(output.String(), "\x1b[H\x1b[2J")
+	plain = regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(frames[len(frames)-1], "")
+	if !strings.Contains(plain, "System-GPU · Zero-GPU") {
+		t.Fatalf("zero-GPU node did not expose its per-device state: %s", plain)
+	}
+}
+
+func TestLocalModelRowsColorLoadedAndUnloadedModels(t *testing.T) {
+	var output bytes.Buffer
+	session := &Session{out: &output, interactive: true, style: "panel", widthFn: func() int { return 130 }, heightFn: func() int { return 45 },
+		status: "Idle", statusSince: time.Now(), jobs: map[string]jobState{}, browserSelections: map[int]browserSelection{}, localModels: map[string]localModelSelection{}}
+	session.Banner("v0.test", "worker")
+	session.recordLocalModelsLocked([]cluster.ModelCapability{
+		{Name: "warm", Provider: "ollama", Loaded: true, Tasks: []string{"generation"}},
+		{Name: "cold", Provider: "ollama", Loaded: false, Tasks: []string{"vision"}},
+	}, []string{"ollama"})
+	frames := strings.Split(output.String(), "\x1b[H\x1b[2J")
+	latest := frames[len(frames)-1]
+	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(latest, "")
+	if !strings.Contains(plain, "warm · geladen") || !strings.Contains(plain, "cold · bereit · nicht geladen") || strings.Index(plain, "warm · geladen") > strings.Index(plain, "cold · bereit") {
+		t.Fatalf("local model rows are missing or not loaded-first: %s", plain)
+	}
+	if !strings.Contains(latest, ansiGreen+"geladen"+ansiReset) || !strings.Contains(latest, ansiDim+"bereit · nicht geladen"+ansiReset) {
+		t.Fatalf("loaded and unloaded local models are not color-distinguished: %q", latest)
 	}
 }

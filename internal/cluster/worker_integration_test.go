@@ -45,7 +45,7 @@ func TestWorkerRelayParallelCapacityEndToEnd(t *testing.T) {
 				"routes": map[string]interface{}{
 					"default": map[string]interface{}{"task": "generation", "model": "browser-tab", "provider": "browser"},
 				},
-				"browser": map[string]interface{}{"connected": true, "selectors_ready": true},
+				"browser": map[string]interface{}{"connected": true, "selectors_ready": true, "active_tabs": 1},
 				"runtime": map[string]interface{}{"engines": map[string]interface{}{}},
 			})
 		case "/v1/jobs":
@@ -207,7 +207,7 @@ func TestWorkerCancelsLocalExecutionWhenRelayConnectionDrops(t *testing.T) {
 				"routes": map[string]interface{}{
 					"default": map[string]interface{}{"task": "generation", "model": "browser-tab", "provider": "browser"},
 				},
-				"browser": map[string]interface{}{"connected": true, "selectors_ready": true},
+				"browser": map[string]interface{}{"connected": true, "selectors_ready": true, "active_tabs": 1},
 				"runtime": map[string]interface{}{"engines": map[string]interface{}{}},
 			})
 		case "/v1/jobs":
@@ -330,7 +330,7 @@ func TestRelayCancellationInterruptsAssignedWorkerExecution(t *testing.T) {
 				"routes": map[string]interface{}{
 					"default": map[string]interface{}{"task": "generation", "model": "browser-tab", "provider": "browser"},
 				},
-				"browser": map[string]interface{}{"connected": true, "selectors_ready": true},
+				"browser": map[string]interface{}{"connected": true, "selectors_ready": true, "active_tabs": 1},
 				"runtime": map[string]interface{}{"engines": map[string]interface{}{}},
 			})
 		case "/v1/jobs":
@@ -431,6 +431,131 @@ func TestRelayCancellationInterruptsAssignedWorkerExecution(t *testing.T) {
 	}
 	if cancelled.Status != JobCancelled {
 		t.Fatalf("job status = %q, want %q", cancelled.Status, JobCancelled)
+	}
+}
+
+func TestMaintenanceTimeoutInterruptsHungWorkerExecution(t *testing.T) {
+	admin := "admin_012345678901234567890123456789012345"
+	relay, err := NewRelay(RelayConfig{
+		Database:      filepath.Join(t.TempDir(), "relay.db"),
+		AdminToken:    admin,
+		AllowedTasks:  []string{"generation"},
+		DispatchEvery: 10 * time.Millisecond,
+		JobTimeout:    80 * time.Millisecond,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+
+	relayHTTP := httptest.NewServer(relay.Handler())
+	defer relayHTTP.Close()
+
+	localStarted := make(chan struct{})
+	localCancelled := make(chan struct{})
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch req.URL.Path {
+		case "/v1/status":
+			writeJSON(w, http.StatusOK, map[string]interface{}{
+				"queued": 0,
+				"routes": map[string]interface{}{
+					"default": map[string]interface{}{"task": "generation", "model": "browser-tab", "provider": "browser"},
+				},
+				"browser": map[string]interface{}{"connected": true, "selectors_ready": true, "active_tabs": 1},
+				"runtime": map[string]interface{}{"engines": map[string]interface{}{}},
+			})
+		case "/v1/jobs":
+			_, _ = io.Copy(io.Discard, req.Body)
+			close(localStarted)
+			<-req.Context().Done()
+			close(localCancelled)
+		default:
+			if strings.HasPrefix(req.URL.Path, "/v1/browser/jobs/") && strings.HasSuffix(req.URL.Path, "/progress") {
+				writeJSON(w, http.StatusOK, JobProgress{Sequence: 1, Phase: "generating", Busy: true})
+				return
+			}
+			http.NotFound(w, req)
+		}
+	}))
+	defer local.Close()
+
+	privateKey, publicKey, err := NewIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeID := "maintenance-timeout-worker"
+	nodeToken, _, err := relay.store.CreateToken("node", nodeID, nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identityFile := filepath.Join(t.TempDir(), "identity.json")
+	if err := saveIdentity(identityFile, WorkerIdentity{NodeID: nodeID, NodeToken: nodeToken, PrivateKey: privateKey, PublicKey: publicKey, RelayURL: relayHTTP.URL}); err != nil {
+		t.Fatal(err)
+	}
+	worker, err := LoadWorker(WorkerConfig{
+		RelayURL:       relayHTTP.URL,
+		IdentityFile:   identityFile,
+		Name:           nodeID,
+		MaxConcurrent:  1,
+		LocalURL:       local.URL,
+		LocalToken:     "local-test-token",
+		HeartbeatEvery: 20 * time.Millisecond,
+		RequestTimeout: time.Minute,
+		AllowedTasks:   []string{"generation"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerCtx, stopWorker := context.WithCancel(context.Background())
+	workerDone := make(chan error, 1)
+	go func() { workerDone <- worker.Run(workerCtx, nil) }()
+	defer func() {
+		stopWorker()
+		select {
+		case <-workerDone:
+		case <-time.After(3 * time.Second):
+			t.Error("worker did not stop after its parent context was cancelled")
+		}
+	}()
+
+	waitFor(t, 3*time.Second, func() bool {
+		node, loadErr := relay.store.GetNode(nodeID)
+		return loadErr == nil && node.Connected
+	}, "worker did not connect")
+	job, err := relay.store.CreateJob(SubmitRequest{
+		Requirements: Requirements{Task: "generation", Provider: "browser"},
+		Payload:      json.RawMessage(`{"route":"default","prompt":"hang until maintenance cancellation","output":{"mode":"text"}}`),
+		MaxAttempts:  1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay.dispatch()
+	select {
+	case <-localStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("local execution did not start")
+	}
+
+	// Use the stored assignment timestamp so the test proves the durable timeout,
+	// rather than depending on how quickly the worker connected on this host.
+	running, err := relay.store.GetJob(job.ID)
+	if err != nil || running.AssignedAt.IsZero() {
+		t.Fatalf("job did not enter assigned execution: %#v, %v", running, err)
+	}
+	relay.runMaintenance(running.AssignedAt.Add(relay.cfg.JobTimeout + time.Millisecond))
+	select {
+	case <-localCancelled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("maintenance timeout failed to cancel the worker's local HTTP request")
+	}
+	waitFor(t, 3*time.Second, worker.Idle, "worker slot was not released after its cancellation result")
+	timedOut, err := relay.store.GetJob(job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if timedOut.Status != JobFailed || !strings.Contains(timedOut.Error, "execution state is ambiguous") {
+		t.Fatalf("maintenance timeout did not fail closed: %#v", timedOut)
 	}
 }
 

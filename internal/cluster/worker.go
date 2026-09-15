@@ -54,6 +54,7 @@ type Worker struct {
 	sem        chan struct{}
 	mu         sync.Mutex
 	running    int
+	quiescing  bool
 	hardwareMu sync.Mutex
 	hardware   systeminfo.Snapshot
 	hardwareAt time.Time
@@ -63,6 +64,38 @@ func (w *Worker) Idle() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.running == 0
+}
+
+// QuiesceForStop atomically prevents a newly received relay frame from
+// starting after the composite process has been declared idle.
+func (w *Worker) QuiesceForStop(force bool) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.quiescing {
+		return true
+	}
+	w.quiescing = true
+	if !force && w.running != 0 {
+		w.quiescing = false
+		return false
+	}
+	return true
+}
+
+func (w *Worker) ResumeAfterRejectedStop() {
+	w.mu.Lock()
+	w.quiescing = false
+	w.mu.Unlock()
+}
+
+func (w *Worker) beginJob() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.quiescing {
+		return false
+	}
+	w.running++
+	return true
 }
 
 const (
@@ -369,10 +402,18 @@ func (w *Worker) connect(ctx context.Context, report WorkerReporter) error {
 		}
 		activeJobs[job.ID] = cancelJob
 		activeMu.Unlock()
+		if !w.beginJob() {
+			cancelJob()
+			activeMu.Lock()
+			delete(activeJobs, job.ID)
+			activeMu.Unlock()
+			<-w.sem
+			_ = write(WireMessage{Type: "result", JobID: job.ID, Attempt: job.Attempt, Error: "worker is stopping"})
+			continue
+		}
 		if cancelledBeforeDispatch {
 			cancelJob()
 		}
-		w.changeRunning(1)
 		connectionWG.Add(1)
 		go func(job Job, jobCtx context.Context, cancelJob context.CancelFunc) {
 			defer connectionWG.Done()
@@ -632,6 +673,10 @@ func prepareLocalPayload(payload []byte, requirements Requirements, localJobID s
 		rawSession, _ := json.Marshal(session)
 		job["session_id"] = rawSession
 	}
+	if profile := strings.TrimSpace(requirements.BrowserProfile); profile != "" && strings.EqualFold(provider, "browser") {
+		rawProfile, _ := json.Marshal(profile)
+		job["browser_profile"] = rawProfile
+	}
 	// A browser tab is a security boundary between producer conversations.
 	// Derive its internal binding from the authenticated producer, never from a
 	// producer-supplied scope field. The public session_id remains unchanged.
@@ -765,6 +810,11 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 		}
 		if response.StatusCode == http.StatusOK && json.NewDecoder(io.LimitReader(response.Body, 4<<20)).Decode(&status) == nil {
 			capability.QueueDepth = status.Queued
+			// The map's presence tells v0.5.66+ schedulers that provider-specific
+			// automatic route readiness is authoritative. This prevents a ready
+			// browser route from making an incompatible local provider appear able
+			// to execute the same global task.
+			capability.AutomaticTasks = map[string][]string{}
 			// Browser tabs are separate serial UI slots. They must not lower the
 			// worker-wide limit for Ollama or other local-model jobs.
 			if len(w.cfg.AllowedProviders) == 0 || containsFold(w.cfg.AllowedProviders, "browser") {
@@ -810,6 +860,75 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 				engine, ok := status.Runtime.Engines[provider]
 				return ok && engine.State == "online"
 			}
+			runtimeModels := map[string]ModelCapability{}
+			runtimeModelOrder := make([]string, 0)
+			for provider, engine := range status.Runtime.Engines {
+				if engine.State != "online" || !providerAllowed(provider) {
+					continue
+				}
+				for _, model := range engine.Models {
+					if strings.TrimSpace(model.Name) == "" {
+						continue
+					}
+					tasks, vision, embedding := modelTasksFromCapabilities(model.Name, model.Capabilities)
+					runtimeModel := ModelCapability{Name: model.Name, Provider: provider, Size: model.Size, VRAM: model.VRAM, Loaded: model.Loaded, Vision: vision, Embedding: embedding, Tasks: allowedModelTasks(tasks)}
+					key := modelCapabilityKey(provider, model.Name)
+					if existing, ok := runtimeModels[key]; ok {
+						runtimeModels[key] = mergeModelCapability(existing, runtimeModel)
+						continue
+					}
+					runtimeModels[key] = runtimeModel
+					runtimeModelOrder = append(runtimeModelOrder, key)
+				}
+			}
+			modelIndexes := map[string]int{}
+			addModel := func(model ModelCapability) {
+				if strings.TrimSpace(model.Name) == "" {
+					return
+				}
+				key := modelCapabilityKey(model.Provider, model.Name)
+				if index, ok := modelIndexes[key]; ok {
+					capability.Models[index] = mergeModelCapability(capability.Models[index], model)
+					return
+				}
+				modelIndexes[key] = len(capability.Models)
+				capability.Models = append(capability.Models, model)
+			}
+			runtimeProviderSupportsTask := func(provider, task string) (bool, bool) {
+				inventoryAvailable := false
+				for _, runtimeModel := range runtimeModels {
+					if !strings.EqualFold(runtimeModel.Provider, provider) {
+						continue
+					}
+					inventoryAvailable = true
+					if modelAllowed(runtimeModel.Name) && containsFold(runtimeModel.Tasks, task) {
+						return true, true
+					}
+				}
+				return false, inventoryAvailable
+			}
+			providerSupportsRouteTask := func(provider, routeModel, task string) bool {
+				model := strings.TrimSpace(routeModel)
+				if model == "" || strings.EqualFold(model, "auto") {
+					// A non-empty runtime model list is authoritative for automatic
+					// selection. Keep the historical optimistic behavior when the
+					// inventory is unavailable, but do not advertise a task when every
+					// discovered model is incapable of it.
+					if supports, inventoryAvailable := runtimeProviderSupportsTask(provider, task); inventoryAvailable {
+						return supports
+					}
+					return true
+				}
+				if runtimeModel, knownByRuntime := runtimeModels[modelCapabilityKey(provider, model)]; knownByRuntime {
+					return modelAllowed(runtimeModel.Name) && containsFold(runtimeModel.Tasks, task)
+				}
+				if _, inventoryAvailable := runtimeProviderSupportsTask(provider, task); inventoryAvailable {
+					// A non-empty inventory is authoritative: a configured fixed
+					// model absent from it cannot be loaded by this provider.
+					return false
+				}
+				return true
+			}
 			for _, route := range status.Routes {
 				task := route.Task
 				if task == "" {
@@ -819,11 +938,17 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 				routeReady := false
 				for _, provider := range providers {
 					if provider != "" && providerOnline(provider) {
-						routeReady = true
 						if !seenProviders[provider] {
 							capability.Providers = append(capability.Providers, provider)
 							seenProviders[provider] = true
 						}
+						providerSupportsTask := providerSupportsRouteTask(provider, route.Model, task)
+						if providerSupportsTask && (len(w.cfg.AllowedTasks) == 0 || containsFold(w.cfg.AllowedTasks, task)) {
+							if !containsFold(capability.AutomaticTasks[provider], task) {
+								capability.AutomaticTasks[provider] = append(capability.AutomaticTasks[provider], task)
+							}
+						}
+						routeReady = routeReady || providerSupportsTask
 					}
 				}
 				if routeReady && !seenTasks[task] && (len(w.cfg.AllowedTasks) == 0 || containsFold(w.cfg.AllowedTasks, task)) {
@@ -834,10 +959,16 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 				if strings.EqualFold(route.Provider, "browser") {
 					allowedRouteModel = browserModelAllowed(route.Model)
 				}
-				if route.Model != "" && providerOnline(route.Provider) && allowedRouteModel {
-					vision, embedding := modelFeatures(route.Model, task)
-					if tasks := allowedModelTasks(modelTasks(task, vision, embedding)); len(tasks) > 0 {
-						capability.Models = append(capability.Models, ModelCapability{Name: route.Model, Tasks: tasks, Provider: route.Provider, Vision: vision, Embedding: embedding})
+				if route.Model != "" && providerOnline(route.Provider) && allowedRouteModel && providerSupportsRouteTask(route.Provider, route.Model, task) {
+					// A runtime inventory entry for the same provider and model is
+					// authoritative. Route defaults describe intent, not what the
+					// model can execute, and therefore must never add generation or
+					// vision to an embedding/image-generation-only model.
+					if _, knownByRuntime := runtimeModels[modelCapabilityKey(route.Provider, route.Model)]; !knownByRuntime {
+						vision, embedding := modelFeatures(route.Model, task)
+						if tasks := allowedModelTasks(modelTasks(task, vision, embedding)); len(tasks) > 0 {
+							addModel(ModelCapability{Name: route.Model, Tasks: tasks, Provider: route.Provider, Vision: vision, Embedding: embedding})
+						}
 					}
 				}
 			}
@@ -849,17 +980,13 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 					capability.Providers = append(capability.Providers, provider)
 					seenProviders[provider] = true
 				}
-				for _, model := range engine.Models {
-					if !modelAllowed(model.Name) {
-						continue
-					}
-					tasks, vision, embedding := modelTasksFromCapabilities(model.Name, model.Capabilities)
-					if tasks = allowedModelTasks(tasks); len(tasks) > 0 {
-						capability.Models = append(capability.Models, ModelCapability{Name: model.Name, Provider: provider, Size: model.Size, VRAM: model.VRAM, Loaded: model.Loaded, Vision: vision, Embedding: embedding, Tasks: tasks})
-					}
+			}
+			for _, key := range runtimeModelOrder {
+				model := runtimeModels[key]
+				if modelAllowed(model.Name) {
+					addModel(model)
 				}
 			}
-			seenBrowserModels := map[string]bool{}
 			for _, tab := range status.Browser.Tabs {
 				if !providerAllowed("browser") {
 					break
@@ -869,13 +996,11 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 					models = append(models, tab.CurrentModel)
 				}
 				for _, model := range models {
-					key := strings.ToLower(strings.TrimSpace(tab.Profile + ":" + model))
-					if model == "" || seenBrowserModels[key] || !browserModelAllowed(model) {
+					if model == "" || !browserModelAllowed(model) {
 						continue
 					}
-					seenBrowserModels[key] = true
 					if tasks := allowedModelTasks([]string{"generation", "vision"}); len(tasks) > 0 {
-						capability.Models = append(capability.Models, ModelCapability{Name: model, Provider: "browser", Vision: true, Tasks: tasks})
+						addModel(ModelCapability{Name: model, Provider: "browser", Vision: true, Tasks: tasks})
 					}
 				}
 			}
@@ -1029,6 +1154,33 @@ func maxU64(a, b uint64) uint64 {
 		return b
 	}
 	return a
+}
+
+func modelCapabilityKey(provider, name string) string {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	name = strings.TrimSpace(name)
+	if strings.EqualFold(provider, "browser") {
+		name = strings.Join(strings.Fields(name), " ")
+	}
+	return provider + "\x00" + strings.ToLower(name)
+}
+
+func mergeModelCapability(current, incoming ModelCapability) ModelCapability {
+	for _, task := range incoming.Tasks {
+		if !containsFold(current.Tasks, task) {
+			current.Tasks = append(current.Tasks, task)
+		}
+	}
+	current.Vision = current.Vision || incoming.Vision
+	current.Embedding = current.Embedding || incoming.Embedding
+	current.Loaded = current.Loaded || incoming.Loaded
+	if incoming.Size > current.Size {
+		current.Size = incoming.Size
+	}
+	if incoming.VRAM > current.VRAM {
+		current.VRAM = incoming.VRAM
+	}
+	return current
 }
 
 func modelFeatures(name, task string) (bool, bool) {

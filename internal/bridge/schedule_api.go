@@ -257,6 +257,10 @@ func (s *Server) handleScheduleAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_, job, err := s.claimSchedule(id, time.Now().UTC(), true)
+		if errors.Is(err, errServiceStopping) {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": errServiceStopping.Error()})
+			return
+		}
 		if errors.Is(err, errScheduleCapacity) {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "capacity unavailable"})
 			return

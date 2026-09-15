@@ -223,6 +223,14 @@ func TestPipelineTimeoutCancelsJobAndRejectsLateResult(t *testing.T) {
 				}
 			}
 			relay := &Relay{store: store}
+			var worker *workerConnection
+			if initial == JobRunning {
+				worker = newWorkerConnection(nil, 1)
+				if !worker.reserve(job.ID) {
+					t.Fatal("test worker could not reserve the pipeline job")
+				}
+				relay.workers = map[string]*workerConnection{"node-a": worker}
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 			defer cancel()
 			cancelled, err := relay.waitJob(ctx, job.ID, 30)
@@ -233,6 +241,18 @@ func TestPipelineTimeoutCancelsJobAndRejectsLateResult(t *testing.T) {
 				t.Fatalf("underlying job was not cancelled: %#v", cancelled)
 			}
 			if initial == JobRunning {
+				if relay.hasStaleRecoveryCandidates() {
+					t.Fatal("terminal pipeline reservation still requested repeated stale-job scans")
+				}
+				before := store.db.Stats()
+				relay.runMaintenance(time.Now().UTC())
+				after := store.db.Stats()
+				if delta := after.Sub(&before); delta.TxStats.Write != 0 {
+					t.Fatalf("pipeline timeout caused %d repeated maintenance writes", delta.TxStats.Write)
+				}
+				if worker.reserve("replacement-before-worker-finished") {
+					t.Fatal("pipeline timeout released an ambiguously running worker slot")
+				}
 				if _, err := store.CompleteJob(job.ID, "node-a", job.Attempt, json.RawMessage(`{"late":true}`), nil, Usage{}, ""); err == nil {
 					t.Fatal("late worker result was accepted after pipeline timeout")
 				}

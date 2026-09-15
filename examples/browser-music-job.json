@@ -3,6 +3,7 @@
   "requirements": {
     "task": "generation",
     "provider": "browser",
+    "browser_profile": "gemini",
     "session_id": "campaign-music-1"
   },
   "payload": {

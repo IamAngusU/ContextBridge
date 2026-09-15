@@ -9,6 +9,12 @@
 <p align="center"><a href="docs/start-here.de.md">🇩🇪 Deutsch: ContextBridge einfach verstehen, installieren und ausprobieren</a></p>
 
 <p align="center">
+  <a href="docs/demo-video-de-en.md">🎬 3-minute demo script · DE/EN narration</a>
+  ·
+  <a href="docs/demo-de-en.md">Copy-paste technical demo runbook</a>
+</p>
+
+<p align="center">
   <a href="https://github.com/IamAngusU/ContextBridge/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/IamAngusU/ContextBridge?display_name=tag&sort=semver&style=flat-square&color=2a9d8f"></a>
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-20231f?style=flat-square"></a>
   <img alt="Go 1.25" src="https://img.shields.io/badge/Go-1.25-00ADD8?style=flat-square&logo=go&logoColor=white">
@@ -49,6 +55,23 @@ ChatGPT and Gemini are detected automatically from stable DOM and accessibility 
 - **Durable local schedules:** a resource-aware due queue runs one-time and recurring jobs with explicit route/model/reasoning choices, safe restart semantics, pause/resume, bounded history, and sequential follow-ups using prior answers or verified artifacts ([schedules guide](docs/schedules.md)).
 - **Portable deployment:** one executable for Windows, Linux, and macOS on AMD64 and ARM64.
 
+### Measured bridge overhead
+
+The provider still determines AI latency; ContextBridge does not hide that
+time inside a flattering benchmark. On the dated Windows workstation / Linux
+VPS test pair used for 0.5.66, the median ContextBridge-only overhead was:
+
+| Operation | Windows | Linux VPS |
+| --- | ---: | ---: |
+| Authenticated durable submit + compact read + cancel | 2.09 ms | 3.70 ms |
+| Small E2EE job + result cryptographic round trip | 0.124 ms | 0.241 ms |
+| Decode, validate, and SHA-256-check an exact 12 MiB artifact | 13.6 ms | 22.8 ms |
+
+These are reproducible engineering measurements, not an SLA and not model
+inference time. The exact hardware, method, five-run medians, large-payload
+throughput, idle-scheduler result, commands, and limitations are in
+[Limits and measured ContextBridge overhead](docs/limits-and-performance.md).
+
 ## Quick Start
 
 ### Windows
@@ -69,9 +92,11 @@ The installer verifies the matching published release checksum, creates a privat
 
 On Windows, the installer also creates **ContextBridge → Terminal** and **ContextBridge → Dashboard** shortcuts in the user's Start menu. Terminal attaches read-only to the already running service; closing that window does not stop the service or interrupt jobs. Developers can use `contextbridge console` for the same live view, `contextbridge status` for a one-time snapshot, and `contextbridge doctor` for actionable setup checks. `contextbridge run` is only for starting the service itself; do not launch a second copy merely to see its terminal output.
 
-The installer adds its installation folder to the **user PATH** unless `-NoPath` was selected. Open a new CMD or PowerShell window, then run `contextbridge console` to attach to the managed service. Type `exit` and press Enter (or use Ctrl+C) to leave that read-only view; the service keeps running. If the view was launched from the Start menu shortcut, its own console window closes too. If you launched it from an existing CMD or PowerShell, you return to that shell and can type `exit` there to close the shell window. Do not close a terminal running `contextbridge run` in the foreground unless you intend to stop that service process.
+The installer adds its installation folder to the **user PATH** unless `-NoPath` was selected. Open a new CMD or PowerShell window, then run `contextbridge console` to attach to the managed service. The shorter `cb console` is installed as a path-stable alias to the same executable. ContextBridge refuses to replace an existing unrelated `cb` command or file. PowerShell, bash, and zsh completion is installed for new shells by default; opt out with `-NoCompletion` on Windows or `CONTEXTBRIDGE_NO_COMPLETION=1` on Linux/macOS. The auditable scripts are also available through `contextbridge completion powershell|bash|zsh`.
 
-Browser Connect confirms the local service and selected tabs first. Page-control and model scans continue independently, so one idle or suspended AI page does not hold the Connect button indefinitely; that tab still has to become responsive before a job can send to it. Already loaded text chats often keep working in a background or minimized Chromium window, but browsers may throttle, discard, or lazily render inactive pages. ContextBridge therefore does not claim universal headless browser operation, and it never treats composer readiness alone as proof of completion.
+Type `help` inside the live console for a multi-line command list. Type `exit` and press Enter (or use Ctrl+C) to leave that read-only view; the service keeps running. If the view was launched from the Start menu shortcut, its own console window closes too. If you launched it from an existing CMD or PowerShell, you return to that shell and can type `exit` there to close the shell window. `contextbridge stop` asks the standard local `serve`/`run` process to shut down through an authenticated, loopback-only control endpoint; it refuses while local, relay, or worker work is active. `contextbridge stop --force` is the explicit interruption override. A standalone `relay` or `worker` process has no local bridge control endpoint and still uses its service manager or Ctrl+C. Do not close a terminal running `contextbridge run` in the foreground unless you intend to stop that service process.
+
+Browser Connect confirms the local service and selected tabs first. Page-control and model scans continue independently, so one idle or suspended AI page does not hold the Connect button indefinitely; that tab still has to become responsive before a job can send to it. Already loaded text chats often keep working in a background or minimized Chromium window, but browsers may throttle, discard, or lazily render inactive pages. ContextBridge therefore does not claim universal headless browser operation, and it never treats composer readiness alone as proof of completion. One dogfood run retained authenticated liveness after an operator-observed overnight minimized interval and could later foreground an attached tab, but the interval was not continuously instrumented; the [bounded evidence and its limits](docs/known-browser-edge-cases.md#observed-configuration-specific-evidence) are recorded separately.
 The popup's **Reconnect automatically after an update or connection loss** option is on by default. It restores the user's existing attached-tab connection after a browser or extension restart and retries temporary service outages with bounded backoff; it never attaches new personal chats or reloads a provider page. **Disconnect** always stays disconnected until clicked again. A rejected pairing token or access permission fails closed and needs a manual fix.
 
 ## Automatic Updates
@@ -115,6 +140,13 @@ return to the shell until the service stops:
 contextbridge doctor
 contextbridge dashboard
 ```
+
+For one operator-safe pool check from either a worker PC or VPS, use
+`cb selftest` (`contextbridge cluster selftest` is the identical long form). It waits for the requested local engine,
+attached ChatGPT/Gemini tabs, and free slots, but sends no AI request by
+default. Add `--run` to opt into isolated exact-marker text jobs; add `--image`
+only when one real ChatGPT image request is intended. See the
+[copy-paste self-test guide](docs/selftest.md).
 
 `contextbridge doctor` verifies the config, running local service, token, default
 route, relay, and worker identity. It prints a concrete fix for every blocking
@@ -218,6 +250,10 @@ Inside interactive chat, `/model …`, `/reasoning …`, `/profile …`, `/image
 Add `--stream` to `contextbridge cluster submit` to print progressive browser text while the final normalized result remains on stdout. Plaintext progress is deliberately disabled for E2EE jobs.
 
 Set `output.artifacts: true` on a browser text/JSON job to collect up to twelve generated images, media, download links, or code files from the newly completed response. Embedded files share a bounded `max_artifact_bytes` budget (12 MiB maximum), are normalized, and SHA-256 verified. Save them with `contextbridge cluster submit --artifacts ./downloads ...`; provider-hosted resources that the browser cannot read remain HTTPS references in the JSON result. For image generation, run `contextbridge cluster chat --image --artifacts ./downloads --prompt "Create one image of ..."`. This asks through the prompt and requires a transferred image file; it does not change the web chat's tool selection. In a JSON browser job, set `output.min_images: 1` (or more for a series). The optional `metadata.contextbridge_image_tool: true` explicitly selects ChatGPT's visible image tool if desired. For Gemini's visible Music tool, use `contextbridge cluster chat --music --profile gemini --artifacts ./downloads --prompt "Create a short instrumental ..."`; the returned playable file may be MP4 rather than a standalone audio file. JSON jobs can set `metadata.contextbridge_music_tool: true` with `output.min_media: 1`. `output.min_artifacts` and `--min-artifacts` require files of any supported type. A text claim, a code block, a mislabeled file, or an HTTPS link without transferred bytes cannot satisfy `min_images` or `min_media`. The interactive chat saves artifacts automatically under local ContextBridge storage unless `--artifacts off` is used. Use `--attach-image ./picture.png` to send a local picture along with the prompt. The selected web chat must actually provide the requested feature; ContextBridge cannot create media when its provider says that feature is unavailable. See [`browser-image-job.json`](examples/browser-image-job.json) and [`browser-music-job.json`](examples/browser-music-job.json).
+
+See [protocol limits and measured ContextBridge-only overhead](docs/limits-and-performance.md)
+for exact/+1 byte boundaries, multi-image aggregate semantics, reproducible
+benchmarks, and what the measurements deliberately exclude.
 
 For local selector troubleshooting, run `contextbridge browser inspect --config ./config.yml`. The paired extension reports a small, read-only DOM snapshot for each attached tab: prompt and send controls, whether a draft exists and its length, whether Stop is disabled or spinning, file inputs (including hidden ones), selected tool controls, response-image counts, image progress, and a whitelisted last-failure reason. It does **not** provide full HTML, prompt values, chat text, file contents, cookies, or network payloads. With multiple tabs, specify `--tab ID`; the snapshot is refreshed roughly every five seconds without reloading any page and is not sent to the relay. Gemini's choices come from its live, lazily rendered mode picker, not a hard-coded global list. Automatic model discovery opens and closes a picker only on an idle attached tab; it leaves unsent drafts untouched and skips a focused editor. The interval is at most once per 30 minutes, or five minutes while a ChatGPT model is still unknown; the scan button remains available for immediate refresh.
 
@@ -389,7 +425,9 @@ flowchart LR
 
 ContextBridge never executes commands returned by a model. Source credentials stay with the source process. Browser page content is treated as untrusted data and output is reduced to the configured decision vocabulary.
 
-Read [Architecture](docs/architecture.md) and [Security](docs/security.md) before connecting a remote source.
+Read [Architecture](docs/architecture.md), [Security](docs/security.md), and
+[Privacy and compliance readiness](docs/compliance-readiness.md) before
+connecting a remote source or processing personal data.
 
 ## Repository Layout
 
@@ -408,7 +446,7 @@ Read [Architecture](docs/architecture.md) and [Security](docs/security.md) befor
 | `scripts` | Reproducible extension and release checks |
 | `deploy` | Hardened systemd and nginx relay templates |
 | `web` | Public one-file welcome page, cached repository stats, and installer counters |
-| `docs` | Protocol, architecture, security, and integrations |
+| `docs` | Protocol, architecture, security, compliance readiness, roadmap, and integrations |
 
 ## Development
 
@@ -430,6 +468,6 @@ Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md), use a 
 
 ## Project Status
 
-ContextBridge is usable today for local workflows and single-relay private compute clusters. Browser pages can change their HTML without notice, so visual profiles are testable and automation failures return `review`. Active-active relay HA and signed browser-store distribution remain future deployment tiers.
+ContextBridge is usable today for local workflows and single-relay private compute clusters. Browser pages can change their HTML without notice, so visual profiles are testable and automation failures return `review`. Active-active relay HA and signed browser-store distribution remain future deployment tiers. [Roadmap candidates](docs/roadmap.md) are explicitly non-binding. ContextBridge is MIT licensed; it does not claim GDPR certification or SOC 2 attestation.
 
 MIT licensed. Built and maintained by [Angus Uelsmann](https://github.com/IamAngusU).

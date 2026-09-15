@@ -9,18 +9,24 @@ The Windows commands intentionally show the recording PC's custom `C:\ContextBri
 - Verify the PC service, VPS relay, and Opera extension are connected and compatible. Leave enough capacity: **at most eight attached tabs before attaching the three fresh demo pages**. Those three pages plus three new-chat jobs then stay below the 16-tab safety limit. Close or detach only finished test chats, never personal or active ones.
 - Start Ollama on the Windows PC if it is offline. Check `contextbridge models` locally: this recorded setup uses `qwen2.5:1.5b` for the reliable text step. The optional local-vision step uses `qwen2.5vl:7b`; include it only if that model is installed and enough RAM/VRAM is free, otherwise skip Shot 5. These names are **demo prerequisites for the steps that use them**, not universal bundled models. A model need not remain loaded in VRAM between jobs. `models` reports advertised/inferred capabilities, parameter count and quantization where available—not an intelligence score or proof that every image will be read correctly.
 - Use a fresh ChatGPT page and two fresh Gemini pages for the on-camera attach sequence. Keep the browser visible for image creation and upload. Do **not** include Gemini music: the latest test did not return verified media bytes.
-- Use one VPS shell throughout the recording; shell variables below must persist. Open the PC dashboard at `http://127.0.0.1:32145` **before** recording and authenticate privately if it asks for the local token. Never show or read out that token. Check that Queue, Schedules, and Recent activity load, then switch back to the console. An empty queue is an empty queue—do not present it as a live queue demonstration.
+- Use one VPS shell throughout the recording; shell variables below must persist. Before recording, prepare both the PC dashboard at `http://127.0.0.1:32145` and the relay cluster dashboard in browser tabs, and authenticate privately. Never show or read out either token. Check that Schedules/Recent activity load locally and that Queue/Jobs load on the relay, then switch back to the console.
 - If ChatGPT or Gemini shows a rate-limit dialog, wait for it to clear before recording. Never dismiss a provider error and imply that the job succeeded.
 
 ## Shot 1 — Windows console, local models, and attached tabs (about 30–45 s on screen)
 
-On the Windows PC, open a new CMD and run:
+On the Windows PC, open a new CMD and start the installer-managed background
+service, then attach the terminal view:
 
 ```cmd
-contextbridge console --config "C:\ContextBridge\config.yml"
+schtasks /Run /TN ContextBridge
+cb console --config "C:\ContextBridge\config.yml"
 ```
 
-This attaches to the managed service; it does not start another service process. In a second CMD, run:
+The first command starts the scheduled service (or leaves the already-running
+instance alone). The second command is the short alias for `contextbridge
+console`: it attaches a view and does not start a second service process. If
+the console is faster than Windows service startup, wait one moment and repeat
+only the second command. In a second CMD, run:
 
 ```cmd
 contextbridge models --config "C:\ContextBridge\config.yml"
@@ -28,9 +34,9 @@ contextbridge models --config "C:\ContextBridge\config.yml"
 
 Point to `qwen2.5:1.5b` (text) and, when you include the optional vision segment, `qwen2.5vl:7b` (text+vision). Show the console status line. In Opera, show **Attach this page** on the fresh ChatGPT and Gemini pages, then click **Connect** once and wait for **Connected**.
 
-**DE:** „Mein Windows-PC ist der Worker. Hier laufen eigene Ollama-Modelle: eines für Text, eines mit Bildverständnis. Zusätzlich wähle ich ChatGPT- und Gemini-Seiten bewusst einzeln aus.“
+**DE:** „Mein Windows-PC ist der Worker. Für den sicheren Basistest nutze ich ein kleines lokales Textmodell; bei freien Ressourcen zeige ich zusätzlich ein eigenes Vision-Modell. ChatGPT- und Gemini-Seiten wähle ich bewusst einzeln aus.“
 
-**EN:** “My Windows PC is the worker. It has my own Ollama models—one for text and one with vision. I also explicitly attach the ChatGPT and Gemini pages.”
+**EN:** “My Windows PC is the worker. I use a small local text model for the reliable baseline; when resources are free, I also show my own vision model. I explicitly attach the ChatGPT and Gemini pages.”
 
 ## Shot 2 — VPS sees the worker (about 10 s)
 
@@ -39,13 +45,23 @@ In **one** VPS shell:
 ```bash
 contextbridge version
 contextbridge cluster status --config /var/lib/contextbridge/config.yml
+cb selftest --config /var/lib/contextbridge/config.yml
+contextbridge cluster status --config /var/lib/contextbridge/config.yml --json |
+  python3 -c 'import json,sys; d=json.load(sys.stdin); wanted={"qwen2.5:1.5b","qwen2.5vl:7b"}; rows=[(n,m) for n in d.get("nodes",[]) for m in n.get("capabilities",{}).get("models",[]) if m.get("provider")=="ollama" and m.get("name") in wanted]; [print("{}: {} [{}]".format(n.get("name","node"),m.get("name","unknown"),"+".join(m.get("tasks",[])))) for n,m in rows]'
 DEMO_DIR=/root/contextbridge-demo
 mkdir -p "$DEMO_DIR"
 DEMO_ID=$(date +%Y%m%d-%H%M%S)
 printf 'Files: %s\n' "$DEMO_DIR"
 ```
 
-Show the PC online, its free slots, providers/models, and hardware. Mention the actual displayed slot count rather than assuming four. The ordinary status line lists model names; it does **not** rank model quality. `contextbridge models` on the PC is the easier visual proof of text/vision classification.
+Show the PC online, its free slots, providers, and hardware. `cb selftest`
+waits until local generation plus one idle attached ChatGPT and Gemini page are
+genuinely schedulable; its safe default sends no prompt. Mention the actual
+displayed slot count rather than assuming four. Because the compact status can
+shorten a long model list, the JSON command reliably prints the two demo models
+from the complete node inventory; stop if required `qwen2.5:1.5b` is absent.
+The optional vision model may be absent when Shot 5 is skipped. None of these
+commands ranks model quality.
 
 **DE:** „Vom VPS aus sehe ich den verbundenen PC, seine Slots und die installierten Modelle. Jetzt steuere ich zuerst ein lokales Modell – noch ganz ohne Browser-KI.“
 
@@ -63,10 +79,52 @@ Wait for `CB-LOCAL-OK` and `↳ verwendet: ollama · qwen2.5:1.5b`. The marker a
 
 **EN:** “The command comes from my VPS, but the computation runs on my Windows PC. ContextBridge shows the actual provider, model, and worker.”
 
+## Shot 3B — One job through the durable queue
+
+```bash
+QUEUE_JOB=$(mktemp /tmp/contextbridge-demo-queue.XXXXXX.json)
+cat > "$QUEUE_JOB" <<JSON
+{
+  "source": "contextbridge-demo-queue",
+  "requirements": {
+    "task": "generation",
+    "provider": "ollama",
+    "model": "qwen2.5:1.5b",
+    "session_id": "demo-$DEMO_ID-queue"
+  },
+  "payload": {
+    "source": "contextbridge-demo-queue",
+    "route": "default",
+    "task": "generation",
+    "prompt": "Antworte exakt mit CB-QUEUE-OK und keinen weiteren Zeichen.",
+    "output": {"mode": "text", "max_bytes": 4096}
+  },
+  "max_attempts": 1
+}
+JSON
+if contextbridge cluster submit --config /var/lib/contextbridge/config.yml --file "$QUEUE_JOB"; then
+  rm -f -- "$QUEUE_JOB"
+  unset QUEUE_JOB
+  printf 'Queue demo completed. The Queued job ID remains visible above.\n'
+else
+  QUEUE_STATUS=$?
+  rm -f -- "$QUEUE_JOB"
+  unset QUEUE_JOB
+  printf 'STOP: the queue demo failed; do not present it as successful.\n' >&2
+  (exit "$QUEUE_STATUS")
+fi
+```
+
+Keep the printed `Queued:` ID on screen. A free worker may claim the job immediately; the durable enqueue and successful result are the happy path. This block removes only its temporary JSON file and returns nonzero on failure without closing the VPS shell.
+
+**DE:** „Diesmal nutze ich die JSON-Schnittstelle. Der Relay speichert den Auftrag zuerst dauerhaft in der Queue, zeigt seine Job-ID und gibt ihn dann an einen kompatiblen freien Worker.“
+
+**EN:** “This time I use the JSON interface. The relay first stores the job durably in its queue, shows its job ID, and then hands it to a compatible free worker.”
+
 ## Shot 4 — Hero flow: ChatGPT returns a real image file
 
 ```bash
-unset IMAGE_FILE
+unset IMAGE_FILE IMAGE_SHA256 GEMINI_INPUT_SHA256
 ARTIFACT_LOG=$(mktemp /tmp/contextbridge-demo-artifact.XXXXXX.log)
 set -o pipefail
 contextbridge cluster chat --config /var/lib/contextbridge/config.yml --profile chatgpt --new-chat --foreground-new-chat --session "demo-$DEMO_ID-image" --image --artifacts "$DEMO_DIR" --prompt 'Erstelle genau ein quadratisches Bild: reinweißer Hintergrund, mittig die klare schwarze Aufschrift „IamAngusU“ und direkt darunter deutlich kleiner „ContextBridge“. Keine weiteren Wörter, Symbole oder Verzierungen. Gib nur das Bild aus.' 2>&1 | tee "$ARTIFACT_LOG"
@@ -91,15 +149,27 @@ if [ -n "${IMAGE_FILE:-}" ] && [ -f "$IMAGE_FILE" ]; then
 else
   unset IMAGE_FILE
 fi
-test -n "${IMAGE_FILE:-}" || { printf 'Do not continue; no verified image belongs to this run.\n' >&2; false; }
-printf 'Saved image: %s\n' "$IMAGE_FILE"
+if [ -n "${IMAGE_FILE:-}" ]; then
+  printf 'Saved image: %s\n' "$IMAGE_FILE"
+  IMAGE_SHA256=$(sha256sum -- "$IMAGE_FILE" | cut -d ' ' -f1)
+  if [ "${#IMAGE_SHA256}" -ne 64 ]; then
+    printf 'STOP: could not compute a valid SHA-256 for %s\n' "$IMAGE_FILE" >&2
+    unset IMAGE_FILE IMAGE_SHA256
+  else
+    printf 'Artifact SHA-256: %s\n' "$IMAGE_SHA256"
+  fi
+else
+  printf 'STOP: do not continue; no verified image belongs to this run.\n' >&2
+  false
+fi
+if [ -z "${IMAGE_FILE:-}" ] || [ -z "${IMAGE_SHA256:-}" ]; then false; fi
 ```
 
-Briefly show ChatGPT working on Windows. Return to the VPS for `Saved artifact:`. The temporary `/tmp` log binds the next steps to the artifact path emitted by **this run**; it is deleted immediately. The persistent `/root/contextbridge-demo` directory is neither cleared nor searched for a merely newest file. If `IMAGE_FILE` is empty, stop the demo here; never continue with a guessed or stale path.
+Briefly show ChatGPT working on Windows. Return to the VPS for `Saved artifact:`. The temporary `/tmp` log binds the next steps to the artifact path emitted by **this run**; it is deleted immediately. The persistent `/root/contextbridge-demo` directory is neither cleared nor searched for a merely newest file. If `IMAGE_FILE` is empty, the block prints `STOP` and returns nonzero; stop the demo there and never continue with a guessed or stale path.
 
-**DE:** „Der Job gilt erst als erfolgreich, wenn die tatsächliche Bilddatei auf dem VPS gespeichert wurde – nicht bloß, weil ein Modell sagt, es habe ein Bild erstellt.“
+**DE:** „Der Job gilt erst als erfolgreich, wenn die tatsächliche Bilddatei auf dem VPS gespeichert wurde – nicht bloß, weil ein Modell sagt, es habe ein Bild erstellt. Der Hash ist ihr Fingerabdruck für den nächsten Schritt.“
 
-**EN:** “The job succeeds only when the actual image file is saved on the VPS—not merely because a model says it created one.”
+**EN:** “The job succeeds only when the actual image file is saved on the VPS—not merely because a model says it created one. The hash is its fingerprint for the next step.”
 
 ## Shot 5 — Optional: the same file goes to the local vision model
 
@@ -113,17 +183,28 @@ Include this shot only when `qwen2.5vl:7b` is installed and the worker has enoug
 
 **EN:** “Now my own vision model receives the same saved file. The VPS controls it remotely and gets the result back—without ChatGPT or Gemini for this step.”
 
+**DE, wenn übersprungen:** „Die lokale Bildanalyse ist optional. Gerade sind nicht genug Ressourcen frei, deshalb sende ich dieselbe verifizierte Datei direkt an Gemini.“
+
+**EN, when skipped:** “Local image analysis is optional. There are not enough free resources right now, so I will send the same verified file directly to Gemini.”
+
 ## Shot 6 — Same VPS file goes to Gemini for OCR
 
 ```bash
-contextbridge cluster chat --config /var/lib/contextbridge/config.yml --profile gemini --new-chat --session "demo-$DEMO_ID-ocr" --attach-image "$IMAGE_FILE" --artifacts off --prompt 'Lies ausschließlich die Schrift im angehängten Bild. Nenne zuerst die große und dann die kleine Aufschrift. Keine Recherche, keine Identitätsprüfung und kein neues Bild.'
+GEMINI_INPUT_SHA256=$(sha256sum -- "$IMAGE_FILE" | cut -d ' ' -f1)
+if [ "$GEMINI_INPUT_SHA256" != "$IMAGE_SHA256" ]; then
+  printf 'STOP: image bytes changed before the Gemini handoff.\n' >&2
+  false
+else
+  printf 'Gemini input SHA-256: %s\n' "$GEMINI_INPUT_SHA256"
+  contextbridge cluster chat --config /var/lib/contextbridge/config.yml --profile gemini --new-chat --session "demo-$DEMO_ID-ocr" --attach-image "$IMAGE_FILE" --artifacts off --prompt 'Lies ausschließlich die Schrift im angehängten Bild. Nenne zuerst die große und dann die kleine Aufschrift. Keine Recherche, keine Identitätsprüfung und kein neues Bild.'
+fi
 ```
 
 The upload chat opens visibly, since inactive Opera tabs can stall file uploads. Wait for Gemini's actual answer. Its wording may vary; both `IamAngusU` and `ContextBridge` must be recognized. Show that the answer returns to the VPS.
 
-**DE:** „Jetzt sende ich genau die gespeicherte VPS-Datei an Gemini. Gemini liest die Aufschrift, und die Antwort kommt wieder hier auf dem Server an.“
+**DE:** „Der Hash ist noch identisch. Jetzt sende ich genau diese gespeicherte VPS-Datei an Gemini. Gemini liest die Aufschrift, und die Antwort kommt wieder hier auf dem Server an.“
 
-**EN:** “Now I send that exact saved VPS file to Gemini. Gemini reads the inscription, and the answer comes back here on the server.”
+**EN:** “The hash is still identical. Now I send that exact saved VPS file to Gemini. Gemini reads the inscription, and the answer comes back here on the server.”
 
 ## Shot 7 — Minimized Opera, text job still returns
 
@@ -147,10 +228,10 @@ Keep Opera minimized until the VPS displays `CB-DEMO-MINIMIZED-OK`. This proves 
 
 ## Shot 8 — Dashboard and close (about 10–15 s)
 
-Restore Opera or use another PC browser window and open [the local dashboard](http://127.0.0.1:32145). Show the **actual** Queue metric, Schedules, Worker/connection state, and Recent activity/history. If no schedule or queued job exists, say the view supports them; do not narrate a run that did not happen. A live scheduling or parallel-queue demonstration belongs in a separate, rehearsed technical video; with four slots, two to four simultaneous jobs do not demonstrate waiting in a queue.
+Restore Opera or use another PC browser window. First show the already authenticated **relay cluster dashboard** and match the `Queued:` ID from Shot 3B to its completed job row; its Queue counter will normally be back at zero because the worker claimed the job. Then show [the local dashboard](http://127.0.0.1:32145) for Schedules, local providers, worker/connection state, and Recent activity. The local execution can have a different internal ID from the outer relay job, so do not present those IDs as identical. A live waiting backlog or scheduled occurrence belongs in a separate, rehearsed technical video.
 
-**DE:** „Hier sieht man denselben Zustand auch im Dashboard: lokale Modelle, Browser-Worker, Aufträge und Verlauf. Alles läuft durch denselben kontrollierbaren Pool.“
+**DE:** „Das Relay-Dashboard zeigt den echten Queue-Auftrag mit seiner Job-ID. Null wartende Jobs heißt nach dem Erfolg: Der Worker hat ihn übernommen. Im lokalen Dashboard sehe ich zusätzlich Provider, Zeitpläne und Verlauf.“
 
-**EN:** “The dashboard shows the same state: local models, browser workers, jobs, and history. They all run through the same controllable pool.”
+**EN:** “The relay dashboard shows the real queued job by its job ID. After success, zero waiting jobs means the worker claimed it. The local dashboard also shows providers, schedules, and activity.”
 
 Suggested title: **“I turned browser AI tabs and local models into remote compute workers.”**

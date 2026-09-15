@@ -96,3 +96,10 @@ func TestChatFreshSessionRejectsNonBrowserProvider(t *testing.T) {
 		}
 	}
 }
+
+func TestChatProfileRejectsNonBrowserProvider(t *testing.T) {
+	err := clusterChatCommand([]string{"--provider", "ollama", "--profile", "gemini", "--prompt", "unused"})
+	if err == nil || !strings.Contains(err.Error(), "--profile requires") {
+		t.Fatalf("local provider accepted a browser profile: %v", err)
+	}
+}

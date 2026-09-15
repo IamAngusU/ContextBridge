@@ -47,7 +47,7 @@ func TestE2EEAADRejectsEveryExecutionContextMutation(t *testing.T) {
 	request := AssignmentRequest{
 		TenantID: "tenant-a",
 		Requirements: Requirements{
-			Task: "generation", SessionID: "session-a", Provider: "browser", Model: "model-a", Group: "group-a",
+			Task: "generation", SessionID: "session-a", Provider: "browser", BrowserProfile: "chatgpt", Model: "model-a", Group: "group-a",
 			RequiredTags: []string{"trusted"}, PreferredNodes: []string{"node-a"}, MinFreeVRAM: 1024, Vision: true,
 		},
 	}
@@ -92,6 +92,7 @@ func TestE2EEAADRejectsEveryExecutionContextMutation(t *testing.T) {
 		{"task", func(job *Job) { job.Requirements.Task = "embedding" }},
 		{"session", func(job *Job) { job.Requirements.SessionID = "session-b" }},
 		{"provider", func(job *Job) { job.Requirements.Provider = "ollama" }},
+		{"browser profile", func(job *Job) { job.Requirements.BrowserProfile = "gemini" }},
 		{"model", func(job *Job) { job.Requirements.Model = "model-b" }},
 		{"group", func(job *Job) { job.Requirements.Group = "group-b" }},
 		{"required tags", func(job *Job) { job.Requirements.RequiredTags = []string{"untrusted"} }},
