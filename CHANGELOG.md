@@ -2,6 +2,14 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.67 - 2026-09-15
+
+### Fixed
+
+- PowerShell completion preserves one-item command-token collections, so a
+  partially typed switch such as `cb selftest --r<Tab>` and a partially typed
+  nested action complete correctly instead of only completing after a space
+
 ## 0.5.66 - 2026-09-15
 
 ### Security

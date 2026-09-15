@@ -111,9 +111,14 @@ Register-ArgumentCompleter -Native -CommandName contextbridge, cb -ScriptBlock {
     $elements = @($commandAst.CommandElements | Select-Object -Skip 1)
     $tokens = @($elements | ForEach-Object { $_.Extent.Text.Trim([char[]]@([char]39,[char]34,[char]96)) })
     $hasCurrentToken = $elements.Count -gt 0 -and $elements[$elements.Count - 1].Extent.EndOffset -eq $cursorPosition
-    $completed = @($tokens)
+    # Do not assign an array through an if expression here. PowerShell
+    # enumerates a one-item result and can collapse it into a scalar string;
+    # indexing that value then returns its first character instead of the
+    # command name. Keep the collection explicitly typed so partial options
+    # (--r followed by Tab) and partial nested actions work as well as trailing spaces.
+    [string[]]$completed = @($tokens)
     if ($hasCurrentToken) {
-        $completed = if ($tokens.Count -le 1) { @() } else { @($tokens[0..($tokens.Count - 2)]) }
+        [string[]]$completed = if ($tokens.Count -le 1) { @() } else { @($tokens[0..($tokens.Count - 2)]) }
     }
     $command = if ($completed.Count -ge 1) { $completed[0] } else { '' }
     $subcommand = if ($completed.Count -ge 2 -and $script:ContextBridgeSubcommands.ContainsKey($command) -and -not $completed[1].StartsWith('-')) { $completed[1] } else { '' }

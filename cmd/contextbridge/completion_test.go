@@ -55,6 +55,8 @@ func TestPowerShellTabExpansionTracksTrailingSpaceAndOptionPosition(t *testing.T
 		{"short alias provider", "cb cluster chat --provider ", []string{"browser", "ollama"}, []string{"status", "selftest"}},
 		{"root selftest shortcut", "contextbridge selftest --run ", []string{"--config", "--image", "--job-timeout"}, []string{"status", "chat"}},
 		{"short selftest shortcut", "cb selftest ", []string{"--providers", "--run", "--timeout"}, []string{"status", "chat"}},
+		{"short selftest partial flag", "cb selftest --r", []string{"--run"}, []string{"--providers", "status", "chat"}},
+		{"nested partial action", "contextbridge cluster se", []string{"selftest"}, []string{"status", "submit"}},
 		{"safe stop", "contextbridge stop ", []string{"--config", "--force"}, []string{"--slots", "status"}},
 	}
 	for _, test := range tests {
