@@ -37,7 +37,7 @@
     if (!claim || claim.state !== 'observation_handoff') return false;
     // Reuse the production recovery proof, but present the handoff as the
     // sent-unknown state it came from. This performs no provider or bridge I/O.
-    return Boolean(recoveredLeaseFromClaim(cfg, jobId, { ...claim, state: 'sent_unkown' }, tab));
+    return Boolean(recoveredLeaseFromClaim(cfg, jobId, { ...claim, state: 'sent_unknown' }, tab));
   }
 
   async function adoptObservationLease(work) {
@@ -158,7 +158,7 @@
 
         // Once the durable handoff is recorded, the old generation may no
         // longer authorize provider work. Releasing it merely accelerates the
-        // observation-only re-lease: if transport is unavailable, the lease
+        // observation-only re-lease; if transport is unavailable, the lease
         // expires normally and the same queue semantics take over later.
         try { await releaseBrowserLease(await settings(), lease.jobId, lease.generation); }
         catch (_) { /* Transport uncertainty is resolved by normal lease expiry. */ }
@@ -188,7 +188,7 @@
     if (message?.type === 'authorize-browser-job-action' && message?.action === 'observe') {
       // A provider-tab message itself can be the event that wakes an MV3
       // worker. Let the core authorization finish first, then hand off only if
-      // it reconstructed a recovered sent-unkown lease.
+      // it reconstructed a recovered sent-unknown lease.
       setTimeout(() => { void scheduleRecoveredObservationHandoff(); }, 0);
     }
     return false;

@@ -77,7 +77,7 @@ function harness({ releaseFails = false, quarantined = false } = {}) {
     recoveredLeaseDeadline: (claim) => Date.parse(claim.deadline),
     recoveredLeaseFromClaim: (cfg, jobId, claim, tab) => {
       const binding = cfg.sessionBindings?.[claim.sessionKey];
-      if (jobId !== 'job1' || claim.state !== 'sent_unkown' || !binding || binding.tabId !== claim.tabId
+      if (jobId !== 'job1' || claim.state !== 'sent_unknown' || !binding || binding.tabId !== claim.tabId
           || binding.url !== claim.expectedURL || tab?.url !== claim.expectedURL) return null;
       return { jobId, generation: claim.generation, tabId: claim.tabId };
     },
