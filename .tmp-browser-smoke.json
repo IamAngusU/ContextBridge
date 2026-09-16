@@ -1,0 +1,12 @@
+{
+  "source": "release-smoke",
+  "task": "generation",
+  "provider": "browser",
+  "browser_profile": "gemini",
+  "session_id": "release-v0570-gemini-direct-diagnostic",
+  "prompt": "Reply with exactly CB-GEM-0570-DIRECT-OK and no other text.",
+  "output": {
+    "mode": "text",
+    "max_bytes": 1048576
+  }
+}
