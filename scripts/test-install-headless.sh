@@ -10,6 +10,9 @@ fixture="$test_root/fixture"
 home="$test_root/home"
 calls="$test_root/contextbridge-calls"
 systemctl_calls="$test_root/systemctl-calls"
+# Keep host-specific /usr/local commands (notably an already installed `cb`)
+# out of the clean-install fixture while retaining standard POSIX utilities.
+test_system_path="/usr/bin:/bin:/usr/sbin:/sbin"
 mkdir -p "$fake_bin" "$fixture/extension/chromium" "$fixture/extension/firefox" "$home"
 
 cat > "$fixture/contextbridge" <<'EOF'
@@ -104,7 +107,7 @@ export CONTEXTBRIDGE_RELAY_URL="https://relay.example.test/contextbridge"
 export CONTEXTBRIDGE_WORKER_NAME="headless-worker"
 export CONTEXTBRIDGE_NO_DASHBOARD="1"
 export CONTEXTBRIDGE_NONINTERACTIVE="1"
-HOME="$home" PATH="$fake_bin:$PATH" sh "$root/install.sh" > "$test_root/install.out"
+HOME="$home" PATH="$fake_bin:$test_system_path" sh "$root/install.sh" > "$test_root/install.out"
 
 test -x "$CONTEXTBRIDGE_BIN_DIR/contextbridge"
 test -x "$CONTEXTBRIDGE_BIN_DIR/cb"
@@ -134,7 +137,7 @@ printf '#compdef contextbridge cb\n# ContextBridge managed completion\n' > "$col
 chmod 0640 "$collision/home/.zshrc"
 collision_mode_before="$(stat -c '%a' "$collision/home/.zshrc" 2>/dev/null || stat -f '%Lp' "$collision/home/.zshrc")"
 HOME="$collision/home" \
-  PATH="$collision/bin:$fake_bin:$PATH" \
+  PATH="$collision/bin:$fake_bin:$test_system_path" \
   CONTEXTBRIDGE_HOME="$collision/share" \
   CONTEXTBRIDGE_BIN_DIR="$collision/bin" \
   CONTEXTBRIDGE_CONFIG="$collision/config.yml" \
@@ -174,7 +177,7 @@ printf '#compdef cb\n# user-owned zsh completion\n' > "$collision/home/.zfunc/_c
 collision_bash_completion_before="$(cksum < "$collision/home/.local/share/bash-completion/completions/cb")"
 collision_zsh_completion_before="$(cksum < "$collision/home/.zfunc/_cb")"
 HOME="$collision/home" \
-  PATH="$collision/bin:$fake_bin:$PATH" \
+  PATH="$collision/bin:$fake_bin:$test_system_path" \
   CONTEXTBRIDGE_HOME="$collision/share" \
   CONTEXTBRIDGE_BIN_DIR="$collision/bin" \
   CONTEXTBRIDGE_CONFIG="$collision/config.yml" \
@@ -192,7 +195,7 @@ printf '#!/bin/sh\n# ContextBridge managed cb alias\nexec "$(dirname -- "$0")/co
 printf '#!/bin/sh\nprintf foreign-cb\n' > "$shadowed/foreign/cb"
 chmod +x "$shadowed/bin/cb" "$shadowed/foreign/cb"
 HOME="$shadowed/home" \
-  PATH="$shadowed/foreign:$shadowed/bin:$fake_bin:$PATH" \
+  PATH="$shadowed/foreign:$shadowed/bin:$fake_bin:$test_system_path" \
   CONTEXTBRIDGE_HOME="$shadowed/share" \
   CONTEXTBRIDGE_BIN_DIR="$shadowed/bin" \
   CONTEXTBRIDGE_CONFIG="$shadowed/config.yml" \
@@ -212,7 +215,7 @@ mkdir -p "$symlink_case/home/dotfiles"
 printf '# linked user zsh setting\n' > "$symlink_case/home/dotfiles/zshrc"
 if ln -s dotfiles/zshrc "$symlink_case/home/.zshrc" 2>/dev/null && test -L "$symlink_case/home/.zshrc"; then
   HOME="$symlink_case/home" \
-    PATH="$fake_bin:$PATH" \
+    PATH="$fake_bin:$test_system_path" \
     CONTEXTBRIDGE_HOME="$symlink_case/share" \
     CONTEXTBRIDGE_BIN_DIR="$symlink_case/bin" \
     CONTEXTBRIDGE_CONFIG="$symlink_case/config.yml" \
@@ -237,7 +240,7 @@ for malformed_kind in reversed duplicate unclosed; do
   esac
   malformed_checksum="$(cksum < "$malformed/home/.zshrc")"
   HOME="$malformed/home" \
-    PATH="$fake_bin:$PATH" \
+    PATH="$fake_bin:$test_system_path" \
     CONTEXTBRIDGE_HOME="$malformed/share" \
     CONTEXTBRIDGE_BIN_DIR="$malformed/bin" \
     CONTEXTBRIDGE_CONFIG="$malformed/config.yml" \
@@ -259,7 +262,7 @@ chmod +x "$completion_failure/bin/cb"
 printf '# ContextBridge managed completion\ncomplete -F _contextbridge_complete contextbridge cb\n' > "$completion_failure/home/.local/share/bash-completion/completions/cb"
 printf '#compdef contextbridge cb\n# ContextBridge managed completion\n' > "$completion_failure/home/.zfunc/_cb"
 HOME="$completion_failure/home" \
-  PATH="$completion_failure/bin:$fake_bin:$PATH" \
+  PATH="$completion_failure/bin:$fake_bin:$test_system_path" \
   CONTEXTBRIDGE_HOME="$completion_failure/share" \
   CONTEXTBRIDGE_BIN_DIR="$completion_failure/bin" \
   CONTEXTBRIDGE_CONFIG="$completion_failure/config.yml" \
@@ -278,7 +281,7 @@ grep -F -- 'Shell completion could not be installed; ContextBridge itself is rea
 missing_relay="$test_root/missing-relay"
 mkdir -p "$missing_relay/home"
 if HOME="$missing_relay/home" \
-  PATH="$fake_bin:$PATH" \
+  PATH="$fake_bin:$test_system_path" \
   CONTEXTBRIDGE_HOME="$missing_relay/share" \
   CONTEXTBRIDGE_BIN_DIR="$missing_relay/bin" \
   CONTEXTBRIDGE_CONFIG="$missing_relay/config.yml" \
@@ -297,7 +300,7 @@ test ! -e "$missing_relay/bin/contextbridge"
 unsafe_relay="$test_root/unsafe-relay"
 mkdir -p "$unsafe_relay/home"
 if HOME="$unsafe_relay/home" \
-  PATH="$fake_bin:$PATH" \
+  PATH="$fake_bin:$test_system_path" \
   CONTEXTBRIDGE_HOME="$unsafe_relay/share" \
   CONTEXTBRIDGE_BIN_DIR="$unsafe_relay/bin" \
   CONTEXTBRIDGE_CONFIG="$unsafe_relay/config.yml" \

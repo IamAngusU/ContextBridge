@@ -46,4 +46,13 @@ func TestValidateRequirementsRejectsUnsafeRoutingLabels(t *testing.T) {
 	if err := relay.validateRequirements(nonBrowser); err == nil {
 		t.Fatal("browser profile was accepted for a non-browser provider")
 	}
+	nonBrowser = Requirements{Task: "generation", Provider: "ollama", BrowserFreshChat: true}
+	if err := relay.validateRequirements(nonBrowser); err == nil {
+		t.Fatal("fresh browser chat was accepted for a non-browser provider")
+	}
+	ephemeralWithoutFresh := valid
+	ephemeralWithoutFresh.BrowserEphemeralChat = true
+	if err := relay.validateRequirements(ephemeralWithoutFresh); err == nil {
+		t.Fatal("ephemeral browser chat was accepted without fresh-chat routing")
+	}
 }

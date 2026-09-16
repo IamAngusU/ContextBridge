@@ -217,7 +217,7 @@ func TestFairQueueCursorPreventsRepeatedOneSlotStarvation(t *testing.T) {
 		{id: "a1", owner: "owner-a"}, {id: "a2", owner: "owner-a"}, {id: "a3", owner: "owner-a"},
 		{id: "b1", owner: "owner-b"},
 	} {
-		if _, err := store.CreateJob(SubmitRequest{ID: item.id, OwnerSubject: item.owner, Priority: 10, Payload: json.RawMessage(`{}`)}); err != nil {
+		if _, err := store.CreateJob(SubmitRequest{ID: item.id, OwnerSubject: item.owner, Priority: 10, Requirements: Requirements{Provider: "ollama"}, Payload: json.RawMessage(`{}`)}); err != nil {
 			t.Fatal(err)
 		}
 	}

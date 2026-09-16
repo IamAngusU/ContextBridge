@@ -27,7 +27,12 @@ One BoltDB relay is a single durable coordination process, not an active-active 
 
 ### Source adapters
 
-Sources submit the common job envelope through authenticated HTTP, stdin, or an inbox folder. The source owns database, website, and SSH credentials. ContextBridge does not need them.
+Sources submit the common job envelope through authenticated HTTP, stdin, an
+inbox folder, or the bounded local MCP stdio adapter. The adapter is a child of
+the MCP host and proxies only status, submit, and result calls to the same
+authenticated loopback API; it is not a second router or authorization system.
+The source owns database, website, and SSH credentials. ContextBridge does not
+need them.
 
 ### Local service
 
@@ -37,7 +42,7 @@ The Go service listens on localhost, validates job size and shape, selects a rou
 
 The runtime samples hardware capabilities, inspects Ollama, supervises configured `llama.cpp` processes, and publishes one status snapshot to the CLI and dashboard. Engines bind to localhost. Ordered route fallbacks determine which engine is tried next.
 
-The Ollama provider sends a trusted task wrapper and optional image to a configured local model. The `llama_cpp` provider uses the local OpenAI-compatible chat and embedding endpoints. The browser provider leases work to selected extension tabs. Hosted web-chat inference still runs at that provider; the extension replaces a separate API integration, not the provider's compute. A cluster can route parallel browser jobs across several tabs on one PC and across multiple paired PCs.
+The Ollama provider sends a trusted task wrapper and optional image to a configured local model. The `llama_cpp` provider uses the local OpenAI-compatible chat and embedding endpoints. The browser provider leases work to selected extension tabs. Each worker publishes a bounded per-tab record of profile, state, visible current selection, model choices, reasoning levels, fresh-chat capability, and—only for clustered sessions with a permanent saved conversation—an opaque producer-scoped selector. Chat text, tab titles, public session names, and conversation URLs are excluded, and public node responses redact the selector. When a browser job fixes both profile and model, one ready waiting tab or exact matching owned session must satisfy both instead of the scheduler combining evidence from different tabs on the same node. Hosted web-chat inference still runs at that provider; the extension replaces a separate API integration, not the provider's compute. A cluster can route parallel browser jobs across several tabs on one PC and across multiple paired PCs.
 
 GPU policy is explicit. `prefer` attempts full offload and records a visible CPU fallback warning. `require` fails the engine when GPU startup fails. `off` starts on CPU. ContextBridge does not report an engine as GPU-backed merely because a GPU exists.
 
@@ -63,7 +68,7 @@ semaphore.
 
 ### Browser worker
 
-The extension holds explicitly attached tab IDs, origin grants, visual profiles, provider cooldowns, and private session-to-tab affinity in local extension storage. Optional fresh-tab discovery verifies the URL and an empty composer/conversation twice before attachment; existing or uncertain chats fail closed. Detaching removes a tab from future leases, though work already submitted to a website cannot be unsent. Every tab is a serial slot, while tabs operate concurrently. It receives leased jobs, applies an explicit model/reasoning choice when requested, writes the trusted prompt, and observes response DOM plus send/stop controls. Gemini's mode choices are read from its live picker rather than a fixed catalog. Image loaders and percentages remain progress; visible rate limits/errors become failures; a stable response with an idle composer becomes the final answer. Navigation reattaches to the in-flight conversation without resubmitting, and a generation stuck at 95% or above receives one controlled reload/recovery attempt.
+The extension holds explicitly attached tab IDs, origin grants, visual profiles, provider cooldowns, and private session-to-tab/URL affinity in local extension storage. Optional fresh-tab discovery verifies the URL and an empty composer/conversation twice before attachment; existing or uncertain chats fail closed. Detaching removes a tab from future leases, though work already submitted to a website cannot be unsent. Every tab is a serial slot, while tabs operate concurrently. A completed browser job reports its actual execution tab to correct relay affinity. If a saved conversation is reopened elsewhere, bounded opaque telemetry lets the relay choose the candidate while the exact URL proof remains local. It receives leased jobs, applies an explicit model/reasoning choice when requested, writes the trusted prompt, and observes response DOM plus send/stop controls. Gemini's mode choices are read from its live picker rather than a fixed catalog. Image loaders and percentages remain progress; visible rate limits/errors become failures; a stable response with an idle composer becomes the final answer. Navigation reattaches to the in-flight conversation without resubmitting, and a generation stuck at 95% or above receives one controlled reload/recovery attempt.
 
 ### Storage
 
@@ -84,7 +89,7 @@ reserve a requested amount of RAM per job.
 
 Cluster state uses a separate BoltDB file with owner-only permissions. Jobs have an owner subject derived from the producer token. Producer list, read, and cancel operations are filtered by that subject. Group scopes are enforced both when a producer submits work and when a worker advertises capabilities.
 
-Relay retention runs once during startup and periodically while the dispatcher is active. In one Bolt write transaction it removes only exact terminal job and pipeline-run states plus old/excess event rows. A terminal job's payload, result or sealed envelopes, time index, and any defensive queue entry are removed together; active and unrecognized states fail safe and remain. The newest configured count is retained only while it is also within the configured age, so age and count are independent upper bounds. Before deletion, the summary fields already exposed by the lifetime overview are added to a separate cumulative record. Node compute/cost counters remain sourced from cumulative node records and are not rewritten. Freed Bolt pages are reusable; retention bounds continued detail growth after the database high-water mark but is not an online file-compaction operation.
+Relay retention runs once during startup and periodically while the dispatcher is active. In one Bolt write transaction it removes only exact terminal job and pipeline-run states plus old/excess event rows and old/excess opaque session placements. A terminal job's payload, result or sealed envelopes, time index, and any defensive queue entry are removed together; active and unrecognized states fail safe and remain. The placement cache contains only a hashed owner/session/scope key, node ID, optional browser tab ID, and update time; it has its own configured count and shares the configured age. The newest configured count is retained only while it is also within age, so age and count are independent upper bounds. Before job deletion, summary fields already exposed by the lifetime overview are added to a separate cumulative record. Node compute/cost counters remain sourced from cumulative node records and are not rewritten. Freed Bolt pages are reusable; retention bounds continued detail growth after the database high-water mark but is not an online file-compaction operation.
 
 ### Pipeline runner
 

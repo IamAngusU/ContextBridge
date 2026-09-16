@@ -145,6 +145,7 @@ type ClusterRelay struct {
 	MaxTerminalJobs         int      `yaml:"max_terminal_jobs" json:"max_terminal_jobs"`
 	MaxEvents               int      `yaml:"max_events" json:"max_events"`
 	MaxTerminalPipelineRuns int      `yaml:"max_terminal_pipeline_runs" json:"max_terminal_pipeline_runs"`
+	MaxSessionPlacements    int      `yaml:"max_session_placements" json:"max_session_placements"`
 	RetentionSweepSeconds   int      `yaml:"retention_sweep_seconds" json:"retention_sweep_seconds"`
 }
 
@@ -341,6 +342,9 @@ func (c Config) Validate() error {
 	if c.Cluster.Relay.MaxTerminalPipelineRuns < 1 || c.Cluster.Relay.MaxTerminalPipelineRuns > cluster.MaximumRetainedTerminalPipelineRuns {
 		return fmt.Errorf("cluster.relay.max_terminal_pipeline_runs must be between 1 and %d", cluster.MaximumRetainedTerminalPipelineRuns)
 	}
+	if c.Cluster.Relay.MaxSessionPlacements < 1 || c.Cluster.Relay.MaxSessionPlacements > cluster.MaximumRetainedSessionPlacements {
+		return fmt.Errorf("cluster.relay.max_session_placements must be between 1 and %d", cluster.MaximumRetainedSessionPlacements)
+	}
 	if c.Cluster.Relay.RetentionSweepSeconds < cluster.MinimumRetentionSweepSeconds || c.Cluster.Relay.RetentionSweepSeconds > cluster.MaximumRetentionSweepSeconds {
 		return fmt.Errorf("cluster.relay.retention_sweep_seconds must be between %d and %d", cluster.MinimumRetentionSweepSeconds, cluster.MaximumRetentionSweepSeconds)
 	}
@@ -524,6 +528,9 @@ func applyDefaults(cfg *Config, base string) {
 	}
 	if cfg.Cluster.Relay.MaxTerminalPipelineRuns == 0 {
 		cfg.Cluster.Relay.MaxTerminalPipelineRuns = cluster.DefaultMaxTerminalPipelineRuns
+	}
+	if cfg.Cluster.Relay.MaxSessionPlacements == 0 {
+		cfg.Cluster.Relay.MaxSessionPlacements = cluster.DefaultMaxSessionPlacements
 	}
 	if cfg.Cluster.Relay.RetentionSweepSeconds == 0 {
 		cfg.Cluster.Relay.RetentionSweepSeconds = cluster.DefaultRetentionSweepSeconds
@@ -726,6 +733,7 @@ cluster:
     max_terminal_jobs: 500
     max_events: 5000
     max_terminal_pipeline_runs: 200
+    max_session_placements: 5000
     retention_sweep_seconds: 300
   worker:
     enabled: false

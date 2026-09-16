@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -66,7 +67,11 @@ func TestWorkerRelayParallelCapacityEndToEnd(t *testing.T) {
 			started <- struct{}{}
 			<-release
 			running.Add(-1)
-			writeJSON(w, http.StatusOK, map[string]interface{}{"mode": "text", "text": "ok", "model": "browser-tab"})
+			writeJSON(w, http.StatusOK, map[string]interface{}{
+				"job":    map[string]interface{}{"id": payload.ID},
+				"output": map[string]interface{}{"mode": "text", "text": "ok", "model": "browser-tab"},
+				"status": "completed",
+			})
 		default:
 			if strings.HasPrefix(req.URL.Path, "/v1/browser/jobs/") && strings.HasSuffix(req.URL.Path, "/progress") {
 				writeJSON(w, http.StatusOK, JobProgress{Sequence: 1, Text: "working", Phase: "generating", Busy: true})
@@ -114,7 +119,7 @@ func TestWorkerRelayParallelCapacityEndToEnd(t *testing.T) {
 	jobs := make([]Job, 0, 3)
 	for index := 0; index < 3; index++ {
 		job, createErr := relay.store.CreateJob(SubmitRequest{
-			Requirements: Requirements{Task: "generation", Provider: "browser"},
+			Requirements: Requirements{Task: "generation", Provider: "browser", SessionID: fmt.Sprintf("parallel-%d", index)},
 			Payload:      json.RawMessage(`{"route":"default","prompt":"parallel","output":{"mode":"text"}}`),
 		})
 		if createErr != nil {

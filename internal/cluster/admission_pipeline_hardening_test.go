@@ -66,7 +66,7 @@ func TestReservationAdmissionGCAndOwnerBinding(t *testing.T) {
 	defer store.Close()
 
 	newAssignment := func(id, job string, expires time.Time) Assignment {
-		return Assignment{ID: id, JobID: job, NodeID: "node-a", ExpiresAt: expires, Requirements: Requirements{Task: "generation"}}
+		return Assignment{ID: id, JobID: job, NodeID: "node-a", ExpiresAt: expires, Requirements: Requirements{Task: "generation", SessionID: id}}
 	}
 	now := time.Now().UTC()
 	if err := store.CreateReservationAdmitted(newAssignment("assignment-a1", "job-a1", now.Add(time.Minute)), "secret-a1", "owner-a", 3, 2); err != nil {
@@ -129,9 +129,10 @@ func TestAtomicPerOwnerReservationAdmission(t *testing.T) {
 			defer wait.Done()
 			<-start
 			assignment := Assignment{
-				ID:        fmt.Sprintf("assignment-owner-%d", index),
-				JobID:     fmt.Sprintf("job-owner-%d", index),
-				ExpiresAt: time.Now().UTC().Add(time.Minute),
+				ID:           fmt.Sprintf("assignment-owner-%d", index),
+				JobID:        fmt.Sprintf("job-owner-%d", index),
+				ExpiresAt:    time.Now().UTC().Add(time.Minute),
+				Requirements: Requirements{SessionID: fmt.Sprintf("session-owner-%d", index)},
 			}
 			createErr := store.CreateReservationAdmitted(assignment, fmt.Sprintf("secret-%d", index), "one-owner", 100, ownerCapacity)
 			switch {

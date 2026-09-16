@@ -145,11 +145,7 @@ func (ss *scheduleStore) persistLocked() error {
 	if err != nil {
 		return err
 	}
-	tmp := ss.path + ".tmp"
-	if err := os.WriteFile(tmp, append(raw, '\n'), 0600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, ss.path)
+	return writeScheduleFileAtomic(ss.path, append(raw, '\n'))
 }
 
 func (ss *scheduleStore) list() []Schedule {

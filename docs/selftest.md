@@ -43,9 +43,13 @@ To test only local compute without contacting a browser provider:
 cb selftest --providers local --run
 ```
 
-The smallest compatible loaded Ollama generation model is preferred. If none
-is loaded, the smallest compatible available model is selected and may load on
-demand. Pin an intentional model with `--local-model MODEL`.
+The smallest provider-verified compatible loaded Ollama generation model is
+preferred. If none is loaded, the smallest provider-verified compatible
+available model is selected and may load on demand. ContextBridge does not infer
+a schedulable task from a model name. Pin an intentional model with
+`--local-model MODEL`; this is an operator override for an older Ollama daemon
+that can prove availability but cannot publish capabilities, while verified
+incompatible evidence is still rejected.
 
 ## Explicit image proof
 

@@ -49,7 +49,7 @@ consequential action. Visual profile YAML cannot replace or disable the
 wrapper. See
 [Browser sessions and prompt contracts](browser-sessions-and-prompts.de-en.md).
 
-For browser jobs, `session_id` pins follow-ups to one selected conversation. The worker namespaces it by authenticated producer; distinct keys cannot reuse an occupied chat. With no ID, jobs from one producer share its default session. A new session requires an unassigned attached tab unless the extension is set to create a new chat tab or `metadata.contextbridge_new_chat: true` is set on that job. The extension can also be set to open a fresh chat for every job, or an individual job can request this with `metadata.contextbridge_new_chat_per_job: true`. Per-job mode intentionally prevents conversation follow-ups; use per-session mode for multi-step exchanges. Completed, ContextBridge-created per-job tabs may be closed after a two-minute idle grace period if the user enables the opt-in popup switch. `metadata.contextbridge_close_tab_after_job: true` requests the same guarded cleanup for one explicitly auto-created job tab. Manual switching requires navigating to the saved conversation URL; a moved tab fails before Send. `browser_profile` selects a provider tab such as `chatgpt` or `gemini`; `model` and `reasoning` are matched against that provider's localized visible menus. These fields are bounded preferences: an unavailable explicit choice is an error, never a silent substitution.
+For browser jobs, `session_id` pins follow-ups to one selected conversation. The worker namespaces it by authenticated producer; distinct keys cannot reuse an occupied chat. With no ID, jobs from one producer share its default session. A new session requires an unassigned attached tab unless the extension is set to create a new chat tab or `metadata.contextbridge_new_chat: true` is set on that job. Cluster producers must additionally set `requirements.browser_fresh_chat: true`, because the relay cannot inspect an E2EE payload to discover that metadata; `cluster chat --new-chat` does both. The extension can also be set to open a fresh chat for every job, or an individual job can request this with `metadata.contextbridge_new_chat_per_job: true` plus authenticated `requirements.browser_ephemeral_chat: true`; `cluster chat --new-chat-per-job` sets the complete pair. Ephemeral requires fresh. Per-job mode intentionally prevents conversation follow-ups; use per-session mode for multi-step exchanges. Completed, ContextBridge-created per-job tabs may be closed after a two-minute idle grace period if the user enables the opt-in popup switch. `metadata.contextbridge_close_tab_after_job: true` requests the same guarded cleanup for one explicitly auto-created job tab. Manual switching requires navigating to the saved conversation URL; a moved tab fails before Send. `browser_profile` selects a provider tab such as `chatgpt` or `gemini`; `model` and `reasoning` are matched against that provider's localized visible menus. These fields are bounded preferences: an unavailable explicit choice is an error, never a silent substitution.
 
 ```json
 {
@@ -124,6 +124,14 @@ field. `sequence` is monotonic, `text` contains at most 1 MB of UTF-8, and
 
 A browser result can opt in with `output.artifacts: true`. Up to twelve images, audio/video files, download links, or code blocks from the newly completed turn are accepted. Embedded decoded bytes share a maximum 12 MiB budget; the exact limit is accepted and one byte beyond it is rejected. The local service recomputes size and SHA-256 rather than trusting browser metadata. Protected HTTPS assets may remain authenticated browser references. `output.min_artifacts` requires 1–12 transferred files of any supported type; `output.min_images` requires transferred image files whose decoded bytes match the declared image type; `output.min_media` requires transferred audio/video files with matching file signatures. All requirements accept 1–12 files. References, generated code blocks, and textual claims do not satisfy an image or media requirement. An image-generation prompt does not require selecting a special browser tool; `metadata.contextbridge_image_tool: true` is an optional explicit ChatGPT UI selection. `metadata.contextbridge_music_tool: true` selects Gemini's visible Music tool, with `output.min_media: 1` recommended. This requires explicit access to Gemini's media host on the browser connection and may yield an MP4 player file rather than a standalone audio file.
 
+Scheduled workflows may pass the immediately preceding step's embedded image
+bytes into a browser, Ollama, or llama.cpp follow-up. ContextBridge decodes the
+bytes, verifies their signature, recomputes decoded size and SHA-256, binds the
+handoff to the schedule/session and source job in metadata, and enforces the
+8 MiB image-input bound. It never fetches a URL-only artifact for this purpose.
+Local-model handoff is image-only and fails closed when image input is disabled;
+general files remain browser-only.
+
 For a visual input, set `image_base64` and `image_media_type` alongside the prompt. One decoded image may contain up to exactly 8 MiB; empty inputs and inputs one byte over the limit are rejected before dispatch. The extension uploads the image through the provider's file input even when that input is visually hidden, then submits the prompt text. Local selector diagnostics are available via `contextbridge browser inspect`; the browser heartbeat reports bounded control attributes and counts only, never prompt values, answer text, files, cookies, or full HTML. These diagnostics remain on the local bridge and are not forwarded to the cluster relay.
 
 ## Tunnel Status Endpoint
@@ -173,7 +181,7 @@ Cluster endpoints use separate admin, observer, producer, and node bearer creden
 | `GET` | `/v1/cluster/workers/connect` | Node | Upgrade to the worker WebSocket |
 | `POST` | `/v1/cluster/pipelines/{name}/run` | Admin, producer | Start a declared pipeline |
 
-Detailed terminal records are subject to relay retention. By default a startup and five-minute periodic sweep keeps only terminal jobs from the last 30 days (at most 500), events from the last 30 days (at most 5,000), and terminal pipeline runs from the last 30 days (at most 200). Age and count are both upper bounds. Active or unrecognized lifecycle states are never swept. Once detail is pruned, its job or pipeline-run endpoint returns not found and its prompt, result, sealed envelopes, and per-record ownership metadata are no longer available; aggregate lifetime counts remain available from `/v1/cluster/overview`. Configure the guarded limits with `cluster.relay.retention_days`, `max_terminal_jobs`, `max_events`, `max_terminal_pipeline_runs`, and `retention_sweep_seconds`.
+Detailed terminal records and opaque session placements are subject to relay retention. By default a startup and five-minute periodic sweep keeps only terminal jobs from the last 30 days (at most 500), events from the last 30 days (at most 5,000), terminal pipeline runs from the last 30 days (at most 200), and pseudonymous session placements from the last 30 days (at most 5,000). Age and count are both upper bounds. Active or unrecognized lifecycle states are never swept. Once detail is pruned, its job or pipeline-run endpoint returns not found and its prompt, result, sealed envelopes, and per-record ownership metadata are no longer available; an expired/excess placement loses its cached node/tab affinity but may still be rediscovered from live opaque browser evidence. Aggregate lifetime counts remain available from `/v1/cluster/overview`. Configure the guarded limits with `cluster.relay.retention_days`, `max_terminal_jobs`, `max_events`, `max_terminal_pipeline_runs`, `max_session_placements`, and `retention_sweep_seconds`.
 
 A cluster job contains routing metadata and one local ContextBridge job as its payload:
 
@@ -214,11 +222,34 @@ an incompatible or missing fixed model is never upgraded by a generic fallback,
 and all requested properties (for example `task: vision`) must be satisfied by
 the same model on the selected provider.
 
+Browser workers additionally report bounded `browser_sessions`. A session may
+include its provider profile, waiting/working state, visible current model and
+reasoning, capped model/reasoning choice labels, whether that origin can create
+a fresh chat, and an optional producer-scoped opaque session selector. It never
+includes chat content, a tab title, a conversation URL, or a public session
+name. The selector is accepted only in the fixed `cb:` plus SHA-256 form and is
+removed from `/v1/cluster/nodes` responses; it is routing evidence internal to
+the relay. New schedulers require one ready waiting session or the exact
+matching owned session to jointly satisfy an explicit browser profile and
+model; a node-wide model union cannot make a Gemini slot satisfy a ChatGPT
+request. Current-model-only telemetry and older workers without per-session
+choices retain a conservative compatibility path.
+
+The relay stores the concrete tab reported by the worker after execution, not
+merely the tab it predicted before the lease. On a later turn, a matching live
+opaque selector outranks stale numeric tab placement on that same worker. The
+extension still rechecks its private exact saved URL immediately before Send;
+duplicate selector claims fail closed. If no live selector exists, recovery may
+use an unpinned waiting tab on the same worker so the extension can prove the
+saved URL locally. A fresh-chat launcher is allowed only for ChatGPT/Gemini,
+with matching host permission and fewer than 16 attached tabs.
+
 For a provider-specific browser job, also set
 `requirements.browser_profile` to `chatgpt`, `gemini`, or the exact learned
 profile name and repeat the value in the local job payload's
 `browser_profile`. The requirement is a hard scheduler filter: a node without
-an attached waiting tab of that profile is not eligible. `cluster chat
+an attached ready waiting tab or exact matching owned session of that profile
+is not eligible. `cluster chat
 --profile` and `cluster selftest` set both fields automatically. A browser
 profile is rejected with any provider other than `browser`.
 
@@ -239,6 +270,10 @@ requirements (including `session_id`), selected node, job ID, and first
 assignment attempt. A producer must reject a response that changes an
 explicitly requested value before encrypting; the only server-filled routing
 value is a blank group when the producer token authorizes exactly one group.
+An exact browser-tab reservation is therefore intentionally not relocatable
+after sealing. If the tab or worker changes, the producer must make a new
+reservation and encrypt a new submission rather than silently retargeting the
+existing ciphertext.
 
 Worker WebSocket protocol version 2 carries the assignment `attempt` on
 `started`, `progress`, and `result` frames. The relay changes job state only

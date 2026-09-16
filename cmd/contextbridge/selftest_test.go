@@ -101,10 +101,10 @@ func TestBuildSelftestPlanSelectsReadyTargetsAndSmallestLoadedModel(t *testing.T
 				"browser": {"generation"},
 			},
 			Models: []cluster.ModelCapability{
-				{Name: "huge", Provider: "ollama", Tasks: []string{"generation"}, Loaded: true, Size: 20 << 30},
-				{Name: "small", Provider: "ollama", Tasks: []string{"generation"}, Loaded: true, Size: 2 << 30},
-				{Name: "tiny-cold", Provider: "ollama", Tasks: []string{"generation"}, Size: 1 << 30},
-				{Name: "embed", Provider: "ollama", Tasks: []string{"embedding"}, Loaded: true},
+				{Name: "huge", Provider: "ollama", Tasks: []string{"generation"}, Available: true, Loaded: true, CapabilitiesVerified: true, Size: 20 << 30},
+				{Name: "small", Provider: "ollama", Tasks: []string{"generation"}, Available: true, Loaded: true, CapabilitiesVerified: true, Size: 2 << 30},
+				{Name: "tiny-cold", Provider: "ollama", Tasks: []string{"generation"}, Available: true, CapabilitiesVerified: true, Size: 1 << 30},
+				{Name: "embed", Provider: "ollama", Tasks: []string{"embedding"}, Available: true, Loaded: true, CapabilitiesVerified: true},
 			},
 			BrowserSessions: []cluster.BrowserSessionCapability{
 				{Profile: "chatgpt", State: "waiting"},
@@ -121,6 +121,25 @@ func TestBuildSelftestPlanSelectsReadyTargetsAndSmallestLoadedModel(t *testing.T
 	}
 	if plan.Targets[0].Running != 0 || plan.Targets[0].Capacity != 4 {
 		t.Fatalf("local capacity metrics = %#v", plan.Targets[0])
+	}
+}
+
+func TestBuildSelftestPlanRequiresVerifiedAutomaticOllamaEvidence(t *testing.T) {
+	now := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	node := cluster.Node{ID: "node-a", Name: "Legacy", Connected: true, LastSeen: now, Capabilities: cluster.Capabilities{
+		MaxConcurrent: 1, Providers: []string{"ollama"}, AutomaticTasks: map[string][]string{"ollama": {"generation"}},
+		Models: []cluster.ModelCapability{{
+			Name: "legacy", Provider: "ollama", Tasks: []string{"generation"}, Available: true,
+			CapabilitySource: "name_inference",
+		}},
+	}}
+	plan := buildSelftestPlanAt(now, []cluster.Node{node}, []string{selftestLocal}, "")
+	if len(plan.Targets) != 0 || len(plan.Missing) != 1 || !strings.Contains(plan.Missing[0], "no generation model") {
+		t.Fatalf("automatic self-test trusted unverified model evidence: %#v", plan)
+	}
+	plan = buildSelftestPlanAt(now, []cluster.Node{node}, []string{selftestLocal}, "legacy")
+	if len(plan.Targets) != 1 || len(plan.Missing) != 0 {
+		t.Fatalf("explicit available legacy model was not honored: %#v", plan)
 	}
 }
 
@@ -155,7 +174,7 @@ func TestBuildSelftestPlanRejectsRateLimitedTabAndEmbeddingOnlyModel(t *testing.
 		ID: "node-a", Name: "Worker", Connected: true, LastSeen: now,
 		Capabilities: cluster.Capabilities{
 			MaxConcurrent: 2, Providers: []string{"ollama", "browser"},
-			Models:          []cluster.ModelCapability{{Name: "embed", Provider: "ollama", Tasks: []string{"embedding"}, Loaded: true}},
+			Models:          []cluster.ModelCapability{{Name: "embed", Provider: "ollama", Tasks: []string{"embedding"}, Available: true, Loaded: true, CapabilitiesVerified: true}},
 			BrowserSessions: []cluster.BrowserSessionCapability{{Profile: "gemini", State: "rate_limited"}},
 		},
 	}}
@@ -255,7 +274,7 @@ func TestBuildSelftestPlanPrefersFreshBlockingReasonOverStaleSnapshot(t *testing
 		Capabilities: cluster.Capabilities{
 			MaxConcurrent: 2,
 			Providers:     []string{"ollama", "browser"},
-			Models:        []cluster.ModelCapability{{Name: "generation", Provider: "ollama", Tasks: []string{"generation"}}},
+			Models:        []cluster.ModelCapability{{Name: "generation", Provider: "ollama", Tasks: []string{"generation"}, Available: true, CapabilitiesVerified: true}},
 			BrowserSessions: []cluster.BrowserSessionCapability{
 				{Profile: "chatgpt", State: "waiting"},
 				{Profile: "gemini", State: "waiting"},
@@ -272,14 +291,14 @@ func TestBuildSelftestPlanPrefersFreshBlockingReasonOverStaleSnapshot(t *testing
 			name: "compatible local capacity is busy", kind: selftestLocal, want: "slots are busy",
 			fresh: cluster.Node{ID: "fresh-local-busy", Connected: true, LastSeen: now, Capabilities: cluster.Capabilities{
 				MaxConcurrent: 1, Running: 1, Providers: []string{"ollama"},
-				Models: []cluster.ModelCapability{{Name: "generation", Provider: "ollama", Tasks: []string{"generation"}}},
+				Models: []cluster.ModelCapability{{Name: "generation", Provider: "ollama", Tasks: []string{"generation"}, Available: true, CapabilitiesVerified: true}},
 			}},
 		},
 		{
 			name: "local provider lacks generation model", kind: selftestLocal, want: "no generation model",
 			fresh: cluster.Node{ID: "fresh-local-embed", Connected: true, LastSeen: now, Capabilities: cluster.Capabilities{
 				MaxConcurrent: 1, Providers: []string{"ollama"},
-				Models: []cluster.ModelCapability{{Name: "embed", Provider: "ollama", Tasks: []string{"embedding"}}},
+				Models: []cluster.ModelCapability{{Name: "embed", Provider: "ollama", Tasks: []string{"embedding"}, Available: true, CapabilitiesVerified: true}},
 			}},
 		},
 		{
@@ -321,6 +340,9 @@ func TestSelftestBrowserJobAlwaysUsesFreshPerJobConversation(t *testing.T) {
 	}
 	if request.Requirements.BrowserProfile != "chatgpt" {
 		t.Fatalf("browser profile is not a hard scheduler requirement: %#v", request.Requirements)
+	}
+	if !request.Requirements.BrowserFreshChat || !request.Requirements.BrowserEphemeralChat {
+		t.Fatalf("self-test fresh per-job policy is not visible to the relay scheduler: %#v", request.Requirements)
 	}
 	if job.Metadata["contextbridge_new_chat"] != true || job.Metadata["contextbridge_new_chat_per_job"] != true {
 		t.Fatalf("self-test could reuse a personal chat: %#v", job.Metadata)

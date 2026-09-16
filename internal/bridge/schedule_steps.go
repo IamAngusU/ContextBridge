@@ -59,21 +59,32 @@ func artifactNames(artifacts []Artifact) string {
 }
 
 func verifiedPreviousArtifact(previous Output, kind string) (Artifact, error) {
+	if kind != "image" && kind != "file" {
+		return Artifact{}, errors.New("previous artifact kind must be image or file")
+	}
 	for _, item := range previous.Artifacts {
-		if kind == "image" && !strings.HasPrefix(item.MediaType, "image/") {
+		mediaType := strings.ToLower(strings.TrimSpace(item.MediaType))
+		if kind == "image" && !strings.HasPrefix(mediaType, "image/") {
 			continue
 		}
 		if item.DataBase64 == "" {
 			continue // A URL alone is not a transferable file.
 		}
 		decoded, err := base64.StdEncoding.DecodeString(item.DataBase64)
-		if err != nil || len(decoded) == 0 || len(decoded) > 8<<20 || !artifactBytesMatchMediaType(decoded, item.MediaType) {
+		if err != nil || len(decoded) == 0 || len(decoded) > 8<<20 || !artifactBytesMatchMediaType(decoded, mediaType) {
 			continue
 		}
 		digest := sha256.Sum256(decoded)
-		if item.SHA256 == "" || !strings.EqualFold(item.SHA256, hex.EncodeToString(digest[:])) {
+		canonicalDigest := hex.EncodeToString(digest[:])
+		if item.SHA256 == "" || !strings.EqualFold(item.SHA256, canonicalDigest) {
 			continue
 		}
+		// The previous provider controls its JSON fields. Preserve only values
+		// verified from the embedded bytes and normalize away an unrelated URL.
+		item.MediaType = mediaType
+		item.Size = len(decoded)
+		item.SHA256 = canonicalDigest
+		item.URL = ""
 		return item, nil
 	}
 	return Artifact{}, fmt.Errorf("no verified %s bytes in the previous result; next step was not sent", kind)
@@ -87,6 +98,10 @@ func (s *Server) nextScheduleStep(base Job, step ScheduleStep, index int, previo
 	if job.SessionID == "" {
 		job.SessionID = base.SessionID
 	}
+	if routeTask := strings.TrimSpace(s.cfg.Route(job.Route).Task); routeTask != "" {
+		job.Task = routeTask
+	}
+	applyTaskOutput(&job, s.cfg.Route(job.Route).Task)
 	metadata := make(map[string]interface{}, len(job.Metadata)+3)
 	for key, value := range job.Metadata {
 		metadata[key] = value
@@ -118,15 +133,40 @@ func (s *Server) nextScheduleStep(base Job, step ScheduleStep, index int, previo
 			provider = job.Provider
 		}
 		engine, ok := s.cfg.Engine(provider)
-		if !ok || engine.Type != "browser" {
-			return Job{}, errors.New("artifact handoff requires a browser provider; next step was not sent")
+		if !ok {
+			return Job{}, errors.New("artifact handoff provider is unavailable; next step was not sent")
 		}
-		if step.UsePreviousArtifact == "image" {
-			job.ImageBase64, job.ImageMediaType = artifact.DataBase64, artifact.MediaType
-		} else {
-			metadata["contextbridge_input_file"] = map[string]string{
-				"name": artifact.Name, "media_type": artifact.MediaType, "data_base64": artifact.DataBase64,
+		// Artifact contracts are provider-specific. Pin the verified provider so
+		// a route fallback cannot succeed without receiving the carried bytes.
+		job.Provider = provider
+		sourceJobID := base.ID
+		if index > 1 {
+			sourceJobID = fmt.Sprintf("%s-step-%d", base.ID, index)
+		}
+		metadata["contextbridge_input_artifact"] = map[string]interface{}{
+			"name": artifact.Name, "media_type": artifact.MediaType, "size": artifact.Size,
+			"sha256": artifact.SHA256, "source_job_id": sourceJobID, "source": "schedule_previous_step",
+		}
+		switch engine.Type {
+		case "browser":
+			if step.UsePreviousArtifact == "image" {
+				job.ImageBase64, job.ImageMediaType = artifact.DataBase64, artifact.MediaType
+			} else {
+				metadata["contextbridge_input_file"] = map[string]string{
+					"name": artifact.Name, "media_type": artifact.MediaType, "data_base64": artifact.DataBase64,
+					"size": fmt.Sprint(artifact.Size), "sha256": artifact.SHA256, "source_job_id": sourceJobID,
+				}
 			}
+		case "ollama", "llama_cpp":
+			if step.UsePreviousArtifact != "image" {
+				return Job{}, errors.New("local model artifact handoff supports verified images only; next step was not sent")
+			}
+			if engine.Type == "ollama" && !s.cfg.Providers.Ollama.Images {
+				return Job{}, errors.New("local Ollama image input is disabled; next step was not sent")
+			}
+			job.ImageBase64, job.ImageMediaType = artifact.DataBase64, artifact.MediaType
+		default:
+			return Job{}, errors.New("artifact handoff provider cannot accept verified image bytes; next step was not sent")
 		}
 	}
 	if err := validateJob(job); err != nil {

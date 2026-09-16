@@ -42,13 +42,16 @@ type EngineStatus struct {
 }
 
 type RuntimeModel struct {
-	Name         string   `json:"name"`
-	Size         int64    `json:"size_bytes,omitempty"`
-	VRAM         int64    `json:"vram_bytes,omitempty"`
-	Affinity     string   `json:"affinity,omitempty"`
-	ExpiresAt    string   `json:"expires_at,omitempty"`
-	Loaded       bool     `json:"loaded"`
-	Capabilities []string `json:"capabilities,omitempty"`
+	Name                 string   `json:"name"`
+	Size                 int64    `json:"size_bytes,omitempty"`
+	VRAM                 int64    `json:"vram_bytes,omitempty"`
+	Affinity             string   `json:"affinity,omitempty"`
+	ExpiresAt            string   `json:"expires_at,omitempty"`
+	Available            bool     `json:"available"`
+	Loaded               bool     `json:"loaded"`
+	Capabilities         []string `json:"capabilities,omitempty"`
+	CapabilitiesVerified bool     `json:"capabilities_verified"`
+	CapabilitySource     string   `json:"capability_source,omitempty"`
 }
 
 type RuntimeManager struct {
@@ -131,9 +134,7 @@ func (m *RuntimeManager) refreshExternalEngines(parent context.Context) {
 	}
 	for name, engine := range engines {
 		if engine.Type == "ollama" {
-			ctx, cancel := context.WithTimeout(parent, 1500*time.Millisecond)
-			status := ollamaStatus(ctx, name, engine)
-			cancel()
+			status := ollamaStatus(parent, name, engine)
 			m.setEngine(status)
 			continue
 		}
@@ -358,17 +359,24 @@ func healthy(parent context.Context, base string) bool {
 
 func ollamaStatus(parent context.Context, name string, engine config.Engine) EngineStatus {
 	status := EngineStatus{Name: name, Type: "ollama", State: "offline", URL: engine.URL, Model: engine.Model, UpdatedAt: time.Now().UTC()}
-	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
-	defer cancel()
 	base := strings.TrimRight(engine.URL, "/")
 	var version struct {
 		Version string `json:"version"`
 	}
-	if !getJSON(ctx, base+"/api/version", &version) {
+	versionCtx, versionCancel := context.WithTimeout(parent, 800*time.Millisecond)
+	versionOK := getJSON(versionCtx, base+"/api/version", &version)
+	versionCancel()
+	if !versionOK {
 		return status
 	}
 	status.State = "online"
 	status.Version = version.Version
+	type evidence struct {
+		digest       string
+		capabilities []string
+		hint         string
+	}
+	evidenceByModel := map[string]evidence{}
 	var cached struct {
 		Models []struct {
 			Name         string   `json:"name"`
@@ -377,13 +385,16 @@ func ollamaStatus(parent context.Context, name string, engine config.Engine) Eng
 			Capabilities []string `json:"capabilities"`
 		} `json:"models"`
 	}
-	if getJSON(ctx, base+"/api/tags", &cached) {
+	tagsCtx, tagsCancel := context.WithTimeout(parent, time.Second)
+	tagsOK := getJSON(tagsCtx, base+"/api/tags", &cached)
+	tagsCancel()
+	if tagsOK {
 		for index, model := range cached.Models {
 			if index >= 256 {
 				break
 			}
-			capabilities := modelregistry.ResolveOllamaCapabilities(ctx, http.DefaultClient, base, model.Name, model.Digest, model.Capabilities, model.Name)
-			status.Models = append(status.Models, RuntimeModel{Name: model.Name, Size: model.Size, Capabilities: capabilities})
+			status.Models = append(status.Models, RuntimeModel{Name: model.Name, Size: model.Size, Available: true})
+			evidenceByModel[strings.ToLower(strings.TrimSpace(model.Name))] = evidence{digest: model.Digest, capabilities: model.Capabilities, hint: model.Name}
 		}
 	}
 	var running struct {
@@ -394,7 +405,13 @@ func ollamaStatus(parent context.Context, name string, engine config.Engine) Eng
 			ExpiresAt string `json:"expires_at"`
 		} `json:"models"`
 	}
-	if getJSON(ctx, base+"/api/ps", &running) {
+	// Loaded-state evidence is latency-sensitive and independent of /api/show.
+	// Read it before capability probes so a slow model cannot erase GPU/CPU and
+	// loaded-model telemetry for the whole status refresh.
+	psCtx, psCancel := context.WithTimeout(parent, 800*time.Millisecond)
+	psOK := getJSON(psCtx, base+"/api/ps", &running)
+	psCancel()
+	if psOK {
 		for _, model := range running.Models {
 			affinity := "CPU"
 			if model.SizeVRAM > 0 && model.SizeVRAM >= model.Size {
@@ -404,20 +421,44 @@ func ollamaStatus(parent context.Context, name string, engine config.Engine) Eng
 			}
 			updated := false
 			for index := range status.Models {
-				if status.Models[index].Name == model.Name {
+				if strings.EqualFold(status.Models[index].Name, model.Name) {
 					status.Models[index].Size = model.Size
 					status.Models[index].VRAM = model.SizeVRAM
 					status.Models[index].Affinity = affinity
 					status.Models[index].ExpiresAt = model.ExpiresAt
+					status.Models[index].Available = true
 					status.Models[index].Loaded = true
 					updated = true
 					break
 				}
 			}
 			if !updated {
-				status.Models = append(status.Models, RuntimeModel{Name: model.Name, Size: model.Size, VRAM: model.SizeVRAM, Affinity: affinity, ExpiresAt: model.ExpiresAt, Loaded: true, Capabilities: modelregistry.OllamaCapabilities(nil, model.Name)})
+				status.Models = append(status.Models, RuntimeModel{Name: model.Name, Size: model.Size, VRAM: model.SizeVRAM, Affinity: affinity, ExpiresAt: model.ExpiresAt, Available: true, Loaded: true})
+				evidenceByModel[strings.ToLower(strings.TrimSpace(model.Name))] = evidence{hint: model.Name}
 			}
 		}
+	}
+	capabilityCtx, capabilityCancel := context.WithTimeout(parent, 2*time.Second)
+	defer capabilityCancel()
+	for index := range status.Models {
+		model := &status.Models[index]
+		item := evidenceByModel[strings.ToLower(strings.TrimSpace(model.Name))]
+		if item.hint == "" {
+			item.hint = model.Name
+		}
+		if capabilityCtx.Err() != nil {
+			model.Capabilities = modelregistry.OllamaCapabilities(item.capabilities, item.hint)
+			model.CapabilitiesVerified = len(item.capabilities) > 0
+			if model.CapabilitiesVerified {
+				model.CapabilitySource = "ollama_tags"
+			} else {
+				model.CapabilitySource = "name_inference"
+			}
+			continue
+		}
+		modelCtx, modelCancel := context.WithTimeout(capabilityCtx, 400*time.Millisecond)
+		model.Capabilities, model.CapabilitiesVerified, model.CapabilitySource = modelregistry.ResolveOllamaCapabilityEvidence(modelCtx, http.DefaultClient, base, model.Name, item.digest, item.capabilities, item.hint)
+		modelCancel()
 	}
 	status.Affinity = "idle"
 	for _, model := range status.Models {

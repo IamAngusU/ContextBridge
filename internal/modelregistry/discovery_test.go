@@ -55,7 +55,7 @@ func TestDiscoverOllamaAndLocalModels(t *testing.T) {
 	if local == nil || local.Quantization != "Q4_K_M" || local.Parameters != "7B" || len(local.Capabilities) != 2 {
 		t.Fatalf("local metadata was not inferred: %#v", local)
 	}
-	if ollama == nil || !ollama.Loaded || ollama.VRAM != 2048 || len(ollama.Capabilities) != 2 {
+	if ollama == nil || !ollama.Loaded || ollama.VRAM != 2048 || len(ollama.Capabilities) != 2 || !ollama.CapabilitiesVerified || ollama.CapabilitySource != "ollama_show" {
 		t.Fatalf("Ollama runtime metadata was not discovered: %#v", ollama)
 	}
 }
@@ -98,7 +98,7 @@ func TestDiscoverOllamaTrustsAdvertisedCapabilitiesForOpaqueName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(models) != 1 || strings.Join(models[0].Capabilities, ",") != "text,vision" {
+	if len(models) != 1 || strings.Join(models[0].Capabilities, ",") != "text,vision" || !models[0].CapabilitiesVerified || models[0].CapabilitySource != "ollama_show" {
 		t.Fatalf("advertised Ollama capabilities were not preserved: %#v", models)
 	}
 	if showCalls != 1 {
@@ -117,6 +117,17 @@ func TestOllamaImageGenerationIsNotVisionUnderstanding(t *testing.T) {
 	}
 	if capabilities := OllamaCapabilities([]string{"unrecognized"}, "llava:7b"); len(capabilities) != 0 {
 		t.Fatalf("authoritative advertised capabilities fell back to name guessing: %#v", capabilities)
+	}
+}
+
+func TestOllamaCapabilityEvidenceMarksNameFallbackUnverified(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	capabilities, verified, source := ResolveOllamaCapabilityEvidence(context.Background(), server.Client(), server.URL, "llava:7b", "fallback-only", nil, "llava:7b")
+	if verified || source != "name_inference" || strings.Join(capabilities, ",") != "text,vision" {
+		t.Fatalf("name inference was not clearly separated from provider evidence: capabilities=%v verified=%v source=%q", capabilities, verified, source)
 	}
 }
 

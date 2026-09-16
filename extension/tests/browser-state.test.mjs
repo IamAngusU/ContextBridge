@@ -10,18 +10,26 @@ assert.equal(source.includes("fetch(candidate.url, { credentials: 'include'"), f
   'provider DOM URLs must not be fetched credentialed before origin policy checks');
 assert.match(source, /jobs\/next\?wait=25[\s\S]{0,300}fetchWithTimeout|fetchWithTimeout[\s\S]{0,300}jobs\/next\?wait=25/,
   'the relay long poll must have an abortable deadline');
+assert.match(source, /jobs\/next\?wait=25[^`]{0,300}tab_id=/,
+  'each extension poller must identify its concrete browser tab to the local lease boundary');
+assert.match(source, /leaseState\?\.tabId[\s\S]{0,180}contextbridge_browser_tab_id/,
+  'completion metadata must identify only a successfully resolved execution tab');
 assert.equal(source.includes("add(href, cleanFileName(anchor.download"), true,
   'download links stay available as references');
 assert.match(source, /add\(href,[\s\S]{0,300}'generic_link', false\)/,
   'generic assistant links must not trigger an extension-side transfer');
+assert.match(source, /async function resume[\s\S]{0,1800}restorePersistedBrowserLeaseReservations[\s\S]{0,500}poll\(\)/,
+  'startup must restore durable browser leases before opening pollers');
 const listeners = { addListener() {} };
 let alarmListener;
 const alarmCalls = [];
 let activeHeartbeatAlarm;
+const grantedOrigins = new Set();
 const chrome = {
   runtime: { onInstalled: listeners, onStartup: listeners, onMessage: listeners, getManifest: () => ({ version: 'test' }) },
   storage: { local: { get: async (defaults) => defaults, set: async () => {} } },
   tabs: {}, scripting: {}, i18n: { getMessage: () => '' },
+  permissions: { contains: async ({ origins }) => (origins || []).every((origin) => grantedOrigins.has(origin)) },
   alarms: {
     onAlarm: { addListener(fn) { alarmListener = fn; } },
     get: async (name) => name === activeHeartbeatAlarm?.name ? activeHeartbeatAlarm : undefined,
@@ -66,6 +74,80 @@ context.crypto = webcrypto;
     context.renewLease = previousRenew;
     context.completeWork = previousComplete;
     context.sendHeartbeat = previousHeartbeat;
+  }
+}
+
+{
+  const opaque = `cb:${'a'.repeat(64)}`;
+  const key = JSON.stringify([opaque, 'chatgpt']);
+  const saved = 'https://chatgpt.com/c/saved';
+  const cfg = { useVisualProfile: false, profile: 'chatgpt', sessionBindings: {
+    [key]: { tabId: 11, url: saved },
+    [JSON.stringify(['local-direct-name', 'chatgpt'])]: { tabId: 14, url: 'https://chatgpt.com/c/local' },
+    [JSON.stringify([`cb:${'b'.repeat(64)}`, 'chatgpt'])]: { tabId: 15, url: 'https://chatgpt.com/', perJob: true },
+    'legacy-tab:16': { tabId: 16, url: saved, legacy: true }
+  } };
+  let routed = context.browserSessionKeysForTabs(cfg, [
+    { id: 11, url: 'https://chatgpt.com/c/other' },
+    { id: 12, url: saved },
+    { id: 14, url: 'https://chatgpt.com/c/local' },
+    { id: 15, url: 'https://chatgpt.com/' }
+  ]);
+  assert.equal(routed.get(11), undefined, 'a recorded tab navigated away from its saved conversation must lose the session key');
+  assert.equal(routed.get(12), opaque, 'the sole attached tab at the exact saved URL must inherit the opaque session key');
+  assert.equal(routed.get(14), undefined, 'a local raw session name must never enter heartbeat telemetry');
+  assert.equal(routed.get(15), undefined, 'per-job and fresh-URL bindings must never enter session-key telemetry');
+
+  routed = context.browserSessionKeysForTabs(cfg, [{ id: 11, url: saved }, { id: 12, url: saved }]);
+  assert.equal(routed.get(11), opaque, 'the recorded owner must win when two tabs show the same saved URL');
+  assert.equal(routed.get(12), undefined, 'a duplicate view must not also claim the session');
+
+  cfg.sessionBindings[key] = { tabId: 99, url: saved };
+  routed = context.browserSessionKeysForTabs(cfg, [{ id: 11, url: saved }, { id: 12, url: saved }]);
+  assert.equal(routed.size, 0, 'an ambiguous moved conversation must fail closed');
+
+  const customOpaque = `cb:${'c'.repeat(64)}`;
+  const customURL = 'https://example.test/conversations/exact';
+  routed = context.browserSessionKeysForTabs({ useVisualProfile: false, profile: 'custom-secure', sessionBindings: {
+    [JSON.stringify([customOpaque, 'custom-secure'])]: { tabId: 20, url: customURL }
+  } }, [{ id: 20, url: customURL }]);
+  assert.equal(routed.get(20), customOpaque, 'a learned profile must retain opaque exact-session routing');
+
+  const conflictingBindings = {};
+  for (const letter of ['d', 'e', 'f']) {
+    const candidate = `cb:${letter.repeat(64)}`;
+    conflictingBindings[JSON.stringify([candidate, 'chatgpt'])] = { tabId: 21, url: saved };
+  }
+  routed = context.browserSessionKeysForTabs({ useVisualProfile: false, profile: 'chatgpt', sessionBindings: conflictingBindings },
+    [{ id: 21, url: saved }]);
+  assert.equal(routed.size, 0, 'three conflicting session claims for one tab must remain failed closed');
+
+  grantedOrigins.clear();
+  assert.equal(await context.canCreateFreshChat('chatgpt', 1), false, 'fresh-chat routing must require actual host permission');
+  grantedOrigins.add('https://chatgpt.com/*');
+  assert.equal(await context.canCreateFreshChat('chatgpt', 1), true);
+  assert.equal(await context.canCreateFreshChat('chatgpt', 16), false, 'the 16-tab safety limit must be routing-visible');
+}
+{
+  const previousGet = chrome.storage.local.get;
+  const previousSet = chrome.storage.local.set;
+  const state = {
+    running: false,
+    tabId: 22,
+    tabIds: [22],
+    sessionBindingsMigrated: true,
+    sessionBindings: { disposable: { tabId: 22, url: 'https://chatgpt.com/c/done', autoCreated: true, perJob: true } },
+    ownedDrafts: {}, autoAttachBlockedTabIds: [], tabCapabilities: {}, tabCapabilityScans: {}, tabFailures: {}, tabEditModes: {}
+  };
+  chrome.storage.local.get = async (defaults) => ({ ...defaults, ...state });
+  chrome.storage.local.set = async (update) => Object.assign(state, update);
+  try {
+    await context.detachClosedTab(22);
+    assert.equal(state.sessionBindings.disposable, undefined,
+      'a closed auto-created per-job tab must not leave an unreachable binding');
+  } finally {
+    chrome.storage.local.get = previousGet;
+    chrome.storage.local.set = previousSet;
   }
 }
 {
@@ -117,6 +199,8 @@ context.crypto = webcrypto;
   }));
   const tabs = Array.from({ length: 16 }, (_, index) => ({
     id: index + 1, origin: 'https://chatgpt.com', title: `tab-${index}-${long}`, profile: 'chatgpt', state: 'waiting',
+    session_key: `cb:${String(index).padStart(64, '0')}`, session_key_supported: true,
+    can_create_fresh_chat: true, default_fresh_chat: true,
     current_model: 'GPT-5.6 Sol', current_reasoning: 'Sehr hoch',
     models: Array.from({ length: 50 }, (_, model) => `model-${model}-${long}`),
     reasoning_levels: Array.from({ length: 20 }, (_, level) => `level-${level}-${long}`),
@@ -131,6 +215,8 @@ context.crypto = webcrypto;
   assert.equal(compact.tabs.length, 16, 'payload budgeting must not hide attached tabs from routing');
   assert.ok(compact.tab_title.length <= 300, 'page-controlled top-level metadata must also be bounded during compaction');
   assert.equal(compact.tabs[15].current_model, 'GPT-5.6 Sol', 'routing-critical current model metadata must survive compaction');
+  assert.equal(compact.tabs[15].session_key_supported, true, 'session routing compatibility must survive compaction');
+  assert.equal(compact.tabs[15].can_create_fresh_chat, true, 'fresh-chat launcher evidence must survive compaction');
 }
 {
   assert.equal(alarmCalls.length, 0,
@@ -2231,6 +2317,24 @@ for (const disabled of [true, false]) {
 }
 
 {
+	const cfg = {
+	  useVisualProfile: true, profile: 'chatgpt', tabCooldowns: {},
+	  sessionBindings: { occupied: { tabId: 7 } },
+	  tabCapabilities: { 7: { currentModel: 'GPT-5.6 Sol', pageContext: {
+		url: 'https://chatgpt.com/c/one', origin: 'https://chatgpt.com', profile: 'chatgpt'
+	  } } }
+	};
+	const chatGPT = { id: 7, url: 'https://chatgpt.com/c/one' };
+	const chatProfile = { name: 'chatgpt' };
+	assert.equal(context.capabilitiesForTab(cfg, chatGPT, chatProfile).currentModel, 'GPT-5.6 Sol');
+	assert.deepEqual(Object.keys(context.capabilitiesForTab(cfg, { id: 7, url: 'https://gemini.google.com/app' }, { name: 'gemini' })), [],
+	  'navigation must not reuse model capabilities from the previous provider or URL');
+	assert.equal(context.browserTabState(cfg, 7), 'session_bound', 'an idle occupied conversation must not be advertised as free');
+	assert.equal(context.routingProfileName({ ...cfg, useVisualProfile: false, profile: 'gemini' }, chatGPT), 'gemini',
+	  'manual routing must advertise the same profile used by the poller');
+}
+
+{
   const originalSettings = context.settings;
   const originalProfileForTab = context.profileForTab;
   const originalTabGet = chrome.tabs.get;
@@ -2262,6 +2366,46 @@ for (const disabled of [true, false]) {
     context.profileForTab = originalProfileForTab;
     chrome.tabs.get = originalTabGet;
     chrome.scripting.executeScript = originalExecute;
+    chrome.storage.local.set = originalStorageSet;
+  }
+}
+
+{
+  const originalSettings = context.settings;
+  const originalProfileForTab = context.profileForTab;
+  const originalTabGet = chrome.tabs.get;
+  const originalStorageSet = chrome.storage.local.set;
+  const cfg = { tabIds: [41, 42], sessionBindingsMigrated: true, sessionBindings: {}, sessionMode: 'reuse' };
+  const work = { profile: { name: 'chatgpt' }, job: {
+    id: 'exact-tab-work', session_id: 'exact-tab-session', contextbridge_session_key: 'exact-tab-session',
+    contextbridge_browser_tab_id: 42
+  } };
+  context.settings = async () => cfg;
+  context.profileForTab = () => ({ name: 'chatgpt', selectors: {} });
+	const urls = { 41: 'https://chatgpt.com/c/tab-41', 42: 'https://chatgpt.com/c/tab-42' };
+	chrome.tabs.get = async (id) => {
+	  if (!urls[id]) throw new Error('closed');
+	  return { id, url: urls[id] };
+	};
+  chrome.storage.local.set = async (value) => Object.assign(cfg, value);
+  try {
+    await assert.rejects(context.resolveWorkTab(cfg, work, 41), /other than the relay-selected tab/i,
+      'a non-selected poller must not resolve pinned work through another attached tab');
+    assert.equal(await context.resolveWorkTab(cfg, work, 42), 42,
+      'the relay-selected poller must keep execution on its qualifying tab');
+	const key = context.workSessionKey(work);
+	cfg.sessionBindings[key] = { tabId: 41, url: 'https://chatgpt.com/c/tab-41' };
+	await assert.rejects(context.resolveWorkTab(cfg, work, 42), /does not own this ContextBridge session/i,
+	  'a qualified poller must not redirect pinned work into another bound conversation');
+	delete urls[41];
+	urls[42] = 'https://chatgpt.com/c/tab-41';
+	assert.equal(await context.resolveWorkTab(cfg, work, 42), 42,
+	  'a saved conversation reopened on the relay-selected replacement tab must recover safely');
+	assert.equal(cfg.sessionBindings[key].tabId, 42);
+  } finally {
+    context.settings = originalSettings;
+    context.profileForTab = originalProfileForTab;
+    chrome.tabs.get = originalTabGet;
     chrome.storage.local.set = originalStorageSet;
   }
 }
@@ -2418,13 +2562,34 @@ for (const disabled of [true, false]) {
     return { ok: true };
   };
   chrome.tabs.get = async () => ({ id: 31, url: permanentURL });
-  chrome.scripting.executeScript = async () => [{ result: ownedTurn }];
+  let proofReady = false;
+  let proofCalls = 0;
+  let releaseProof;
+  chrome.scripting.executeScript = async () => {
+    proofCalls += 1;
+    if (!proofReady) return [{ result: null }];
+    await new Promise((resolve) => { releaseProof = resolve; });
+    return [{ result: ownedTurn }];
+  };
   chrome.storage.local.set = async (update) => Object.assign(state, update);
   const lease = { jobId: 'job', generation: 4, tabId: 31, expectedURL: freshURL, cancelled: false,
     sessionKey: 'session', prompt: 'owned prompt', profileName: 'chatgpt', sentUnknown: true };
   activeLeases.set('job', lease);
-  const promoted = await context.authorizeBrowserJobAction(
+  await assert.rejects(context.assertActiveLeaseConversation(lease), /submitted ContextBridge turn could not be verified/i);
+  assert.equal(lease.cancelled, false, 'a fresh-chat URL appearing before its DOM user turn must not poison the valid lease');
+  assert.equal(lease.expectedURL, freshURL, 'unverified navigation must not update ownership');
+  assert.equal(state.browserJobClaims.job.expectedURL, freshURL);
+  proofReady = true;
+  const sampled = context.assertActiveLeaseConversation(lease);
+  const observed = context.authorizeBrowserJobAction(
     { jobId: 'job', generation: 4, action: 'observe', expectedURL: freshURL }, { tab: { id: 31 } });
+  while (!releaseProof) await new Promise((resolve) => setTimeout(resolve, 0));
+  // Both callers must share the in-flight proof and commit for this URL.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(proofCalls, 2, 'progress and the injected observer must not race duplicate promotion commits');
+  releaseProof();
+  assert.equal((await sampled).url, permanentURL);
+  const promoted = await observed;
   assert.equal(promoted.ok, true);
   assert.equal(promoted.expectedURL, permanentURL);
   assert.equal(lease.expectedURL, permanentURL);
@@ -2443,6 +2608,464 @@ for (const disabled of [true, false]) {
   chrome.tabs.get = previousTabGet;
   chrome.scripting.executeScript = previousExecute;
   chrome.storage.local.set = previousStorageSet;
+}
+
+for (const observer of ['progress', 'action']) {
+  // A tab lookup can retain its fresh-page snapshot while a different
+  // observer completes ownership promotion. That snapshot must be refreshed.
+  const previousSettings = context.settings;
+  const previousRenew = context.renewLease;
+  const previousTabGet = chrome.tabs.get;
+  const previousExecute = chrome.scripting.executeScript;
+  const previousStorageSet = chrome.storage.local.set;
+  const activeLeases = vm.runInContext('activeBrowserLeases', context);
+  const freshURL = 'https://chatgpt.com/';
+  const permanentURL = 'https://chatgpt.com/c/promoted-during-tab-get';
+  const lease = { jobId: 'stale-tab-snapshot', generation: 5, tabId: 32, expectedURL: freshURL,
+    sessionKey: 'stale', prompt: 'owned prompt', profileName: 'chatgpt', sentUnknown: true, cancelled: false };
+  const state = { running: true, tabIds: [32], sessionBindingsMigrated: true,
+    sessionBindings: { stale: { tabId: 32, url: freshURL } }, browserJobClaims: {
+      'stale-tab-snapshot': { generation: 5, tabId: 32, sessionKey: 'stale', expectedURL: freshURL, state: 'sent_unknown' }
+    } };
+  let finishOldLookup;
+  let lookups = 0;
+  context.settings = async () => state;
+  context.renewLease = async () => true;
+  chrome.tabs.get = () => ++lookups === 1 ? new Promise((resolve) => { finishOldLookup = resolve; })
+    : Promise.resolve({ id: 32, url: permanentURL });
+  chrome.scripting.executeScript = async () => [{ result: { id: 'owned', digest: 'a'.repeat(64), provider: 'chatgpt' } }];
+  chrome.storage.local.set = async (update) => Object.assign(state, update);
+  activeLeases.set(lease.jobId, lease);
+  try {
+    const observing = observer === 'progress' ? context.assertActiveLeaseConversation(lease)
+      : context.authorizeBrowserJobAction({ jobId: lease.jobId, generation: 5, action: 'observe', expectedURL: freshURL }, { tab: { id: 32 } });
+    while (!finishOldLookup) await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(await context.promoteActiveLeaseConversation(lease, { id: 32, url: permanentURL }), true);
+    finishOldLookup({ id: 32, url: freshURL });
+    const result = await observing;
+    assert.equal(observer === 'progress' ? result.url : result.expectedURL, permanentURL);
+    if (observer === 'action') assert.equal(result.ok, true);
+    assert.equal(lease.cancelled, false, `${observer} cancelled an already verified conversation from an old tab snapshot`);
+    assert.equal(lookups, 3, 'stale lookup must be refreshed after the separate promotion verification');
+  } finally {
+    activeLeases.delete(lease.jobId);
+    context.settings = previousSettings;
+    context.renewLease = previousRenew;
+    chrome.tabs.get = previousTabGet;
+    chrome.scripting.executeScript = previousExecute;
+    chrome.storage.local.set = previousStorageSet;
+  }
+}
+
+{
+  const previousLocation = context.location;
+  const previousDocument = context.document;
+  const previousTabGet = chrome.tabs.get;
+  const previousExecute = chrome.scripting.executeScript;
+  const freshURL = 'https://chatgpt.com/';
+  let reads = 0;
+  context.document = { querySelectorAll() { reads += 1; return []; } };
+  chrome.tabs.get = async () => ({ id: 33, url: freshURL });
+  chrome.scripting.executeScript = async ({ func, args }) => {
+    context.location = { href: 'https://chatgpt.com/c/not-yet-proven' };
+    return [{ result: await func(...args) }];
+  };
+  try {
+    await assert.rejects(context.captureTabProgress(33, { response: ['#response'] },
+      { tabId: 33, expectedURL: freshURL, cancelled: false }), /conversation URL changed/);
+    assert.equal(reads, 0, 'navigation between the background URL check and script injection must not read response DOM');
+  } finally {
+    if (previousLocation === undefined) delete context.location;
+    else context.location = previousLocation;
+    context.document = previousDocument;
+    chrome.tabs.get = previousTabGet;
+    chrome.scripting.executeScript = previousExecute;
+  }
+}
+
+for (const proofDelay of [2500, Infinity]) {
+  // Sending changes the URL immediately, but the owned user turn may mount
+  // several seconds later. Observe retries must neither read nor resend.
+  const previousLocation = context.location;
+  const previousDocument = context.document;
+  const previousSendMessage = chrome.runtime.sendMessage;
+  const realDate = context.Date;
+  const realSetTimeout = context.setTimeout;
+  let fakeNow = Date.now();
+  const startedAt = fakeNow;
+  const freshURL = 'https://chatgpt.com/';
+  const permanentURL = 'https://chatgpt.com/c/delayed-owned-turn';
+  let sends = 0;
+  let sendClaims = 0;
+  let observedAfterSend = 0;
+  let proofReady = false;
+  let responseReads = 0;
+  context.Date = class extends Date { static now() { return fakeNow; } };
+  context.setTimeout = (callback, milliseconds) => realSetTimeout(() => { fakeNow += milliseconds; callback(); }, 1);
+  context.location = { href: freshURL, origin: 'https://chatgpt.com', hostname: 'chatgpt.com' };
+  const input = { ...element(), value: 'owned prompt', setAttribute() {}, closest: () => null };
+  const send = { ...element('', { 'aria-label': 'Send message' }), click() {
+    sends += 1;
+    input.value = '';
+    context.location.href = permanentURL;
+  } };
+  const response = { ...element('Owned answer'), matches: () => true,
+    querySelectorAll: (selector) => selector === '.markdown' ? [element('Owned answer')] : [] };
+  context.document = { querySelectorAll(selector) {
+    if (selector === '#input') return [input];
+    if (selector === '#send') return [send];
+    if (selector === '#response') {
+      if (!sends) return [];
+      assert.equal(proofReady, true, 'response DOM was accessed before conversation ownership was proven');
+      responseReads += 1;
+      return [response];
+    }
+    return [];
+  }, querySelector: () => null };
+  chrome.runtime.sendMessage = async ({ action }) => {
+    if (action === 'send') sendClaims += 1;
+    if (action === 'observe' && sends) {
+      observedAfterSend += 1;
+      if (fakeNow - startedAt < proofDelay) return { ok: false, error: 'browser_conversation_unverified' };
+      proofReady = true;
+    }
+    return { ok: true, expectedURL: proofReady ? permanentURL : freshURL };
+  };
+  try {
+    const result = await context.automate({ id: 'late-proof', prompt: 'owned prompt', output: { mode: 'text' } },
+      { name: 'chatgpt', selectors: { input: ['#input'], submit: ['#send'], response: ['#response'] } },
+      new Date(startedAt + 10000).toISOString(), null, freshURL, { jobId: 'late-proof', generation: 6 });
+    assert.equal(sends, 1);
+    assert.equal(sendClaims, 1, 'ownership retries must never repeat Send authorization');
+    assert.ok(observedAfterSend > 3, 'the injected observer must tolerate a user turn mounting later than 500 ms');
+    if (Number.isFinite(proofDelay)) {
+      assert.equal(result.ok, true, result.error);
+      assert.equal(result.text, 'Owned answer');
+      assert.ok(responseReads > 0);
+    } else {
+      assert.equal(result.ok, false);
+      assert.equal(result.code, 'browser_session_changed');
+      assert.equal(responseReads, 0);
+      assert.ok(fakeNow <= startedAt + 10250, 'proof waiting must remain bounded by the supplied job deadline');
+    }
+  } finally {
+    if (previousLocation === undefined) delete context.location;
+    else context.location = previousLocation;
+    context.document = previousDocument;
+    chrome.runtime.sendMessage = previousSendMessage;
+    context.Date = realDate;
+    context.setTimeout = realSetTimeout;
+  }
+}
+
+{
+  const previousSettings = context.settings;
+  const previousFetch = context.fetch;
+  const previousTabGet = chrome.tabs.get;
+  const previousStorageSet = chrome.storage.local.set;
+  const activeLeases = vm.runInContext('activeBrowserLeases', context);
+  const busyTabs = vm.runInContext('busyTabs', context);
+  const expectedURL = 'https://chatgpt.com/c/restart-owned';
+  const state = { running: true, tabIds: [41], sessionBindings: {
+    restart: { tabId: 41, url: expectedURL, autoCreated: true }
+  }, browserJobClaims: {
+    'restart-job': { generation: 7, sessionKey: 'restart', tabId: 41, expectedURL,
+      profileName: 'chatgpt', state: 'leased', at: Date.now() }
+  } };
+  let claims = 0;
+  context.settings = async () => ({ bridgeUrl: 'http://127.0.0.1:32145', token: 'token', ...state });
+  context.fetch = async (url) => {
+    assert.match(url, /\/claim$/);
+    claims += 1;
+    return { ok: true };
+  };
+  chrome.tabs.get = async () => ({ id: 41, url: expectedURL });
+  chrome.storage.local.set = async (update) => Object.assign(state, update);
+
+  assert.equal(activeLeases.has('restart-job'), false);
+  const authorized = await context.authorizeBrowserJobAction(
+    { jobId: 'restart-job', generation: 7, action: 'send', expectedURL }, { tab: { id: 41 } });
+  assert.equal(authorized.ok, true, 'an exact durable claim should survive an MV3 worker restart');
+  assert.equal(claims, 1, 'restart recovery must still claim the action from the local service');
+  assert.equal(activeLeases.get('restart-job')?.recovered, true);
+  assert.equal(busyTabs.has(41), true, 'a recovered provider script must keep its tab out of the poll pool');
+  assert.equal(state.browserJobClaims['restart-job'].state, 'sent_unknown');
+  assert.equal('prompt' in state.browserJobClaims['restart-job'], false, 'durable recovery must not store prompt text');
+
+  context.cancelRecoveredBrowserLease(activeLeases.get('restart-job'), true);
+  context.settings = previousSettings;
+  context.fetch = previousFetch;
+  chrome.tabs.get = previousTabGet;
+  chrome.storage.local.set = previousStorageSet;
+}
+
+{
+  const previousSettings = context.settings;
+  const previousFetch = context.fetch;
+  const previousTabGet = chrome.tabs.get;
+  const previousExecute = chrome.scripting.executeScript;
+  const previousStorageSet = chrome.storage.local.set;
+  const activeLeases = vm.runInContext('activeBrowserLeases', context);
+  const busyTabs = vm.runInContext('busyTabs', context);
+  const freshURL = 'https://chatgpt.com/';
+  const permanentURL = 'https://chatgpt.com/c/restarted-new-chat';
+  const promptProof = { nonce: 'a'.repeat(32), digest: 'b'.repeat(64) };
+  const state = { running: true, tabIds: [42], sessionBindings: {
+    restart: { tabId: 42, url: freshURL, autoCreated: true }
+  }, browserJobClaims: {
+    'restart-observe': { generation: 8, sessionKey: 'restart', tabId: 42, expectedURL: freshURL,
+      profileName: 'chatgpt', promptProof, state: 'sent_unknown', at: Date.now() }
+  } };
+  context.settings = async () => ({ bridgeUrl: 'http://127.0.0.1:32145', token: 'token', ...state });
+  context.fetch = async (url) => {
+    assert.match(url, /\/lease$/);
+    return { ok: true };
+  };
+  chrome.tabs.get = async () => ({ id: 42, url: permanentURL });
+  chrome.scripting.executeScript = async ({ args }) => {
+    assert.equal(args[0], '', 'restart recovery must not persist or replay plaintext prompt text');
+    assert.deepEqual(args[4], promptProof, 'fresh-chat promotion must use the salted ownership proof');
+    return [{ result: { id: 'owned', digest: 'c'.repeat(64), provider: 'chatgpt' } }];
+  };
+  chrome.storage.local.set = async (update) => Object.assign(state, update);
+
+  const observed = await context.authorizeBrowserJobAction(
+    { jobId: 'restart-observe', generation: 8, action: 'observe', expectedURL: freshURL }, { tab: { id: 42 } });
+  assert.equal(observed.ok, true);
+  assert.equal(observed.expectedURL, permanentURL);
+  assert.equal(state.sessionBindings.restart.url, permanentURL);
+  assert.deepEqual(state.browserJobClaims['restart-observe'].promptProof, promptProof);
+
+  context.cancelRecoveredBrowserLease(activeLeases.get('restart-observe'), true);
+  context.settings = previousSettings;
+  context.fetch = previousFetch;
+  chrome.tabs.get = previousTabGet;
+  chrome.scripting.executeScript = previousExecute;
+  chrome.storage.local.set = previousStorageSet;
+}
+
+{
+  // A valid durable claim is reserved before polling and remains reserved
+  // across gaps longer than the old fixed 15-second heuristic. Only the
+  // service's read-only lease status or the immutable job deadline releases
+  // it; the status check itself never renews the server lease.
+  const previousSettings = context.settings;
+  const previousLeaseStatus = context.browserLeaseStatus;
+  const previousTabGet = chrome.tabs.get;
+  const previousStorageSet = chrome.storage.local.set;
+  const activeLeases = vm.runInContext('activeBrowserLeases', context);
+  const busyTabs = vm.runInContext('busyTabs', context);
+  const reservations = vm.runInContext('recoveredTabReservations', context);
+  const expectedURL = 'https://chatgpt.com/c/recovered-before-poll';
+  const now = Date.now();
+  const state = { running: true, tabIds: [61], sessionBindings: {
+    recovered: { tabId: 61, url: expectedURL, autoCreated: true }
+  }, browserJobClaims: {
+    'guarded-job': { generation: 13, sessionKey: 'recovered', tabId: 61, expectedURL,
+      profileName: 'chatgpt', state: 'sent_unknown', at: now - 20000,
+      deadline: new Date(now + 60000).toISOString() }
+  } };
+  context.settings = async () => ({ bridgeUrl: 'http://127.0.0.1:32145', token: 'token', ...state });
+  context.browserLeaseStatus = async () => ({ active: true, expiresAt: Date.now() + 30000 });
+  chrome.tabs.get = async () => ({ id: 61, url: expectedURL });
+  chrome.storage.local.set = async (update) => Object.assign(state, update);
+
+  await context.restorePersistedBrowserLeaseReservations();
+  const lease = activeLeases.get('guarded-job');
+  assert.ok(lease?.recovered);
+  assert.equal(busyTabs.has(61), true, 'restoration must reserve the tab before any relay status round trip');
+  assert.equal(reservations.get(61)?.claims.size, 1);
+  clearTimeout(lease.recoveryTimer);
+  lease.recoveryTimer = 0;
+  await context.checkRecoveredBrowserLease(lease);
+  assert.equal(activeLeases.get('guarded-job'), lease);
+  assert.equal(busyTabs.has(61), true, 'an active lease must survive a >15 second provider-action gap');
+  clearTimeout(lease.recoveryTimer);
+  lease.recoveryTimer = 0;
+
+  context.browserLeaseStatus = async () => ({ active: false, expiresAt: 0 });
+  await context.checkRecoveredBrowserLease(lease);
+  assert.equal(activeLeases.has('guarded-job'), false);
+  assert.equal(busyTabs.has(61), false, 'an authoritative 409-equivalent must release exactly this reservation');
+  assert.equal(state.browserJobClaims['guarded-job'], undefined, 'an invalid lease must remove its durable claim before release');
+  const stale = await context.recoverPersistedBrowserLease('guarded-job', 13, 'observe',
+    { expectedURL }, { tab: { id: 61 } });
+  assert.equal(stale, null, 'a late provider message must not rehydrate a rejected generation');
+
+  context.settings = previousSettings;
+  context.browserLeaseStatus = previousLeaseStatus;
+  chrome.tabs.get = previousTabGet;
+  chrome.storage.local.set = previousStorageSet;
+}
+
+{
+  // Network ambiguity remains fail-closed, and two durable claims for one tab
+  // quarantine that tab rather than choosing a winner and risking two sends.
+  const previousSettings = context.settings;
+  const previousLeaseStatus = context.browserLeaseStatus;
+  const previousTabGet = chrome.tabs.get;
+  const activeLeases = vm.runInContext('activeBrowserLeases', context);
+  const busyTabs = vm.runInContext('busyTabs', context);
+  const reservations = vm.runInContext('recoveredTabReservations', context);
+  const expectedURL = 'https://gemini.google.com/app/owned';
+  const deadline = new Date(Date.now() + 60000).toISOString();
+  const base = { sessionKey: 'duplicate', tabId: 62, expectedURL, profileName: 'gemini',
+    state: 'sent_unknown', at: Date.now(), deadline };
+  const state = { running: true, tabIds: [62], sessionBindings: {
+    duplicate: { tabId: 62, url: expectedURL, autoCreated: true }
+  }, browserJobClaims: {
+    'duplicate-a': { ...base, generation: 21 }, 'duplicate-b': { ...base, generation: 22 }
+  } };
+  context.settings = async () => ({ bridgeUrl: 'http://127.0.0.1:32145', token: 'token', ...state });
+  context.browserLeaseStatus = async () => { throw new TypeError('bridge temporarily unavailable'); };
+  chrome.tabs.get = async () => ({ id: 62, url: expectedURL });
+  await context.restorePersistedBrowserLeaseReservations();
+  assert.equal(busyTabs.has(62), true);
+  assert.equal(reservations.get(62)?.quarantined, true);
+  const rejected = await context.authorizeBrowserJobAction(
+    { jobId: 'duplicate-a', generation: 21, action: 'observe', expectedURL }, { tab: { id: 62 } });
+  assert.equal(rejected.error, 'browser_job_lease_lost', 'duplicate claims must never authorize a provider action');
+  for (const id of ['duplicate-a', 'duplicate-b']) {
+    const lease = activeLeases.get(id);
+    if (lease?.recoveryTimer) clearTimeout(lease.recoveryTimer);
+    context.cancelRecoveredBrowserLease(lease, true);
+  }
+  assert.equal(busyTabs.has(62), false);
+
+  context.settings = previousSettings;
+  context.browserLeaseStatus = previousLeaseStatus;
+  chrome.tabs.get = previousTabGet;
+}
+
+{
+  const task = context.beginBrowserLeaseRecovery();
+  let passed = false;
+  const waiting = context.waitForBrowserLeaseRecovery().then(() => { passed = true; });
+  await Promise.resolve();
+  assert.equal(passed, false, 'polling must wait while durable-claim recovery is in flight');
+  context.finishBrowserLeaseRecovery(task);
+  await waiting;
+  assert.equal(passed, true);
+}
+
+{
+  // Recovery starts by aborting any in-flight /next request. This prevents an
+  // alarm wake from leasing new work before restored claims reserve the tab.
+  const pollControllers = vm.runInContext('pollAbortControllers', context);
+  let aborted = 0;
+  pollControllers.set(77, { abort() { aborted += 1; } });
+  const task = context.beginBrowserLeaseRecovery();
+  assert.equal(aborted, 1);
+  pollControllers.delete(77);
+  context.finishBrowserLeaseRecovery(task);
+}
+
+{
+  // An old read-only status request can settle after the same job received a
+  // new generation on another tab. Its 409 must not erase the replacement's
+  // durable claim (generation-CAS / ABA protection).
+  const previousSettings = context.settings;
+  const previousLeaseStatus = context.browserLeaseStatus;
+  const previousTabGet = chrome.tabs.get;
+  const previousStorageSet = chrome.storage.local.set;
+  const activeLeases = vm.runInContext('activeBrowserLeases', context);
+  const busyTabs = vm.runInContext('busyTabs', context);
+  const oldURL = 'https://chatgpt.com/c/old-generation';
+  const newURL = 'https://chatgpt.com/c/new-generation';
+  const state = { running: true, tabIds: [71, 72], sessionBindings: {
+    old: { tabId: 71, url: oldURL }, replacement: { tabId: 72, url: newURL }
+  }, browserJobClaims: {
+    aba: { generation: 30, sessionKey: 'old', tabId: 71, expectedURL: oldURL,
+      profileName: 'chatgpt', state: 'sent_unknown', at: Date.now(), deadline: new Date(Date.now() + 60000).toISOString() }
+  } };
+  let settleStatus;
+  context.settings = async () => ({ bridgeUrl: 'http://127.0.0.1:32145', token: 'token', ...state });
+  context.browserLeaseStatus = () => new Promise((resolve) => { settleStatus = resolve; });
+  chrome.tabs.get = async (id) => ({ id, url: id === 71 ? oldURL : newURL });
+  chrome.storage.local.set = async (update) => Object.assign(state, update);
+  await context.restorePersistedBrowserLeaseReservations();
+  const oldLease = activeLeases.get('aba');
+  clearTimeout(oldLease.recoveryTimer);
+  oldLease.recoveryTimer = 0;
+  const checking = context.checkRecoveredBrowserLease(oldLease);
+  while (!settleStatus) await new Promise((resolve) => setTimeout(resolve, 0));
+
+  state.browserJobClaims.aba = { generation: 31, sessionKey: 'replacement', tabId: 72, expectedURL: newURL,
+    profileName: 'chatgpt', state: 'leased', at: Date.now(), deadline: new Date(Date.now() + 60000).toISOString() };
+  const replacement = { jobId: 'aba', generation: 31, tabId: 72, expectedURL: newURL, sessionKey: 'replacement', cancelled: false };
+  activeLeases.set('aba', replacement);
+  settleStatus({ active: false, expiresAt: 0 });
+  await checking;
+  assert.equal(state.browserJobClaims.aba.generation, 31, 'old 409 must not delete the replacement claim');
+  assert.equal(activeLeases.get('aba'), replacement);
+  assert.equal(busyTabs.has(71), false, 'the superseded tab reservation must be released by identity');
+  activeLeases.delete('aba');
+
+  context.settings = previousSettings;
+  context.browserLeaseStatus = previousLeaseStatus;
+  chrome.tabs.get = previousTabGet;
+  chrome.storage.local.set = previousStorageSet;
+}
+
+{
+  // tabs.get yields during startup restoration. A newer generation recovered
+  // by a provider-script message in that window must win; the stale snapshot
+  // may never overwrite its active lease.
+  const previousSettings = context.settings;
+  const previousTabGet = chrome.tabs.get;
+  const activeLeases = vm.runInContext('activeBrowserLeases', context);
+  const expectedURL = 'https://chatgpt.com/c/restore-generation-race';
+  const state = { running: true, tabIds: [81], sessionBindings: {
+    race: { tabId: 81, url: expectedURL }
+  }, browserJobClaims: {
+    'restore-race': { generation: 40, sessionKey: 'race', tabId: 81, expectedURL,
+      profileName: 'chatgpt', state: 'leased', at: Date.now(), deadline: new Date(Date.now() + 60000).toISOString() }
+  } };
+  let resolveTab;
+  context.settings = async () => ({ bridgeUrl: 'http://127.0.0.1:32145', token: 'token', ...state });
+  chrome.tabs.get = () => new Promise((resolve) => { resolveTab = resolve; });
+  const restoring = context.restorePersistedBrowserLeaseReservations();
+  while (!resolveTab) await new Promise((resolve) => setTimeout(resolve, 0));
+  state.browserJobClaims['restore-race'] = { ...state.browserJobClaims['restore-race'], generation: 41 };
+  const newer = { jobId: 'restore-race', generation: 41, tabId: 81, expectedURL, sessionKey: 'race', cancelled: false };
+  activeLeases.set('restore-race', newer);
+  resolveTab({ id: 81, url: expectedURL });
+  await restoring;
+  assert.equal(activeLeases.get('restore-race'), newer, 'stale startup snapshot overwrote a newer recovered generation');
+  activeLeases.delete('restore-race');
+  context.settings = previousSettings;
+  chrome.tabs.get = previousTabGet;
+}
+
+{
+  // The direct message-triggered recovery path has the same yield at tabs.get.
+  // A late message for generation N must not replace generation N+1 installed
+  // while the tab lookup was pending.
+  const previousSettings = context.settings;
+  const previousTabGet = chrome.tabs.get;
+  const activeLeases = vm.runInContext('activeBrowserLeases', context);
+  const expectedURL = 'https://chatgpt.com/c/direct-generation-race';
+  const state = { running: true, tabIds: [91], sessionBindings: {
+    direct: { tabId: 91, url: expectedURL }
+  }, browserJobClaims: {
+    'direct-race': { generation: 50, sessionKey: 'direct', tabId: 91, expectedURL,
+      profileName: 'chatgpt', state: 'leased', at: Date.now(), deadline: new Date(Date.now() + 60000).toISOString() }
+  } };
+  let resolveTab;
+  context.settings = async () => ({ bridgeUrl: 'http://127.0.0.1:32145', token: 'token', ...state });
+  chrome.tabs.get = () => new Promise((resolve) => { resolveTab = resolve; });
+  const recovering = context.recoverPersistedBrowserLease('direct-race', 50, 'observe',
+    { expectedURL }, { tab: { id: 91 } });
+  while (!resolveTab) await new Promise((resolve) => setTimeout(resolve, 0));
+  state.browserJobClaims['direct-race'] = { ...state.browserJobClaims['direct-race'], generation: 51 };
+  const newer = { jobId: 'direct-race', generation: 51, tabId: 91, expectedURL, sessionKey: 'direct', cancelled: false };
+  activeLeases.set('direct-race', newer);
+  resolveTab({ id: 91, url: expectedURL });
+  assert.equal(await recovering, null);
+  assert.equal(activeLeases.get('direct-race'), newer, 'late direct recovery overwrote the newer generation');
+  activeLeases.delete('direct-race');
+  context.settings = previousSettings;
+  chrome.tabs.get = previousTabGet;
 }
 
 {
@@ -2543,6 +3166,12 @@ for (const disabled of [true, false]) {
   context.document = { querySelectorAll: (selector) => selector === 'section[data-turn="user"]' ? [turn] : [] };
   assert.ok(await context.inspectLatestOwnedTurn('exact nested prompt', 'chatgpt'),
     'provider action chrome may decorate the wrapper, but the nested prompt node must still match exactly');
+  const nonce = 'd'.repeat(32);
+  const proof = { nonce, digest: await context.sha256Text(`${nonce}\u0000exact nested prompt`) };
+  assert.ok(await context.inspectLatestOwnedTurn('', 'chatgpt', false, null, proof),
+    'a salted durable proof must identify the exact owned turn without persisted prompt text');
+  assert.equal(await context.inspectLatestOwnedTurn('', 'chatgpt', false, null,
+    { nonce, digest: 'e'.repeat(64) }), null, 'a mismatched durable proof must fail closed');
 }
 
 {

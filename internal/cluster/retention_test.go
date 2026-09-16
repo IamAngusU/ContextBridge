@@ -72,7 +72,7 @@ func TestRetentionPrunesOnlyDetailedTerminalHistoryAndKeepsLifetimeTotals(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	policy := RetentionPolicy{MaxAge: 30 * 24 * time.Hour, MaxTerminalJobs: 2, MaxEvents: 2, MaxTerminalPipelineRuns: 2}
+	policy := RetentionPolicy{MaxAge: 30 * 24 * time.Hour, MaxTerminalJobs: 2, MaxEvents: 2, MaxTerminalPipelineRuns: 2, MaxSessionPlacements: 2}
 	removed, err := store.PruneRetention(now, policy)
 	if err != nil {
 		t.Fatal(err)
@@ -143,6 +143,62 @@ func TestRetentionPrunesOnlyDetailedTerminalHistoryAndKeepsLifetimeTotals(t *tes
 	}
 }
 
+func TestRetentionBoundsSessionPlacementsByAgeAndCount(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC)
+	placements := map[string]sessionPlacement{
+		"old":    {NodeID: "node-old", UpdatedAt: now.Add(-40 * 24 * time.Hour)},
+		"third":  {NodeID: "node-third", UpdatedAt: now.Add(-3 * time.Hour)},
+		"second": {NodeID: "node-second", UpdatedAt: now.Add(-2 * time.Hour)},
+		"newest": {NodeID: "node-newest", UpdatedAt: now.Add(-time.Hour)},
+	}
+	if err := store.db.Update(func(tx *bolt.Tx) error {
+		for key, placement := range placements {
+			if err := putJSON(tx.Bucket(bucketSessionPlacements), key, placement); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	policy := RetentionPolicy{
+		MaxAge: 30 * 24 * time.Hour, MaxTerminalJobs: 1, MaxEvents: 1,
+		MaxTerminalPipelineRuns: 1, MaxSessionPlacements: 2,
+	}
+	removed, err := store.PruneRetention(now, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed.SessionPlacements != 2 {
+		t.Fatalf("session placement retention removed %d entries, want 2", removed.SessionPlacements)
+	}
+	if err := store.db.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketSessionPlacements)
+		for _, key := range []string{"second", "newest"} {
+			if bucket.Get([]byte(key)) == nil {
+				t.Fatalf("fresh retained placement %q was removed", key)
+			}
+		}
+		for _, key := range []string{"old", "third"} {
+			if bucket.Get([]byte(key)) != nil {
+				t.Fatalf("expired/excess placement %q survived", key)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	again, err := store.PruneRetention(now, policy)
+	if err != nil || again.SessionPlacements != 0 {
+		t.Fatalf("session placement sweep was not idempotent: %#v %v", again, err)
+	}
+}
+
 func TestRelayPrunesRetentionAtStartupAndWhenPeriodicSweepIsDue(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "relay.db")
 	store, err := OpenStore(database)
@@ -159,13 +215,14 @@ func TestRelayPrunesRetentionAtStartupAndWhenPeriodicSweepIsDue(t *testing.T) {
 	}
 
 	relay, err := NewRelay(RelayConfig{
-		Database:        database,
-		AdminToken:      "admin-token-long-enough-for-retention-test",
-		RetentionMaxAge: 24 * time.Hour,
-		MaxTerminalJobs: 10,
-		MaxEvents:       10,
-		MaxTerminalRuns: 10,
-		RetentionSweep:  time.Duration(MinimumRetentionSweepSeconds) * time.Second,
+		Database:             database,
+		AdminToken:           "admin-token-long-enough-for-retention-test",
+		RetentionMaxAge:      24 * time.Hour,
+		MaxTerminalJobs:      10,
+		MaxEvents:            10,
+		MaxTerminalRuns:      10,
+		MaxSessionPlacements: 10,
+		RetentionSweep:       time.Duration(MinimumRetentionSweepSeconds) * time.Second,
 	}, log.New(io.Discard, "", 0))
 	if err != nil {
 		t.Fatal(err)
@@ -196,13 +253,14 @@ func TestRetentionRejectsDisabledOrUnboundedPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	valid := RetentionPolicy{MaxAge: 24 * time.Hour, MaxTerminalJobs: 1, MaxEvents: 1, MaxTerminalPipelineRuns: 1}
+	valid := RetentionPolicy{MaxAge: 24 * time.Hour, MaxTerminalJobs: 1, MaxEvents: 1, MaxTerminalPipelineRuns: 1, MaxSessionPlacements: 1}
 	tests := []RetentionPolicy{
-		{MaxAge: 0, MaxTerminalJobs: 1, MaxEvents: 1, MaxTerminalPipelineRuns: 1},
-		{MaxAge: time.Hour, MaxTerminalJobs: 1, MaxEvents: 1, MaxTerminalPipelineRuns: 1},
-		{MaxAge: valid.MaxAge, MaxTerminalJobs: 0, MaxEvents: 1, MaxTerminalPipelineRuns: 1},
-		{MaxAge: valid.MaxAge, MaxTerminalJobs: 1, MaxEvents: 0, MaxTerminalPipelineRuns: 1},
-		{MaxAge: valid.MaxAge, MaxTerminalJobs: 1, MaxEvents: 1, MaxTerminalPipelineRuns: 0},
+		{MaxAge: 0, MaxTerminalJobs: 1, MaxEvents: 1, MaxTerminalPipelineRuns: 1, MaxSessionPlacements: 1},
+		{MaxAge: time.Hour, MaxTerminalJobs: 1, MaxEvents: 1, MaxTerminalPipelineRuns: 1, MaxSessionPlacements: 1},
+		{MaxAge: valid.MaxAge, MaxTerminalJobs: 0, MaxEvents: 1, MaxTerminalPipelineRuns: 1, MaxSessionPlacements: 1},
+		{MaxAge: valid.MaxAge, MaxTerminalJobs: 1, MaxEvents: 0, MaxTerminalPipelineRuns: 1, MaxSessionPlacements: 1},
+		{MaxAge: valid.MaxAge, MaxTerminalJobs: 1, MaxEvents: 1, MaxTerminalPipelineRuns: 0, MaxSessionPlacements: 1},
+		{MaxAge: valid.MaxAge, MaxTerminalJobs: 1, MaxEvents: 1, MaxTerminalPipelineRuns: 1, MaxSessionPlacements: 0},
 	}
 	for _, policy := range tests {
 		if _, err := store.PruneRetention(time.Now(), policy); err == nil {
@@ -219,7 +277,7 @@ func TestConcurrentRetentionSweepsArchiveATerminalJobOnce(t *testing.T) {
 	defer store.Close()
 	now := time.Now().UTC()
 	putRetentionJob(t, store, retentionJob("concurrent-old", JobCompleted, now.Add(-48*time.Hour), 17))
-	policy := RetentionPolicy{MaxAge: 24 * time.Hour, MaxTerminalJobs: 1, MaxEvents: 1, MaxTerminalPipelineRuns: 1}
+	policy := RetentionPolicy{MaxAge: 24 * time.Hour, MaxTerminalJobs: 1, MaxEvents: 1, MaxTerminalPipelineRuns: 1, MaxSessionPlacements: 1}
 
 	const sweepers = 12
 	var wait sync.WaitGroup
@@ -267,7 +325,7 @@ func TestRetentionLifetimeTotalsSurviveStoreReopen(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	putRetentionJob(t, store, retentionJob("durable-old", JobFailed, now.Add(-48*time.Hour), 23))
-	policy := RetentionPolicy{MaxAge: 24 * time.Hour, MaxTerminalJobs: 1, MaxEvents: 1, MaxTerminalPipelineRuns: 1}
+	policy := RetentionPolicy{MaxAge: 24 * time.Hour, MaxTerminalJobs: 1, MaxEvents: 1, MaxTerminalPipelineRuns: 1, MaxSessionPlacements: 1}
 	if _, err := store.PruneRetention(now, policy); err != nil {
 		t.Fatal(err)
 	}
@@ -311,6 +369,9 @@ func putRetentionJob(t *testing.T, store *Store, job Job) {
 		if err := tx.Bucket(bucketJobIndex).Put(jobIndexKey(job), []byte(job.ID)); err != nil {
 			return err
 		}
+		if err := putJobOwnerIndex(tx.Bucket(bucketJobOwnerIndex), job); err != nil {
+			return err
+		}
 		if job.Status == JobQueued {
 			return tx.Bucket(bucketQueue).Put(queueKey(job), []byte(job.ID))
 		}
@@ -325,6 +386,9 @@ func assertRetentionIndexesRemoved(t *testing.T, store *Store, job Job) {
 	if err := store.db.View(func(tx *bolt.Tx) error {
 		if tx.Bucket(bucketJobIndex).Get(jobIndexKey(job)) != nil {
 			return errors.New("job index remains")
+		}
+		if tx.Bucket(bucketJobOwnerIndex).Get(jobOwnerIndexKey(job)) != nil {
+			return errors.New("job owner index remains")
 		}
 		queue := tx.Bucket(bucketQueue).Cursor()
 		for key, value := queue.First(); key != nil; key, value = queue.Next() {

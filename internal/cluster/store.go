@@ -20,20 +20,27 @@ import (
 )
 
 var (
-	bucketJobs         = []byte("jobs")
-	bucketJobIndex     = []byte("job_index")
-	bucketQueue        = []byte("queue")
-	bucketNodes        = []byte("nodes")
-	bucketTokens       = []byte("tokens")
-	bucketPairings     = []byte("pairings")
-	bucketPairCodes    = []byte("pair_codes")
-	bucketAssignments  = []byte("assignments")
-	bucketEvents       = []byte("events")
-	bucketPipelineRuns = []byte("pipeline_runs")
+	bucketJobs                = []byte("jobs")
+	bucketJobIndex            = []byte("job_index")
+	bucketJobOwnerIndex       = []byte("job_owner_index_v1")
+	bucketStoreMeta           = []byte("store_meta")
+	bucketQueue               = []byte("queue")
+	bucketNodes               = []byte("nodes")
+	bucketTokens              = []byte("tokens")
+	bucketPairings            = []byte("pairings")
+	bucketPairCodes           = []byte("pair_codes")
+	bucketAssignments         = []byte("assignments")
+	bucketEvents              = []byte("events")
+	bucketPipelineRuns        = []byte("pipeline_runs")
+	bucketSessionPlacements   = []byte("session_placements_v1")
+	bucketBrowserSessionLocks = []byte("browser_session_locks_v1")
+	keyJobOwnerIndexVersion   = []byte("job_owner_index_version")
+	jobOwnerIndexVersion      = []byte("1")
 )
 
 type Store struct {
-	db *bolt.DB
+	db                      *bolt.DB
+	savePipelineRunTestHook func(PipelineRun) error
 }
 
 var (
@@ -47,12 +54,31 @@ var (
 	ErrPipelineCapacity            = errors.New("active pipeline capacity is full")
 	ErrOwnerPipelineCapacity       = errors.New("producer active pipeline capacity is full")
 	ErrNodePublicKeyMismatch       = errors.New("node public key differs from paired identity")
+	ErrBrowserSessionBusy          = errors.New("browser session already has an active job or reservation")
 )
 
 type reservation struct {
 	Assignment   Assignment `json:"assignment"`
 	SecretHash   string     `json:"secret_hash"`
 	OwnerSubject string     `json:"owner_subject"`
+}
+
+type sessionPlacement struct {
+	NodeID       string    `json:"node_id"`
+	BrowserTabID int       `json:"browser_tab_id,omitempty"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// browserSessionLock serializes non-ephemeral jobs for one pseudonymous
+// producer/session scope. Explicit profiles are independent; provider-less or
+// profile-less routes use a wildcard scope that conflicts with every profile.
+// Assignment locks expire with their E2EE reservation; job locks live until
+// execution is proven terminal.
+type browserSessionLock struct {
+	Kind      string    `json:"kind"`
+	HolderID  string    `json:"holder_id"`
+	Scope     string    `json:"scope"`
+	ExpiresAt time.Time `json:"expires_at,omitempty"`
 }
 
 func OpenStore(path string) (*Store, error) {
@@ -64,12 +90,15 @@ func OpenStore(path string) (*Store, error) {
 		return nil, err
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, name := range [][]byte{bucketJobs, bucketJobIndex, bucketQueue, bucketNodes, bucketTokens, bucketPairings, bucketPairCodes, bucketAssignments, bucketEvents, bucketPipelineRuns, bucketHistoricalTotals} {
+		for _, name := range [][]byte{bucketJobs, bucketJobIndex, bucketJobOwnerIndex, bucketStoreMeta, bucketQueue, bucketNodes, bucketTokens, bucketPairings, bucketPairCodes, bucketAssignments, bucketEvents, bucketPipelineRuns, bucketSessionPlacements, bucketBrowserSessionLocks, bucketHistoricalTotals} {
 			if _, createErr := tx.CreateBucketIfNotExists(name); createErr != nil {
 				return createErr
 			}
 		}
-		return nil
+		if err := ensureJobOwnerIndex(tx); err != nil {
+			return err
+		}
+		return rebuildBrowserSessionLocks(tx, time.Now().UTC())
 	})
 	if err != nil {
 		db.Close()
@@ -458,6 +487,7 @@ func (s *Store) createJob(request SubmitRequest, maxQueued, maxOwner int) (Job, 
 		ID: request.ID, OwnerSubject: cleanLabel(request.OwnerSubject, 120), TenantID: cleanLabel(request.TenantID, 200), Source: cleanLabel(request.Source, 120), Requirements: request.Requirements,
 		Payload: request.Payload, SealedPayload: request.Sealed, Status: JobQueued, Priority: request.Priority,
 		MaxAttempts: request.MaxAttempts, CreatedAt: now, UpdatedAt: now,
+		Pipeline: cleanLabel(request.Pipeline, 120), Step: cleanLabel(request.Step, 120), ParentID: cleanLabel(request.ParentID, 128),
 	}
 	if job.ID == "" {
 		job.ID = randomID("job")
@@ -496,6 +526,9 @@ func (s *Store) createJob(request SubmitRequest, maxQueued, maxOwner int) (Job, 
 			return err
 		}
 		if err := tx.Bucket(bucketJobIndex).Put(jobIndexKey(job), []byte(job.ID)); err != nil {
+			return err
+		}
+		if err := putJobOwnerIndex(tx.Bucket(bucketJobOwnerIndex), job); err != nil {
 			return err
 		}
 		return tx.Bucket(bucketQueue).Put(queueKey(job), []byte(job.ID))
@@ -551,8 +584,12 @@ func (s *Store) CreateReservationAdmitted(assignment Assignment, secret, owner s
 		return ErrReservationInvalidOrExpired
 	}
 	return s.db.Update(func(tx *bolt.Tx) error {
+		now := time.Now().UTC()
 		assignments := tx.Bucket(bucketAssignments)
-		if err := garbageCollectReservations(assignments, time.Now().UTC()); err != nil {
+		if err := garbageCollectReservations(assignments, now); err != nil {
+			return err
+		}
+		if _, err := garbageCollectBrowserSessionLocks(tx, now); err != nil {
 			return err
 		}
 		if assignments.Get([]byte(assignment.ID)) != nil || tx.Bucket(bucketJobs).Get([]byte(assignment.JobID)) != nil {
@@ -567,6 +604,9 @@ func (s *Store) CreateReservationAdmitted(assignment Assignment, secret, owner s
 		}
 		if maxOwner > 0 && owned >= maxOwner {
 			return ErrOwnerReservationCapacity
+		}
+		if err := acquireBrowserSessionLockTx(tx, owner, assignment.Requirements, browserSessionLockAssignment, assignment.ID, assignment.ExpiresAt, now, browserSessionNeedsLockTx(tx, assignment.Requirements, assignment.NodeID)); err != nil {
+			return err
 		}
 		return putJSON(assignments, assignment.ID, reservation{Assignment: assignment, SecretHash: tokenHash(secret), OwnerSubject: owner})
 	})
@@ -590,8 +630,10 @@ func (s *Store) ConsumeReservationAdmitted(id, secret string, sealed *SealedEnve
 		if err := getJSON(tx.Bucket(bucketAssignments), id, &saved); err != nil {
 			return err
 		}
-		if !saved.Assignment.ExpiresAt.After(time.Now().UTC()) {
+		now := time.Now().UTC()
+		if !saved.Assignment.ExpiresAt.After(now) {
 			_ = tx.Bucket(bucketAssignments).Delete([]byte(id))
+			_ = releaseBrowserSessionLockTx(tx, saved.OwnerSubject, saved.Assignment.Requirements, browserSessionLockAssignment, saved.Assignment.ID)
 			return ErrReservationInvalidOrExpired
 		}
 		if !constantEqual(saved.SecretHash, tokenHash(secret)) {
@@ -624,15 +666,20 @@ func (s *Store) ConsumeReservationAdmitted(id, secret string, sealed *SealedEnve
 				return ErrOwnerQueueCapacity
 			}
 		}
-		now := time.Now().UTC()
 		job = Job{ID: saved.Assignment.JobID, OwnerSubject: saved.Assignment.OwnerSubject, Source: cleanLabel(source, 120), TenantID: saved.Assignment.TenantID, Requirements: saved.Assignment.Requirements, SealedPayload: sealed, Status: JobQueued, AssignedNode: saved.Assignment.NodeID, Priority: priority, MaxAttempts: attempts, CreatedAt: now, UpdatedAt: now}
 		if job.MaxAttempts <= 0 {
 			job.MaxAttempts = 1
+		}
+		if err := promoteBrowserSessionLockTx(tx, saved, job, now); err != nil {
+			return err
 		}
 		if err := putJSON(tx.Bucket(bucketJobs), job.ID, job); err != nil {
 			return err
 		}
 		if err := tx.Bucket(bucketJobIndex).Put(jobIndexKey(job), []byte(job.ID)); err != nil {
+			return err
+		}
+		if err := putJobOwnerIndex(tx.Bucket(bucketJobOwnerIndex), job); err != nil {
 			return err
 		}
 		if err := tx.Bucket(bucketQueue).Put(queueKey(job), []byte(job.ID)); err != nil {
@@ -650,6 +697,10 @@ func (s *Store) GarbageCollectReservations(now time.Time) (int, error) {
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		var err error
 		removed, err = garbageCollectReservationsCount(tx.Bucket(bucketAssignments), now)
+		if err != nil {
+			return err
+		}
+		_, err = garbageCollectBrowserSessionLocks(tx, now)
 		return err
 	})
 	return removed, err
@@ -755,16 +806,33 @@ func (s *Store) GetJob(id string) (Job, error) {
 // logical session. A session is only an affinity hint: the relay can still use
 // another compatible worker when the previous one is offline.
 func (s *Store) RecentSessionNode(owner, session string) (string, bool) {
+	node, _, ok := s.RecentSessionPlacement(owner, Requirements{SessionID: session})
+	return node, ok
+}
+
+// RecentSessionPlacement keeps a browser conversation on the concrete tab
+// chosen for its previous turn. Browser tab identifiers are meaningful only
+// together with their worker node, so both values come from the same job.
+func (s *Store) RecentSessionPlacement(owner string, requirements Requirements) (node string, browserTabID int, ok bool) {
 	owner = cleanLabel(owner, 120)
-	session = strings.TrimSpace(session)
-	if session == "" {
-		return "", false
+	session := canonicalSessionID(requirements.SessionID)
+	key := sessionPlacementKey(owner, requirements)
+	var placement sessionPlacement
+	if err := s.db.View(func(tx *bolt.Tx) error {
+		return getJSON(tx.Bucket(bucketSessionPlacements), key, &placement)
+	}); err == nil && placement.NodeID != "" {
+		return placement.NodeID, placement.BrowserTabID, true
 	}
 	var selected Job
 	err := s.db.View(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketJobs).ForEach(func(_, value []byte) error {
 			var job Job
-			if json.Unmarshal(value, &job) != nil || job.OwnerSubject != owner || job.Requirements.SessionID != session || job.AssignedNode == "" {
+			if json.Unmarshal(value, &job) != nil || job.OwnerSubject != owner ||
+				canonicalSessionID(job.Requirements.SessionID) != session || job.AssignedNode == "" || !terminalJobStatus(job.Status) ||
+				!sameSessionPlacementScope(job.Requirements, requirements) {
+				return nil
+			}
+			if strings.EqualFold(strings.TrimSpace(requirements.Provider), "browser") && (job.ExecutedBrowserTabID <= 0 || job.EphemeralBrowserTab) {
 				return nil
 			}
 			if selected.ID == "" || job.UpdatedAt.After(selected.UpdatedAt) {
@@ -773,15 +841,325 @@ func (s *Store) RecentSessionNode(owner, session string) (string, bool) {
 			return nil
 		})
 	})
-	return selected.AssignedNode, err == nil && selected.AssignedNode != ""
+	if err != nil || selected.AssignedNode == "" {
+		return "", 0, false
+	}
+	tabID := selected.ExecutedBrowserTabID
+	placement = sessionPlacement{NodeID: selected.AssignedNode, BrowserTabID: tabID, UpdatedAt: selected.UpdatedAt}
+	_ = s.db.Update(func(tx *bolt.Tx) error { return putSessionPlacement(tx, key, placement) })
+	return selected.AssignedNode, tabID, true
+}
+
+func canonicalSessionID(session string) string {
+	session = strings.TrimSpace(session)
+	if session == "" {
+		return "default"
+	}
+	return session
+}
+
+func sameSessionPlacementScope(previous, current Requirements) bool {
+	previousBrowser := strings.EqualFold(strings.TrimSpace(previous.Provider), "browser")
+	currentBrowser := strings.EqualFold(strings.TrimSpace(current.Provider), "browser")
+	if previousBrowser || currentBrowser {
+		return previousBrowser && currentBrowser &&
+			strings.EqualFold(strings.TrimSpace(previous.BrowserProfile), strings.TrimSpace(current.BrowserProfile))
+	}
+	return true
+}
+
+func sessionPlacementKey(owner string, requirements Requirements) string {
+	scope := "node"
+	if strings.EqualFold(strings.TrimSpace(requirements.Provider), "browser") {
+		scope = "browser\x00" + strings.ToLower(strings.TrimSpace(requirements.BrowserProfile))
+	}
+	sum := sha256.Sum256([]byte(owner + "\x00" + canonicalSessionID(requirements.SessionID) + "\x00" + scope))
+	return hex.EncodeToString(sum[:])
+}
+
+const (
+	browserSessionLockAssignment = "assignment"
+	browserSessionLockJob        = "job"
+)
+
+func browserSessionLockEligible(requirements Requirements) bool {
+	provider := strings.TrimSpace(requirements.Provider)
+	return !requirements.BrowserEphemeralChat && (strings.EqualFold(provider, "browser") || provider == "")
+}
+
+// browserSessionNeedsLockTx identifies jobs that can reach the browser
+// conversation boundary. Every provider-less job qualifies because an
+// operator-owned route may switch/fallback to a browser after the last node
+// heartbeat; negative or stale capability telemetry is not safety evidence.
+func browserSessionNeedsLockTx(tx *bolt.Tx, requirements Requirements, nodeID string) bool {
+	return browserSessionLockEligible(requirements)
+}
+
+func browserSessionLockBase(owner string, requirements Requirements) string {
+	// The worker injects one producer/session key for explicit browser and
+	// provider-less fallback jobs. The profile is a separate selector because
+	// the extension scopes one logical session independently per provider UI.
+	sum := sha256.Sum256([]byte(cleanLabel(owner, 120) + "\x00" + canonicalSessionID(requirements.SessionID) + "\x00browser-session-lock-v1"))
+	return hex.EncodeToString(sum[:])
+}
+
+func browserSessionLockScope(requirements Requirements) string {
+	if strings.EqualFold(strings.TrimSpace(requirements.Provider), "browser") {
+		if profile := strings.ToLower(strings.TrimSpace(requirements.BrowserProfile)); profile != "" {
+			return "profile:" + profile
+		}
+	}
+	return "*"
+}
+
+func browserSessionLockPrefix(owner string, requirements Requirements) string {
+	return browserSessionLockBase(owner, requirements) + "\x00" + browserSessionLockScope(requirements) + "\x00"
+}
+
+func browserSessionLockKey(owner string, requirements Requirements, kind, holderID string) string {
+	return browserSessionLockPrefix(owner, requirements) + kind + "\x00" + holderID
+}
+
+func browserSessionLockActive(lock browserSessionLock, now time.Time) bool {
+	return lock.ExpiresAt.IsZero() || lock.ExpiresAt.After(now)
+}
+
+func browserSessionBusyTx(tx *bolt.Tx, owner string, requirements Requirements, excludeKind, excludeID string, now time.Time) (bool, error) {
+	if !browserSessionLockEligible(requirements) {
+		return false, nil
+	}
+	bucket := tx.Bucket(bucketBrowserSessionLocks)
+	prefix := []byte(browserSessionLockBase(owner, requirements) + "\x00")
+	wantedScope := browserSessionLockScope(requirements)
+	cursor := bucket.Cursor()
+	for key, value := cursor.Seek(prefix); key != nil && bytes.HasPrefix(key, prefix); key, value = cursor.Next() {
+		var lock browserSessionLock
+		if err := json.Unmarshal(value, &lock); err != nil {
+			return false, err
+		}
+		if !browserSessionLockActive(lock, now) {
+			if err := cursor.Delete(); err != nil {
+				return false, err
+			}
+			continue
+		}
+		if wantedScope != "*" && lock.Scope != "*" && lock.Scope != wantedScope {
+			continue
+		}
+		if lock.Kind == excludeKind && lock.HolderID == excludeID {
+			continue
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+func acquireBrowserSessionLockTx(tx *bolt.Tx, owner string, requirements Requirements, kind, holderID string, expiresAt, now time.Time, required bool) error {
+	if !required {
+		return nil
+	}
+	busy, err := browserSessionBusyTx(tx, owner, requirements, kind, holderID, now)
+	if err != nil {
+		return err
+	}
+	if busy {
+		return ErrBrowserSessionBusy
+	}
+	return putJSON(tx.Bucket(bucketBrowserSessionLocks), browserSessionLockKey(owner, requirements, kind, holderID), browserSessionLock{
+		Kind: kind, HolderID: holderID, Scope: browserSessionLockScope(requirements), ExpiresAt: expiresAt,
+	})
+}
+
+func releaseBrowserSessionLockTx(tx *bolt.Tx, owner string, requirements Requirements, kind, holderID string) error {
+	if !browserSessionLockEligible(requirements) {
+		return nil
+	}
+	return tx.Bucket(bucketBrowserSessionLocks).Delete([]byte(browserSessionLockKey(owner, requirements, kind, holderID)))
+}
+
+func promoteBrowserSessionLockTx(tx *bolt.Tx, saved reservation, job Job, now time.Time) error {
+	assignmentKey := []byte(browserSessionLockKey(saved.OwnerSubject, saved.Assignment.Requirements, browserSessionLockAssignment, saved.Assignment.ID))
+	locked := tx.Bucket(bucketBrowserSessionLocks).Get(assignmentKey) != nil
+	if !locked && !browserSessionNeedsLockTx(tx, job.Requirements, job.AssignedNode) {
+		return nil
+	}
+	if err := releaseBrowserSessionLockTx(tx, saved.OwnerSubject, saved.Assignment.Requirements, browserSessionLockAssignment, saved.Assignment.ID); err != nil {
+		return err
+	}
+	return acquireBrowserSessionLockTx(tx, job.OwnerSubject, job.Requirements, browserSessionLockJob, job.ID, time.Time{}, now, true)
+}
+
+func garbageCollectBrowserSessionLocks(tx *bolt.Tx, now time.Time) (int, error) {
+	removed := 0
+	cursor := tx.Bucket(bucketBrowserSessionLocks).Cursor()
+	for key, value := cursor.First(); key != nil; key, value = cursor.Next() {
+		var lock browserSessionLock
+		if err := json.Unmarshal(value, &lock); err != nil {
+			return removed, err
+		}
+		if browserSessionLockActive(lock, now) {
+			continue
+		}
+		if err := cursor.Delete(); err != nil {
+			return removed, err
+		}
+		removed++
+	}
+	return removed, nil
+}
+
+// rebuildBrowserSessionLocks makes the lock table derivable rather than a
+// second source of truth. This both repairs upgrades from older databases and
+// reconstructs reservations/active executions after a relay process crash.
+func rebuildBrowserSessionLocks(tx *bolt.Tx, now time.Time) error {
+	locks := tx.Bucket(bucketBrowserSessionLocks)
+	for cursor, key, _ := locks.Cursor(), []byte(nil), []byte(nil); ; {
+		if key == nil {
+			key, _ = cursor.First()
+		} else {
+			key, _ = cursor.Next()
+		}
+		if key == nil {
+			break
+		}
+		if err := cursor.Delete(); err != nil {
+			return err
+		}
+	}
+	if err := tx.Bucket(bucketAssignments).ForEach(func(_, value []byte) error {
+		var saved reservation
+		if err := json.Unmarshal(value, &saved); err != nil {
+			return err
+		}
+		if !saved.Assignment.ExpiresAt.After(now) || !browserSessionNeedsLockTx(tx, saved.Assignment.Requirements, saved.Assignment.NodeID) {
+			return nil
+		}
+		return putJSON(locks, browserSessionLockKey(saved.OwnerSubject, saved.Assignment.Requirements, browserSessionLockAssignment, saved.Assignment.ID), browserSessionLock{
+			Kind: browserSessionLockAssignment, HolderID: saved.Assignment.ID, Scope: browserSessionLockScope(saved.Assignment.Requirements), ExpiresAt: saved.Assignment.ExpiresAt,
+		})
+	}); err != nil {
+		return err
+	}
+	return tx.Bucket(bucketJobs).ForEach(func(_, value []byte) error {
+		var job Job
+		if err := json.Unmarshal(value, &job); err != nil {
+			return err
+		}
+		active := job.Status == JobAssigned || job.Status == JobRunning ||
+			(job.Status == JobQueued && job.SealedPayload != nil && job.AssignedNode != "")
+		if !active || !browserSessionNeedsLockTx(tx, job.Requirements, job.AssignedNode) {
+			return nil
+		}
+		return putJSON(locks, browserSessionLockKey(job.OwnerSubject, job.Requirements, browserSessionLockJob, job.ID), browserSessionLock{
+			Kind: browserSessionLockJob, HolderID: job.ID, Scope: browserSessionLockScope(job.Requirements),
+		})
+	})
+}
+
+// BrowserSessionBusy is a cheap scheduler hint. The write-transaction checks
+// in reservation creation and assignment remain authoritative against races.
+func (s *Store) BrowserSessionBusy(owner string, requirements Requirements, excludeJobID string) (bool, error) {
+	if !browserSessionLockEligible(requirements) {
+		return false, nil
+	}
+	var busy bool
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		var err error
+		busy, err = browserSessionBusyTx(tx, owner, requirements, browserSessionLockJob, excludeJobID, time.Now().UTC())
+		return err
+	})
+	return busy, err
+}
+
+// ReleaseBrowserSessionJobLock is used only when the relay has proof that a
+// cancelled/terminalized worker execution ended (matching result or teardown).
+func (s *Store) ReleaseBrowserSessionJobLock(jobID string) (bool, error) {
+	released := false
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		var job Job
+		if err := getJSON(tx.Bucket(bucketJobs), jobID, &job); err != nil {
+			return err
+		}
+		if !browserSessionLockEligible(job.Requirements) {
+			return nil
+		}
+		key := []byte(browserSessionLockKey(job.OwnerSubject, job.Requirements, browserSessionLockJob, job.ID))
+		if tx.Bucket(bucketBrowserSessionLocks).Get(key) == nil {
+			return nil
+		}
+		if err := tx.Bucket(bucketBrowserSessionLocks).Delete(key); err != nil {
+			return err
+		}
+		released = true
+		return nil
+	})
+	return released, err
+}
+
+func browserSessionJobLockExistsTx(tx *bolt.Tx, job Job) bool {
+	return browserSessionLockEligible(job.Requirements) && tx.Bucket(bucketBrowserSessionLocks).Get([]byte(browserSessionLockKey(job.OwnerSubject, job.Requirements, browserSessionLockJob, job.ID))) != nil
+}
+
+func putSessionPlacement(tx *bolt.Tx, key string, placement sessionPlacement) error {
+	if placement.NodeID == "" || placement.UpdatedAt.IsZero() {
+		return nil
+	}
+	bucket := tx.Bucket(bucketSessionPlacements)
+	var current sessionPlacement
+	if getJSON(bucket, key, &current) == nil && !placement.UpdatedAt.After(current.UpdatedAt) {
+		return nil
+	}
+	return putJSON(bucket, key, placement)
 }
 
 func (s *Store) SaveJob(job Job) error {
 	job.UpdatedAt = time.Now().UTC()
-	return s.db.Update(func(tx *bolt.Tx) error { return putJSON(tx.Bucket(bucketJobs), job.ID, job) })
+	return s.db.Update(func(tx *bolt.Tx) error {
+		var previous Job
+		previousExists := getJSON(tx.Bucket(bucketJobs), job.ID, &previous) == nil
+		if err := putJSON(tx.Bucket(bucketJobs), job.ID, job); err != nil {
+			return err
+		}
+		if previousExists && !bytes.Equal(jobIndexKey(previous), jobIndexKey(job)) {
+			if err := tx.Bucket(bucketJobIndex).Delete(jobIndexKey(previous)); err != nil {
+				return err
+			}
+		}
+		if !previousExists || !bytes.Equal(jobIndexKey(previous), jobIndexKey(job)) {
+			if err := tx.Bucket(bucketJobIndex).Put(jobIndexKey(job), []byte(job.ID)); err != nil {
+				return err
+			}
+		}
+		if previousExists && !bytes.Equal(jobOwnerIndexKey(previous), jobOwnerIndexKey(job)) {
+			if err := deleteJobOwnerIndex(tx.Bucket(bucketJobOwnerIndex), previous); err != nil {
+				return err
+			}
+		}
+		return putJobOwnerIndex(tx.Bucket(bucketJobOwnerIndex), job)
+	})
 }
 
-func (s *Store) AssignJob(id, nodeID string) (Job, error) {
+func (s *Store) AssignJob(id, nodeID string, selectedBrowserTab ...int) (Job, error) {
+	if len(selectedBrowserTab) > 1 {
+		return Job{}, errors.New("only one browser tab may be selected")
+	}
+	selection := (*browserAssignment)(nil)
+	if len(selectedBrowserTab) == 1 {
+		selection = &browserAssignment{TabID: selectedBrowserTab[0]}
+	}
+	return s.assignJob(id, nodeID, selection)
+}
+
+type browserAssignment struct {
+	TabID           int
+	SessionRecovery bool
+}
+
+func (s *Store) AssignBrowserJob(id, nodeID string, tabID int, sessionRecovery bool) (Job, error) {
+	return s.assignJob(id, nodeID, &browserAssignment{TabID: tabID, SessionRecovery: sessionRecovery})
+}
+
+func (s *Store) assignJob(id, nodeID string, browser *browserAssignment) (Job, error) {
 	var job Job
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		if err := getJSON(tx.Bucket(bucketJobs), id, &job); err != nil {
@@ -792,6 +1170,25 @@ func (s *Store) AssignJob(id, nodeID string) (Job, error) {
 		}
 		if job.SealedPayload != nil && job.AssignedNode != "" && job.AssignedNode != nodeID {
 			return errors.New("sealed job is bound to another node")
+		}
+		if browser != nil {
+			if !strings.EqualFold(job.Requirements.Provider, "browser") {
+				return errors.New("browser tab selection requires provider browser")
+			}
+			if browser.TabID < 0 {
+				return errors.New("browser tab selection is invalid")
+			}
+			if job.SealedPayload != nil && (browser.TabID != job.Requirements.BrowserTabID || browser.SessionRecovery != job.Requirements.BrowserSessionRecovery) {
+				return errors.New("sealed browser assignment cannot change authenticated tab requirements")
+			}
+			if browser.TabID > 0 && job.Requirements.BrowserTabID > 0 && job.Requirements.BrowserTabID != browser.TabID {
+				return errors.New("browser job is bound to another tab")
+			}
+			job.Requirements.BrowserTabID = browser.TabID
+			job.Requirements.BrowserSessionRecovery = browser.SessionRecovery
+		}
+		if err := acquireBrowserSessionLockTx(tx, job.OwnerSubject, job.Requirements, browserSessionLockJob, job.ID, time.Time{}, time.Now().UTC(), browserSessionNeedsLockTx(tx, job.Requirements, nodeID)); err != nil {
+			return err
 		}
 		job.Status = JobAssigned
 		job.AssignedNode = nodeID
@@ -873,8 +1270,11 @@ func (s *Store) CancelJob(id string) (Job, error) {
 	return job, err
 }
 
-func (s *Store) CompleteJob(id, nodeID string, attempt int, result json.RawMessage, sealed *SealedEnvelope, usage Usage, jobError string) (Job, error) {
+func (s *Store) CompleteJob(id, nodeID string, attempt int, result json.RawMessage, sealed *SealedEnvelope, usage Usage, jobError string, execution ...*ExecutionMetadata) (Job, error) {
 	var job Job
+	if len(execution) > 1 {
+		return Job{}, errors.New("only one execution metadata record may be reported")
+	}
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		if err := getJSON(tx.Bucket(bucketJobs), id, &job); err != nil {
 			return err
@@ -889,9 +1289,25 @@ func (s *Store) CompleteJob(id, nodeID string, attempt int, result json.RawMessa
 			return errors.New("job result belongs to a stale assignment attempt")
 		}
 		completionError := validateWorkerResult(job, result, sealed, jobError)
+		var executedBrowserTabID int
+		if len(execution) == 1 && execution[0] != nil && execution[0].BrowserTabID != 0 {
+			executedBrowserTabID = execution[0].BrowserTabID
+			provider := strings.TrimSpace(job.Requirements.Provider)
+			if executedBrowserTabID < 1 || provider != "" && !strings.EqualFold(provider, "browser") {
+				completionError = errors.New("browser execution metadata does not match this job")
+			}
+		}
 		if completionError == nil {
 			job.Result = result
 			job.SealedResult = sealed
+			// The authenticated request is authoritative. A worker may confirm
+			// that a tab was ephemeral, but it cannot downgrade an explicitly
+			// per-job browser chat into durable session placement.
+			job.EphemeralBrowserTab = job.Requirements.BrowserEphemeralChat
+			if executedBrowserTabID > 0 {
+				job.ExecutedBrowserTabID = executedBrowserTabID
+				job.EphemeralBrowserTab = job.EphemeralBrowserTab || execution[0].EphemeralBrowserTab
+			}
 		} else {
 			// A malformed completion from the assigned worker is terminal. Retrying
 			// an execution whose side effects are unknown could submit a browser
@@ -919,6 +1335,22 @@ func (s *Store) CompleteJob(id, nodeID string, attempt int, result json.RawMessa
 			job.Status = JobFailed
 		}
 		if err := putJSON(tx.Bucket(bucketJobs), id, job); err != nil {
+			return err
+		}
+		if strings.EqualFold(strings.TrimSpace(job.Requirements.Provider), "browser") {
+			if job.ExecutedBrowserTabID > 0 && !job.EphemeralBrowserTab {
+				if err := putSessionPlacement(tx, sessionPlacementKey(job.OwnerSubject, job.Requirements), sessionPlacement{
+					NodeID: job.AssignedNode, BrowserTabID: job.ExecutedBrowserTabID, UpdatedAt: job.UpdatedAt,
+				}); err != nil {
+					return err
+				}
+			}
+		} else if err := putSessionPlacement(tx, sessionPlacementKey(job.OwnerSubject, job.Requirements), sessionPlacement{
+			NodeID: job.AssignedNode, BrowserTabID: job.ExecutedBrowserTabID, UpdatedAt: job.UpdatedAt,
+		}); err != nil {
+			return err
+		}
+		if err := releaseBrowserSessionLockTx(tx, job.OwnerSubject, job.Requirements, browserSessionLockJob, job.ID); err != nil {
 			return err
 		}
 		if job.Status == JobCompleted || job.Status == JobFailed {
@@ -986,7 +1418,13 @@ func (s *Store) RequeueNode(nodeID, reason string) ([]Job, error) {
 		changes := []pending{}
 		if err := bucket.ForEach(func(key, value []byte) error {
 			var job Job
-			if json.Unmarshal(value, &job) != nil || job.AssignedNode != nodeID || (job.Status != JobAssigned && job.Status != JobRunning) {
+			if json.Unmarshal(value, &job) != nil || job.AssignedNode != nodeID {
+				return nil
+			}
+			if job.Status == JobCancelled {
+				return releaseBrowserSessionLockTx(tx, job.OwnerSubject, job.Requirements, browserSessionLockJob, job.ID)
+			}
+			if job.Status != JobAssigned && job.Status != JobRunning {
 				return nil
 			}
 			job.Error = cleanLabel(reason+"; execution state is ambiguous; explicit resubmission required", 500)
@@ -994,6 +1432,9 @@ func (s *Store) RequeueNode(nodeID, reason string) ([]Job, error) {
 			job.Status = JobFailed
 			job.FinishedAt = job.UpdatedAt
 			if err := deleteQueueEntry(tx.Bucket(bucketQueue), job.ID); err != nil {
+				return err
+			}
+			if err := releaseBrowserSessionLockTx(tx, job.OwnerSubject, job.Requirements, browserSessionLockJob, job.ID); err != nil {
 				return err
 			}
 			changes = append(changes, pending{key: append([]byte(nil), key...), job: job})
@@ -1062,6 +1503,9 @@ func (s *Store) RecoverRelayRestart(reason string) ([]Job, error) {
 			if err := deleteQueueEntry(tx.Bucket(bucketQueue), job.ID); err != nil {
 				return err
 			}
+			if err := releaseBrowserSessionLockTx(tx, job.OwnerSubject, job.Requirements, browserSessionLockJob, job.ID); err != nil {
+				return err
+			}
 			changes = append(changes, pending{key: append([]byte(nil), key...), job: job})
 			updated = append(updated, job)
 			return nil
@@ -1115,6 +1559,11 @@ func (s *Store) RecoverStaleJobs(now time.Time, sealedWait, execution time.Durat
 			}
 			if err := deleteQueueEntry(tx.Bucket(bucketQueue), job.ID); err != nil {
 				return err
+			}
+			if staleBound {
+				if err := releaseBrowserSessionLockTx(tx, job.OwnerSubject, job.Requirements, browserSessionLockJob, job.ID); err != nil {
+					return err
+				}
 			}
 			changes = append(changes, change{key: append([]byte(nil), key...), job: job})
 			updated = append(updated, job)
@@ -1258,18 +1707,50 @@ func appendFairPriorityTier(target *[]Job, tier []Job, limit int, afterOwner str
 }
 
 func (s *Store) ListJobs(limit int, status string) ([]Job, error) {
+	return s.ListJobsForOwner(limit, status, "")
+}
+
+// ListJobsForOwner uses a durable owner+createdAt index for producer-scoped
+// history. Old databases build the index once, atomically, during OpenStore;
+// this hot path never decodes another producer's records.
+func (s *Store) ListJobsForOwner(limit int, status, owner string) ([]Job, error) {
 	if limit <= 0 || limit > 5000 {
 		limit = 100
 	}
+	owner = cleanLabel(owner, 120)
 	jobs := []Job{}
 	err := s.db.View(func(tx *bolt.Tx) error {
-		cursor := tx.Bucket(bucketJobIndex).Cursor()
-		for key, id := cursor.Last(); key != nil && len(jobs) < limit; key, id = cursor.Prev() {
+		index := tx.Bucket(bucketJobIndex)
+		var prefix []byte
+		if owner != "" {
+			index = tx.Bucket(bucketJobOwnerIndex)
+			prefix = jobOwnerIndexPrefix(owner)
+		}
+		cursor := index.Cursor()
+		key, id := cursor.Last()
+		if len(prefix) > 0 {
+			upper := prefixUpperBound(prefix)
+			if upper != nil {
+				key, id = cursor.Seek(upper)
+				if key == nil {
+					key, id = cursor.Last()
+				} else {
+					key, id = cursor.Prev()
+				}
+			}
+		}
+		for ; key != nil && len(jobs) < limit; key, id = cursor.Prev() {
+			if len(prefix) > 0 && !bytes.HasPrefix(key, prefix) {
+				break
+			}
 			var job Job
 			if err := getJSON(tx.Bucket(bucketJobs), string(id), &job); err != nil {
 				return err
 			}
-			if status == "" || job.Status == status {
+			if owner != "" && (job.OwnerSubject != owner || !bytes.Equal(key, jobOwnerIndexKey(job))) {
+				return errors.New("job owner index does not match its authoritative record")
+			}
+			if (owner == "" || job.OwnerSubject == owner) && (status == "" || job.Status == status) {
 				jobs = append(jobs, job)
 			}
 		}
@@ -1393,6 +1874,11 @@ func (s *Store) Overview() (Overview, error) {
 }
 
 func (s *Store) SavePipelineRun(run PipelineRun) error {
+	if s.savePipelineRunTestHook != nil {
+		if err := s.savePipelineRunTestHook(run); err != nil {
+			return err
+		}
+	}
 	return s.db.Update(func(tx *bolt.Tx) error { return putJSON(tx.Bucket(bucketPipelineRuns), run.ID, run) })
 }
 
@@ -1578,6 +2064,76 @@ func randomUserCode() (string, error) {
 
 func jobIndexKey(job Job) []byte {
 	return []byte(fmt.Sprintf("%020d:%s", job.CreatedAt.UnixNano(), job.ID))
+}
+
+func jobOwnerIndexPrefix(owner string) []byte {
+	digest := sha256.Sum256([]byte(owner))
+	return append([]byte(nil), digest[:]...)
+}
+
+func jobOwnerIndexKey(job Job) []byte {
+	if job.OwnerSubject == "" {
+		return nil
+	}
+	return append(jobOwnerIndexPrefix(job.OwnerSubject), jobIndexKey(job)...)
+}
+
+func putJobOwnerIndex(bucket *bolt.Bucket, job Job) error {
+	key := jobOwnerIndexKey(job)
+	if len(key) == 0 {
+		return nil
+	}
+	return bucket.Put(key, []byte(job.ID))
+}
+
+func deleteJobOwnerIndex(bucket *bolt.Bucket, job Job) error {
+	key := jobOwnerIndexKey(job)
+	if len(key) == 0 {
+		return nil
+	}
+	value := bucket.Get(key)
+	if value != nil && bytes.Equal(value, []byte(job.ID)) {
+		return bucket.Delete(key)
+	}
+	return nil
+}
+
+func prefixUpperBound(prefix []byte) []byte {
+	upper := append([]byte(nil), prefix...)
+	for index := len(upper) - 1; index >= 0; index-- {
+		if upper[index] != 0xff {
+			upper[index]++
+			return upper[:index+1]
+		}
+	}
+	return nil
+}
+
+func ensureJobOwnerIndex(tx *bolt.Tx) error {
+	meta := tx.Bucket(bucketStoreMeta)
+	if bytes.Equal(meta.Get(keyJobOwnerIndexVersion), jobOwnerIndexVersion) {
+		return nil
+	}
+	if err := tx.DeleteBucket(bucketJobOwnerIndex); err != nil && !errors.Is(err, bolt.ErrBucketNotFound) {
+		return err
+	}
+	index, err := tx.CreateBucket(bucketJobOwnerIndex)
+	if err != nil {
+		return err
+	}
+	if err := tx.Bucket(bucketJobs).ForEach(func(key, value []byte) error {
+		var job Job
+		if err := json.Unmarshal(value, &job); err != nil {
+			return fmt.Errorf("migrate job owner index for %q: %w", key, err)
+		}
+		if job.ID != string(key) {
+			return fmt.Errorf("migrate job owner index: record key %q does not match id %q", key, job.ID)
+		}
+		return putJobOwnerIndex(index, job)
+	}); err != nil {
+		return err
+	}
+	return meta.Put(keyJobOwnerIndexVersion, jobOwnerIndexVersion)
 }
 
 func queueKey(job Job) []byte {

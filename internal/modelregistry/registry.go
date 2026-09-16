@@ -45,9 +45,14 @@ type DiscoveryEntry struct {
 	Quantization   string   `json:"quantization,omitempty"`
 	Parameters     string   `json:"parameters,omitempty"`
 	Capabilities   []string `json:"capabilities"`
-	Installed      bool     `json:"installed"`
-	Ready          bool     `json:"ready"`
-	Loaded         bool     `json:"loaded"`
+	// CapabilitiesVerified is true only when the running provider advertised
+	// the capabilities itself. Name/family inference remains useful inventory
+	// metadata for offline files, but must never authorize automatic routing.
+	CapabilitiesVerified bool   `json:"capabilities_verified"`
+	CapabilitySource     string `json:"capability_source,omitempty"`
+	Installed            bool   `json:"installed"`
+	Ready                bool   `json:"ready"`
+	Loaded               bool   `json:"loaded"`
 }
 
 type Progress func(message string, received, total int64)
@@ -61,6 +66,8 @@ const maximumOllamaShowBytes int64 = 2 << 20
 
 type ollamaCapabilityCacheEntry struct {
 	capabilities []string
+	verified     bool
+	source       string
 	expires      time.Time
 }
 
@@ -240,8 +247,8 @@ func discoverOllama(ctx context.Context, base string) []DiscoveryEntry {
 		}
 		vram, isLoaded := loaded[strings.ToLower(model.Name)]
 		hint := model.Name + " " + model.Details.Family + " " + strings.Join(model.Details.Families, " ")
-		capabilities := ResolveOllamaCapabilities(metadataContext, client, base, model.Name, model.Digest, model.Capabilities, hint)
-		result = append(result, DiscoveryEntry{Name: model.Name, Provider: "ollama", Format: "ollama", Size: model.Size, MemoryEstimate: memoryEstimate(model.Size), VRAM: vram, Quantization: model.Details.Quantization, Parameters: model.Details.ParameterSize, Capabilities: capabilities, Installed: true, Ready: true, Loaded: isLoaded})
+		capabilities, verified, source := ResolveOllamaCapabilityEvidence(metadataContext, client, base, model.Name, model.Digest, model.Capabilities, hint)
+		result = append(result, DiscoveryEntry{Name: model.Name, Provider: "ollama", Format: "ollama", Size: model.Size, MemoryEstimate: memoryEstimate(model.Size), VRAM: vram, Quantization: model.Details.Quantization, Parameters: model.Details.ParameterSize, Capabilities: capabilities, CapabilitiesVerified: verified, CapabilitySource: source, Installed: true, Ready: true, Loaded: isLoaded})
 	}
 	return result
 }
@@ -311,7 +318,7 @@ func discoverOllamaManifests() []DiscoveryEntry {
 			_ = json.Unmarshal(configRaw, &metadata)
 		}
 		hints := name + " " + metadata.Family + " " + strings.Join(metadata.Families, " ")
-		result = append(result, DiscoveryEntry{Name: name, Provider: "ollama", Path: path, Format: metadata.Format, Size: size, MemoryEstimate: memoryEstimate(size), Quantization: metadata.Quantization, Parameters: metadata.Parameters, Capabilities: modelCapabilities(hints), Installed: true})
+		result = append(result, DiscoveryEntry{Name: name, Provider: "ollama", Path: path, Format: metadata.Format, Size: size, MemoryEstimate: memoryEstimate(size), Quantization: metadata.Quantization, Parameters: metadata.Parameters, Capabilities: modelCapabilities(hints), CapabilitySource: "name_inference", Installed: true})
 		return nil
 	})
 	return result
@@ -337,7 +344,7 @@ func localDiscovery(path string, size int64) DiscoveryEntry {
 	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 	format := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
 	hints := name + " " + filepath.Dir(path)
-	return DiscoveryEntry{Name: name, Provider: "local-file", Path: path, Format: format, Size: size, MemoryEstimate: memoryEstimate(size), Quantization: quantization(hints), Parameters: parameterSize(hints), Capabilities: modelCapabilities(hints), Installed: true, Ready: true}
+	return DiscoveryEntry{Name: name, Provider: "local-file", Path: path, Format: format, Size: size, MemoryEstimate: memoryEstimate(size), Quantization: quantization(hints), Parameters: parameterSize(hints), Capabilities: modelCapabilities(hints), CapabilitySource: "name_inference", Installed: true, Ready: true}
 }
 
 func memoryEstimate(size int64) int64 {
@@ -420,13 +427,24 @@ func OllamaCapabilities(advertised []string, hint string) []string {
 	return result
 }
 
-// ResolveOllamaCapabilities reads the authoritative top-level capabilities
-// from POST /api/show. /api/tags does not normally expose this field. Results
-// are bounded and cached by daemon plus immutable model digest (or name for
-// older servers), so a frequent status refresh does not repeatedly inspect
-// every installed model. Older daemons retain the conservative tag/name
-// fallback when /api/show is unavailable.
+// ResolveOllamaCapabilities returns display inventory. Callers making an
+// automatic execution decision must use ResolveOllamaCapabilityEvidence and
+// require verified=true. This wrapper deliberately preserves inferred labels
+// for older daemons and offline inventory without turning those labels into a
+// routing authorization.
 func ResolveOllamaCapabilities(ctx context.Context, client *http.Client, base, name, digest string, tagCapabilities []string, hint string) []string {
+	capabilities, _, _ := ResolveOllamaCapabilityEvidence(ctx, client, base, name, digest, tagCapabilities, hint)
+	return capabilities
+}
+
+// ResolveOllamaCapabilityEvidence reads the authoritative top-level
+// capabilities from POST /api/show. Some compatible runtimes also advertise
+// the same field on /api/tags; that is provider evidence as well. Results are
+// bounded and cached by daemon plus immutable model digest (or name for older
+// servers), so a frequent status refresh does not repeatedly inspect every
+// installed model. Name/family inference is returned only as unverified
+// inventory metadata and must never make an automatic model eligible.
+func ResolveOllamaCapabilityEvidence(ctx context.Context, client *http.Client, base, name, digest string, tagCapabilities []string, hint string) ([]string, bool, string) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	name = strings.TrimSpace(name)
 	cacheIdentity := strings.TrimSpace(digest)
@@ -439,18 +457,22 @@ func ResolveOllamaCapabilities(ctx context.Context, client *http.Client, base, n
 	if cached, ok := ollamaCapabilityCache.items[cacheKey]; ok && now.Before(cached.expires) {
 		result := append([]string(nil), cached.capabilities...)
 		ollamaCapabilityCache.Unlock()
-		return result
+		return result, cached.verified, cached.source
 	}
 	ollamaCapabilityCache.Unlock()
 
 	capabilities, authoritative := fetchOllamaShowCapabilities(ctx, client, base, name)
+	source := "ollama_show"
 	ttl := 5 * time.Minute
 	if !authoritative {
 		ttl = 30 * time.Second
 		if len(tagCapabilities) > 0 {
 			capabilities = OllamaCapabilities(tagCapabilities, hint)
+			authoritative = true
+			source = "ollama_tags"
 		} else {
 			capabilities = modelCapabilities(hint)
+			source = "name_inference"
 		}
 	}
 	ollamaCapabilityCache.Lock()
@@ -464,9 +486,9 @@ func ResolveOllamaCapabilities(ctx context.Context, client *http.Client, base, n
 			ollamaCapabilityCache.items = map[string]ollamaCapabilityCacheEntry{}
 		}
 	}
-	ollamaCapabilityCache.items[cacheKey] = ollamaCapabilityCacheEntry{capabilities: append([]string(nil), capabilities...), expires: now.Add(ttl)}
+	ollamaCapabilityCache.items[cacheKey] = ollamaCapabilityCacheEntry{capabilities: append([]string(nil), capabilities...), verified: authoritative, source: source, expires: now.Add(ttl)}
 	ollamaCapabilityCache.Unlock()
-	return capabilities
+	return capabilities, authoritative, source
 }
 
 func fetchOllamaShowCapabilities(ctx context.Context, client *http.Client, base, name string) ([]string, bool) {

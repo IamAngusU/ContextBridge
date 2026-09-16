@@ -155,6 +155,36 @@ func TestProducerRejectsChangedAssignmentContextBeforeEncryption(t *testing.T) {
 	}
 }
 
+func TestProducerAcceptsOnlyRelaySelectedBrowserTabInAssignment(t *testing.T) {
+	_, publicKey, err := NewIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := AssignmentRequest{Requirements: Requirements{
+		Task: "generation", Provider: "browser", BrowserProfile: "chatgpt", Model: "GPT-5.6 Sol", Reasoning: "high",
+		BrowserFreshChat: true, BrowserEphemeralChat: true,
+	}}
+	response := AssignmentResponse{Assignment: Assignment{
+		ID: "assignment-browser", JobID: "job-browser", NodeID: "node-browser", PublicKey: publicKey,
+		Attempt: 1, OwnerSubject: "producer-a", ExpiresAt: time.Now().UTC().Add(time.Minute), Requirements: request.Requirements,
+	}, Secret: "assignment-secret"}
+	response.Assignment.Requirements.BrowserTabID = 42
+	context, err := ValidateAssignmentResponse(request, response, time.Now().UTC())
+	if err != nil || context.Requirements.BrowserTabID != 42 {
+		t.Fatalf("relay-selected browser tab was not authenticated: %#v %v", context, err)
+	}
+	changed := response
+	changed.Assignment.Requirements.Model = "GPT-5.5"
+	if _, err := ValidateAssignmentResponse(request, changed, time.Now().UTC()); err == nil {
+		t.Fatal("browser tab binding allowed another requested capability to change")
+	}
+	changed = response
+	changed.Assignment.Requirements.BrowserEphemeralChat = false
+	if _, err := ValidateAssignmentResponse(request, changed, time.Now().UTC()); err == nil {
+		t.Fatal("browser tab binding changed the authenticated fresh-chat policy")
+	}
+}
+
 func TestWorkerFailsBeforeLocalExecutionWhenEncryptedMetadataIsTampered(t *testing.T) {
 	privateKey, publicKey, err := NewIdentity()
 	if err != nil {
@@ -184,7 +214,7 @@ func TestWorkerFailsBeforeLocalExecutionWhenEncryptedMetadataIsTampered(t *testi
 		Requirements: encryptionContext.Requirements, SealedPayload: envelope,
 	}
 	job.Requirements.Task = "embedding"
-	if _, _, _, err := worker.execute(context.Background(), job, nil); err == nil || !strings.Contains(err.Error(), "decrypt job") {
+	if _, _, _, _, err := worker.execute(context.Background(), job, nil); err == nil || !strings.Contains(err.Error(), "decrypt job") {
 		t.Fatalf("tampered worker job did not fail at authenticated decryption: %v", err)
 	}
 	if localCalls.Load() != 0 {

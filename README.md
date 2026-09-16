@@ -33,10 +33,11 @@ ChatGPT and Gemini are detected automatically from stable DOM and accessibility 
 
 - **Visual browser teaching:** point at page controls instead of reverse engineering selectors.
 - **Progressive browser output:** follow a web-chat answer while it is generated, through the worker and relay, with `cluster submit --stream`.
-- **Stateful browser conversations:** pin related turns to one browser worker with `session_id`, or use the streaming `cluster chat` terminal.
-- **Parallel web-chat pool:** select several ChatGPT and Gemini tabs in one extension; each becomes an independent serial UI slot. Browser sessions are bound to separate conversations, including when two producers choose the same public `session_id`. A missing ID uses one producer-scoped default session.
+- **Stateful browser conversations:** pin related turns to the conversation that actually executed them with `session_id`, even after that saved chat moves to another attached tab on the same worker. Routing uses redacted opaque evidence; exact URL proof stays in the extension.
+- **Parallel web-chat pool:** select several ChatGPT and Gemini tabs in one extension; each becomes an independent serial UI slot. Profile and explicit-model requirements must be proven by the same ready waiting tab or exact matching owned session rather than combined across a node. Browser sessions are bound to separate conversations, including when two producers choose the same public `session_id`. A missing ID uses one producer-scoped default session.
 - **Provider-aware recovery:** progress percentages, stop/send controls, rate limits, errors, accidental reloads, and stalled image generation are separate states rather than answer text. A one-shot reload requires proof that the same ContextBridge turn is still present and no unsent draft or attachment would be lost.
 - **Images and files back:** opt in to bounded response artifacts, verify their SHA-256, and save them with `--artifacts`.
+- **Verified artifact handoff:** a scheduled image result can feed the next browser, Ollama, or llama.cpp step without trusting a URL or a model's claim that a file exists.
 - **1:1, N:1, 1:N, and N:N compute:** connect one app to one worker, let scoped producers share a worker, distribute one queue across many workers, or share a capability-aware node pool between producers.
 - **Outbound worker connections:** workers join through WebSockets without router port forwarding or fixed public worker ports.
 - **Durable scheduling:** priority queue, bounded history, fail-closed recovery from ambiguous worker loss, groups, tags, task requirements, and VRAM-aware placement survive relay restarts.
@@ -51,6 +52,7 @@ ChatGPT and Gemini are detected automatically from stable DOM and accessibility 
 - **Structured output:** model output is normalized before it reaches the calling application.
 - **Fail-safe moderation:** invalid, missing, or timed-out decisions become `review`, never silent approval.
 - **Flexible inputs:** HTTP, stdin, folders, SSH pipelines, database workers, and custom adapters use one protocol.
+- **Bounded MCP tools:** a local stdio server exposes status, one-shot job submission, and stored-result lookup without arbitrary shell access or silent retries ([MCP guide](docs/mcp.md)).
 - **Inspectable operation:** a local dashboard shows routes, hardware, providers, models, latency, flags, jobs, and decisions.
 - **Durable local schedules:** a resource-aware due queue runs one-time and recurring jobs with explicit route/model/reasoning choices, safe restart semantics, pause/resume, bounded history, and sequential follow-ups using prior answers or verified artifacts ([schedules guide](docs/schedules.md)).
 - **Portable deployment:** one executable for Windows, Linux, and macOS on AMD64 and ARM64.
@@ -58,19 +60,25 @@ ChatGPT and Gemini are detected automatically from stable DOM and accessibility 
 ### Measured bridge overhead
 
 The provider still determines AI latency; ContextBridge does not hide that
-time inside a flattering benchmark. On the dated Windows workstation / Linux
-VPS test pair used for 0.5.66, the median ContextBridge-only overhead was:
+time inside a flattering benchmark. Running the built-in benchmark from the
+actual v0.5.70 release binaries on the dated Windows workstation / Linux VPS
+test pair produced these single-concurrency p50 observations:
 
 | Operation | Windows | Linux VPS |
 | --- | ---: | ---: |
-| Authenticated durable submit + compact read + cancel | 2.09 ms | 3.70 ms |
-| Small E2EE job + result cryptographic round trip | 0.124 ms | 0.241 ms |
-| Decode, validate, and SHA-256-check an exact 12 MiB artifact | 13.6 ms | 22.8 ms |
+| Authenticated durable submit + compact read + cancel | 2.129 ms | 5.738 ms |
+| Small E2EE job + result cryptographic round trip | 0.103 ms | 0.227 ms |
+| Decode, validate, and SHA-256-check a 64 KiB artifact | 0.067 ms | 0.116 ms |
 
-These are reproducible engineering measurements, not an SLA and not model
-inference time. The exact hardware, method, five-run medians, large-payload
-throughput, idle-scheduler result, commands, and limitations are in
+These are reproducible engineering observations, not an SLA and not model
+inference time. The queue benchmark uses loopback HTTP to a relay hosted in
+the same benchmark process; it does not measure Windows-to-VPS network latency.
+The exact binaries, method, p50/p95/p99 and throughput at
+concurrency 1/4/16/64, resource footprint, older large-payload measurements,
+commands, and limitations are in
 [Limits and measured ContextBridge overhead](docs/limits-and-performance.md).
+Measure the same bridge-only paths and resource footprint on your own machine
+with `contextbridge benchmark` (or `contextbridge benchmark --json`).
 
 ## Quick Start
 
@@ -158,14 +166,13 @@ Windows and Linux are first-class runtime targets, not browser-only controller
 machines. Published releases contain native AMD64 and ARM64 executables; Linux
 has the shell installer, user-systemd setup, and hardened systemd/nginx relay
 templates. The repository CI workflow targets Ubuntu, Windows, and macOS, with
-the race detector on Linux. Release 0.5.66 was additionally exercised on a real
-Windows worker and Linux VPS; its Linux/macOS AMD64 and ARM64 binaries and test
-packages were cross-compiled. The VPS relay and producer workflow documented
+the race detector on Linux. Release 0.5.70 was additionally exercised on a real
+Windows worker and Linux VPS. The VPS relay and producer workflow documented
 here is a normal Linux deployment.
 
 macOS has native AMD64/ARM64 release builds, the same shell installer, a
-LaunchAgent, and Apple Metal discovery. Its current 0.5.66 evidence is clean
-cross-compilation of the CLI and relevant test packages; this project does not
+LaunchAgent, and Apple Metal discovery. Its final 0.5.70 validation evidence is
+cross-compilation only, not execution on a Mac; this project does not
 yet claim a maintained physical-Mac end-to-end matrix for Metal offload,
 Ollama, and every browser lifecycle edge case. Use Chromium or Firefox on
 macOS—the extension does not claim Safari support. OS support also does not
@@ -225,7 +232,7 @@ If a tab should reuse just one prompt instead of accumulating turns, enable **Ed
 
 This release uses one durable BoltDB file per relay process. It supports many producers and workers through one relay. Active-active relay replication is a separate deployment tier and requires a shared database and message broker rather than copying the BoltDB file.
 
-Detailed terminal relay history is bounded by both age and count. Defaults keep at most the newest 500 terminal jobs, 5,000 events, and 200 terminal pipeline runs for no longer than 30 days; `cluster.relay.retention_*` settings in [config.example.yml](config.example.yml) can lower or raise those limits within guarded bounds. Queued, reserved, assigned, running, and unknown future states are never removed by retention. Pruning removes stored prompts, results/ciphertext, and their detail indexes, so an old job or pipeline-run URL may later return not found. Lifetime job-state and token/cost-savings totals remain monotonic, as do cumulative node compute and cost counters. BoltDB reuses freed pages but does not promise that the file immediately shrinks on disk after a sweep.
+Detailed relay history and pseudonymous session affinity are bounded by both age and count. Defaults keep at most the newest 500 terminal jobs, 5,000 events, 200 terminal pipeline runs, and 5,000 opaque session placements for no longer than 30 days; guarded `cluster.relay` settings in [config.example.yml](config.example.yml) can lower or raise those limits. Queued, reserved, assigned, running, and unknown future states are never removed by retention. Pruning removes stored prompts, results/ciphertext, their detail indexes, and expired/excess placement hashes, so an old job or pipeline-run URL may return not found and a later session may need live rediscovery. Lifetime job-state and token/cost-savings totals remain monotonic, as do cumulative node compute and cost counters. BoltDB reuses freed pages but does not promise that the file immediately shrinks on disk after a sweep.
 
 A PC can join more than one independent relay with one worker process and identity per relay, with per-worker task/provider/model allow-lists. See [multiple-server, multi-GPU, and rack setup and its shared-hardware limitations](docs/multiple-servers.md). The server never needs the PC's browser credentials or direct access to its local model files.
 
@@ -276,7 +283,7 @@ Install Ollama and start ContextBridge:
 contextbridge run
 ```
 
-With `model: auto`, ContextBridge selects the smallest compatible local model. Image jobs prefer a vision-capable model and embedding jobs require an embedding-capable model. An explicit model name always wins. The default route tries Ollama first and uses the paired browser only when Ollama is unavailable.
+With `model: auto`, ContextBridge selects only from models that Ollama currently reports as available and whose task capabilities were verified through Ollama (`/api/show`, or explicit capability metadata). Already loaded compatible models win; otherwise the smallest compatible available model is selected. Image inputs require verified vision support and embedding jobs require verified embedding support. ContextBridge never upgrades a model from its name alone. An explicit model name remains an operator override for older Ollama daemons that can prove availability but cannot publish capability metadata; verified incompatible evidence is still rejected. The default route tries Ollama first and uses the paired browser only when Ollama is unavailable.
 
 Inventory an existing local setup without moving or loading anything:
 
@@ -328,6 +335,22 @@ A folder producer can place the same JSON document in the configured inbox. Cont
 ```
 
 See the [job protocol](docs/protocol.md) and [integration recipes](docs/integrations.md).
+
+### MCP hosts
+
+An MCP host can launch a bounded local stdio adapter while the normal
+ContextBridge service is running:
+
+```bash
+contextbridge mcp serve --config /absolute/path/to/config.yml
+```
+
+It exposes only `contextbridge.status`, `contextbridge.submit`, and
+`contextbridge.result`. Submission uses the same authenticated job validation
+and is attempted exactly once; artifact submissions and artifact-bearing stored
+results are rejected, and remote MCP transport is not part of this adapter. See
+the [MCP setup, schemas, trust boundary, and explicit
+limits](docs/mcp.md).
 
 Cluster jobs wrap that local job in routing requirements. See [examples/cluster-job.json](examples/cluster-job.json).
 
@@ -461,7 +484,7 @@ Releases do not depend on GitHub Actions. From PowerShell, build every supported
 platform bundle, both extension archives, and `SHA256SUMS` locally:
 
 ```powershell
-.\scripts\build-release.ps1 -Version v0.5.69
+.\scripts\build-release.ps1 -Version v0.5.70
 ```
 
 Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md), use a focused issue for behavior changes, and include tests for routing or protocol work.

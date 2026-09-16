@@ -47,9 +47,113 @@ func TestBrowserSessionBindingIsScopedToAuthenticatedProducer(t *testing.T) {
 	}
 }
 
+func TestPrepareLocalPayloadMakesRequirementsSessionAuthoritative(t *testing.T) {
+	raw, err := prepareLocalPayload([]byte(`{"prompt":"hello","session_id":"forged","metadata":{"contextbridge_new_chat":false}}`), Requirements{
+		Task: "generation", Provider: "browser", BrowserProfile: "chatgpt", BrowserFreshChat: true,
+	}, "local-job", "producer-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var job struct {
+		SessionID  string                 `json:"session_id"`
+		SessionKey string                 `json:"contextbridge_session_key"`
+		Metadata   map[string]interface{} `json:"metadata"`
+	}
+	if err := json.Unmarshal(raw, &job); err != nil {
+		t.Fatal(err)
+	}
+	expected := browserSessionRoutingKey("producer-a", Requirements{Provider: "browser", BrowserProfile: "chatgpt"})
+	if job.SessionID != "default" || job.SessionKey != expected || job.Metadata["contextbridge_new_chat"] != true {
+		t.Fatalf("worker trusted payload session or fresh-chat metadata: %#v", job)
+	}
+}
+
+func TestPrepareLocalPayloadRemovesUnauthenticatedBrowserRoutingHints(t *testing.T) {
+	raw, err := prepareLocalPayload([]byte(`{
+		"prompt":"hello",
+		"contextbridge_browser_tab_id":999,
+		"contextbridge_session_key":"cb:forged",
+		"metadata":{"contextbridge_new_chat":true,"contextbridge_new_chat_per_job":true,"contextbridge_resume_only":true,"contextbridge_baseline_text":"forged","contextbridge_baseline_response_count":0,"contextbridge_baseline_response_identity":"forged","contextbridge_baseline_text_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","contextbridge_model_fallbacks":["GPT-5.6 Sol"],"contextbridge_reasoning_fallbacks":["Sehr hoch"],"keep":"value"}
+	}`), Requirements{Task: "generation", Provider: "browser", BrowserProfile: "chatgpt"}, "local-job", "producer-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var job map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &job); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := job["contextbridge_browser_tab_id"]; ok {
+		t.Fatal("producer supplied browser tab id survived without an authenticated requirement")
+	}
+	var sessionKey string
+	if err := json.Unmarshal(job["contextbridge_session_key"], &sessionKey); err != nil || sessionKey == "cb:forged" {
+		t.Fatalf("producer supplied session key survived: %q %v", sessionKey, err)
+	}
+	var metadata map[string]json.RawMessage
+	if err := json.Unmarshal(job["metadata"], &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := metadata["contextbridge_new_chat"]; ok {
+		t.Fatal("producer supplied fresh-chat flag survived without an authenticated requirement")
+	}
+	if _, ok := metadata["contextbridge_new_chat_per_job"]; ok {
+		t.Fatal("producer supplied per-job flag survived without an authenticated requirement")
+	}
+	for _, field := range []string{
+		"contextbridge_resume_only", "contextbridge_baseline_text", "contextbridge_baseline_response_count",
+		"contextbridge_baseline_response_identity", "contextbridge_baseline_text_digest",
+		"contextbridge_model_fallbacks", "contextbridge_reasoning_fallbacks",
+	} {
+		if _, ok := metadata[field]; ok {
+			t.Fatalf("producer supplied recovery field %q survived", field)
+		}
+	}
+	if string(metadata["keep"]) != `"value"` {
+		t.Fatalf("unrelated metadata was not preserved: %#v", metadata)
+	}
+}
+
+func TestPrepareLocalPayloadSecuresProviderlessAutomaticRoute(t *testing.T) {
+	raw, err := prepareLocalPayload([]byte(`{
+		"route":"default","provider":"browser","model":"disallowed-model","browser_profile":"gemini",
+		"reasoning":"forged","session_id":"forged-session",
+		"metadata":{"contextbridge_resume_only":true,"contextbridge_baseline_text":"old answer"}
+	}`), Requirements{Task: "generation", SessionID: "outer-session"}, "local-job", "producer-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var job map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &job); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"provider", "model", "browser_profile", "reasoning"} {
+		if _, ok := job[field]; ok {
+			t.Fatalf("provider-less cluster route retained unauthenticated %s", field)
+		}
+	}
+	var session, sessionKey string
+	if err := json.Unmarshal(job["session_id"], &session); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(job["contextbridge_session_key"], &sessionKey); err != nil {
+		t.Fatal(err)
+	}
+	expected := browserSessionRoutingKey("producer-a", Requirements{Provider: "browser", BrowserProfile: "any", SessionID: "outer-session"})
+	if session != "outer-session" || sessionKey != expected {
+		t.Fatalf("automatic route lost producer-scoped session authority: session=%q key=%q", session, sessionKey)
+	}
+	var metadata map[string]json.RawMessage
+	if err := json.Unmarshal(job["metadata"], &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if len(metadata) != 0 {
+		t.Fatalf("automatic route retained internal browser controls: %#v", metadata)
+	}
+}
+
 func TestBrowserProfileRequirementOverridesPayloadClaim(t *testing.T) {
 	raw, err := prepareLocalPayload([]byte(`{"browser_profile":"gemini","prompt":"safe"}`), Requirements{
-		Task: "generation", Provider: "browser", BrowserProfile: "chatgpt",
+		Task: "generation", Provider: "browser", BrowserProfile: "chatgpt", Reasoning: "Sehr hoch", BrowserTabID: 42,
 	}, "local-job", "producer")
 	if err != nil {
 		t.Fatal(err)
@@ -60,6 +164,9 @@ func TestBrowserProfileRequirementOverridesPayloadClaim(t *testing.T) {
 	}
 	if job["browser_profile"] != "chatgpt" {
 		t.Fatalf("payload profile escaped hard routing requirement: %#v", job)
+	}
+	if job["reasoning"] != "Sehr hoch" || job["contextbridge_browser_tab_id"] != float64(42) {
+		t.Fatalf("relay-selected browser controls were not carried to the local lease boundary: %#v", job)
 	}
 }
 
@@ -147,12 +254,12 @@ func TestWorkerConsoleLabelsDoNotExposePromptOrAssumeSelectedModel(t *testing.T)
 }
 
 func TestCompactLocalSubmissionDoesNotEchoLargeInput(t *testing.T) {
-	raw := []byte(`{"job":{"id":"job-1","prompt":"private prompt","text":"private text","image_base64":"very-large-input","model":"qwen"},"output":{"mode":"text","text":"answer"},"status":"completed"}`)
+	raw := []byte(`{"job":{"id":"job-1","prompt":"private prompt","text":"private text","image_base64":"very-large-input","model":"qwen","contextbridge_session_key":"cb:private-routing-key","contextbridge_browser_tab_id":42},"contextbridge_browser_tab_id":42,"contextbridge_ephemeral_browser_tab":true,"output":{"mode":"text","text":"answer","contextbridge_browser_tab_id":42,"contextbridge_ephemeral_browser_tab":true},"status":"completed"}`)
 	compact, err := compactLocalSubmission(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(compact) >= len(raw) || strings.Contains(string(compact), "private prompt") || strings.Contains(string(compact), "very-large-input") {
+	if len(compact) >= len(raw) || strings.Contains(string(compact), "private prompt") || strings.Contains(string(compact), "very-large-input") || strings.Contains(string(compact), "private-routing-key") {
 		t.Fatalf("large input was echoed in the cluster result: %s", compact)
 	}
 	var submission struct {
@@ -166,6 +273,33 @@ func TestCompactLocalSubmissionDoesNotEchoLargeInput(t *testing.T) {
 	}
 	if err := json.Unmarshal(compact, &submission); err != nil || submission.Job.ID != "job-1" || submission.Job.Model != "qwen" || submission.Output.Text != "answer" {
 		t.Fatalf("useful result metadata was lost: %#v, %v", submission, err)
+	}
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(compact, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := decoded["contextbridge_browser_tab_id"]; ok {
+		t.Fatal("top-level browser execution metadata leaked to the producer result")
+	}
+	var compactJob map[string]json.RawMessage
+	if err := json.Unmarshal(decoded["job"], &compactJob); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := compactJob["contextbridge_session_key"]; ok {
+		t.Fatal("opaque browser session key leaked to the producer result")
+	}
+	if _, ok := compactJob["contextbridge_browser_tab_id"]; ok {
+		t.Fatal("internal browser tab id leaked inside the producer result")
+	}
+	var compactOutput map[string]json.RawMessage
+	if err := json.Unmarshal(decoded["output"], &compactOutput); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := compactOutput["contextbridge_browser_tab_id"]; ok {
+		t.Fatal("internal browser tab id leaked inside the normalized output")
+	}
+	if _, ok := compactOutput["contextbridge_ephemeral_browser_tab"]; ok {
+		t.Fatal("internal ephemeral-tab marker leaked inside the normalized output")
 	}
 }
 
@@ -201,6 +335,13 @@ func TestCompactLocalSubmissionNeverFallsBackToSensitiveRawInput(t *testing.T) {
 func TestCompactLocalSubmissionFailsClosedOnMalformedEnvelope(t *testing.T) {
 	if compact, err := compactLocalSubmission([]byte(`{"job":`)); err == nil || compact != nil {
 		t.Fatalf("malformed local response did not fail closed: %q, %v", compact, err)
+	}
+}
+
+func TestCompactLocalSubmissionFailsClosedWhenJobEnvelopeIsMissing(t *testing.T) {
+	raw := []byte(`{"prompt":"secret","contextbridge_browser_tab_id":42,"output":{"mode":"text","text":"answer"}}`)
+	if compact, err := compactLocalSubmission(raw); err == nil || compact != nil {
+		t.Fatalf("job-less local response did not fail closed: %q, %v", compact, err)
 	}
 }
 

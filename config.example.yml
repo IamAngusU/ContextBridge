@@ -124,12 +124,13 @@ cluster:
     max_queue: 10000
     max_job_bytes: 12582912
     pairing_ttl_seconds: 600
-    # Detailed terminal history is removed when older than this age or beyond
-    # its newest-record count. Active work is never removed by retention.
+    # Detailed terminal history and opaque session placements are removed when
+    # older than this age or beyond their counts. Active work is never removed.
     retention_days: 30
     max_terminal_jobs: 500
     max_events: 5000
     max_terminal_pipeline_runs: 200
+    max_session_placements: 5000
     retention_sweep_seconds: 300
   worker:
     enabled: false

@@ -32,17 +32,37 @@ calls, and streaming errors. A shared OpenAPI or JSON Schema may later generate
 small TypeScript, Python, and Go clients; generated SDKs are exploratory, not a
 current deliverable.
 
-### Native MCP gateway — exploratory
+### Idempotent submission and small application clients — planned direction
 
-Investigate both directions: ContextBridge as an MCP server exposing scoped
-routes or runs, and ContextBridge as an MCP client that registers remote tools
-as worker capabilities. The useful boundary is a private tool on an outbound-
+Define a producer-scoped submission key so a client that loses the HTTP reply
+can determine whether its job was durably accepted without creating a second
+provider request. Reusing a key with the same canonical request would return
+the original job reference; reusing it with different content would be an
+explicit conflict. Retention, deletion, E2EE request digests, and ambiguous
+provider execution must remain separate concerns—this is submission
+deduplication, not a claim of universal exactly-once side effects.
+
+After that contract is stable, a deliberately small PHP client is a useful
+first adoption target for shared hosting: submit, read status/result, verify and
+save an artifact, and cancel a still-queued job. Safe reads may retry with
+bounded backoff; mutating calls may not invent silent retries. Broader generated
+SDKs remain exploratory until the native and compatibility schemas converge.
+
+### Remote MCP gateway and MCP client — exploratory
+
+The shipped [MCP adapter](mcp.md) is deliberately smaller: one local stdio
+server exposes bounded status, submit, and result tools through the existing
+authenticated local API. It is not a remote gateway and not an MCP client.
+
+A future direction may investigate Streamable HTTP with real producer scopes,
+or ContextBridge as an MCP client that registers remote tools as worker
+capabilities. The useful boundary would be a private tool on an outbound-
 connected worker without making that workstation publicly reachable.
 
-Every tool, resource, and prompt would need an explicit producer scope,
-bounded input/output, provenance, and an attributable worker/run. MCP output is
-untrusted input to subsequent model steps. No tool response may create a route,
-credential, permission, or recursive delegation on its own.
+Every remote tool, resource, and prompt would need an explicit producer scope,
+bounded input/output, provenance, and an attributable worker/run. MCP output
+would remain untrusted input to subsequent model steps. No tool response may
+create a route, credential, permission, or recursive delegation on its own.
 
 ## Routing and operations
 
@@ -83,6 +103,16 @@ for known scheduled work, batch compatible embeddings, and evict idle models
 under operator-defined VRAM pressure. Pre-warming must be opt-in and respect
 energy, temperature, memory, time-window, and cost budgets. Telemetry is a
 routing hint, not a GPU reservation or proof that a model will fit.
+
+### Worker drain and provider-scoped pause — planned direction
+
+Let an operator stop new assignments while existing jobs finish, or pause only
+local GPU execution while attached browser work remains eligible (and vice
+versa). State must be visible to route explanation, survive a worker restart
+when configured as administrative policy, and never cancel ambiguous work in
+flight. Loaded compatible models can remain a soft preference; drain/pause,
+capability checks, producer policy, memory limits, and exact session ownership
+stay hard constraints.
 
 ### Shared multi-relay resource budget — planned direction
 

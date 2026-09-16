@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -114,6 +115,16 @@ func ValidateAssignmentResponse(request AssignmentRequest, response AssignmentRe
 	expectedRequirements := request.Requirements
 	if expectedRequirements.Group == "" {
 		expectedRequirements.Group = assignment.Requirements.Group
+	}
+	// The relay may bind a browser reservation to the exact waiting tab that
+	// satisfied the requested profile/model/reasoning. The producer cannot
+	// choose this local browser identifier, but it is authenticated from this
+	// point onward as part of the E2EE assignment context.
+	if expectedRequirements.BrowserTabID == 0 && strings.EqualFold(expectedRequirements.Provider, "browser") && assignment.Requirements.BrowserTabID > 0 {
+		expectedRequirements.BrowserTabID = assignment.Requirements.BrowserTabID
+	}
+	if strings.EqualFold(expectedRequirements.Provider, "browser") && assignment.Requirements.BrowserSessionRecovery {
+		expectedRequirements.BrowserSessionRecovery = true
 	}
 	expected := EncryptionContext{
 		JobID:        assignment.JobID,

@@ -78,20 +78,24 @@ type BrowserClientStatus struct {
 }
 
 type BrowserTabStatus struct {
-	ID               int                 `json:"id,omitempty"`
-	Origin           string              `json:"origin,omitempty"`
-	Title            string              `json:"title,omitempty"`
-	Profile          string              `json:"profile,omitempty"`
-	State            string              `json:"state,omitempty"`
-	CurrentModel     string              `json:"current_model,omitempty"`
-	CurrentReasoning string              `json:"current_reasoning,omitempty"`
-	Models           []string            `json:"models,omitempty"`
-	ReasoningLevels  []string            `json:"reasoning_levels,omitempty"`
-	ModelScan        string              `json:"model_scan,omitempty"`
-	ReasoningScan    string              `json:"reasoning_scan,omitempty"`
-	DOMStatus        string              `json:"dom_status,omitempty"`
-	LastFailure      *BrowserTabFailure  `json:"last_failure,omitempty"`
-	DOM              *BrowserDOMSnapshot `json:"dom,omitempty"`
+	ID                  int                 `json:"id,omitempty"`
+	Origin              string              `json:"origin,omitempty"`
+	Title               string              `json:"title,omitempty"`
+	Profile             string              `json:"profile,omitempty"`
+	State               string              `json:"state,omitempty"`
+	SessionKey          string              `json:"session_key,omitempty"`
+	SessionKeySupported bool                `json:"session_key_supported,omitempty"`
+	CanCreateFreshChat  bool                `json:"can_create_fresh_chat,omitempty"`
+	DefaultFreshChat    bool                `json:"default_fresh_chat,omitempty"`
+	CurrentModel        string              `json:"current_model,omitempty"`
+	CurrentReasoning    string              `json:"current_reasoning,omitempty"`
+	Models              []string            `json:"models,omitempty"`
+	ReasoningLevels     []string            `json:"reasoning_levels,omitempty"`
+	ModelScan           string              `json:"model_scan,omitempty"`
+	ReasoningScan       string              `json:"reasoning_scan,omitempty"`
+	DOMStatus           string              `json:"dom_status,omitempty"`
+	LastFailure         *BrowserTabFailure  `json:"last_failure,omitempty"`
+	DOM                 *BrowserDOMSnapshot `json:"dom,omitempty"`
 }
 
 type BrowserTabFailure struct {
@@ -411,6 +415,10 @@ func (s *Store) Queue(job Job, profile interface{}, timeout time.Duration) <-cha
 }
 
 func (s *Store) NextBrowserJob(profile string, lease time.Duration) *browserJob {
+	return s.NextBrowserJobForTab(profile, 0, lease)
+}
+
+func (s *Store) NextBrowserJobForTab(profile string, tabID int, lease time.Duration) *browserJob {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now()
@@ -420,6 +428,9 @@ func (s *Store) NextBrowserJob(profile string, lease time.Duration) *browserJob 
 			continue
 		}
 		if now.Before(item.leasedTil) {
+			continue
+		}
+		if item.job.ContextBridgeBrowserTabID > 0 && item.job.ContextBridgeBrowserTabID != tabID {
 			continue
 		}
 		if profile != "" {
@@ -502,6 +513,37 @@ func (s *Store) Renew(id string, generation uint64, lease time.Duration) bool {
 	}
 	item.leasedTil = now.Add(lease)
 	return true
+}
+
+// ReleaseBrowserLease returns an unprocessed lease to the browser queue. It
+// never clears sentUnknown: if a provider action may already have happened,
+// the next generation remains observation-only.
+func (s *Store) ReleaseBrowserLease(id string, generation uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.queued[id]
+	now := time.Now()
+	if !ok || now.After(item.deadline) || !validBrowserLease(item, generation, now) {
+		return false
+	}
+	item.leasedTil = time.Time{}
+	return true
+}
+
+// BrowserLeaseActive reports whether generation still owns the current,
+// unexpired browser lease. Unlike Renew it never extends the lease. The
+// extension uses this after an MV3 service-worker restart to reserve the
+// provider tab before it starts polling for more work without keeping an
+// abandoned job alive merely by checking it.
+func (s *Store) BrowserLeaseStatus(id string, generation uint64) (time.Time, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.queued[id]
+	now := time.Now()
+	if !ok || now.After(item.deadline) || !validBrowserLease(item, generation, now) {
+		return time.Time{}, false
+	}
+	return item.leasedTil.UTC(), true
 }
 
 // MarkBrowserAction is the point of no automatic retry. It is called before

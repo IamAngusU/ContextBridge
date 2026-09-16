@@ -30,6 +30,7 @@ let connectionStartedAt = 0;
 let connectionPhase = '';
 let connectionPhaseStartedAt = 0;
 const pollers = new Map();
+const pollAbortControllers = new Map();
 const busyTabs = new Set();
 const freshTabChecks = new Map();
 let freshTabWrite = Promise.resolve();
@@ -37,6 +38,9 @@ let sessionWrite = Promise.resolve();
 let capabilityWrite = Promise.resolve();
 let browserClaimWrite = Promise.resolve();
 const activeBrowserLeases = new Map();
+const recoveredTabReservations = new Map();
+const rejectedBrowserClaims = new Set();
+const leaseRecoveryTasks = new Set();
 const PENDING_COMPLETION_MAX_BYTES = 512 * 1024;
 const acceptedModelLabel = /^(?:gpt[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:astra|sol|terra|luna|pro|mini|nano|codex|thinking|instant))?|gemini(?:[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:pro|flash|lite|thinking|preview|experimental))*)?|astra|sol|terra|luna|\d+(?:\.\d+)?\s+(?:pro|flash|astra|sol|terra|luna))$/i;
 
@@ -66,7 +70,7 @@ api.tabs.onUpdated?.addListener((tabId, changeInfo, tab) => {
   progressScriptsInFlight.delete(tabId);
   capabilityWatchInstalled.delete(tabId);
   scheduleFreshTabCheck(tabId, tab?.url || changeInfo.url || '');
-  void settings().then((cfg) => {
+  void invalidateTabCapabilities(tabId).then(() => settings()).then((cfg) => {
     if (cfg.running && configuredTabIDs(cfg).includes(tabId)) return sendHeartbeat('waiting');
   }).catch(() => {});
 });
@@ -80,8 +84,8 @@ api.tabs.onRemoved?.addListener((tabId) => {
   capabilityForcePending.delete(tabId);
   if (capabilityInteractionTimers.has(tabId)) clearTimeout(capabilityInteractionTimers.get(tabId));
   capabilityInteractionTimers.delete(tabId);
-  for (const lease of activeBrowserLeases.values()) {
-    if (lease.tabId === tabId) lease.cancelled = true;
+  for (const lease of [...activeBrowserLeases.values()]) {
+    if (lease.tabId === tabId) cancelRecoveredBrowserLease(lease, true);
   }
   void detachClosedTab(tabId);
 });
@@ -148,14 +152,15 @@ function startPairing() {
 }
 
 async function startPairingOnce() {
+  const recoveryTask = beginBrowserLeaseRecovery();
   const pendingGeneration = lifecycleGeneration;
-  const cfg = await settings();
-  if (!cfg.token) throw new Error('Enter the pairing token once in Advanced settings');
-  const tabIds = configuredTabIDs(cfg);
-  if (!tabIds.length) throw new Error('Select at least one AI tab first');
-  connectionStartedAt = Date.now();
-  await reportConnectionProgress('Checking selected tabs', 0, tabIds.length);
   try {
+    const cfg = await settings();
+    if (!cfg.token) throw new Error('Enter the pairing token once in Advanced settings');
+    const tabIds = configuredTabIDs(cfg);
+    if (!tabIds.length) throw new Error('Select at least one AI tab first');
+    connectionStartedAt = Date.now();
+    await reportConnectionProgress('Checking selected tabs', 0, tabIds.length);
     for (let index = 0; index < tabIds.length; index += 1) {
       const tab = await withDeadline(api.tabs.get(tabIds[index]), 2000);
       if (!tab?.url || !/^https?:/i.test(tab.url)) throw new Error('One selected tab is not a supported web page');
@@ -182,6 +187,8 @@ async function startPairingOnce() {
       throw new Error(reason || 'Local ContextBridge did not accept the browser connection; check the service status');
     }
     if (generation !== lifecycleGeneration) throw new Error('The connection attempt was cancelled');
+    await restorePersistedBrowserLeaseReservations(generation);
+    if (generation !== lifecycleGeneration) throw new Error('The connection attempt was cancelled');
     await startHeartbeat();
     if (generation !== lifecycleGeneration) throw new Error('The connection attempt was cancelled');
     poll();
@@ -189,6 +196,7 @@ async function startPairingOnce() {
     void discoverFreshTabs();
     return { ok: true };
   } finally {
+    finishBrowserLeaseRecovery(recoveryTask);
     connectionStartedAt = 0;
     await api.storage.local.set({ connectionProgress: null });
   }
@@ -215,10 +223,38 @@ function persistLifecycleState(generation, changes) {
   return operation;
 }
 
+function beginBrowserLeaseRecovery() {
+  let finish;
+  const task = new Promise((resolve) => { finish = resolve; });
+  task.finish = finish;
+  leaseRecoveryTasks.add(task);
+  // An alarm can wake recovery while an older /next request is pending in the
+  // same worker. Abort it synchronously so it cannot lease a second job for a
+  // tab whose durable claim is about to be restored.
+  for (const controller of pollAbortControllers.values()) controller.abort();
+  return task;
+}
+
+function finishBrowserLeaseRecovery(task) {
+  if (!task || !leaseRecoveryTasks.has(task)) return;
+  leaseRecoveryTasks.delete(task);
+  task.finish();
+}
+
+async function waitForBrowserLeaseRecovery() {
+  // New alarm/startup work can begin while an older gate settles. Repeat
+  // until no recovery task remains so a poll never slips between two gates.
+  while (leaseRecoveryTasks.size) {
+    await Promise.allSettled([...leaseRecoveryTasks]);
+  }
+}
+
 async function stopPairing() {
   const generation = ++lifecycleGeneration;
   stopRequested = true;
-  for (const lease of activeBrowserLeases.values()) lease.cancelled = true;
+  for (const lease of [...activeBrowserLeases.values()]) cancelRecoveredBrowserLease(lease, true);
+  recoveredTabReservations.clear();
+  busyTabs.clear();
   if (!await persistLifecycleState(generation, { running: false, relayConnected: false, teachingTabId: 0 })) return { ok: true };
   await stopHeartbeat();
   if (generation !== lifecycleGeneration) return { ok: true };
@@ -227,32 +263,39 @@ async function stopPairing() {
 }
 
 async function resume(afterExtensionOrBrowserRestart = false) {
+  const recoveryTask = beginBrowserLeaseRecovery();
   const generation = lifecycleGeneration;
-  const { running, autoReconnect } = await api.storage.local.get({ running: false, autoReconnect: true });
-  if (generation !== lifecycleGeneration) return;
-  if (!running) {
-    await stopHeartbeat();
+  try {
+    const { running, autoReconnect } = await api.storage.local.get({ running: false, autoReconnect: true });
     if (generation !== lifecycleGeneration) return;
-    await api.storage.local.set({ connectionProgress: null });
-    return;
+    if (!running) {
+      await stopHeartbeat();
+      if (generation !== lifecycleGeneration) return;
+      await api.storage.local.set({ connectionProgress: null });
+      return;
+    }
+    if (afterExtensionOrBrowserRestart && !autoReconnect) {
+      const stopGeneration = ++lifecycleGeneration;
+      stopRequested = true;
+      if (!await persistLifecycleState(stopGeneration, { running: false, relayConnected: false, connectionProgress: null,
+        connectionError: 'Automatic reconnect is off. Click Connect when you are ready.' })) return;
+      await stopHeartbeat();
+      if (stopGeneration !== lifecycleGeneration) return;
+      await sendHeartbeat('paused');
+      return;
+    }
+    stopRequested = false;
+    await restorePersistedBrowserLeaseReservations(generation);
+    if (generation !== lifecycleGeneration) return;
+    await startHeartbeat();
+    if (generation !== lifecycleGeneration) return;
+    poll();
+    await sendHeartbeat(busyTabs.size ? 'working' : 'waiting');
+    if (generation !== lifecycleGeneration) return;
+    void discoverFreshTabs();
+  } finally {
+    finishBrowserLeaseRecovery(recoveryTask);
   }
-  if (afterExtensionOrBrowserRestart && !autoReconnect) {
-    const stopGeneration = ++lifecycleGeneration;
-    stopRequested = true;
-    if (!await persistLifecycleState(stopGeneration, { running: false, relayConnected: false, connectionProgress: null,
-      connectionError: 'Automatic reconnect is off. Click Connect when you are ready.' })) return;
-    await stopHeartbeat();
-    if (stopGeneration !== lifecycleGeneration) return;
-    await sendHeartbeat('paused');
-    return;
-  }
-  stopRequested = false;
-  await startHeartbeat();
-  if (generation !== lifecycleGeneration) return;
-  poll();
-  await sendHeartbeat('waiting');
-  if (generation !== lifecycleGeneration) return;
-  void discoverFreshTabs();
 }
 
 function isFreshChatURL(value) {
@@ -344,7 +387,10 @@ async function detachClosedTab(tabId) {
     const sessionBindings = { ...latest.sessionBindings };
     for (const [key, binding] of Object.entries(sessionBindings)) {
       if (Number(binding?.tabId) !== tabId) continue;
-      if (binding.autoCreated && binding.perJob && binding.closeEligibleAt) { delete sessionBindings[key]; continue; }
+      // A per-job binding has no durable conversation identity. Once its tab
+      // is gone, retaining the entry can only grow storage.local and can never
+      // make a later routing decision safer.
+      if (binding.autoCreated && binding.perJob) { delete sessionBindings[key]; continue; }
       if (binding.url && !isFreshChatURL(binding.url) && !binding.legacy) sessionBindings[key] = { ...binding, tabId: 0 };
       else delete sessionBindings[key];
     }
@@ -385,12 +431,13 @@ async function currentStatus() {
       const busy = busyTabs.has(tabId);
       const coolingDown = Number(cfg.tabCooldowns?.[tabId] || 0) > Date.now();
       const pageHealth = summarizePageHealth(tab, tabDOMDiagnostics.get(tabId));
+      const capabilities = capabilitiesForTab(cfg, tab, profileForTab(cfg, tab));
       tabs.push({
         ...tabSummary(tab),
         busy,
         state: busy ? 'working' : (coolingDown ? 'rate_limited' : 'waiting'),
         profile: profileForTab(cfg, tab)?.name || '',
-        currentModel: cfg.tabCapabilities?.[tabId]?.currentModel || '',
+        currentModel: capabilities.currentModel || '',
         lastFailure: cfg.tabFailures?.[tabId] || null,
         pageHealth
       });
@@ -513,7 +560,7 @@ async function scanPageCapabilities(tabId) {
     throw new Error('Scan model choices works only on a ChatGPT or Gemini tab');
   }
   const results = await api.scripting.executeScript({ target: { tabId }, func: discoverPageCapabilities });
-  const capabilities = results?.[0]?.result || {};
+  const capabilities = { ...(results?.[0]?.result || {}), pageContext: capabilityPageContext(tab, profileForTab(cfg, tab)) };
   capabilities.scanDiagnostic = { ...(capabilities.scanDiagnostic || {}), version: api.runtime.getManifest().version };
   const tabCapabilities = { ...(cfg.tabCapabilities || {}), [tabId]: capabilities };
   const tabCapabilityScans = { ...(cfg.tabCapabilityScans || {}), [tabId]: Date.now() };
@@ -565,10 +612,15 @@ function cleanSelectors(value) {
 function profileForTab(cfg, tab) {
   if (!tab?.url || !/^https?:/i.test(tab.url)) return null;
   try {
-    return cfg.taughtProfiles[new URL(tab.url).origin] || globalThis.ContextBridgeProfiles?.forURL(tab.url) || null;
+    return cfg.taughtProfiles?.[new URL(tab.url).origin] || globalThis.ContextBridgeProfiles?.forURL(tab.url) || null;
   } catch (_) {
     return null;
   }
+}
+
+function routingProfileName(cfg, tab) {
+  if (!cfg.useVisualProfile) return String(cfg.profile || '').trim().slice(0, 50);
+  return String(profileForTab(cfg, tab)?.name || cfg.profile || '').trim().slice(0, 50);
 }
 
 async function poll() {
@@ -583,6 +635,7 @@ async function poll() {
 
 async function pollTab(tabId) {
   while (!stopRequested) {
+      await waitForBrowserLeaseRecovery();
       const cfg = await settings();
       if (!cfg.running || !cfg.token || !configuredTabIDs(cfg).includes(tabId)) break;
       if (cfg.relayConnected === false) {
@@ -599,20 +652,36 @@ async function pollTab(tabId) {
       }
       await flushPendingCompletions(cfg);
       try {
-        let requestedProfile = cfg.profile || '';
-        if (cfg.useVisualProfile) {
-          try {
-            const selectedTab = await api.tabs.get(tabId);
-            requestedProfile = profileForTab(cfg, selectedTab)?.name || requestedProfile;
-          } catch (_) {}
-        }
-        const response = await fetchWithTimeout(`${cfg.bridgeUrl}/v1/browser/jobs/next?wait=25&profile=${encodeURIComponent(requestedProfile)}`, {
+		let requestedProfile = cfg.profile || '';
+		try { requestedProfile = routingProfileName(cfg, await api.tabs.get(tabId)) || requestedProfile; } catch (_) {}
+        const pollController = new AbortController();
+        pollAbortControllers.set(tabId, pollController);
+        let response;
+        try {
+          response = await fetchWithTimeout(`${cfg.bridgeUrl}/v1/browser/jobs/next?wait=25&profile=${encodeURIComponent(requestedProfile)}&tab_id=${encodeURIComponent(tabId)}`, {
           headers: { Authorization: `Bearer ${cfg.token}` },
-          cache: 'no-store'
-        }, 35000);
+          cache: 'no-store', signal: pollController.signal
+          }, 35000);
+        } finally {
+          if (pollAbortControllers.get(tabId) === pollController) pollAbortControllers.delete(tabId);
+        }
         if (response.status === 204) continue;
         if (!response.ok) throw new Error(`Bridge returned ${response.status}`);
         const work = await response.json();
+		const requiredTabId = Number(work?.job?.contextbridge_browser_tab_id || 0);
+		if (requiredTabId > 0 && requiredTabId !== tabId) {
+			await releaseBrowserLease(await settings(), work.job.id, Number(work.lease_generation || 0));
+			throw new Error('The local bridge leased this job to a different browser tab');
+		}
+        await waitForBrowserLeaseRecovery();
+        if (stopRequested) break;
+        if (busyTabs.has(tabId)) {
+          // A startup/alarm recovery may have begun just after /next returned.
+          // Return this untouched lease instead of holding a second job behind
+          // the recovered provider action on the same tab.
+          await releaseBrowserLease(await settings(), work.job.id, Number(work.lease_generation || 0));
+          continue;
+        }
         const pending = cfg.pendingCompletions[work?.job?.id];
         if (pending) {
           const pendingGeneration = Number(pending.lease_generation || 0);
@@ -631,6 +700,7 @@ async function pollTab(tabId) {
         }
         await processWork(cfg, work, tabId);
       } catch (error) {
+        if (error?.name === 'AbortError' && leaseRecoveryTasks.size) continue;
         await api.storage.local.set({ lastError: error.message || String(error) });
         await delay(2000);
       }
@@ -817,7 +887,7 @@ async function processWork(cfg, work, claimedTabId) {
         contextbridge_baseline_response_identity: String(persistedClaim.baselineIdentity || ''),
         contextbridge_baseline_text_digest: String(persistedClaim.baselineDigest || '') } };
     } else {
-      await rememberBrowserJobClaim(work, tabId, (await assertSessionTab(workSessionKey(work), tabId)).tab.url, initial);
+      await rememberBrowserJobClaim(work, tabId, (await assertSessionTab(workSessionKey(work), tabId)).tab.url, initial, effectiveProfile.name);
     }
     try {
       await requireActiveBrowserLease(cfg, leaseState);
@@ -961,8 +1031,8 @@ async function processWork(cfg, work, claimedTabId) {
     decision = parseOutput(answer.text, work.job.output || {}, answer.selected_model || work.job.model || effectiveProfile.label || 'browser', answer.artifacts || []);
     // These are the selections confirmed by the tab automation, not merely
     // the model/reasoning requested by the remote job.
-    if (answer.selected_model) decision.selected_model = String(answer.selected_model).slice(0, 100);
-    if (answer.selected_reasoning) decision.selected_reasoning = String(answer.selected_reasoning).slice(0, 100);
+	if (answer.selected_model) decision.selected_model = String(answer.selected_model).slice(0, 100);
+	if (answer.selected_reasoning) decision.selected_reasoning = String(answer.selected_reasoning).slice(0, 100);
     tab = await assertActiveLeaseConversation(leaseState);
     await assertSessionTab(leaseState.sessionKey, tabId);
     if (!editTarget) await releaseOwnedDraftIfEmpty(tabId, effectiveProfile);
@@ -989,8 +1059,15 @@ async function processWork(cfg, work, claimedTabId) {
     }
     if (tabSlotHeld) busyTabs.delete(tabId);
     const activeLease = activeBrowserLeases.get(String(work?.job?.id || ''));
-    if (activeLease?.generation === leaseGeneration) activeBrowserLeases.delete(String(work.job.id || ''));
+    if (activeLease?.generation === leaseGeneration) {
+      if (activeLease.recoveryTimer) clearTimeout(activeLease.recoveryTimer);
+      activeBrowserLeases.delete(String(work.job.id || ''));
+    }
   }
+	if (Number(leaseState?.tabId || 0) > 0 && decision) {
+	  decision.contextbridge_browser_tab_id = Number(leaseState.tabId);
+	  if (work?.job?.metadata?.contextbridge_new_chat_per_job === true) decision.contextbridge_ephemeral_browser_tab = true;
+	}
 
   let acknowledged;
   try {
@@ -1108,6 +1185,10 @@ async function resolveWorkTab(_cfg, work, claimedTabId) {
     const { cfg, bindings } = await sessionBindingState();
     const key = workSessionKey(work);
     const requested = String(work?.profile?.name || '');
+	const requiredTabId = Number(work?.job?.contextbridge_browser_tab_id || 0);
+	if (requiredTabId > 0 && (!Number.isSafeInteger(requiredTabId) || requiredTabId !== claimedTabId)) {
+	  throw new Error('The browser lease was claimed by a tab other than the relay-selected tab');
+	}
     const compatible = async (tabId) => {
       try {
         const tab = await api.tabs.get(tabId);
@@ -1119,7 +1200,7 @@ async function resolveWorkTab(_cfg, work, claimedTabId) {
       const mapped = Number(binding.tabId);
       if (configuredTabIDs(cfg).includes(mapped)) {
         const tab = await compatible(mapped);
-        if (tab && (!binding.url || tab.url === binding.url)) return mapped;
+		if (tab && (requiredTabId <= 0 || mapped === requiredTabId) && (!binding.url || tab.url === binding.url)) return mapped;
         // A fresh chat may gain its permanent conversation URL only after the
         // first job has completed. Keep that exact tab bound, but only after
         // the latest user turn still matches ContextBridge's stored proof.
@@ -1167,6 +1248,7 @@ async function resolveWorkTab(_cfg, work, claimedTabId) {
       // or visible text, and park the previous occupant before reassigning.
       if (binding.url && !isFreshChatURL(binding.url)) {
         for (const id of configuredTabIDs(cfg)) {
+		  if (requiredTabId > 0 && id !== requiredTabId) continue;
           if (busyTabs.has(id)) continue;
           const tab = await compatible(id);
           if (!tab || tab.url !== binding.url) continue;
@@ -1178,6 +1260,9 @@ async function resolveWorkTab(_cfg, work, claimedTabId) {
           return id;
         }
       }
+	  if (requiredTabId > 0 && mapped !== requiredTabId) {
+		throw new Error('The relay-selected tab does not own this ContextBridge session or its saved conversation URL');
+	  }
       throw new Error('The session tab moved or closed. Open its original chat in an attached tab before sending another turn');
     }
     const occupied = new Set(Object.values(bindings).map((entry) => Number(entry?.tabId)));
@@ -1189,7 +1274,7 @@ async function resolveWorkTab(_cfg, work, claimedTabId) {
         delete bindings[oldKey];
       }
     }
-    const order = [claimedTabId, ...configuredTabIDs(cfg).filter((id) => id !== claimedTabId)];
+	const order = requiredTabId > 0 ? [requiredTabId] : [claimedTabId, ...configuredTabIDs(cfg).filter((id) => id !== claimedTabId)];
     const requestedMode = work?.job?.metadata?.contextbridge_new_chat === true ? 'new_chat' : cfg.sessionMode;
     let tab = null;
     if (requestedMode !== 'new_chat') {
@@ -1220,7 +1305,7 @@ async function resolveWorkTab(_cfg, work, claimedTabId) {
 
 async function createFreshSessionTab(cfg, work, claimedTabId) {
   const profile = String(work?.profile?.name || profileForTab(cfg, await api.tabs.get(claimedTabId))?.name || '');
-  const url = profile === 'chatgpt' ? 'https://chatgpt.com/' : profile === 'gemini' ? 'https://gemini.google.com/app' : '';
+  const url = freshChatURLForProfile(profile);
   if (!url) throw new Error('Automatic new chats are supported only for ChatGPT and Gemini');
   if (configuredTabIDs(cfg).length >= 16) throw new Error('The 16-tab safety limit is reached; close or detach a session tab first');
   if (!await api.permissions.contains({ origins: [new URL(url).origin + '/*'] })) throw new Error('Page access for the new AI chat is not granted');
@@ -1232,6 +1317,10 @@ async function createFreshSessionTab(cfg, work, claimedTabId) {
   void poll();
   void sendHeartbeat('waiting');
   return api.tabs.get(created.id);
+}
+
+function freshChatURLForProfile(profile) {
+  return profile === 'chatgpt' ? 'https://chatgpt.com/' : profile === 'gemini' ? 'https://gemini.google.com/app' : '';
 }
 
 function foregroundFreshChatForJob(job) {
@@ -1269,8 +1358,11 @@ async function rememberOwnedTurn(key, tabId, ownedTurn) {
   });
 }
 
-async function inspectLatestOwnedTurn(expectedPrompt, provider, requireResponseAfter = false, selectors = null) {
-  if (!['chatgpt', 'gemini'].includes(provider) || !expectedPrompt) return null;
+async function inspectLatestOwnedTurn(expectedPrompt, provider, requireResponseAfter = false, selectors = null, expectedProof = null) {
+  const proofNonce = String(expectedProof?.nonce || '');
+  const proofDigest = String(expectedProof?.digest || '');
+  const hasProof = /^[a-f0-9]{32}$/.test(proofNonce) && /^[a-f0-9]{64}$/.test(proofDigest);
+  if (!['chatgpt', 'gemini'].includes(provider) || (!expectedPrompt && !hasProof)) return null;
   const turns = document.querySelectorAll(provider === 'chatgpt' ? 'section[data-turn="user"]' : 'user-query');
   const turn = turns.length ? (turns.item ? turns.item(turns.length - 1) : turns[turns.length - 1]) : null;
   const content = provider === 'chatgpt'
@@ -1279,6 +1371,12 @@ async function inspectLatestOwnedTurn(expectedPrompt, provider, requireResponseA
   const id = provider === 'chatgpt' ? turn?.getAttribute('data-turn-id') : content?.id;
   const normalize = (value) => String(value || '').normalize('NFKC').replace(/\s+/g, ' ').trim();
   const expected = normalize(expectedPrompt);
+  const digestText = async (value) => {
+    const input = hasProof ? `${proofNonce}\u0000${normalize(value)}` : normalize(value);
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input));
+    return [...new Uint8Array(digest)].map((part) => part.toString(16).padStart(2, '0')).join('');
+  };
+  const matchesExpected = async (value) => expected ? normalize(value) === expected : await digestText(value) === proofDigest;
   let promptContent = content;
   if (provider === 'chatgpt' && content?.querySelectorAll) {
     const parts = content.querySelectorAll('[data-message-content-part], .whitespace-pre-wrap, .markdown');
@@ -1286,11 +1384,11 @@ async function inspectLatestOwnedTurn(expectedPrompt, provider, requireResponseA
     for (let index = 0; index < Math.min(parts.length, 32); index += 1) {
       const part = parts.item ? parts.item(index) : parts[index];
       if (part?.closest?.(attachmentSelector) || part?.querySelector?.('img, video, audio, [data-file-citation-primary-file-id]')) continue;
-      if (normalize(part?.textContent) === expected) { promptContent = part; break; }
+      if (await matchesExpected(part?.textContent)) { promptContent = part; break; }
     }
   }
   const text = normalize(promptContent?.textContent);
-  if (!id || !text || text !== expected) return null;
+  if (!id || !text || !await matchesExpected(text)) return null;
   if (requireResponseAfter) {
     let responseAfter = false;
     for (const selector of selectors?.response || []) {
@@ -1308,8 +1406,7 @@ async function inspectLatestOwnedTurn(expectedPrompt, provider, requireResponseA
     }
     if (!responseAfter) return null;
   }
-  const bytes = new TextEncoder().encode(text);
-  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
   return { id, digest: [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join(''), provider };
 }
 
@@ -1587,57 +1684,97 @@ async function waitForTabReady(tabId, selectors, timeout, initialDelay = 600) {
   throw new Error('The AI prompt did not become ready after tab navigation');
 }
 
-async function promoteActiveLeaseConversation(lease, tab) {
-  if (!lease?.sentUnknown || !lease.expectedURL || !lease.sessionKey || !lease.prompt
+function isPendingLeaseConversation(lease, tab) {
+  if (!lease?.sentUnknown || !lease.expectedURL || !lease.sessionKey || (!lease.prompt && !lease.promptProof)
       || !['chatgpt', 'gemini'].includes(lease.profileName) || !tab?.url) return false;
-  if (tab.url === lease.expectedURL) return true;
-  let before;
-  let after;
   try {
-    before = new URL(lease.expectedURL);
-    after = new URL(tab.url);
+    const before = new URL(lease.expectedURL);
+    const after = new URL(tab.url);
+    return before.origin === after.origin && isFreshChatURL(before.href) && !isFreshChatURL(after.href);
   } catch (_) { return false; }
-  if (before.origin !== after.origin || !isFreshChatURL(before.href) || isFreshChatURL(after.href)) return false;
+}
+
+async function promoteActiveLeaseConversation(lease, tab) {
+  if (!lease || lease.cancelled || stopRequested) return false;
+  if (tab?.url === lease.expectedURL) return true;
+  if (!isPendingLeaseConversation(lease, tab)) return false;
+  // Progress sampling and the injected observer can see the first chat URL
+  // change together. Share one proof/CAS instead of letting one caller cancel
+  // a lease while the other is still committing the same verified transition.
+  if (lease.conversationPromotion) return lease.conversationPromotion.targetURL === tab.url
+    ? lease.conversationPromotion.promise : false;
+  const sourceURL = lease.expectedURL;
+  const targetURL = tab.url;
+  const promotion = { targetURL, promise: null };
+  lease.conversationPromotion = promotion;
+  promotion.promise = commitActiveLeaseConversation(lease, sourceURL, targetURL);
+  try { return await promotion.promise; }
+  finally { if (lease.conversationPromotion === promotion) delete lease.conversationPromotion; }
+}
+
+async function commitActiveLeaseConversation(lease, sourceURL, targetURL) {
   const proof = await withDeadline(api.scripting.executeScript({ target: { tabId: lease.tabId },
-    func: inspectLatestOwnedTurn, args: [lease.prompt, lease.profileName] }), 5000).catch(() => null);
+    func: inspectLatestOwnedTurn, args: [lease.prompt || '', lease.profileName, false, null, lease.promptProof || null] }), 5000).catch(() => null);
   const ownedTurn = proof?.[0]?.result;
   if (!ownedTurn) return false;
   const verifiedTab = await withDeadline(api.tabs.get(lease.tabId), 2500).catch(() => null);
-  if (!verifiedTab?.url || verifiedTab.url !== tab.url) return false;
-  tab = verifiedTab;
+  if (lease.cancelled || stopRequested || verifiedTab?.url !== targetURL) return false;
   const updated = await serializeSessionWrite(() => serializeBrowserClaimWrite(async () => {
     const { cfg, bindings } = await sessionBindingState();
     const binding = bindings[lease.sessionKey];
     const existing = cfg.browserJobClaims?.[lease.jobId];
-    if (!binding || Number(binding.tabId) !== lease.tabId || binding.url !== lease.expectedURL
+    if (lease.cancelled || stopRequested || lease.expectedURL !== sourceURL
+        || !binding || Number(binding.tabId) !== lease.tabId || binding.url !== sourceURL
         || !existing || Number(existing.generation) !== lease.generation || Number(existing.tabId) !== lease.tabId
-        || existing.sessionKey !== lease.sessionKey || existing.expectedURL !== lease.expectedURL) return false;
-    bindings[lease.sessionKey] = { ...binding, url: tab.url, ownedTurn };
+        || existing.sessionKey !== lease.sessionKey || existing.expectedURL !== sourceURL) return false;
+    bindings[lease.sessionKey] = { ...binding, url: targetURL, ownedTurn };
     const browserJobClaims = { ...cfg.browserJobClaims,
-      [lease.jobId]: { ...existing, expectedURL: tab.url, ownedTurn, at: Date.now() } };
+      [lease.jobId]: { ...existing, expectedURL: targetURL, ownedTurn, at: Date.now() } };
     await api.storage.local.set({ sessionBindings: bindings, browserJobClaims });
+    lease.expectedURL = targetURL;
+    lease.ownedTurn = ownedTurn;
     return true;
   }));
-  if (!updated) return false;
-  lease.expectedURL = tab.url;
-  lease.ownedTurn = ownedTurn;
-  return true;
+  return updated;
 }
 
 async function assertActiveLeaseConversation(lease) {
   if (!lease || lease.cancelled || stopRequested) throw new Error('The browser job lease was cancelled');
-  let tab;
-  try { tab = await withDeadline(api.tabs.get(lease.tabId), 2500); } catch (_) {}
+  const tab = await readActiveLeaseTab(lease);
+  if (lease.cancelled || stopRequested) throw new Error('The browser job lease was cancelled');
   if (tab?.url === lease.expectedURL) return tab;
-  if (tab && await promoteActiveLeaseConversation(lease, tab)) return tab;
+  if (tab && await promoteActiveLeaseConversation(lease, tab)) {
+    if (lease.cancelled || stopRequested) throw new Error('The browser job lease was cancelled');
+    return tab;
+  }
+  // A provider can publish its conversation URL before the corresponding
+  // user turn mounts. Skip this progress sample without poisoning the live
+  // lease. No response content is read until the ownership proof succeeds.
+  if (isPendingLeaseConversation(lease, tab)) {
+    const error = new Error('The submitted ContextBridge turn could not be verified after the conversation URL changed; no provider content was observed');
+    error.code = 'browser_session_changed';
+    throw error;
+  }
   lease.cancelled = true;
   throw new Error('The conversation URL changed; no provider content was observed');
+}
+
+async function readActiveLeaseTab(lease) {
+  const expectedURL = lease.expectedURL;
+  let tab = await withDeadline(api.tabs.get(lease.tabId), 2500).catch(() => null);
+  // tabs.get can return its earlier fresh-page snapshot after another caller
+  // has committed the owned conversation. Refresh that stale snapshot before
+  // treating it as navigation away from the newly verified URL.
+  if (lease.expectedURL !== expectedURL && tab?.url !== lease.expectedURL) {
+    tab = await withDeadline(api.tabs.get(lease.tabId), 2500).catch(() => null);
+  }
+  return tab;
 }
 
 async function captureTabProgress(tabId, selectors, lease = null) {
   if (lease) await assertActiveLeaseConversation(lease);
   if (progressScriptsInFlight.has(tabId)) throw new Error('The prior browser progress scan is still pending');
-  const raw = api.scripting.executeScript({ target: { tabId }, func: captureProgress, args: [selectors] });
+  const raw = api.scripting.executeScript({ target: { tabId }, func: captureProgress, args: [selectors, lease?.expectedURL || ''] });
   progressScriptsInFlight.set(tabId, raw);
   raw.then(() => {
     if (progressScriptsInFlight.get(tabId) === raw) progressScriptsInFlight.delete(tabId);
@@ -1717,6 +1854,29 @@ async function renewLease(cfg, jobId, generation) {
   return response.ok;
 }
 
+async function releaseBrowserLease(cfg, jobId, generation) {
+  if (!Number.isSafeInteger(generation) || generation <= 0) return false;
+  const response = await browserLeaseControlRequest(cfg, `/v1/browser/jobs/${encodeURIComponent(jobId)}/release`, {
+    method: 'POST',
+    headers: { 'X-ContextBridge-Lease-Generation': String(generation) },
+    cache: 'no-store'
+  });
+  return response.ok;
+}
+
+async function browserLeaseStatus(cfg, jobId, generation) {
+  if (!Number.isSafeInteger(generation) || generation <= 0) return { active: false, expiresAt: 0 };
+  const response = await browserLeaseControlRequest(cfg, `/v1/browser/jobs/${encodeURIComponent(jobId)}/lease`, {
+    method: 'GET',
+    headers: { 'X-ContextBridge-Lease-Generation': String(generation) },
+    cache: 'no-store'
+  });
+  if (!response.ok) return { active: false, expiresAt: 0 };
+  let body = null;
+  try { body = await response.json(); } catch (_) {}
+  return { active: true, expiresAt: Date.parse(body?.lease_expires_at || '') || 0 };
+}
+
 async function requireActiveBrowserLease(cfg, lease) {
   if (!lease || lease.cancelled || stopRequested) throw browserLeaseLost('The browser job lease was cancelled');
   if (!await renewLease(cfg, lease.jobId, lease.generation)) {
@@ -1740,18 +1900,25 @@ async function authorizeBrowserJobAction(message, sender) {
   const jobId = String(message?.jobId || '');
   const generation = Number(message?.generation || 0);
   const action = String(message?.action || '');
-  const lease = activeBrowserLeases.get(jobId);
+  let lease = activeBrowserLeases.get(jobId);
+  if (!lease) lease = await recoverPersistedBrowserLease(jobId, generation, action, message, sender);
   if (!lease || lease.cancelled || lease.generation !== generation || lease.tabId !== Number(sender?.tab?.id || 0) || stopRequested) {
     return { ok: false, error: 'browser_job_lease_lost' };
   }
+  touchRecoveredBrowserLease(lease);
+  const reservation = recoveredTabReservations.get(lease.tabId);
+  if (lease.recovered && (!reservation || reservation.token !== lease.reservationToken || reservation.quarantined)) {
+    return { ok: false, error: 'browser_job_lease_lost' };
+  }
   const cfg = await settings();
+  if (activeBrowserLeases.get(jobId) !== lease || lease.cancelled) return { ok: false, error: 'browser_job_lease_lost' };
   if (!cfg.running || !configuredTabIDs(cfg).includes(lease.tabId)) {
     lease.cancelled = true;
     return { ok: false, error: 'browser_job_cancelled' };
   }
   if (!['observe', 'upload', 'edit', 'send'].includes(action)) return { ok: false, error: 'invalid_browser_job_action' };
-  let tab;
-  try { tab = await api.tabs.get(lease.tabId); } catch (_) { lease.cancelled = true; }
+  const tab = await readActiveLeaseTab(lease);
+  if (activeBrowserLeases.get(jobId) !== lease || lease.cancelled) return { ok: false, error: 'browser_job_lease_lost' };
   const expectedURL = String(message?.expectedURL || '');
   let staleFreshObserver = false;
   try {
@@ -1766,19 +1933,29 @@ async function authorizeBrowserJobAction(message, sender) {
   if (tab.url !== lease.expectedURL) {
     let promoted = false;
     if (action === 'observe') {
-      try { promoted = await promoteActiveLeaseConversation(lease, tab); } catch (_) {}
+      for (let attempt = 0; attempt < 3 && !promoted; attempt += 1) {
+        try { promoted = await promoteActiveLeaseConversation(lease, tab); } catch (_) {}
+        if (promoted || !isPendingLeaseConversation(lease, tab) || lease.cancelled) break;
+        if (attempt < 2) await delay(250);
+      }
     }
     if (!promoted) {
+      if (action === 'observe' && isPendingLeaseConversation(lease, tab) && !lease.cancelled) {
+        return { ok: false, error: 'browser_conversation_unverified' };
+      }
       lease.cancelled = true;
       return { ok: false, error: 'browser_conversation_changed' };
     }
+    if (activeBrowserLeases.get(jobId) !== lease || lease.cancelled) return { ok: false, error: 'browser_job_lease_lost' };
   }
   if (action === 'observe') {
     let renewed;
     try { renewed = await renewLease(cfg, jobId, generation); }
     catch (error) { return { ok: false, error: error?.code || 'browser_bridge_unavailable' }; }
+    if (activeBrowserLeases.get(jobId) !== lease || lease.cancelled) return { ok: false, error: 'browser_job_lease_lost' };
     if (!renewed) {
-      lease.cancelled = true;
+      if (lease.recovered) await rejectRecoveredBrowserLease(lease);
+      else lease.cancelled = true;
       return { ok: false, error: 'browser_job_lease_lost' };
     }
     return { ok: true, expectedURL: lease.expectedURL };
@@ -1786,8 +1963,10 @@ async function authorizeBrowserJobAction(message, sender) {
   let claimed;
   try { claimed = await claimBrowserAction(cfg, jobId, generation, action); }
   catch (error) { return { ok: false, error: error?.code || 'browser_bridge_unavailable' }; }
+  if (activeBrowserLeases.get(jobId) !== lease || lease.cancelled) return { ok: false, error: 'browser_job_lease_lost' };
   if (!claimed) {
-    lease.cancelled = true;
+    if (lease.recovered) await rejectRecoveredBrowserLease(lease);
+    else lease.cancelled = true;
     return { ok: false, error: 'browser_job_lease_lost' };
   }
   lease.sentUnknown = true;
@@ -1795,7 +1974,255 @@ async function authorizeBrowserJobAction(message, sender) {
     lease.cancelled = true;
     return { ok: false, error: 'browser_claim_persistence_failed' };
   }
+  if (activeBrowserLeases.get(jobId) !== lease || lease.cancelled) return { ok: false, error: 'browser_job_lease_lost' };
   return { ok: true, sentUnknown: true, expectedURL: lease.expectedURL };
+}
+
+function browserClaimKey(jobId, generation) {
+  return `${String(jobId || '')}:${Number(generation || 0)}`;
+}
+
+function recoveredLeaseDeadline(claim) {
+  const absolute = Date.parse(String(claim?.deadline || ''));
+  if (Number.isFinite(absolute) && absolute > 0) return absolute;
+  // Pre-deadline releases can exist for one upgrade. Preserve their previous
+  // fail-closed 24-hour age bound rather than guessing a shorter job timeout.
+  return Number(claim?.at || 0) + 24 * 60 * 60 * 1000;
+}
+
+function reserveRecoveredBrowserLease(lease) {
+  if (!lease?.recovered || lease.cancelled) return null;
+  let reservation = recoveredTabReservations.get(lease.tabId);
+  if (!reservation) {
+    reservation = { token: Symbol(`tab-${lease.tabId}`), claims: new Map(), quarantined: false };
+    recoveredTabReservations.set(lease.tabId, reservation);
+  }
+  const key = browserClaimKey(lease.jobId, lease.generation);
+  reservation.claims.set(key, lease);
+  reservation.quarantined = reservation.claims.size > 1;
+  lease.reservationToken = reservation.token;
+  busyTabs.add(lease.tabId);
+  return reservation;
+}
+
+function releaseRecoveredBrowserLease(lease) {
+  if (!lease?.recovered) return;
+  if (lease.recoveryTimer) clearTimeout(lease.recoveryTimer);
+  lease.recoveryTimer = 0;
+  const current = activeBrowserLeases.get(lease.jobId);
+  if (current === lease) activeBrowserLeases.delete(lease.jobId);
+  const reservation = recoveredTabReservations.get(lease.tabId);
+  if (!reservation || reservation.token !== lease.reservationToken) return;
+  const key = browserClaimKey(lease.jobId, lease.generation);
+  if (reservation.claims.get(key) === lease) reservation.claims.delete(key);
+  if (reservation.claims.size === 0) {
+    recoveredTabReservations.delete(lease.tabId);
+    const anotherLeaseOwnsTab = [...activeBrowserLeases.values()].some((candidate) => candidate !== lease
+      && !candidate.cancelled && candidate.tabId === lease.tabId);
+    if (!anotherLeaseOwnsTab) busyTabs.delete(lease.tabId);
+  } else {
+    reservation.quarantined = reservation.claims.size > 1;
+  }
+}
+
+function cancelRecoveredBrowserLease(lease, removeActive = false) {
+  if (!lease) return;
+  lease.cancelled = true;
+  if (lease.recovered) releaseRecoveredBrowserLease(lease);
+  else if (removeActive && activeBrowserLeases.get(lease.jobId) === lease) activeBrowserLeases.delete(lease.jobId);
+}
+
+function scheduleRecoveredBrowserLeaseCheck(lease, delayMilliseconds = 1000) {
+  if (!lease?.recovered || lease.cancelled || lease.recoveryTimer) return;
+  const delayWithJitter = Math.max(250, Math.floor(delayMilliseconds + Math.random() * Math.min(1000, delayMilliseconds / 4)));
+  lease.recoveryTimer = setTimeout(() => {
+    lease.recoveryTimer = 0;
+    void checkRecoveredBrowserLease(lease);
+  }, delayWithJitter);
+}
+
+async function rejectRecoveredBrowserLease(lease) {
+  const current = activeBrowserLeases.get(lease?.jobId);
+  const reservation = recoveredTabReservations.get(lease?.tabId);
+  if (current !== lease || !reservation || reservation.token !== lease.reservationToken) return;
+  const key = browserClaimKey(lease?.jobId, lease?.generation);
+  if (rejectedBrowserClaims.size >= 256) rejectedBrowserClaims.delete(rejectedBrowserClaims.values().next().value);
+  rejectedBrowserClaims.add(key);
+  if (lease) lease.cancelled = true;
+  // Keep the tab reserved until the durable claim is gone. A late isolated
+  // script cannot rehydrate it in the storage-write window because the
+  // in-memory tombstone above is already authoritative for this worker.
+  try {
+    await forgetBrowserJobClaim(lease.jobId, {
+      generation: lease.generation, tabId: lease.tabId, sessionKey: lease.sessionKey
+    });
+  } catch (_) {}
+  releaseRecoveredBrowserLease(lease);
+  void sendHeartbeat(busyTabs.size ? 'working' : 'waiting');
+}
+
+async function checkRecoveredBrowserLease(lease) {
+  const current = activeBrowserLeases.get(lease?.jobId);
+  const reservation = recoveredTabReservations.get(lease?.tabId);
+  if (!lease?.recovered || current !== lease || !reservation || reservation.token !== lease.reservationToken) return;
+  if (lease.cancelled || stopRequested || lease.lifecycleGeneration !== lifecycleGeneration) {
+    cancelRecoveredBrowserLease(lease);
+    return;
+  }
+  if (Date.now() >= lease.recoveryDeadline) {
+    await rejectRecoveredBrowserLease(lease);
+    return;
+  }
+  try {
+    const status = await browserLeaseStatus(await settings(), lease.jobId, lease.generation);
+    const latest = activeBrowserLeases.get(lease.jobId);
+    const latestReservation = recoveredTabReservations.get(lease.tabId);
+    if (latest !== lease || !latestReservation || latestReservation.token !== lease.reservationToken
+        || lease.cancelled || stopRequested || lease.lifecycleGeneration !== lifecycleGeneration) {
+      releaseRecoveredBrowserLease(lease);
+      return;
+    }
+    if (!status.active) {
+      await rejectRecoveredBrowserLease(lease);
+      return;
+    }
+    lease.recoveryFailures = 0;
+    const untilExpiry = status.expiresAt > Date.now() ? status.expiresAt - Date.now() : 5000;
+    scheduleRecoveredBrowserLeaseCheck(lease, Math.max(1000, Math.min(5000, Math.floor(untilExpiry / 2))));
+  } catch (_) {
+    // Transport uncertainty is not lease loss. Hold the tab until the saved
+    // absolute job deadline and retry with bounded exponential backoff.
+    lease.recoveryFailures = Math.min(6, Number(lease.recoveryFailures || 0) + 1);
+    scheduleRecoveredBrowserLeaseCheck(lease, Math.min(30000, 1000 * (2 ** lease.recoveryFailures)));
+  }
+}
+
+function touchRecoveredBrowserLease(lease) {
+  if (!lease?.recovered || lease.cancelled) return;
+  reserveRecoveredBrowserLease(lease);
+  scheduleRecoveredBrowserLeaseCheck(lease);
+}
+
+function persistedClaimsForTab(cfg, tabId) {
+  const now = Date.now();
+  return Object.entries(cfg.browserJobClaims || {}).filter(([jobId, claim]) =>
+    !rejectedBrowserClaims.has(browserClaimKey(jobId, claim?.generation))
+    && Number(claim?.tabId) === tabId
+    && ['leased', 'sent_unknown'].includes(String(claim?.state || ''))
+    && now - Number(claim?.at || 0) <= 24 * 60 * 60 * 1000
+    && recoveredLeaseDeadline(claim) > now);
+}
+
+function recoveredLeaseFromClaim(cfg, jobId, claim, tab) {
+  const generation = Number(claim?.generation || 0);
+  const tabId = Number(claim?.tabId || 0);
+  if (!jobId || !Number.isSafeInteger(generation) || generation <= 0 || !Number.isInteger(tabId) || tabId <= 0
+      || rejectedBrowserClaims.has(browserClaimKey(jobId, generation))
+      || !configuredTabIDs(cfg).includes(tabId) || !claim?.sessionKey || !claim?.expectedURL
+      || !['leased', 'sent_unknown'].includes(String(claim?.state || ''))
+      || Date.now() - Number(claim?.at || 0) > 24 * 60 * 60 * 1000
+      || recoveredLeaseDeadline(claim) <= Date.now()) return null;
+  const binding = cfg.sessionBindings?.[claim.sessionKey];
+  if (!binding || Number(binding.tabId) !== tabId || binding.url !== claim.expectedURL || !tab?.url) return null;
+  let validConversation = tab.url === claim.expectedURL;
+  try {
+    validConversation ||= claim.state === 'sent_unknown' && isFreshChatURL(claim.expectedURL) && !isFreshChatURL(tab.url)
+      && new URL(claim.expectedURL).origin === new URL(tab.url).origin && Boolean(claim.promptProof);
+  } catch (_) {}
+  if (!validConversation) return null;
+  const profileName = String(claim.profileName || profileForTab(cfg, tab)?.name || '');
+  if (!['chatgpt', 'gemini'].includes(profileName)) return null;
+  return { jobId, generation, tabId, expectedURL: String(claim.expectedURL), sessionKey: String(claim.sessionKey),
+    profileName, sentUnknown: claim.state === 'sent_unknown', prompt: '', promptProof: claim.promptProof || null,
+    ownedTurn: claim.ownedTurn || null, cancelled: false, recovered: true, lifecycleGeneration,
+    recoveryDeadline: recoveredLeaseDeadline(claim), recoveryFailures: 0 };
+}
+
+async function restorePersistedBrowserLeaseReservations(generation = lifecycleGeneration) {
+  const cfg = await settings();
+  if (!cfg.running || stopRequested || generation !== lifecycleGeneration) return;
+  const tabIDs = [...new Set(Object.values(cfg.browserJobClaims || {}).map((claim) => Number(claim?.tabId || 0)).filter(Boolean))];
+  for (const tabId of tabIDs) {
+    if (generation !== lifecycleGeneration || stopRequested) return;
+    const tab = await api.tabs.get(tabId).catch(() => null);
+    const claims = persistedClaimsForTab(cfg, tabId);
+    for (const [jobId, claim] of claims) {
+      if (generation !== lifecycleGeneration || stopRequested) return;
+      const existing = activeBrowserLeases.get(jobId);
+      if (existing && !existing.cancelled) {
+        if (existing.generation === Number(claim.generation) && existing.recovered) touchRecoveredBrowserLease(existing);
+        continue;
+      }
+      // tabs.get() and earlier claims may have yielded while a provider-script
+      // action recovered a newer generation. Re-read storage and require the
+      // exact durable identity before installing this snapshot.
+      const latestCfg = await settings();
+      const latestClaim = latestCfg.browserJobClaims?.[jobId];
+      if (!latestCfg.running || generation !== lifecycleGeneration || stopRequested || !latestClaim
+          || Number(latestClaim.generation) !== Number(claim.generation)
+          || Number(latestClaim.tabId) !== Number(claim.tabId)
+          || String(latestClaim.sessionKey || '') !== String(claim.sessionKey || '')
+          || String(latestClaim.expectedURL || '') !== String(claim.expectedURL || '')) continue;
+      const current = activeBrowserLeases.get(jobId);
+      if (current && !current.cancelled) continue;
+      const lease = recoveredLeaseFromClaim(latestCfg, jobId, latestClaim, tab);
+      if (!lease) continue;
+      activeBrowserLeases.set(jobId, lease);
+      reserveRecoveredBrowserLease(lease);
+      scheduleRecoveredBrowserLeaseCheck(lease, 250);
+    }
+  }
+}
+
+// MV3 may suspend a background worker while the isolated provider-tab script
+// is awaiting an answer. Rebuild only the minimal action gate from an exact,
+// durable claim; the relay claim/lease endpoint remains authoritative before
+// every provider side effect or observation. No prompt text is persisted.
+async function recoverPersistedBrowserLease(jobId, generation, action, message, sender) {
+  if (!jobId || !Number.isSafeInteger(generation) || generation <= 0 || stopRequested
+      || !['observe', 'upload', 'edit', 'send'].includes(action)) return null;
+  const tabId = Number(sender?.tab?.id || 0);
+  if (!Number.isInteger(tabId) || tabId <= 0) return null;
+  let cfg = await settings();
+  let claim = cfg.browserJobClaims?.[jobId];
+  if (rejectedBrowserClaims.has(browserClaimKey(jobId, generation))) return null;
+  if (!cfg.running || !configuredTabIDs(cfg).includes(tabId) || !claim
+      || Number(claim.generation) !== generation || Number(claim.tabId) !== tabId
+      || !claim.sessionKey || !claim.expectedURL
+      || !['leased', 'sent_unknown'].includes(String(claim.state || ''))
+      || Date.now() - Number(claim.at || 0) > 24 * 60 * 60 * 1000) return null;
+  const tab = await api.tabs.get(tabId).catch(() => null);
+  if (!tab?.url) return null;
+  // tabs.get() yields. Another provider-script message may have recovered a
+  // newer generation in that window, so refresh the durable identity and
+  // never overwrite an existing live lease from this stale snapshot.
+  cfg = await settings();
+  claim = cfg.browserJobClaims?.[jobId];
+  if (!claim || Number(claim.generation) !== generation || Number(claim.tabId) !== tabId
+      || !claim.sessionKey || !claim.expectedURL || !['leased', 'sent_unknown'].includes(String(claim.state || ''))
+      || rejectedBrowserClaims.has(browserClaimKey(jobId, generation))) return null;
+  const concurrent = activeBrowserLeases.get(jobId);
+  if (concurrent && !concurrent.cancelled) {
+    return concurrent.generation === generation && concurrent.tabId === tabId
+      && concurrent.sessionKey === String(claim.sessionKey) && concurrent.expectedURL === String(claim.expectedURL)
+      ? concurrent : null;
+  }
+  const competingClaims = persistedClaimsForTab(cfg, tabId);
+  if (competingClaims.length > 1) return null;
+  const requestedURL = String(message?.expectedURL || '');
+  let exactConversation = tab.url === claim.expectedURL && requestedURL === claim.expectedURL;
+  let freshConversationPromotion = false;
+  try {
+    freshConversationPromotion = action === 'observe' && requestedURL === claim.expectedURL
+      && isFreshChatURL(claim.expectedURL) && !isFreshChatURL(tab.url)
+      && new URL(claim.expectedURL).origin === new URL(tab.url).origin;
+  } catch (_) {}
+  if (!exactConversation && !freshConversationPromotion) return null;
+  const lease = recoveredLeaseFromClaim(cfg, jobId, claim, tab);
+  if (!lease) return null;
+  activeBrowserLeases.set(jobId, lease);
+  touchRecoveredBrowserLease(lease);
+  return lease;
 }
 
 function serializeBrowserClaimWrite(operation) {
@@ -1804,8 +2231,12 @@ function serializeBrowserClaimWrite(operation) {
   return result;
 }
 
-async function rememberBrowserJobClaim(work, tabId, expectedURL, baseline) {
+async function rememberBrowserJobClaim(work, tabId, expectedURL, baseline, profileName = '') {
   const baselineDigest = await sha256Text(String(baseline?.text || ''));
+  const proofNonce = [...crypto.getRandomValues(new Uint8Array(16))]
+    .map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  const normalizedPrompt = String(work?.job?.prompt || '').normalize('NFKC').replace(/\s+/g, ' ').trim();
+  const promptProof = { nonce: proofNonce, digest: await sha256Text(`${proofNonce}\u0000${normalizedPrompt}`) };
   return serializeBrowserClaimWrite(async () => {
     const cfg = await settings();
     const now = Date.now();
@@ -1814,7 +2245,9 @@ async function rememberBrowserJobClaim(work, tabId, expectedURL, baseline) {
       .sort((a, b) => Number(b[1]?.at || 0) - Number(a[1]?.at || 0)).slice(0, 63));
     claims[work.job.id] = { generation: Number(work.lease_generation), sessionKey: workSessionKey(work), tabId,
       expectedURL, baselineCount: Number(baseline?.response_count) || 0,
-      baselineIdentity: String(baseline?.response_identity || ''), baselineDigest, state: 'leased', at: now };
+      baselineIdentity: String(baseline?.response_identity || ''), baselineDigest, state: 'leased', at: now,
+      profileName: String(profileName || '').slice(0, 100), promptProof,
+      deadline: new Date(Date.parse(work?.deadline || '') || now + 24 * 60 * 60 * 1000).toISOString() };
     await api.storage.local.set({ browserJobClaims: claims });
   });
 }
@@ -1831,12 +2264,18 @@ async function markBrowserJobSentUnknown(jobId, generation, action) {
   });
 }
 
-async function forgetBrowserJobClaim(jobId) {
+async function forgetBrowserJobClaim(jobId, expected = null) {
   return serializeBrowserClaimWrite(async () => {
     const cfg = await settings();
+    const existing = cfg.browserJobClaims?.[jobId];
+    if (expected && (!existing || Number(existing.generation) !== Number(expected.generation)
+        || Number(existing.tabId) !== Number(expected.tabId) || String(existing.sessionKey || '') !== String(expected.sessionKey || ''))) {
+      return false;
+    }
     const browserJobClaims = { ...cfg.browserJobClaims };
     delete browserJobClaims[jobId];
     await api.storage.local.set({ browserJobClaims });
+    return true;
   });
 }
 
@@ -2281,10 +2720,22 @@ function automate(job, profile, jobDeadline, editTarget = null, expectedConversa
     }
     const runtime = (globalThis.browser || globalThis.chrome)?.runtime;
     if (!runtime?.sendMessage) throw new Error('The browser job lease cannot be verified; no provider action was performed');
-    const response = await runtime.sendMessage({ type: 'authorize-browser-job-action', action,
-      jobId: String(leaseContext.jobId || ''), generation: Number(leaseContext.generation || 0),
-      expectedURL: activeExpectedConversationURL });
+    const verificationDeadline = Math.min(Date.now() + 15000, Date.parse(jobDeadline || '') || Infinity);
+    let response;
+    do {
+      response = await runtime.sendMessage({ type: 'authorize-browser-job-action', action,
+        jobId: String(leaseContext.jobId || ''), generation: Number(leaseContext.generation || 0),
+        expectedURL: activeExpectedConversationURL });
+      if (action !== 'observe' || response?.error !== 'browser_conversation_unverified'
+          || Date.now() >= verificationDeadline) break;
+      // Provider routing can settle well before its user-turn DOM mounts.
+      // Retry only observation authority and read no response while waiting.
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    } while (Date.now() < verificationDeadline);
     if (!response?.ok) {
+      if (response?.error === 'browser_conversation_unverified') {
+        throw new Error('The submitted ContextBridge turn could not be verified after the conversation URL changed; no provider content was observed');
+      }
       if (response?.error === 'browser_conversation_changed') {
         throw new Error('The conversation URL changed; no provider content was observed');
       }
@@ -3443,10 +3894,12 @@ function automate(job, profile, jobDeadline, editTarget = null, expectedConversa
 	      let nextLeaseCheck = Date.now() + 5000;
 	      while (Date.now() < deadline) {
 	        await wait(650);
-	        if (leaseContext && Date.now() >= nextLeaseCheck) {
-	          await authorizeAction('observe');
-	          nextLeaseCheck = Date.now() + 5000;
-	        }
+        if (leaseContext && (Date.now() >= nextLeaseCheck
+            || (activeExpectedConversationURL && location.href !== activeExpectedConversationURL))) {
+          await authorizeAction('observe');
+          nextLeaseCheck = Date.now() + 5000;
+        }
+        requireExpectedConversation();
         const responseSnapshot = responseTail(selectors.response);
         const responses = responseSnapshot.values;
         let latestElement = responses.length ? responses[responses.length - 1] : null;
@@ -3647,7 +4100,10 @@ function isEditAssistantTurn(before, after, text, baselineText) {
     && after?.active_generation && text && text !== baselineText);
 }
 
-function captureProgress(selectors) {
+function captureProgress(selectors, expectedURL = '') {
+  if (expectedURL && location.href !== expectedURL) {
+    throw new Error('The conversation URL changed; no provider content was observed');
+  }
   const visibleText = (element) => (element?.innerText || element?.textContent || '').trim();
   const boundedNodes = (root, selector, limit = 64) => {
     if (!root?.querySelectorAll) return [];
@@ -3998,6 +4454,10 @@ function browserHeartbeatBody(payload, budget = BROWSER_HEARTBEAT_BODY_BUDGET) {
     title: limited(tab.title, 300),
     profile: limited(tab.profile, 100),
     state: limited(tab.state, 30),
+    session_key: limited(tab.session_key, 80),
+    session_key_supported: tab.session_key_supported === true,
+    can_create_fresh_chat: tab.can_create_fresh_chat === true,
+    default_fresh_chat: tab.default_fresh_chat === true,
     current_model: limited(tab.current_model, 100),
     current_reasoning: limited(tab.current_reasoning, 100),
     dom_status: limited(tab.dom_status, 20)
@@ -4015,17 +4475,36 @@ async function sendHeartbeatOnce(state, connecting = false, generation = lifecyc
   const tabs = [];
   const tabIds = configuredTabIDs(cfg);
   if (connecting) await reportConnectionProgress('Registering selected tabs', 0, tabIds.length);
+  const attachedTabs = [];
   for (const [index, tabId] of tabIds.entries()) {
     try {
       const tab = await withDeadline(api.tabs.get(tabId), 2000);
+      attachedTabs.push(tab);
+    } catch (_) {}
+    if (connecting) await reportConnectionProgress('Registering selected tabs', index + 1, tabIds.length);
+  }
+  if (connecting && attachedTabs.length !== tabIds.length) return false;
+  const sessionKeys = browserSessionKeysForTabs(cfg, attachedTabs);
+  const freshChatAccess = {};
+  for (const profile of new Set(attachedTabs.map((tab) => routingProfileName(cfg, tab)).filter((name) => ['chatgpt', 'gemini'].includes(name)))) {
+    freshChatAccess[profile] = await canCreateFreshChat(profile, tabIds.length);
+  }
+  for (const tab of attachedTabs) {
+    try {
+      const tabId = Number(tab.id);
       const profile = profileForTab(cfg, tab);
-      const capabilities = cfg.tabCapabilities?.[tabId] || {};
+      const capabilities = capabilitiesForTab(cfg, tab, profile);
       const diagnostic = tabDOMDiagnostics.get(tabId);
+      const routingProfile = routingProfileName(cfg, tab);
       tabs.push({
         id: tabId,
         origin: tab?.url && /^https?:/i.test(tab.url) ? new URL(tab.url).origin : '',
-        title: tab?.title || '', profile: profile?.name || '',
-        state: busyTabs.has(tabId) ? 'working' : (Number(cfg.tabCooldowns?.[tabId] || 0) > Date.now() ? 'rate_limited' : 'waiting'),
+        title: tab?.title || '', profile: routingProfile,
+        state: browserTabState(cfg, tabId),
+        session_key: sessionKeys.get(tabId) || '',
+        session_key_supported: true,
+        can_create_fresh_chat: freshChatAccess[routingProfile] === true,
+        default_fresh_chat: ['new_chat', 'new_chat_per_job'].includes(cfg.sessionMode),
         current_model: capabilities.currentModel || '', current_reasoning: capabilities.currentReasoning || '',
         models: capabilities.models || [], reasoning_levels: capabilities.reasoningLevels || [],
         model_scan: capabilities.scanDiagnostic?.model || '',
@@ -4035,11 +4514,10 @@ async function sendHeartbeatOnce(state, connecting = false, generation = lifecyc
         dom: !connecting && diagnostic?.url === tab.url ? diagnostic.dom : null
       });
     } catch (_) {}
-    if (connecting) await reportConnectionProgress('Registering selected tabs', index + 1, tabIds.length);
   }
-  if (connecting && tabs.length !== tabIds.length) return false;
+  if (connecting && tabs.length !== attachedTabs.length) return false;
   const tab = tabs[0] || null;
-  const profile = tab ? (cfg.taughtProfiles[tab.origin] || globalThis.ContextBridgeProfiles?.forURL(tab.origin)) : null;
+  const profile = tab ? (cfg.taughtProfiles?.[tab.origin] || globalThis.ContextBridgeProfiles?.forURL(tab.origin)) : null;
   const effectiveState = state === 'paused' ? 'paused' : (busyTabs.size ? 'working' : state);
   if (connecting) await reportConnectionProgress('Registering with local service', 0, 1);
   if (stopRequested && state !== 'paused') return false;
@@ -4152,7 +4630,7 @@ async function refreshTabDiagnostics(tabId, forceScan = false) {
       if (installed?.[0]?.result === true) capabilityWatchInstalled.add(tabId);
     } catch (_) {}
   }
-  let capabilities = cfg.tabCapabilities?.[tabId] || {};
+  let capabilities = capabilitiesForTab(cfg, tab, profile);
   let scannedAt = 0;
   const scanInterval = capabilityScanInterval(profile?.name, capabilities);
   const needsUpdatedModelScan = ['chatgpt', 'gemini'].includes(profile?.name) && !capabilities.currentModel
@@ -4164,7 +4642,7 @@ async function refreshTabDiagnostics(tabId, forceScan = false) {
       if (safe?.[0]?.result === true) {
         const scanned = await executeDiagnosticScript(tabId, { target: { tabId }, func: discoverPageCapabilities }, 8000);
         const previousAttempts = Number(capabilities.scanDiagnostic?.noTriggerAttempts || 0);
-        capabilities = scanned?.[0]?.result || capabilities;
+        capabilities = { ...(scanned?.[0]?.result || capabilities), pageContext: capabilityPageContext(tab, profile) };
         capabilities.scanDiagnostic = { ...(capabilities.scanDiagnostic || {}), version: api.runtime.getManifest().version };
         if (String(capabilities.scanDiagnostic.model || '').startsWith('no trigger')) {
           capabilities.scanDiagnostic.noTriggerAttempts = Math.min(3, previousAttempts + 1);
@@ -4183,6 +4661,7 @@ async function refreshTabDiagnostics(tabId, forceScan = false) {
       || String(value || '').match(/\b\d+(?:\.\d+)?\b/)?.[0] === live.currentModelVersion;
     capabilities = {
       ...capabilities,
+	  pageContext: capabilityPageContext(tab, profile),
       currentModel: scannedAt && validModel(capabilities.currentModel || '') && modelMatchesComposer(capabilities.currentModel) ? capabilities.currentModel
         : (validModel(live.currentModel || '') ? live.currentModel
           : (validModel(capabilities.currentModel || '') && modelMatchesComposer(capabilities.currentModel) ? capabilities.currentModel : '')),
@@ -4229,6 +4708,88 @@ async function refreshTabDiagnostics(tabId, forceScan = false) {
   }
 }
 
+function capabilityPageContext(tab, profile) {
+  return {
+    url: String(tab?.url || '').slice(0, 2048),
+    origin: tab?.url && /^https?:/i.test(tab.url) ? new URL(tab.url).origin : '',
+    profile: String(profile?.name || '').slice(0, 50)
+  };
+}
+
+function capabilitiesForTab(cfg, tab, profile) {
+  const capabilities = cfg.tabCapabilities?.[tab?.id] || {};
+  const expected = capabilityPageContext(tab, profile);
+  const stored = capabilities.pageContext || {};
+  if (!stored.url || stored.url !== expected.url || stored.origin !== expected.origin || stored.profile !== expected.profile) return {};
+  return capabilities;
+}
+
+function browserTabState(cfg, tabId) {
+  if (busyTabs.has(tabId)) return 'working';
+  if (Number(cfg.tabCooldowns?.[tabId] || 0) > Date.now()) return 'rate_limited';
+  if (Object.values(cfg.sessionBindings || {}).some((binding) => Number(binding?.tabId) === tabId)) return 'session_bound';
+  return 'waiting';
+}
+
+// Only cluster-derived opaque bindings may leave the browser worker. Local
+// direct session names, saved URLs, titles, and page content stay on this PC.
+// A permanent URL is the proof anchor; shared fresh-chat URLs are deliberately
+// never advertised as session identity.
+function browserSessionKeysForTabs(cfg, tabs) {
+  const result = new Map();
+  const conflicted = new Set();
+  const byId = new Map((tabs || []).map((tab) => [Number(tab?.id), tab]));
+  for (const [workKey, binding] of Object.entries(cfg.sessionBindings || {})) {
+    if (binding?.legacy || binding?.perJob) continue;
+    let parts;
+    try { parts = JSON.parse(workKey); } catch (_) { continue; }
+    if (!Array.isArray(parts) || parts.length !== 2) continue;
+    const sessionKey = String(parts[0] || '');
+    const profile = String(parts[1] || '');
+    if (!/^cb:[a-f0-9]{64}$/.test(sessionKey) || !profile) continue;
+    const savedURL = String(binding?.url || '');
+    if (!savedURL || isFreshChatURL(savedURL)) continue;
+    const candidates = (tabs || []).filter((tab) => String(tab?.url || '') === savedURL && routingProfileName(cfg, tab) === profile);
+    if (!candidates.length) continue;
+    const mapped = Number(binding?.tabId || 0);
+    const recorded = candidates.find((tab) => Number(tab?.id) === mapped);
+    const selected = recorded || (candidates.length === 1 ? candidates[0] : null);
+    if (!selected || !byId.has(Number(selected.id))) continue;
+    const tabId = Number(selected.id);
+    if (conflicted.has(tabId)) continue;
+    if (result.has(tabId) && result.get(tabId) !== sessionKey) {
+      result.delete(tabId);
+      conflicted.add(tabId);
+      continue;
+    }
+    result.set(tabId, sessionKey);
+  }
+  return result;
+}
+
+async function canCreateFreshChat(profile, attachedTabCount) {
+  const freshURL = freshChatURLForProfile(profile);
+  if (!freshURL || attachedTabCount >= 16) return false;
+  try {
+    return await withDeadline(api.permissions.contains({ origins: [new URL(freshURL).origin + '/*'] }), 2000) === true;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function invalidateTabCapabilities(tabId) {
+  const write = capabilityWrite.then(async () => {
+    const latest = await api.storage.local.get({ tabCapabilities: {}, tabCapabilityScans: {} });
+    const tabCapabilities = { ...latest.tabCapabilities };
+    const tabCapabilityScans = { ...latest.tabCapabilityScans };
+    delete tabCapabilities[tabId];
+    delete tabCapabilityScans[tabId];
+    await api.storage.local.set({ tabCapabilities, tabCapabilityScans });
+  });
+  capabilityWrite = write.catch(() => {});
+  await write;
+}
+
 function withDeadline(promise, milliseconds) {
   let timeout;
   return Promise.race([
@@ -4239,9 +4800,16 @@ function withDeadline(promise, milliseconds) {
 
 async function fetchWithTimeout(url, options, milliseconds) {
   const controller = new AbortController();
+  const externalSignal = options?.signal;
+  const abortFromExternal = () => controller.abort(externalSignal?.reason);
+  if (externalSignal?.aborted) abortFromExternal();
+  else externalSignal?.addEventListener?.('abort', abortFromExternal, { once: true });
   const timeout = setTimeout(() => controller.abort(), milliseconds);
   try { return await fetch(url, { ...options, signal: controller.signal }); }
-  finally { clearTimeout(timeout); }
+  finally {
+    clearTimeout(timeout);
+    externalSignal?.removeEventListener?.('abort', abortFromExternal);
+  }
 }
 
 async function settings() {

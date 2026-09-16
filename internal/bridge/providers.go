@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/IamAngusU/ContextBridge/internal/config"
+	"github.com/IamAngusU/ContextBridge/internal/modelregistry"
 )
 
 type Processor struct {
@@ -91,9 +93,13 @@ func (p *Processor) ollama(parent context.Context, job Job, route config.Route, 
 	if model == "" {
 		model = engine.Model
 	}
+	needsImage := job.ImageBase64 != ""
+	if needsImage && !p.cfg.Providers.Ollama.Images {
+		return Output{}, errors.New("ollama image input is disabled in providers.ollama.images")
+	}
 	if model == "" || model == "auto" {
 		var selectErr error
-		model, selectErr = selectOllamaModel(ctx, engine.URL, job.ImageBase64 != "", outputMode(job.Output) == "embedding")
+		model, selectErr = selectOllamaModel(ctx, engine.URL, jobTask(job, route.Task), outputMode(job.Output), needsImage)
 		if selectErr != nil {
 			return Output{}, selectErr
 		}
@@ -148,7 +154,11 @@ func (p *Processor) ollama(parent context.Context, job Job, route config.Route, 
 	return output, nil
 }
 
-func selectOllamaModel(ctx context.Context, base string, needsImage, needsEmbedding bool) (string, error) {
+func selectOllamaModel(ctx context.Context, base, task, mode string, needsImage bool) (string, error) {
+	required, err := requiredOllamaCapabilities(task, mode, needsImage)
+	if err != nil {
+		return "", err
+	}
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(base, "/")+"/api/tags", nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -160,40 +170,115 @@ func selectOllamaModel(ctx context.Context, base string, needsImage, needsEmbedd
 	}
 	var payload struct {
 		Models []struct {
-			Name    string `json:"name"`
-			Size    int64  `json:"size"`
-			Details struct {
-				Families []string `json:"families"`
-				Family   string   `json:"family"`
-			} `json:"details"`
+			Name         string   `json:"name"`
+			Digest       string   `json:"digest"`
+			Size         int64    `json:"size"`
+			Capabilities []string `json:"capabilities"`
 		} `json:"models"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&payload); err != nil {
 		return "", err
 	}
-	selected := ""
-	selectedSize := int64(1<<63 - 1)
-	for _, candidate := range payload.Models {
-		lowerName := strings.ToLower(candidate.Name)
-		vision := strings.Contains(lowerName, "vl") || strings.Contains(lowerName, "llava") || strings.Contains(lowerName, "gemma3") || strings.Contains(strings.ToLower(candidate.Details.Family), "vl")
-		for _, family := range candidate.Details.Families {
-			vision = vision || strings.Contains(strings.ToLower(family), "vl")
+	loaded := map[string]bool{}
+	psReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(base, "/")+"/api/ps", nil)
+	if psResp, psErr := http.DefaultClient.Do(psReq); psErr == nil {
+		var running struct {
+			Models []struct {
+				Name string `json:"name"`
+			} `json:"models"`
 		}
-		if needsImage && !vision {
-			continue
+		if psResp.StatusCode == http.StatusOK {
+			_ = json.NewDecoder(io.LimitReader(psResp.Body, 4<<20)).Decode(&running)
 		}
-		embedding := strings.Contains(lowerName, "embed") || strings.Contains(lowerName, "jina") || strings.Contains(lowerName, "nomic") || strings.Contains(lowerName, "bge")
-		if needsEmbedding && !embedding {
-			continue
-		}
-		if candidate.Name != "" && candidate.Size < selectedSize {
-			selected, selectedSize = candidate.Name, candidate.Size
+		psResp.Body.Close()
+		for _, candidate := range running.Models {
+			loaded[strings.ToLower(strings.TrimSpace(candidate.Name))] = true
 		}
 	}
-	if selected == "" {
-		return "", errors.New("ollama has no compatible local model; run ollama pull or configure a model explicitly")
+	type candidateModel struct {
+		name         string
+		digest       string
+		capabilities []string
+		size         int64
+		loaded       bool
 	}
-	return selected, nil
+	candidates := make([]candidateModel, 0, len(payload.Models))
+	for index, candidate := range payload.Models {
+		if index >= 256 {
+			break
+		}
+		if strings.TrimSpace(candidate.Name) == "" {
+			continue
+		}
+		size := candidate.Size
+		if size <= 0 {
+			size = int64(^uint64(0) >> 1)
+		}
+		candidates = append(candidates, candidateModel{name: candidate.Name, digest: candidate.Digest, capabilities: candidate.Capabilities, size: size, loaded: loaded[strings.ToLower(strings.TrimSpace(candidate.Name))]})
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].loaded != candidates[j].loaded {
+			return candidates[i].loaded
+		}
+		if candidates[i].size != candidates[j].size {
+			return candidates[i].size < candidates[j].size
+		}
+		return strings.ToLower(candidates[i].name) < strings.ToLower(candidates[j].name)
+	})
+	// Resolve in preference order and stop at the first compatible model. A
+	// slow or legacy /api/show response gets a small per-model budget so one
+	// broken candidate cannot hide a later compatible model for the whole route
+	// timeout. Provider evidence is still mandatory; timing out never becomes a
+	// name-based capability guess.
+	selectionCtx, selectionCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer selectionCancel()
+	for _, candidate := range candidates {
+		if selectionCtx.Err() != nil {
+			break
+		}
+		capabilityCtx, capabilityCancel := context.WithTimeout(selectionCtx, 750*time.Millisecond)
+		capabilities, verified, _ := modelregistry.ResolveOllamaCapabilityEvidence(capabilityCtx, http.DefaultClient, base, candidate.name, candidate.digest, candidate.capabilities, candidate.name)
+		capabilityCancel()
+		if verified && containsAllFolded(capabilities, required) {
+			return candidate.name, nil
+		}
+	}
+	return "", fmt.Errorf("ollama has no available model with provider-verified %s capability; pull a compatible model or configure one explicitly", strings.Join(required, "+"))
+}
+
+func requiredOllamaCapabilities(task, mode string, needsImage bool) ([]string, error) {
+	task = strings.ToLower(strings.TrimSpace(task))
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if task == "embedding" || mode == "embedding" {
+		if needsImage {
+			return nil, errors.New("ollama embedding jobs cannot carry an image")
+		}
+		return []string{"embedding"}, nil
+	}
+	if task == "image" || task == "image_generation" {
+		return nil, errors.New("ollama image generation is not supported by the local generation endpoint")
+	}
+	required := []string{"text"}
+	if needsImage || task == "vision" {
+		required = append(required, "vision")
+	}
+	return required, nil
+}
+
+func containsAllFolded(values, required []string) bool {
+	for _, wanted := range required {
+		found := false
+		for _, value := range values {
+			if strings.EqualFold(strings.TrimSpace(value), wanted) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 func (p *Processor) ollamaEmbedding(ctx context.Context, job Job, engine config.Engine, model string, started time.Time) (Output, error) {

@@ -15,9 +15,9 @@ func TestCompletionScriptsCoverBothAliasesAndNestedCommands(t *testing.T) {
 		script string
 		want   []string
 	}{
-		{"powershell", powershellCompletionScript(), []string{"-CommandName contextbridge, cb", "'serve'", "'stop' = @('--config','--force')", "'selftest'", "'selftest' = @('--config','--providers'", "'cluster status' = @('--config','--json')", "--attach-image", "--reasoning"}},
-		{"bash", bashCompletionScript(), []string{"# ContextBridge managed completion", "contextbridge cb", "init serve run stop", "stop) candidates=\"--config --force\"", "cluster) candidates=\"status submit chat selftest", "\"cluster status\") candidates=\"--config --json\"", "--attach-image", "--reasoning"}},
-		{"zsh", zshCompletionScript(), []string{"#compdef contextbridge cb", "# ContextBridge managed completion", "serve:Run only the local bridge service", "stop:Safely stop the local ContextBridge process", "cluster:Use a remote pool", "status submit chat selftest", "completion)", "--attach-image[", "--job-timeout[", "--managed-service[", "--discover["}},
+		{"powershell", powershellCompletionScript(), []string{"-CommandName contextbridge, cb", "'serve'", "'stop' = @('--config','--force')", "'mcp serve' = @('--config')", "'benchmark' = @('--json','--samples'", "'selftest'", "'selftest' = @('--config','--providers'", "'cluster status' = @('--config','--json')", "--attach-image", "--reasoning"}},
+		{"bash", bashCompletionScript(), []string{"# ContextBridge managed completion", "contextbridge cb", "init serve run stop", "stop) candidates=\"--config --force\"", "\"mcp serve\") candidates=\"--config\"", "cluster) candidates=\"status submit chat selftest", "\"cluster status\") candidates=\"--config --json\"", "--attach-image", "--reasoning"}},
+		{"zsh", zshCompletionScript(), []string{"#compdef contextbridge cb", "# ContextBridge managed completion", "serve:Run only the local bridge service", "mcp:Expose bounded local tools over MCP stdio", "benchmark:Measure bridge-only overhead and resource footprint", "stop:Safely stop the local ContextBridge process", "cluster:Use a remote pool", "status submit chat selftest", "completion)", "--attach-image[", "--job-timeout[", "--managed-service[", "--discover["}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -57,6 +57,7 @@ func TestPowerShellTabExpansionTracksTrailingSpaceAndOptionPosition(t *testing.T
 		{"short selftest shortcut", "cb selftest ", []string{"--providers", "--run", "--timeout"}, []string{"status", "chat"}},
 		{"short selftest partial flag", "cb selftest --r", []string{"--run"}, []string{"--providers", "status", "chat"}},
 		{"nested partial action", "contextbridge cluster se", []string{"selftest"}, []string{"status", "submit"}},
+		{"MCP stdio options", "contextbridge mcp serve ", []string{"--config"}, []string{"--json", "status"}},
 		{"safe stop", "contextbridge stop ", []string{"--config", "--force"}, []string{"--slots", "status"}},
 	}
 	for _, test := range tests {
@@ -116,7 +117,7 @@ func TestCompletionRootCommandsStayUnique(t *testing.T) {
 		}
 		seen[command] = true
 	}
-	for _, required := range []string{"serve", "stop", "console", "cluster", "selftest", "completion", "version"} {
+	for _, required := range []string{"serve", "stop", "console", "mcp", "benchmark", "cluster", "selftest", "completion", "version"} {
 		if !seen[required] {
 			t.Errorf("completion root is missing %q", required)
 		}
@@ -165,6 +166,8 @@ func TestBashCompletionOffersRootCommandFlagsAtCurrentWord(t *testing.T) {
 		{"status", "contextbridge status --", 2, []string{"--config", "--json"}, []string{"--token"}},
 		{"doctor", "contextbridge doctor --", 2, []string{"--config", "--json"}, nil},
 		{"models", "contextbridge models --", 2, []string{"--config", "--json", "--discover"}, nil},
+		{"mcp serve", "contextbridge mcp serve --", 3, []string{"--config"}, nil},
+		{"benchmark", "contextbridge benchmark --", 2, []string{"--json", "--samples", "--idle-duration", "--extension-root"}, nil},
 		{"hardware", "contextbridge hardware --", 2, []string{"--json"}, []string{"--config"}},
 		{"update root", "contextbridge update --", 2, []string{"--force", "--managed-service", "--relay-only"}, nil},
 		{"update action", "contextbridge update apply --", 3, []string{"--config", "--force"}, nil},

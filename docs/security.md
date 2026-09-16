@@ -2,6 +2,15 @@
 
 ContextBridge is local-first. Its default listener is `127.0.0.1`, its token is generated from 32 random bytes, saved files use owner-only permissions where the operating system supports them, and API responses are marked `no-store`.
 
+The optional MCP adapter is stdio-only and connects back to that authenticated
+loopback listener. It never prints the bearer token, exposes no arbitrary shell
+or MCP client, accepts only a closed metadata allowlist, rejects artifact jobs
+before submission, removes endpoint URLs and credential-shaped status fields,
+and never retries a state-changing submit. The MCP host inherits the authority
+of the config it can read, and receives the remaining operational metadata or
+result it requests; stdio does not create a separate tenant boundary. See [MCP
+stdio server](mcp.md).
+
 The cluster relay also binds to localhost by default and must be published through HTTPS. Workers connect outward using `wss://`. Browser WebSocket origins are rejected unless explicitly listed. Pairing endpoints are rate limited, pairing codes expire, and a node token is returned only once. Admin, observer, producer, and node credentials have separate roles.
 
 Normal cluster jobs are encrypted in transit by TLS but remain readable by the relay. Optional E2EE jobs use a two-phase reservation. The producer receives one worker's X25519 public key, encrypts the payload with an ephemeral X25519 key and AES-256-GCM, and authenticates the job ID, selected node, assignment attempt, authenticated producer subject, tenant, session, and complete worker requirements as additional data. The worker reconstructs that context from the outer job and fails before local execution if any field changed. It encrypts the result under the same context with a separately derived response key. The relay stores and forwards ciphertext only.
@@ -11,6 +20,16 @@ E2EE does not hide routing metadata such as task, group, model requirement, prio
 Terminal chat supports E2EE per session with `--e2ee` or interactively with `/e2ee on`; `/e2ee off` returns to TLS-only relay-visible jobs. Plaintext progress streaming is disabled while E2EE is active. Encryption overhead is small compared with model inference, but worker reservation, loss of live plaintext progress, and loss of transparent failover are meaningful operational tradeoffs.
 
 The browser extension does not receive permanent access to every page. The operator explicitly attaches a tab and approves that tab's origin; highlighting a tab is not authorization. Existing conversations require explicit attachment. Optional auto-attachment applies only to confirmed empty new ChatGPT/Gemini chats on previously permitted origins and can be disabled. A tab can be detached without stopping the whole bridge; already-submitted website work may finish, but no new job is sent there. The visual profile contains CSS selectors, not executable JavaScript. The extension sends only the configured prompt and optional image, then reads the configured response elements. Optional all-tabs access is requested when the operator browses every window or enables the fresh-tab helper.
+
+Browser conversation ownership remains local. For cluster affinity, the
+extension may advertise only a fixed-format SHA-256 selector derived by the
+authenticated worker for a binding whose permanent URL still matches. It never
+advertises the URL, public `session_id`, prompt, response, draft, or title. The
+relay validates and uses that selector internally, fails closed on duplicates,
+and redacts it from node-list API responses. The extension still proves the
+exact saved URL immediately before sending; the selector alone grants no page
+access and cannot bypass origin permission, the 16-tab bound, or an occupied
+conversation.
 
 Optional draft preservation is disabled by default. When enabled, the extension saves an unsent text draft to `~/.contextbridge/draft-history.jsonl` through the authenticated localhost service before clearing that unchanged editor. The file is bounded to 1 MiB and inherits the user-home directory's access controls; it is plaintext local history, **not** E2EE-protected and never sent to the relay. A shared OS account should keep the option off for sensitive drafts. Missing private-home storage or an editor change aborts the job without clearing the draft.
 
@@ -24,7 +43,7 @@ ContextBridge application updates are handled by the Go core, not by dashboard J
 
 The hosted installer endpoint records aggregate request counts and a daily rotating HMAC fingerprint derived from a masked network prefix. User-agent variants are not part of uniqueness; per-network daily admission, per-day cardinality, and a 31-day window bound synchronous abuse and stored rows. It does not store raw IP addresses, cookies, prompts, results, node identities, or model activity. This counter belongs to the hosted website only and is not part of the local runtime or self-hosted relay.
 
-Relay detail retention is mandatory and bounded by administrator-configured age and count limits. It applies only to exact terminal jobs (`completed`, `failed`, or `cancelled`), events, and exact terminal pipeline runs; queued, reserved, assigned, running, and unknown states are never deleted by the sweep. Job payloads, results, sealed ciphertext, and matching indexes are removed atomically. Lifetime state and usage summaries are retained without prompt/result contents, while cumulative node compute and cost metrics remain unchanged. This reduces indefinite sensitive-history retention and lets BoltDB reuse freed pages, but it is not secure erasure from storage media and does not immediately compact the database file.
+Relay detail retention is mandatory and bounded by administrator-configured age and count limits. It applies to exact terminal jobs (`completed`, `failed`, or `cancelled`), events, exact terminal pipeline runs, and the separate pseudonymous session-placement cache; queued, reserved, assigned, running, and unknown states are never deleted by the sweep. Job payloads, results, sealed ciphertext, and their matching detail indexes are removed atomically. Opaque placement hashes contain no public session name or conversation URL and are independently removed when old or over their configured count. Lifetime state and usage summaries are retained without prompt/result contents, while cumulative node compute and cost metrics remain unchanged. This reduces indefinite sensitive-history retention and lets BoltDB reuse freed pages, but it is not secure erasure from storage media and does not immediately compact the database file.
 
 Engine processes receive explicit argument arrays without a shell. Model output cannot alter process arguments, routes, executable paths, or GPU policy. Managed engines bind to localhost.
 

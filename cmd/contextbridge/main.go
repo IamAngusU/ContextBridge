@@ -81,6 +81,10 @@ func main() {
 		err = pullCommand(os.Args[2:])
 	case "runtime":
 		err = runtimeCommand(os.Args[2:])
+	case "mcp":
+		err = mcpCommand(os.Args[2:])
+	case "benchmark":
+		err = performanceCommand(os.Args[2:])
 	case "relay":
 		err = relayCommand(os.Args[2:])
 	case "pair":
@@ -141,6 +145,8 @@ Usage:
   contextbridge models [--config path] [--json]
   contextbridge pull [--config path] MODEL
   contextbridge runtime install [--config path] llama.cpp
+  contextbridge mcp serve [--config path]
+  contextbridge benchmark [--json] [--samples N] [--warmup N] [--database-jobs N] [--idle-duration D] [--binary path] [--extension-root path]
   contextbridge relay [--config path]
   contextbridge pair [--config path] [--relay URL] [--identity path] [--name NAME]
   contextbridge worker [--config path] [--relay URL] [--identity path] [--name NAME] [--slots N] [--providers LIST] [--models LIST] [--tasks LIST] [--topmost]
@@ -1214,8 +1220,9 @@ func relayConfig(cfg config.Config) cluster.RelayConfig {
 		JobTimeout:      time.Duration(cfg.Cluster.Policies.MaxJobRuntime) * time.Second,
 		RetentionMaxAge: time.Duration(cfg.Cluster.Relay.RetentionDays) * 24 * time.Hour,
 		MaxTerminalJobs: cfg.Cluster.Relay.MaxTerminalJobs, MaxEvents: cfg.Cluster.Relay.MaxEvents,
-		MaxTerminalRuns: cfg.Cluster.Relay.MaxTerminalPipelineRuns,
-		RetentionSweep:  time.Duration(cfg.Cluster.Relay.RetentionSweepSeconds) * time.Second,
+		MaxTerminalRuns:      cfg.Cluster.Relay.MaxTerminalPipelineRuns,
+		MaxSessionPlacements: cfg.Cluster.Relay.MaxSessionPlacements,
+		RetentionSweep:       time.Duration(cfg.Cluster.Relay.RetentionSweepSeconds) * time.Second,
 	}
 }
 
@@ -1812,7 +1819,7 @@ func formatBytes(value uint64) string {
 	if value == 0 {
 		return "unknown"
 	}
-	units := []string{"B", "KB", "MB", "GB", "TB"}
+	units := []string{"B", "KiB", "MiB", "GiB", "TiB"}
 	size := float64(value)
 	unit := 0
 	for size >= 1024 && unit < len(units)-1 {

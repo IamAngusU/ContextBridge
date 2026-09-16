@@ -75,6 +75,103 @@ func TestBrowserCancellationWinsBeforePreSendClaim(t *testing.T) {
 	}
 }
 
+func TestBrowserLeaseStatusIsReadOnly(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := Job{ID: "read-only-lease-status", Prompt: "observe only"}
+	store.Queue(job, nil, time.Second)
+	lease := store.NextBrowserJob("", 80*time.Millisecond)
+	if lease == nil {
+		t.Fatal("browser job was not leased")
+	}
+	firstExpiry, ok := store.BrowserLeaseStatus(job.ID, lease.LeaseGeneration)
+	if !ok || firstExpiry.IsZero() {
+		t.Fatal("current lease was not reported active")
+	}
+	if _, ok := store.BrowserLeaseStatus(job.ID, lease.LeaseGeneration+1); ok {
+		t.Fatal("wrong generation was reported active")
+	}
+	time.Sleep(30 * time.Millisecond)
+	secondExpiry, ok := store.BrowserLeaseStatus(job.ID, lease.LeaseGeneration)
+	if !ok || !secondExpiry.Equal(firstExpiry) {
+		t.Fatalf("status check changed the lease expiry: first=%s second=%s", firstExpiry, secondExpiry)
+	}
+	time.Sleep(70 * time.Millisecond)
+	if _, ok := store.BrowserLeaseStatus(job.ID, lease.LeaseGeneration); ok {
+		t.Fatal("status checks extended an expired browser lease")
+	}
+}
+
+func TestBrowserLeaseStatusRejectsExpiredJobDeadline(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := Job{ID: "expired-deadline-status", Prompt: "must expire"}
+	store.Queue(job, nil, 20*time.Millisecond)
+	lease := store.NextBrowserJob("", time.Second)
+	if lease == nil {
+		t.Fatal("browser job was not leased")
+	}
+	time.Sleep(40 * time.Millisecond)
+	if _, ok := store.BrowserLeaseStatus(job.ID, lease.LeaseGeneration); ok {
+		t.Fatal("lease status stayed active beyond the job deadline")
+	}
+}
+
+func TestBrowserLeaseCanBeReturnedWithoutLosingSentUnknown(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := Job{ID: "return-browser-lease", Prompt: "send at most once"}
+	store.Queue(job, nil, time.Second)
+	first := store.NextBrowserJob("", time.Second)
+	if first == nil || !store.MarkBrowserAction(job.ID, first.LeaseGeneration, time.Second) {
+		t.Fatal("browser action was not claimed")
+	}
+	if !store.ReleaseBrowserLease(job.ID, first.LeaseGeneration) {
+		t.Fatal("current browser lease was not returned")
+	}
+	second := store.NextBrowserJob("", time.Second)
+	if second == nil || second.LeaseGeneration <= first.LeaseGeneration || !second.ObservationOnly {
+		t.Fatalf("returned sent-unknown job was not reclaimed observation-only: %#v", second)
+	}
+	if store.ReleaseBrowserLease(job.ID, first.LeaseGeneration) {
+		t.Fatal("stale generation returned the replacement lease")
+	}
+}
+
+func TestBrowserLeaseIsRestrictedToRelaySelectedTab(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := Job{ID: "exact-browser-tab", Prompt: "use the qualified tab", ContextBridgeBrowserTabID: 42}
+	store.Queue(job, map[string]interface{}{"name": "chatgpt"}, time.Second)
+	if wrong := store.NextBrowserJobForTab("chatgpt", 41, time.Second); wrong != nil {
+		t.Fatalf("wrong tab leased a pinned job: %#v", wrong)
+	}
+	if missing := store.NextBrowserJob("chatgpt", time.Second); missing != nil {
+		t.Fatalf("legacy poll without a tab id leased a pinned job: %#v", missing)
+	}
+	lease := store.NextBrowserJobForTab("chatgpt", 42, time.Second)
+	if lease == nil || lease.Job.ContextBridgeBrowserTabID != 42 {
+		t.Fatalf("designated tab did not receive its job: %#v", lease)
+	}
+	if !store.ReleaseBrowserLease(job.ID, lease.LeaseGeneration) {
+		t.Fatal("designated tab could not return its untouched lease")
+	}
+	if wrong := store.NextBrowserJobForTab("chatgpt", 41, time.Second); wrong != nil {
+		t.Fatalf("wrong tab leased the returned pinned job: %#v", wrong)
+	}
+	if replacement := store.NextBrowserJobForTab("chatgpt", 42, time.Second); replacement == nil || replacement.LeaseGeneration <= lease.LeaseGeneration {
+		t.Fatalf("designated tab did not reclaim its returned lease: %#v", replacement)
+	}
+}
+
 func TestBrowserCancelAndPreSendClaimRaceLinearizes(t *testing.T) {
 	store, err := NewStore(t.TempDir())
 	if err != nil {

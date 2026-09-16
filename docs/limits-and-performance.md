@@ -54,6 +54,172 @@ exact/+1 fail-closed JSON are covered in
 
 ## Reproducible overhead benchmark
 
+### One auditable release-binary report
+
+Run the built-in measurement when comparing releases or hardware:
+
+```bash
+contextbridge benchmark
+contextbridge benchmark --json > contextbridge-performance.json
+```
+
+The default command performs 128 measured samples after eight untimed warmup samples
+at each concurrency level **1, 4, 16, and 64**. It reports nearest-rank p50,
+p95, and p99 latency for every logical operation plus throughput over the
+complete concurrent sample window. The JSON document records the executable
+version, OS, architecture, Go version, logical CPU count, settings, paths,
+scopes, exclusions, and warnings. Use `--samples`, `--warmup`,
+`--idle-duration`, `--database-jobs`, `--binary`, or `--extension-root` to make
+an intentional alternate run; keep those settings with any quoted result. If a
+custom sample count is below a concurrency level, that level is omitted rather
+than mislabeled—for example, `--samples 4` reports only 1 and 4.
+Sub-millisecond crypto and artifact rows batch 16 real operations inside each
+timed sample, divide the elapsed time by 16 for per-operation latency, and use
+all completed operations for throughput. Queue rows use a batch of one. The
+`operations_per_sample` JSON field and `BATCH` table column make this explicit.
+Very small sample counts can complete within the host clock's resolution; in
+that case the report keeps a zero latency or throughput value instead of
+emitting a non-JSON infinity. Increase `--samples` for a publishable run.
+
+The three timed operations are deliberately narrow:
+
+- `relay_queue_submit_read_cancel` starts a fresh isolated relay in the same
+  benchmark process and a fresh Bolt database for each concurrency. One sample
+  includes client JSON encoding,
+  three authenticated loopback HTTP exchanges, strict decoding, durable job
+  admission, compact readback, and durable cancellation.
+- `e2ee_small_job_and_result` creates and opens a small X25519/AES-256-GCM job
+  envelope and then seals and opens its response. It includes fresh ephemeral
+  cryptographic randomness for each sample.
+- `artifact_verification_64kib` runs the production artifact normalization path
+  for one deterministic 64 KiB file: base64 decode, media and size policy, and
+  SHA-256 recomputation. It excludes provider generation and download time; the
+  separate dated boundary benchmark below retains the exact 12 MiB case.
+
+Concurrency here means simultaneous **client operations**, not AI slots.
+Bolt's durable write transactions remain serialized by design, so the queue
+throughput rows are useful capacity observations rather than a promise of
+linear scaling. Sixty-four is the protocol's maximum worker concurrency and
+is a stress point, not a recommendation for every machine.
+
+The same report measures resource footprint without contacting a provider:
+
+- The running executable is measured as a regular file. Chromium, Firefox,
+  and shared extension source trees are summed from regular files without
+  following symlinks. An installed release normally auto-detects its extension
+  directory; an unusual layout must pass `--extension-root` and receives a
+  warning rather than a made-up zero.
+- A fresh relay is hosted inside the benchmark process, warmed through its
+  health endpoint, and left idle for two seconds by default. Whole-process CPU
+  time is shown both as a
+  percentage of one core and normalized across the host's logical CPUs. Linux
+  reports current RSS, Windows reports the current working set, and macOS
+  explicitly labels `ru_maxrss` as peak RSS. Go heap and OS-reserved runtime
+  memory are separate fields. This is the footprint of the **benchmark CLI
+  process while it hosts one fresh idle relay**, not a separately spawned
+  relay, and not the RAM consumption of Ollama, a browser, a model, or a full
+  multi-role production deployment.
+- Database growth uses a new Bolt file, records its allocated size, creates and
+  cancels 1,000 small jobs, syncs, and records the resulting file size. The
+  report includes raw growth, bytes per job, and normalized bytes per 1,000
+  jobs. Bolt reuses freed pages and does not compact on delete, so this is a
+  reproducible fresh-file observation, not a forecast for every retained job
+  mix or an existing database.
+- Heartbeat rows serialize fixed, typed representative payloads: one idle
+  browser tab, and one worker with one GPU and one model. `bytes/minute` and
+  `bytes/hour` are the JSON application payload at the normal five-second
+  interval. They exclude
+  HTTP/WebSocket, TLS, and TCP framing; actual bytes scale with attached tabs,
+  bounded diagnostics, GPUs, models, capabilities, reconnects, and configured
+  intervals. The payload names and scopes in JSON prevent these fixtures from
+  being mistaken for captured user traffic.
+
+The command creates only temporary databases and loopback listeners, removes
+them afterward, and never attaches a tab, submits an AI prompt, starts a model,
+or contacts the Internet. Regression tests validate arithmetic, schema,
+ordering, bounds, and operation completion; they intentionally assert no
+latency, throughput, CPU, or RAM threshold because shared CI performance is
+not stable enough to make such thresholds honest.
+
+The JSON and table also list metrics that this bounded workload cannot report
+honestly: RAM per active inference job, operating-system disk-write bytes per
+job, and complete wire bytes per job. Browser/model memory cannot be assigned
+to one bridge job without starting inference; Bolt file growth is not the same
+as filesystem/device writes; and job bytes vary with caller payloads, results,
+and transport framing. These remain explicit `unavailable_metrics` rather than
+silent omissions or fabricated zeros.
+
+### v0.5.70 release-binary snapshot
+
+The following tables are direct output observations from the published-shape
+v0.5.70 `windows/amd64` and `linux/amd64` binaries built from the same tree on
+2026-09-16. Both used the default 128 measured samples, eight warmups, 16 real
+operations per crypto/artifact sample, 1,000 cancelled jobs for database
+growth, and an intentional ten-second idle window (rather than the two-second
+default) for more useful OS process sampling. Windows was the 24-logical-CPU Intel Core
+i9-12900K workstation; Linux was the two-logical-CPU AMD EPYC 9354P VPS
+allocation. They are one dated host observation, not an SLA or a claim of
+linear scaling. The unrounded machine-readable reports are attached to the
+v0.5.70 GitHub release as `contextbridge_benchmark_windows_amd64.json` and
+`contextbridge_benchmark_linux_amd64.json`; both identify the exact version,
+settings, binary and extension sizes, scopes, exclusions, and warnings.
+
+#### Latency and throughput — Windows/amd64
+
+| Operation | Concurrency | p50 | p95 | p99 | operations/s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Durable relay submit/read/cancel | 1 | 2.129 ms | 3.076 ms | 3.987 ms | 452.0 |
+| Durable relay submit/read/cancel | 4 | 7.706 ms | 10.422 ms | 11.098 ms | 505.5 |
+| Durable relay submit/read/cancel | 16 | 32.960 ms | 44.649 ms | 44.910 ms | 459.4 |
+| Durable relay submit/read/cancel | 64 | 137.582 ms | 140.498 ms | 140.576 ms | 464.6 |
+| Small E2EE job + result | 1 | 0.103 ms | 0.183 ms | 0.190 ms | 8,630.1 |
+| Small E2EE job + result | 4 | 0.125 ms | 0.193 ms | 0.201 ms | 32,262.3 |
+| Small E2EE job + result | 16 | 0.202 ms | 0.601 ms | 0.770 ms | 48,621.3 |
+| Small E2EE job + result | 64 | 0.736 ms | 2.312 ms | 2.454 ms | 51,411.3 |
+| Verify one 64 KiB artifact | 1 | 0.067 ms | 0.118 ms | 0.151 ms | 13,939.6 |
+| Verify one 64 KiB artifact | 4 | 0.094 ms | 0.145 ms | 0.170 ms | 41,244.2 |
+| Verify one 64 KiB artifact | 16 | 0.137 ms | 0.311 ms | 0.550 ms | 90,280.3 |
+| Verify one 64 KiB artifact | 64 | 0.605 ms | 1.026 ms | 1.176 ms | 86,876.1 |
+
+#### Latency and throughput — Linux/amd64 VPS
+
+| Operation | Concurrency | p50 | p95 | p99 | operations/s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Durable relay submit/read/cancel | 1 | 5.738 ms | 14.637 ms | 25.786 ms | 147.7 |
+| Durable relay submit/read/cancel | 4 | 18.889 ms | 33.457 ms | 40.845 ms | 191.8 |
+| Durable relay submit/read/cancel | 16 | 73.477 ms | 88.915 ms | 93.008 ms | 228.9 |
+| Durable relay submit/read/cancel | 64 | 312.185 ms | 347.491 ms | 350.377 ms | 188.1 |
+| Small E2EE job + result | 1 | 0.227 ms | 0.322 ms | 0.498 ms | 4,107.0 |
+| Small E2EE job + result | 4 | 0.243 ms | 0.892 ms | 1.494 ms | 8,317.7 |
+| Small E2EE job + result | 16 | 0.216 ms | 5.547 ms | 6.409 ms | 9,101.5 |
+| Small E2EE job + result | 64 | 0.231 ms | 6.567 ms | 8.328 ms | 8,726.7 |
+| Verify one 64 KiB artifact | 1 | 0.116 ms | 0.209 ms | 0.224 ms | 7,767.3 |
+| Verify one 64 KiB artifact | 4 | 0.255 ms | 0.622 ms | 0.774 ms | 12,407.9 |
+| Verify one 64 KiB artifact | 16 | 0.778 ms | 2.276 ms | 3.475 ms | 13,295.8 |
+| Verify one 64 KiB artifact | 64 | 3.012 ms | 8.994 ms | 9.537 ms | 12,783.6 |
+
+#### Resource footprint
+
+| Measurement | Windows/amd64 | Linux/amd64 VPS | Scope |
+| --- | ---: | ---: | --- |
+| Core binary | 9.9 MiB | 9.6 MiB | stripped release executable |
+| Chromium extension | 364.6 KiB | 364.6 KiB | regular packaged files |
+| Firefox extension | 364.8 KiB | 364.8 KiB | regular packaged files |
+| Benchmark process + idle relay CPU | 0.000% observed | 0.088% of one core | whole-process, ten-second warmed window; Windows was below counter resolution |
+| Benchmark process + idle relay resident memory | 13.5 MiB | 10.9 MiB | whole-process working set / current RSS |
+| Benchmark process + idle relay Go heap / reserved | 993.0 KiB / 11.3 MiB | 687.0 KiB / 6.6 MiB | same benchmark process |
+| Fresh Bolt growth / 1,000 jobs | 2.0 MiB | 2.0 MiB | small submitted then cancelled jobs |
+| Browser heartbeat | 544 B / interval; 6,528 B/min; 382.5 KiB/hour | same typed fixture | JSON payload, one idle tab |
+| Worker heartbeat | 688 B / interval; 8,256 B/min; 483.8 KiB/hour | same typed fixture | JSON payload, one GPU + one model |
+
+The benchmark deliberately reports `RAM per active inference job`, operating-
+system disk-write bytes per job, and complete wire bytes per job as
+**unavailable**. Assigning browser/model process memory to one job, equating a
+Bolt file allocation with device writes, or pretending every caller sends the
+same payload would produce attractive but false numbers.
+
+### Dated development snapshot
+
 The benchmarks below measure ContextBridge code only. No Ollama model,
 ChatGPT/Gemini tab, provider request, Internet request, or inference time is in
 the timed region. Results are a dated machine snapshot, not an SLA.

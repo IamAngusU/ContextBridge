@@ -1,6 +1,6 @@
 # Privacy and compliance readiness
 
-This document maps ContextBridge 0.5.66 behavior to common privacy and control
+This document maps ContextBridge 0.5.70 behavior to common privacy and control
 questions. It is an engineering aid, **not legal advice, a data processing
 agreement, a GDPR/DSGVO declaration, or a SOC 2 report**. Compliance depends on
 the deployment, purposes, people, contracts, configuration, and operating
@@ -52,9 +52,10 @@ cannot hide a browser prompt from the web provider that must process it.
 
 ## Retention and deletion behavior
 
-| Store | Current behavior in 0.5.66 | Operator action |
+| Store | Current behavior in 0.5.70 | Operator action |
 | --- | --- | --- |
 | Relay terminal-job detail, events, terminal pipeline runs | Mandatory age-and-count sweep; defaults are at most 30 days and the newest 500 jobs, 5,000 events, and 200 runs. Only exact terminal states are removed. | Lower the guarded `cluster.relay.retention_*` limits where the purpose permits. Monitor sweeps and account for backups. |
+| Opaque relay session placements | Mandatory age-and-count sweep; defaults are at most 30 days and the newest 5,000 placements. Records contain a hashed owner/session/scope key, node ID, optional tab ID, and update time—not the public session name or conversation URL. | Lower `cluster.relay.max_session_placements` where the purpose permits; expiry may require live session rediscovery. |
 | Active, queued, reserved, assigned, running, or unknown relay work | Never deleted by the retention sweep because deletion could corrupt live state. | Resolve or cancel work through supported APIs before a planned data disposal. Do not edit BoltDB directly while the relay runs. |
 | Relay lifetime summaries | Prompt/result detail is removed, but cumulative state, compute, and cost counters remain. | Treat retained timestamps/labels as metadata in the data inventory; do not promise erasure of aggregate counters without verifying identifiability. |
 | Local jobs/results, artifacts, schedules, engine logs, and local RAG | No universal age-based purge covers all of these stores. | Set an OS/storage lifecycle appropriate to the purpose, stop affected writers before whole-store disposal, and include replicas/backups. |
@@ -70,7 +71,7 @@ data is not silently reintroduced.
 
 ## Data-subject request runbook
 
-ContextBridge 0.5.66 does **not** provide a universal one-command DSAR export or
+ContextBridge 0.5.70 does **not** provide a universal one-command DSAR export or
 per-person erasure endpoint. The deploying controller should implement and
 test a procedure appropriate to its application:
 
@@ -105,7 +106,10 @@ operator should maintain a deployment-specific register that covers at least:
 - selected browser AI providers and their optional tools;
 - model, release, and package download hosts;
 - backup, logging, monitoring, support, and incident-response services;
-- any MCP, database, folder, SSH, or custom source adapter added later; and
+- the configured MCP host and any model/provider to which that host forwards
+  tool input or output, when the local MCP adapter is enabled;
+- any future remote MCP/client integration, database, folder, SSH, or custom
+  source adapter added later; and
 - the `angusu.de` installer endpoint, only when that hosted endpoint is used.
 
 For each entry record purpose, data categories, location, transfer mechanism,

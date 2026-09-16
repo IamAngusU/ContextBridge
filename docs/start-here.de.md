@@ -31,7 +31,7 @@ Falls dir die Begriffe neu sind: Ein **Auftrag** ist ein Prompt mit Regeln für 
 
 Dieser Weg braucht **keinen VPS und keine eigene GPU**. Du brauchst Windows, Opera/Chrome/Edge oder einen anderen Chromium-Browser, einen angemeldeten ChatGPT- oder Gemini-Tab und die Berechtigung, dort Aufträge zu senden. Der Test schickt einen kurzen Prompt an diesen Anbieter.
 
-> **Versionshinweis, bitte lesen:** Der Installer lädt die [neueste veröffentlichte GitHub-Release](https://github.com/IamAngusU/ContextBridge/releases/latest), nicht automatisch den neuesten Commit auf `main`. Dieser Guide wird für **v0.5.66** vorbereitet. Der einfache Texttest unten funktioniert mit älteren 0.5.x-Ständen; das vollständige Demo-Runbook mit frischen Chats, verifizierter Bildübergabe und den aktuellen Sicherheitsgrenzen benötigt mindestens **0.5.66**. Prüfe vor der Demo mit `contextbridge version`, was wirklich installiert ist. Falls die verlinkte neueste Release noch darunter liegt, ist 0.5.66 noch nicht öffentlich veröffentlicht – ein Commit oder lokal geladener Ordner ist keine Release.
+> **Versionshinweis, bitte lesen:** Der Installer lädt die [neueste veröffentlichte GitHub-Release](https://github.com/IamAngusU/ContextBridge/releases/latest), nicht automatisch den neuesten Commit auf `main`. Dieser Guide wird für **v0.5.70** vorbereitet. Der einfache Texttest unten funktioniert mit älteren 0.5.x-Ständen; das vollständige Demo-Runbook mit frischen Chats, verifizierter Bildübergabe und den aktuellen Sicherheitsgrenzen benötigt mindestens **0.5.66**. Prüfe vor der Demo mit `contextbridge version`, was wirklich installiert ist. Falls die verlinkte neueste Release noch darunter liegt, ist 0.5.70 noch nicht öffentlich veröffentlicht – ein Commit oder lokal geladener Ordner ist keine Release.
 
 ### Schritt 1: Installieren
 
@@ -56,7 +56,8 @@ Auch dort für den ersten lokalen Browser-Test Ziel **3** und Gerätemodus **1**
 Linux ist ein nativer Relay-, Worker- und CLI-Einsatz mit AMD64/ARM64-Builds,
 systemd-Setup und Ubuntu-CI – nicht nur ein Fernsteuer-Terminal für Windows.
 macOS hat native Builds, LaunchAgent, Metal-Erkennung und eine macOS-CI-Matrix;
-die heutige Evidenz umfasst aber noch keine gepflegte physische Mac-E2E-Matrix
+die finale Prüfung von v0.5.70 umfasst dort nur Cross-Builds, keine Ausführung
+auf einem Mac. Es gibt noch keine gepflegte physische Mac-E2E-Matrix
 für Metal, Ollama und alle Browser-Lifecycle-Fälle. Safari wird von der
 Erweiterung derzeit nicht beansprucht. Details stehen im
 [Plattformabschnitt des README](../README.md#platform-support-and-evidence).

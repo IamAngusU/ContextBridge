@@ -21,6 +21,7 @@ func TestRelayRetentionDefaultsAreBounded(t *testing.T) {
 		relay.MaxTerminalJobs != cluster.DefaultMaxTerminalJobs ||
 		relay.MaxEvents != cluster.DefaultMaxEvents ||
 		relay.MaxTerminalPipelineRuns != cluster.DefaultMaxTerminalPipelineRuns ||
+		relay.MaxSessionPlacements != cluster.DefaultMaxSessionPlacements ||
 		relay.RetentionSweepSeconds != cluster.DefaultRetentionSweepSeconds {
 		t.Fatalf("unexpected relay retention defaults: %#v", relay)
 	}
@@ -45,6 +46,10 @@ func TestRelayRetentionLimitsAreValidated(t *testing.T) {
 		{"excessive jobs", func(cfg *Config) { cfg.Cluster.Relay.MaxTerminalJobs = cluster.MaximumRetainedTerminalJobs + 1 }},
 		{"zero events", func(cfg *Config) { cfg.Cluster.Relay.MaxEvents = 0 }},
 		{"zero runs", func(cfg *Config) { cfg.Cluster.Relay.MaxTerminalPipelineRuns = 0 }},
+		{"zero session placements", func(cfg *Config) { cfg.Cluster.Relay.MaxSessionPlacements = 0 }},
+		{"excessive session placements", func(cfg *Config) {
+			cfg.Cluster.Relay.MaxSessionPlacements = cluster.MaximumRetainedSessionPlacements + 1
+		}},
 		{"short sweep", func(cfg *Config) { cfg.Cluster.Relay.RetentionSweepSeconds = cluster.MinimumRetentionSweepSeconds - 1 }},
 		{"long sweep", func(cfg *Config) { cfg.Cluster.Relay.RetentionSweepSeconds = cluster.MaximumRetentionSweepSeconds + 1 }},
 	}

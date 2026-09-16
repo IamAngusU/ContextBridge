@@ -104,6 +104,12 @@ func (s *Server) lifecycleIsIdle() bool {
 	return s.Idle()
 }
 
+func (s *Server) lifecycleStopAccepted() bool {
+	s.scheduleAdmissionMu.Lock()
+	defer s.scheduleAdmissionMu.Unlock()
+	return s.lifecycleStopping
+}
+
 func (s *Server) SetUpdater(manager *updater.Manager) {
 	s.updates = manager
 }
@@ -189,6 +195,15 @@ func (s *Server) Run(ctx context.Context) error {
 	shutdownDone := make(chan error, 1)
 	go func() {
 		<-ctx.Done()
+		// An accepted local stop has already closed admission and waited for its
+		// response handler to leave net/http. Closing remaining keep-alive
+		// connections directly avoids a Shutdown polling race in which an idle
+		// connection can otherwise consume the entire grace period. External
+		// cancellation still receives the normal graceful shutdown path below.
+		if s.lifecycleStopAccepted() {
+			shutdownDone <- httpServer.Close()
+			return
+		}
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		shutdownDone <- httpServer.Shutdown(shutdown)
@@ -378,10 +393,19 @@ func (s *Server) handleSystemStop(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true, "stopping": true, "forced": request.Force})
-	// The root cancellation starts only after the complete response has been
-	// written. http.Server.Shutdown then waits for this handler to return, so a
-	// successful CLI response is not sacrificed to the shutdown it requested.
-	s.lifecycleStopOnce.Do(stop)
+	// Push the confirmation into the connection before arranging process
+	// cancellation. This lets the client receive the complete JSON response
+	// even though the accepted stop closes remaining keep-alive connections.
+	_ = http.NewResponseController(w).Flush()
+	// Wait until net/http has observed ServeHTTP returning and has cancelled
+	// this request context before cancelling the process root. Cancelling here,
+	// while this handler is still counted as active, can make Shutdown wait on
+	// the very request that initiated it (most visibly under the race detector).
+	requestDone := r.Context().Done()
+	go func() {
+		<-requestDone
+		s.lifecycleStopOnce.Do(stop)
+	}()
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -537,7 +561,7 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("compact") == "1" {
 		response = compactResponseJob(job)
 	}
-	submission := Submission{Job: response, Status: "completed"}
+	submission := Submission{Job: response, Status: "completed", ContextBridgeBrowserTabID: output.ContextBridgeBrowserTabID, ContextBridgeEphemeralBrowserTab: output.ContextBridgeEphemeralBrowserTab}
 	if output.Mode == "decision" && output.Decision != nil {
 		submission.Decision = output.Decision
 		s.logger.Printf("completed job %s: %s via %s", job.ID, output.Decision.Verdict, output.Decision.Provider)
@@ -560,6 +584,10 @@ func responseJob(job Job) Job {
 	// visual input plus a legal 12 MiB artifact exceed transport response
 	// limits. Keep its media type and routing metadata, but not the bytes.
 	job.ImageBase64 = ""
+	// These values exist only between the relay, worker, and extension. They
+	// must not become producer-visible correlation or topology metadata.
+	job.ContextBridgeSessionKey = ""
+	job.ContextBridgeBrowserTabID = 0
 	return job
 }
 
@@ -582,13 +610,22 @@ func (s *Server) handleBrowserNext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	profile := strings.TrimSpace(r.URL.Query().Get("profile"))
+	tabID := 0
+	if raw := strings.TrimSpace(r.URL.Query().Get("tab_id")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "tab_id must be a positive browser tab identifier"})
+			return
+		}
+		tabID = parsed
+	}
 	wait := 25 * time.Second
 	if r.URL.Query().Get("wait") == "0" {
 		wait = 0
 	}
 	deadline := time.Now().Add(wait)
 	for {
-		item := s.store.NextBrowserJob(profile, time.Duration(s.cfg.Providers.Browser.LeaseSeconds)*time.Second)
+		item := s.store.NextBrowserJobForTab(profile, tabID, time.Duration(s.cfg.Providers.Browser.LeaseSeconds)*time.Second)
 		if item != nil {
 			writeJSON(w, http.StatusOK, item)
 			return
@@ -656,15 +693,24 @@ func (s *Server) handleBrowserJobAction(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 		return
 	}
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
-		return
-	}
 	if parts[1] == "lease" {
+		if r.Method != http.MethodGet && r.Method != http.MethodPost {
+			w.Header().Set("Allow", "GET, POST")
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET or POST required"})
+			return
+		}
 		generation, err := browserLeaseGeneration(r)
 		if err != nil {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		if r.Method == http.MethodGet {
+			expiresAt, active := s.store.BrowserLeaseStatus(parts[0], generation)
+			if !active {
+				writeJSON(w, http.StatusConflict, map[string]string{"error": "job is missing or expired"})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "lease_expires_at": expiresAt})
 			return
 		}
 		lease := time.Duration(s.cfg.Providers.Browser.LeaseSeconds) * time.Second
@@ -673,6 +719,11 @@ func (s *Server) handleBrowserJobAction(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
 		return
 	}
 	if parts[1] == "claim" {
@@ -700,6 +751,19 @@ func (s *Server) handleBrowserJobAction(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true, "sent_unknown": true})
+		return
+	}
+	if parts[1] == "release" {
+		generation, err := browserLeaseGeneration(r)
+		if err != nil {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		if !s.store.ReleaseBrowserLease(parts[0], generation) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "job lease was lost"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 		return
 	}
 	if parts[1] != "complete" {

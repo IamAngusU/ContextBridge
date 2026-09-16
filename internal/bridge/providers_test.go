@@ -112,31 +112,51 @@ func TestBrowserRouteTimeoutKeepsSpecificFailure(t *testing.T) {
 }
 
 func TestSelectOllamaModelUsesSmallestCompatibleModel(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"models": []map[string]interface{}{
-				{"name": "large-text:latest", "size": 8_000, "details": map[string]interface{}{"family": "qwen"}},
-				{"name": "small-text:latest", "size": 2_000, "details": map[string]interface{}{"family": "qwen"}},
-				{"name": "small-vl:latest", "size": 3_000, "details": map[string]interface{}{"family": "qwen-vl"}},
-				{"name": "jina-embed:latest", "size": 4_000, "details": map[string]interface{}{"family": "bert"}},
-			},
-		})
+	advertised := map[string][]string{
+		"large-text:latest": {"completion"}, "small-text:latest": {"completion"},
+		"small-vl:latest": {"completion", "vision"}, "opaque-embed:latest": {"embedding"},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api/tags":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"models": []map[string]interface{}{
+					{"name": "large-text:latest", "digest": "large-text", "size": 8_000},
+					{"name": "small-text:latest", "digest": "small-text", "size": 2_000},
+					{"name": "small-vl:latest", "digest": "small-vl", "size": 3_000},
+					{"name": "opaque-embed:latest", "digest": "opaque-embed", "size": 4_000},
+				},
+			})
+		case "/api/ps":
+			// A loaded compatible model wins over a smaller cold model.
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"models": []map[string]interface{}{{"name": "large-text:latest"}}})
+		case "/api/show":
+			var input struct {
+				Model string `json:"model"`
+			}
+			_ = json.NewDecoder(request.Body).Decode(&input)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"capabilities": advertised[input.Model]})
+		default:
+			http.NotFound(w, request)
+		}
 	}))
 	defer server.Close()
 
 	tests := []struct {
-		name           string
-		needsImage     bool
-		needsEmbedding bool
-		want           string
+		name       string
+		task       string
+		mode       string
+		needsImage bool
+		want       string
 	}{
-		{name: "text", want: "small-text:latest"},
-		{name: "image", needsImage: true, want: "small-vl:latest"},
-		{name: "embedding", needsEmbedding: true, want: "jina-embed:latest"},
+		{name: "loaded text", task: "generation", mode: "text", want: "large-text:latest"},
+		{name: "image", task: "generation", mode: "text", needsImage: true, want: "small-vl:latest"},
+		{name: "vision task", task: "vision", mode: "text", want: "small-vl:latest"},
+		{name: "embedding", task: "embedding", mode: "embedding", want: "opaque-embed:latest"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got, err := selectOllamaModel(context.Background(), server.URL, test.needsImage, test.needsEmbedding)
+			got, err := selectOllamaModel(context.Background(), server.URL, test.task, test.mode, test.needsImage)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -144,5 +164,102 @@ func TestSelectOllamaModelUsesSmallestCompatibleModel(t *testing.T) {
 				t.Fatalf("selected %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestSelectOllamaModelNeverPromotesANameGuess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api/tags":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"models": []map[string]interface{}{{"name": "obvious-llava-vision:latest", "digest": "unverified", "size": 1}}})
+		case "/api/ps":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"models": []map[string]interface{}{{"name": "obvious-llava-vision:latest"}}})
+		case "/api/show":
+			http.Error(w, "capabilities unavailable", http.StatusNotFound)
+		default:
+			http.NotFound(w, request)
+		}
+	}))
+	defer server.Close()
+
+	if selected, err := selectOllamaModel(context.Background(), server.URL, "vision", "text", true); err == nil || selected != "" {
+		t.Fatalf("unverified model-name guess became an automatic vision model: model=%q err=%v", selected, err)
+	}
+}
+
+func TestAutomaticOllamaVisionJobUsesVerifiedModelAndCarriesImage(t *testing.T) {
+	var generated struct {
+		Model  string   `json:"model"`
+		Images []string `json:"images"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api/tags":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"models": []map[string]interface{}{{"name": "opaque-vl", "digest": "opaque-vl-digest", "size": 100}}})
+		case "/api/ps":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"models": []interface{}{}})
+		case "/api/show":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"capabilities": []string{"completion", "vision"}})
+		case "/api/generate":
+			if err := json.NewDecoder(request.Body).Decode(&generated); err != nil {
+				t.Errorf("decode generation request: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"response": "described"})
+		default:
+			http.NotFound(w, request)
+		}
+	}))
+	defer server.Close()
+
+	cfg := config.Config{
+		Routes:    map[string]config.Route{"default": {Provider: "ollama", Model: "auto", TimeoutSeconds: 5, Task: "vision"}},
+		Providers: config.Providers{Ollama: config.OllamaProvider{URL: server.URL, Model: "auto", Images: true, Timeout: 5}},
+	}
+	output := NewProcessor(cfg, nil).Process(context.Background(), Job{
+		Prompt: "Describe this image.", ImageBase64: "dmVyaWZpZWQ=", ImageMediaType: "image/png", Output: OutputSpec{Mode: "text"},
+	})
+	if output.Error != "" || output.Text != "described" || output.Model != "opaque-vl" {
+		t.Fatalf("verified automatic vision job failed: %#v", output)
+	}
+	if generated.Model != "opaque-vl" || len(generated.Images) != 1 || generated.Images[0] != "dmVyaWZpZWQ=" {
+		t.Fatalf("selected model or verified image was not sent: %#v", generated)
+	}
+}
+
+func TestAutomaticOllamaSelectionSkipsSlowUnverifiedCandidate(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api/tags":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"models": []map[string]interface{}{
+				{"name": "slow-small", "digest": "slow-small", "size": 1},
+				{"name": "ready-next", "digest": "ready-next", "size": 2},
+			}})
+		case "/api/ps":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"models": []interface{}{}})
+		case "/api/show":
+			var input struct {
+				Model string `json:"model"`
+			}
+			_ = json.NewDecoder(request.Body).Decode(&input)
+			if input.Model == "slow-small" {
+				select {
+				case <-request.Context().Done():
+					return
+				case <-time.After(2 * time.Second):
+				}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"capabilities": []string{"completion"}})
+		default:
+			http.NotFound(w, request)
+		}
+	}))
+	defer server.Close()
+	started := time.Now()
+	model, err := selectOllamaModel(context.Background(), server.URL, "generation", "text", false)
+	if err != nil || model != "ready-next" {
+		t.Fatalf("slow candidate hid later compatible model: model=%q err=%v", model, err)
+	}
+	if elapsed := time.Since(started); elapsed >= 1500*time.Millisecond {
+		t.Fatalf("slow candidate consumed the route timeout: %v", elapsed)
 	}
 }

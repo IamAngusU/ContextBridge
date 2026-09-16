@@ -17,11 +17,13 @@ const (
 	DefaultMaxTerminalJobs              = 500
 	DefaultMaxEvents                    = 5000
 	DefaultMaxTerminalPipelineRuns      = 200
+	DefaultMaxSessionPlacements         = 5000
 	DefaultRetentionSweepSeconds        = 300
 	MaximumRetentionDays                = 3650
 	MaximumRetainedTerminalJobs         = 100000
 	MaximumRetainedEvents               = 1000000
 	MaximumRetainedTerminalPipelineRuns = 100000
+	MaximumRetainedSessionPlacements    = 1000000
 	MinimumRetentionSweepSeconds        = 10
 	MaximumRetentionSweepSeconds        = 86400
 )
@@ -38,12 +40,14 @@ type RetentionPolicy struct {
 	MaxTerminalJobs         int
 	MaxEvents               int
 	MaxTerminalPipelineRuns int
+	MaxSessionPlacements    int
 }
 
 type RetentionResult struct {
-	Jobs         int
-	Events       int
-	PipelineRuns int
+	Jobs              int
+	Events            int
+	PipelineRuns      int
+	SessionPlacements int
 }
 
 type historicalJobTotals struct {
@@ -88,6 +92,9 @@ func (p RetentionPolicy) Validate() error {
 	}
 	if p.MaxTerminalPipelineRuns <= 0 || p.MaxTerminalPipelineRuns > MaximumRetainedTerminalPipelineRuns {
 		return fmt.Errorf("retained terminal pipeline runs must be between 1 and %d", MaximumRetainedTerminalPipelineRuns)
+	}
+	if p.MaxSessionPlacements <= 0 || p.MaxSessionPlacements > MaximumRetainedSessionPlacements {
+		return fmt.Errorf("retained session placements must be between 1 and %d", MaximumRetainedSessionPlacements)
 	}
 	return nil
 }
@@ -136,6 +143,12 @@ func (s *Store) PruneRetention(now time.Time, policy RetentionPolicy) (Retention
 			if !terminalJobStatus(job.Status) {
 				continue
 			}
+			// A cancelled browser execution can remain active until its matching
+			// worker result or connection teardown. Keep the durable record while
+			// its session lock exists so that proof can release the right scope.
+			if browserSessionJobLockExistsTx(tx, job) {
+				continue
+			}
 			finished := jobRetentionTime(job)
 			if !finished.Before(cutoff) {
 				if _, keep := jobKeep[job.ID]; keep {
@@ -164,9 +177,58 @@ func (s *Store) PruneRetention(now time.Time, policy RetentionPolicy) (Retention
 			return err
 		}
 		result.PipelineRuns = removedRuns
+		removedPlacements, err := pruneSessionPlacements(tx.Bucket(bucketSessionPlacements), cutoff, policy.MaxSessionPlacements)
+		if err != nil {
+			return err
+		}
+		result.SessionPlacements = removedPlacements
 		return nil
 	})
 	return result, err
+}
+
+func pruneSessionPlacements(bucket *bolt.Bucket, cutoff time.Time, limit int) (int, error) {
+	selected := &retentionHeap{}
+	heap.Init(selected)
+	if err := bucket.ForEach(func(key, value []byte) error {
+		var placement sessionPlacement
+		if err := json.Unmarshal(value, &placement); err != nil {
+			return err
+		}
+		if placement.NodeID == "" || placement.UpdatedAt.IsZero() {
+			return errors.New("session placement is missing routing metadata")
+		}
+		if placement.UpdatedAt.Before(cutoff) {
+			return nil
+		}
+		pushNewest(selected, retentionCandidate{ID: string(key), At: placement.UpdatedAt}, limit)
+		return nil
+	}); err != nil {
+		return 0, err
+	}
+	keep := make(map[string]struct{}, selected.Len())
+	for selected.Len() > 0 {
+		candidate := heap.Pop(selected).(retentionCandidate)
+		keep[candidate.ID] = struct{}{}
+	}
+	removed := 0
+	cursor := bucket.Cursor()
+	for key, value := cursor.First(); key != nil; key, value = cursor.Next() {
+		var placement sessionPlacement
+		if err := json.Unmarshal(value, &placement); err != nil {
+			return removed, err
+		}
+		if !placement.UpdatedAt.Before(cutoff) {
+			if _, retained := keep[string(key)]; retained {
+				continue
+			}
+		}
+		if err := cursor.Delete(); err != nil {
+			return removed, err
+		}
+		removed++
+	}
+	return removed, nil
 }
 
 func newestTerminalJobs(bucket *bolt.Bucket, cutoff time.Time, limit int) (map[string]struct{}, error) {
@@ -315,6 +377,9 @@ func deleteJobIndexes(tx *bolt.Tx, job Job) error {
 		if err := index.Delete(key); err != nil {
 			return err
 		}
+	}
+	if err := deleteJobOwnerIndex(tx.Bucket(bucketJobOwnerIndex), job); err != nil {
+		return err
 	}
 	return deleteQueueEntry(tx.Bucket(bucketQueue), job.ID)
 }

@@ -12,6 +12,18 @@ const ProtocolVersion = 2
 // the relay must apply the same bound to untrusted hello and heartbeat frames.
 const MaximumWorkerConcurrency = 64
 
+// Browser capability inventories are routing evidence, not a copy of page
+// contents. Keep the per-tab lists deliberately small so a compromised local
+// status endpoint or worker cannot turn heartbeats into an unbounded protocol
+// payload.
+const (
+	MaximumBrowserSessions        = 256
+	MaximumBrowserModelChoices    = 20
+	MaximumBrowserReasoningLevels = 20
+	MaximumBrowserChoiceBytes     = 100
+	MaximumBrowserSessionKeyBytes = 80
+)
+
 // MaximumJobPayloadBytes is the largest cleartext job payload supported by
 // every relay/worker transport path. Encryption adds wire overhead but must not
 // reduce this usable budget.
@@ -36,17 +48,36 @@ const (
 )
 
 type Requirements struct {
-	Task           string   `json:"task,omitempty" yaml:"task,omitempty"`
-	SessionID      string   `json:"session_id,omitempty" yaml:"session_id,omitempty"`
-	Provider       string   `json:"provider,omitempty" yaml:"provider,omitempty"`
-	BrowserProfile string   `json:"browser_profile,omitempty" yaml:"browser_profile,omitempty"`
-	Model          string   `json:"model,omitempty" yaml:"model,omitempty"`
-	Group          string   `json:"group,omitempty" yaml:"group,omitempty"`
-	RequiredTags   []string `json:"required_tags,omitempty" yaml:"required_tags,omitempty"`
-	PreferredNodes []string `json:"preferred_nodes,omitempty" yaml:"preferred_nodes,omitempty"`
-	MinFreeVRAM    uint64   `json:"min_free_vram_bytes,omitempty" yaml:"min_free_vram_bytes,omitempty"`
-	Vision         bool     `json:"vision,omitempty" yaml:"vision,omitempty"`
-	Embedding      bool     `json:"embedding,omitempty" yaml:"embedding,omitempty"`
+	Task           string `json:"task,omitempty" yaml:"task,omitempty"`
+	SessionID      string `json:"session_id,omitempty" yaml:"session_id,omitempty"`
+	Provider       string `json:"provider,omitempty" yaml:"provider,omitempty"`
+	BrowserProfile string `json:"browser_profile,omitempty" yaml:"browser_profile,omitempty"`
+	Model          string `json:"model,omitempty" yaml:"model,omitempty"`
+	Reasoning      string `json:"reasoning,omitempty" yaml:"reasoning,omitempty"`
+	// BrowserTabID is selected by the relay from fresh worker telemetry. A
+	// producer cannot set it directly; once assigned it is authenticated by the
+	// E2EE context and carried to the local browser lease boundary.
+	BrowserTabID int `json:"browser_tab_id,omitempty" yaml:"-"`
+	// BrowserSessionRecovery is relay-internal. It allows a worker on the same
+	// node to prove that a saved conversation moved to another attached tab
+	// without allowing the session to migrate to another machine.
+	BrowserSessionRecovery bool `json:"browser_session_recovery,omitempty" yaml:"-"`
+	// BrowserSessionKey is an opaque relay-derived selector used only while
+	// ranking fresh browser telemetry. It is never accepted from or serialized
+	// back to producers and contains no raw session name, URL, or page content.
+	BrowserSessionKey string `json:"-" yaml:"-"`
+	// BrowserFreshChat asks the selected browser worker to create a new provider
+	// conversation when this logical session does not already have a binding.
+	BrowserFreshChat bool `json:"browser_fresh_chat,omitempty" yaml:"browser_fresh_chat,omitempty"`
+	// BrowserEphemeralChat creates a fresh conversation for this one job. Its
+	// completed tab must never become durable session affinity.
+	BrowserEphemeralChat bool     `json:"browser_ephemeral_chat,omitempty" yaml:"browser_ephemeral_chat,omitempty"`
+	Group                string   `json:"group,omitempty" yaml:"group,omitempty"`
+	RequiredTags         []string `json:"required_tags,omitempty" yaml:"required_tags,omitempty"`
+	PreferredNodes       []string `json:"preferred_nodes,omitempty" yaml:"preferred_nodes,omitempty"`
+	MinFreeVRAM          uint64   `json:"min_free_vram_bytes,omitempty" yaml:"min_free_vram_bytes,omitempty"`
+	Vision               bool     `json:"vision,omitempty" yaml:"vision,omitempty"`
+	Embedding            bool     `json:"embedding,omitempty" yaml:"embedding,omitempty"`
 }
 
 type GPUCapability struct {
@@ -60,24 +91,33 @@ type GPUCapability struct {
 }
 
 type ModelCapability struct {
-	Name      string   `json:"name"`
-	Tasks     []string `json:"tasks,omitempty"`
-	Size      int64    `json:"size_bytes,omitempty"`
-	Loaded    bool     `json:"loaded"`
-	Vision    bool     `json:"vision"`
-	Embedding bool     `json:"embedding"`
-	VRAM      int64    `json:"vram_bytes,omitempty"`
-	Provider  string   `json:"provider,omitempty"`
+	Name                 string   `json:"name"`
+	Tasks                []string `json:"tasks,omitempty"`
+	Size                 int64    `json:"size_bytes,omitempty"`
+	Available            bool     `json:"available"`
+	Loaded               bool     `json:"loaded"`
+	Vision               bool     `json:"vision"`
+	Embedding            bool     `json:"embedding"`
+	CapabilitiesVerified bool     `json:"capabilities_verified"`
+	CapabilitySource     string   `json:"capability_source,omitempty"`
+	VRAM                 int64    `json:"vram_bytes,omitempty"`
+	Provider             string   `json:"provider,omitempty"`
 }
 
 // BrowserSessionCapability reports only the visible selection and state of an
 // explicitly attached tab. Chat contents and tab titles never leave the PC.
 type BrowserSessionCapability struct {
-	TabID            int    `json:"tab_id"`
-	Profile          string `json:"profile,omitempty"`
-	State            string `json:"state,omitempty"`
-	CurrentModel     string `json:"current_model,omitempty"`
-	CurrentReasoning string `json:"current_reasoning,omitempty"`
+	TabID               int      `json:"tab_id"`
+	Profile             string   `json:"profile,omitempty"`
+	State               string   `json:"state,omitempty"`
+	SessionKey          string   `json:"session_key,omitempty"`
+	SessionKeySupported bool     `json:"session_key_supported,omitempty"`
+	CanCreateFreshChat  bool     `json:"can_create_fresh_chat,omitempty"`
+	DefaultFreshChat    bool     `json:"default_fresh_chat,omitempty"`
+	CurrentModel        string   `json:"current_model,omitempty"`
+	CurrentReasoning    string   `json:"current_reasoning,omitempty"`
+	ModelChoices        []string `json:"model_choices,omitempty"`
+	ReasoningLevels     []string `json:"reasoning_levels,omitempty"`
 }
 
 type Capabilities struct {
@@ -150,6 +190,14 @@ type Usage struct {
 	PeakGPUUtilization int    `json:"peak_gpu_utilization_percent,omitempty"`
 }
 
+// ExecutionMetadata is bounded worker-reported routing evidence. Browser tab
+// identifiers are local to a worker and are used only to keep later turns of
+// the same logical session on the conversation that actually ran the job.
+type ExecutionMetadata struct {
+	BrowserTabID        int  `json:"browser_tab_id,omitempty"`
+	EphemeralBrowserTab bool `json:"ephemeral_browser_tab,omitempty"`
+}
+
 type JobProgress struct {
 	Sequence  uint64    `json:"sequence"`
 	Text      string    `json:"text"`
@@ -168,32 +216,37 @@ type SealedEnvelope struct {
 }
 
 type Job struct {
-	ID             string          `json:"id"`
-	OwnerSubject   string          `json:"owner_subject,omitempty"`
-	TenantID       string          `json:"tenant_id,omitempty"`
-	Source         string          `json:"source,omitempty"`
-	Pipeline       string          `json:"pipeline,omitempty"`
-	Step           string          `json:"step,omitempty"`
-	ParentID       string          `json:"parent_id,omitempty"`
-	Requirements   Requirements    `json:"requirements"`
-	Payload        json.RawMessage `json:"payload,omitempty"`
-	SealedPayload  *SealedEnvelope `json:"sealed_payload,omitempty"`
-	Result         json.RawMessage `json:"result,omitempty"`
-	SealedResult   *SealedEnvelope `json:"sealed_result,omitempty"`
-	Status         string          `json:"status"`
-	Priority       int             `json:"priority"`
-	Attempt        int             `json:"attempt"`
-	MaxAttempts    int             `json:"max_attempts"`
-	AssignedNode   string          `json:"assigned_node,omitempty"`
-	Error          string          `json:"error,omitempty"`
-	Usage          Usage           `json:"usage"`
-	Progress       *JobProgress    `json:"progress,omitempty"`
-	CreatedAt      time.Time       `json:"created_at"`
-	UpdatedAt      time.Time       `json:"updated_at"`
-	AssignedAt     time.Time       `json:"assigned_at,omitempty"`
-	StartedAt      time.Time       `json:"started_at,omitempty"`
-	FinishedAt     time.Time       `json:"finished_at,omitempty"`
-	ReservationKey string          `json:"-"`
+	ID            string          `json:"id"`
+	OwnerSubject  string          `json:"owner_subject,omitempty"`
+	TenantID      string          `json:"tenant_id,omitempty"`
+	Source        string          `json:"source,omitempty"`
+	Pipeline      string          `json:"pipeline,omitempty"`
+	Step          string          `json:"step,omitempty"`
+	ParentID      string          `json:"parent_id,omitempty"`
+	Requirements  Requirements    `json:"requirements"`
+	Payload       json.RawMessage `json:"payload,omitempty"`
+	SealedPayload *SealedEnvelope `json:"sealed_payload,omitempty"`
+	Result        json.RawMessage `json:"result,omitempty"`
+	SealedResult  *SealedEnvelope `json:"sealed_result,omitempty"`
+	Status        string          `json:"status"`
+	Priority      int             `json:"priority"`
+	Attempt       int             `json:"attempt"`
+	MaxAttempts   int             `json:"max_attempts"`
+	AssignedNode  string          `json:"assigned_node,omitempty"`
+	// ExecutedBrowserTabID records the concrete browser tab used by the worker.
+	// It can differ from Requirements.BrowserTabID when the extension created a
+	// fresh chat for the first turn of a session.
+	ExecutedBrowserTabID int          `json:"executed_browser_tab_id,omitempty"`
+	EphemeralBrowserTab  bool         `json:"ephemeral_browser_tab,omitempty"`
+	Error                string       `json:"error,omitempty"`
+	Usage                Usage        `json:"usage"`
+	Progress             *JobProgress `json:"progress,omitempty"`
+	CreatedAt            time.Time    `json:"created_at"`
+	UpdatedAt            time.Time    `json:"updated_at"`
+	AssignedAt           time.Time    `json:"assigned_at,omitempty"`
+	StartedAt            time.Time    `json:"started_at,omitempty"`
+	FinishedAt           time.Time    `json:"finished_at,omitempty"`
+	ReservationKey       string       `json:"-"`
 }
 
 type SubmitRequest struct {
@@ -208,6 +261,13 @@ type SubmitRequest struct {
 	Priority         int             `json:"priority,omitempty"`
 	MaxAttempts      int             `json:"max_attempts,omitempty"`
 	OwnerSubject     string          `json:"-"`
+	// Pipeline metadata is relay-internal and is persisted atomically with the
+	// queued job. Keeping it out of the producer JSON surface prevents callers
+	// from forging orchestration ownership while avoiding a post-admission
+	// SaveJob checkpoint that could fail after the job became dispatchable.
+	Pipeline string `json:"-"`
+	Step     string `json:"-"`
+	ParentID string `json:"-"`
 }
 
 type Assignment struct {
@@ -276,19 +336,20 @@ type Event struct {
 }
 
 type WireMessage struct {
-	Version      int             `json:"version"`
-	Type         string          `json:"type"`
-	RequestID    string          `json:"request_id,omitempty"`
-	Node         *Node           `json:"node,omitempty"`
-	Capabilities *Capabilities   `json:"capabilities,omitempty"`
-	Job          *Job            `json:"job,omitempty"`
-	JobID        string          `json:"job_id,omitempty"`
-	Attempt      int             `json:"attempt,omitempty"`
-	Result       json.RawMessage `json:"result,omitempty"`
-	SealedResult *SealedEnvelope `json:"sealed_result,omitempty"`
-	Usage        Usage           `json:"usage,omitempty"`
-	Progress     *JobProgress    `json:"progress,omitempty"`
-	Error        string          `json:"error,omitempty"`
+	Version      int                `json:"version"`
+	Type         string             `json:"type"`
+	RequestID    string             `json:"request_id,omitempty"`
+	Node         *Node              `json:"node,omitempty"`
+	Capabilities *Capabilities      `json:"capabilities,omitempty"`
+	Job          *Job               `json:"job,omitempty"`
+	JobID        string             `json:"job_id,omitempty"`
+	Attempt      int                `json:"attempt,omitempty"`
+	Result       json.RawMessage    `json:"result,omitempty"`
+	SealedResult *SealedEnvelope    `json:"sealed_result,omitempty"`
+	Usage        Usage              `json:"usage,omitempty"`
+	Execution    *ExecutionMetadata `json:"execution,omitempty"`
+	Progress     *JobProgress       `json:"progress,omitempty"`
+	Error        string             `json:"error,omitempty"`
 }
 
 type Pricing struct {

@@ -428,7 +428,7 @@ func (w *Worker) connect(ctx context.Context, report WorkerReporter) error {
 			_ = write(WireMessage{Type: "started", JobID: job.ID, Attempt: job.Attempt})
 			provider, profile, model, reasoning := jobRequestLabels(job)
 			report(WorkerEvent{Kind: WorkerJobStarted, NodeName: node.Name, JobID: job.ID, Task: job.Requirements.Task, Provider: provider, Profile: profile, Model: model, Reasoning: reasoning})
-			result, sealed, usage, runErr := w.execute(jobCtx, job, func(progress JobProgress) {
+			result, sealed, usage, execution, runErr := w.execute(jobCtx, job, func(progress JobProgress) {
 				_ = write(WireMessage{Type: "progress", JobID: job.ID, Attempt: job.Attempt, Progress: &progress})
 				report(WorkerEvent{Kind: WorkerJobProgress, NodeName: node.Name, JobID: job.ID, Task: job.Requirements.Task, Phase: progress.Phase, Percent: progress.Percent, Detail: progress.Detail, Sequence: progress.Sequence, Text: progress.Text})
 			})
@@ -440,15 +440,15 @@ func (w *Worker) connect(ctx context.Context, report WorkerReporter) error {
 				reportedProvider, reportedModel, reportedReasoning := localResultSelection(result)
 				report(WorkerEvent{Kind: WorkerJobCompleted, NodeName: node.Name, JobID: job.ID, Task: job.Requirements.Task, ComputeMS: usage.ComputeMS, ReportedProvider: reportedProvider, ReportedModel: reportedModel, ReportedReasoning: reportedReasoning})
 			}
-			_ = write(WireMessage{Type: "result", JobID: job.ID, Attempt: job.Attempt, Result: result, SealedResult: sealed, Usage: usage, Error: errorText})
+			_ = write(WireMessage{Type: "result", JobID: job.ID, Attempt: job.Attempt, Result: result, SealedResult: sealed, Usage: usage, Execution: execution, Error: errorText})
 		}(job, jobCtx, cancelJob)
 	}
 }
 
 func jobRequestLabels(job Job) (provider, profile, model, reasoning string) {
-	provider, model = job.Requirements.Provider, job.Requirements.Model
+	provider, profile, model, reasoning = job.Requirements.Provider, job.Requirements.BrowserProfile, job.Requirements.Model, job.Requirements.Reasoning
 	if job.SealedPayload != nil || len(job.Payload) == 0 {
-		return provider, "", model, ""
+		return provider, profile, model, reasoning
 	}
 	var payload struct {
 		Provider  string `json:"provider"`
@@ -465,7 +465,13 @@ func jobRequestLabels(job Job) (provider, profile, model, reasoning string) {
 	if model == "" {
 		model = payload.Model
 	}
-	return provider, payload.Profile, model, payload.Reasoning
+	if profile == "" {
+		profile = payload.Profile
+	}
+	if reasoning == "" {
+		reasoning = payload.Reasoning
+	}
+	return provider, profile, model, reasoning
 }
 
 func localResultSelection(result json.RawMessage) (provider, model, reasoning string) {
@@ -486,7 +492,7 @@ func localResultSelection(result json.RawMessage) (provider, model, reasoning st
 	return "", "", ""
 }
 
-func (w *Worker) execute(ctx context.Context, job Job, emitProgress func(JobProgress)) (result json.RawMessage, sealedResult *SealedEnvelope, usage Usage, resultErr error) {
+func (w *Worker) execute(ctx context.Context, job Job, emitProgress func(JobProgress)) (result json.RawMessage, sealedResult *SealedEnvelope, usage Usage, execution *ExecutionMetadata, resultErr error) {
 	started := time.Now()
 	payload := []byte(job.Payload)
 	shared := ""
@@ -495,24 +501,24 @@ func (w *Worker) execute(ctx context.Context, job Job, emitProgress func(JobProg
 		var err error
 		encryptionContext, err = job.EncryptionContextForNode(w.identity.NodeID)
 		if err != nil {
-			return nil, nil, Usage{}, fmt.Errorf("validate encrypted job context: %w", err)
+			return nil, nil, Usage{}, nil, fmt.Errorf("validate encrypted job context: %w", err)
 		}
 		payload, shared, err = OpenWith(w.identity.PrivateKey, job.SealedPayload, JobAAD(encryptionContext))
 		if err != nil {
-			return nil, nil, Usage{}, fmt.Errorf("decrypt job: %w", err)
+			return nil, nil, Usage{}, nil, fmt.Errorf("decrypt job: %w", err)
 		}
 	}
 	if !json.Valid(payload) {
-		return nil, nil, Usage{}, errors.New("job payload must be valid JSON")
+		return nil, nil, Usage{}, nil, errors.New("job payload must be valid JSON")
 	}
 	requirements, err := w.applyPolicy(job.Requirements)
 	if err != nil {
-		return nil, nil, Usage{}, err
+		return nil, nil, Usage{}, nil, err
 	}
 	localJobID := localExecutionID(job)
 	payload, err = prepareLocalPayload(payload, requirements, localJobID, job.OwnerSubject, job.TenantID)
 	if err != nil {
-		return nil, nil, Usage{}, err
+		return nil, nil, Usage{}, nil, err
 	}
 	progressCtx, stopProgress := context.WithCancel(ctx)
 	var progressWG sync.WaitGroup
@@ -527,7 +533,7 @@ func (w *Worker) execute(ctx context.Context, job Job, emitProgress func(JobProg
 	defer stopProgress()
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(w.cfg.LocalURL, "/")+"/v1/jobs?compact=1", bytes.NewReader(payload))
 	if err != nil {
-		return nil, nil, Usage{}, err
+		return nil, nil, Usage{}, nil, err
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer "+w.cfg.LocalToken)
@@ -538,20 +544,21 @@ func (w *Worker) execute(ctx context.Context, job Job, emitProgress func(JobProg
 	request.Header.Set("X-ContextBridge-Expected-Task", requirements.Task)
 	response, err := w.client.Do(request)
 	if err != nil {
-		return nil, nil, Usage{}, err
+		return nil, nil, Usage{}, nil, err
 	}
 	defer response.Body.Close()
 	raw, err := readLocalSubmissionResponse(response.Body)
 	if err != nil {
-		return nil, nil, Usage{}, err
+		return nil, nil, Usage{}, nil, err
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, nil, Usage{}, fmt.Errorf("local bridge returned %s: %s", response.Status, truncate(string(raw), 500))
+		return nil, nil, Usage{}, nil, fmt.Errorf("local bridge returned %s: %s", response.Status, truncate(string(raw), 500))
 	}
 	usage = extractUsage(raw)
 	usage.ComputeMS = uint64(time.Since(started).Milliseconds())
+	execution = extractLocalExecutionMetadata(raw)
 	if outputErr := localOutputError(raw); outputErr != "" {
-		return nil, nil, usage, errors.New(outputErr)
+		return nil, nil, usage, execution, errors.New(outputErr)
 	}
 	// The outer cluster job already stores the submitted payload. Do not send
 	// large or sensitive request fields (especially image_base64) back across
@@ -562,7 +569,7 @@ func (w *Worker) execute(ctx context.Context, job Job, emitProgress func(JobProg
 		// Fail closed: a successful local response must never cause the original
 		// prompt, documents, or image bytes to be echoed back to the relay merely
 		// because response compaction failed.
-		return nil, nil, usage, fmt.Errorf("compact local result: %w", err)
+		return nil, nil, usage, nil, fmt.Errorf("compact local result: %w", err)
 	}
 	// Do not fill per-job resource fields from node-wide RAM, VRAM, or GPU
 	// utilization snapshots. Other processes and concurrent jobs share those
@@ -571,9 +578,20 @@ func (w *Worker) execute(ctx context.Context, job Job, emitProgress func(JobProg
 	// measurements.
 	if shared != "" {
 		sealed, sealErr := SealResponse(shared, raw, ResultAAD(encryptionContext))
-		return nil, sealed, usage, sealErr
+		return nil, sealed, usage, execution, sealErr
 	}
-	return json.RawMessage(raw), nil, usage, nil
+	return json.RawMessage(raw), nil, usage, execution, nil
+}
+
+func extractLocalExecutionMetadata(raw []byte) *ExecutionMetadata {
+	var submission struct {
+		BrowserTabID        int  `json:"contextbridge_browser_tab_id"`
+		EphemeralBrowserTab bool `json:"contextbridge_ephemeral_browser_tab"`
+	}
+	if json.Unmarshal(raw, &submission) != nil || submission.BrowserTabID <= 0 {
+		return nil
+	}
+	return &ExecutionMetadata{BrowserTabID: submission.BrowserTabID, EphemeralBrowserTab: submission.EphemeralBrowserTab}
 }
 
 const maximumLocalSubmissionBytes int64 = MaximumJobResultBytes
@@ -594,15 +612,20 @@ func compactLocalSubmission(raw []byte) ([]byte, error) {
 	if err := json.Unmarshal(raw, &envelope); err != nil {
 		return nil, err
 	}
+	delete(envelope, "contextbridge_browser_tab_id")
+	delete(envelope, "contextbridge_ephemeral_browser_tab")
 	jobRaw, ok := envelope["job"]
 	if !ok {
-		return raw, nil
+		return nil, errors.New("local bridge response is missing the required job object")
 	}
 	var job map[string]json.RawMessage
 	if err := json.Unmarshal(jobRaw, &job); err != nil {
 		return nil, err
 	}
-	for _, field := range []string{"prompt", "text", "texts", "documents", "query", "image_base64"} {
+	for _, field := range []string{
+		"prompt", "text", "texts", "documents", "query", "image_base64",
+		"contextbridge_session_key", "contextbridge_browser_tab_id",
+	} {
 		delete(job, field)
 	}
 	compactJob, err := json.Marshal(job)
@@ -610,6 +633,23 @@ func compactLocalSubmission(raw []byte) ([]byte, error) {
 		return nil, err
 	}
 	envelope["job"] = compactJob
+	for _, name := range []string{"output", "decision"} {
+		raw, ok := envelope[name]
+		if !ok || len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			continue
+		}
+		var value map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return nil, err
+		}
+		delete(value, "contextbridge_browser_tab_id")
+		delete(value, "contextbridge_ephemeral_browser_tab")
+		cleaned, err := json.Marshal(value)
+		if err != nil {
+			return nil, err
+		}
+		envelope[name] = cleaned
+	}
 	compact, err := json.Marshal(envelope)
 	if err != nil {
 		return nil, err
@@ -658,6 +698,8 @@ func prepareLocalPayload(payload []byte, requirements Requirements, localJobID s
 	if provider != "" {
 		rawProvider, _ := json.Marshal(provider)
 		job["provider"] = rawProvider
+	} else {
+		delete(job, "provider")
 	}
 	if task := strings.TrimSpace(requirements.Task); task != "" {
 		rawTask, _ := json.Marshal(task)
@@ -666,26 +708,41 @@ func prepareLocalPayload(payload []byte, requirements Requirements, localJobID s
 	if model := strings.TrimSpace(requirements.Model); model != "" {
 		rawModel, _ := json.Marshal(model)
 		job["model"] = rawModel
+	} else {
+		delete(job, "model")
 	}
 	rawID, _ := json.Marshal(localJobID)
 	job["id"] = rawID
-	if session := strings.TrimSpace(requirements.SessionID); session != "" {
-		rawSession, _ := json.Marshal(session)
-		job["session_id"] = rawSession
-	}
+	// These fields cross the browser lease/session boundary. Producer payload
+	// hints are never authoritative; only authenticated requirements may add
+	// them back below.
+	delete(job, "contextbridge_browser_tab_id")
+	delete(job, "contextbridge_session_key")
+	session := canonicalSessionID(requirements.SessionID)
+	rawSession, _ := json.Marshal(session)
+	job["session_id"] = rawSession
 	if profile := strings.TrimSpace(requirements.BrowserProfile); profile != "" && strings.EqualFold(provider, "browser") {
 		rawProfile, _ := json.Marshal(profile)
 		job["browser_profile"] = rawProfile
+	} else {
+		delete(job, "browser_profile")
+	}
+	if reasoning := strings.TrimSpace(requirements.Reasoning); reasoning != "" && strings.EqualFold(provider, "browser") {
+		rawReasoning, _ := json.Marshal(reasoning)
+		job["reasoning"] = rawReasoning
+	} else {
+		delete(job, "reasoning")
+	}
+	if requirements.BrowserTabID > 0 && strings.EqualFold(provider, "browser") {
+		rawTabID, _ := json.Marshal(requirements.BrowserTabID)
+		job["contextbridge_browser_tab_id"] = rawTabID
 	}
 	// A browser tab is a security boundary between producer conversations.
 	// Derive its internal binding from the authenticated producer, never from a
-	// producer-supplied scope field. The public session_id remains unchanged.
-	if strings.EqualFold(provider, "browser") {
-		var session string
-		_ = json.Unmarshal(job["session_id"], &session)
-		if session == "" {
-			session = "default"
-		}
+	// producer-supplied scope field. Provider-less cluster jobs may resolve via
+	// an operator-owned local route, so they receive the same safe binding in
+	// case that route is a browser; explicit non-browser jobs do not need it.
+	if provider == "" || strings.EqualFold(provider, "browser") {
 		producer := "local"
 		if len(owner) > 0 && owner[0] != "" {
 			producer = owner[0]
@@ -694,6 +751,36 @@ func prepareLocalPayload(payload []byte, requirements Requirements, localJobID s
 		key, _ := json.Marshal(fmt.Sprintf("cb:%x", sum[:]))
 		job["contextbridge_session_key"] = key
 	}
+	metadata := map[string]json.RawMessage{}
+	if raw := bytes.TrimSpace(job["metadata"]); len(raw) > 0 && !bytes.Equal(raw, []byte("null")) {
+		if err := json.Unmarshal(raw, &metadata); err != nil || metadata == nil {
+			return nil, errors.New("cluster job metadata must be a JSON object")
+		}
+	}
+	delete(metadata, "contextbridge_new_chat")
+	delete(metadata, "contextbridge_new_chat_per_job")
+	// Recovery is granted only by the extension after it verifies a durable
+	// sent-unknown claim and the exact owned turn. A producer must never be able
+	// to turn an initial or provider-less job into observation-only page reads.
+	for _, field := range []string{
+		"contextbridge_resume_only",
+		"contextbridge_baseline_text",
+		"contextbridge_baseline_response_count",
+		"contextbridge_baseline_response_identity",
+		"contextbridge_baseline_text_digest",
+		"contextbridge_model_fallbacks",
+		"contextbridge_reasoning_fallbacks",
+	} {
+		delete(metadata, field)
+	}
+	if requirements.BrowserFreshChat || requirements.BrowserEphemeralChat {
+		metadata["contextbridge_new_chat"] = json.RawMessage(`true`)
+		if requirements.BrowserEphemeralChat {
+			metadata["contextbridge_new_chat_per_job"] = json.RawMessage(`true`)
+		}
+	}
+	rawMetadata, _ := json.Marshal(metadata)
+	job["metadata"] = rawMetadata
 	if strings.EqualFold(requirements.Task, "rag_ingest") || strings.EqualFold(requirements.Task, "rag_query") {
 		logicalTenant := ""
 		if len(owner) > 1 {
@@ -781,12 +868,17 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 				ActiveTabs     int  `json:"active_tabs"`
 				BusyTabs       int  `json:"busy_tabs"`
 				Tabs           []struct {
-					ID               int      `json:"id"`
-					Profile          string   `json:"profile"`
-					State            string   `json:"state"`
-					CurrentModel     string   `json:"current_model"`
-					CurrentReasoning string   `json:"current_reasoning"`
-					Models           []string `json:"models"`
+					ID                  int      `json:"id"`
+					Profile             string   `json:"profile"`
+					State               string   `json:"state"`
+					SessionKey          string   `json:"session_key"`
+					SessionKeySupported bool     `json:"session_key_supported"`
+					CanCreateFreshChat  bool     `json:"can_create_fresh_chat"`
+					DefaultFreshChat    bool     `json:"default_fresh_chat"`
+					CurrentModel        string   `json:"current_model"`
+					CurrentReasoning    string   `json:"current_reasoning"`
+					Models              []string `json:"models"`
+					ReasoningLevels     []string `json:"reasoning_levels"`
 				} `json:"tabs"`
 			} `json:"browser"`
 			Routes map[string]struct {
@@ -799,11 +891,14 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 				Engines map[string]struct {
 					State  string `json:"state"`
 					Models []struct {
-						Name         string   `json:"name"`
-						Size         int64    `json:"size_bytes"`
-						VRAM         int64    `json:"vram_bytes"`
-						Loaded       bool     `json:"loaded"`
-						Capabilities []string `json:"capabilities"`
+						Name                 string   `json:"name"`
+						Size                 int64    `json:"size_bytes"`
+						VRAM                 int64    `json:"vram_bytes"`
+						Available            bool     `json:"available"`
+						Loaded               bool     `json:"loaded"`
+						Capabilities         []string `json:"capabilities"`
+						CapabilitiesVerified bool     `json:"capabilities_verified"`
+						CapabilitySource     string   `json:"capability_source"`
 					} `json:"models"`
 				} `json:"engines"`
 			} `json:"runtime"`
@@ -821,9 +916,14 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 				capability.BrowserTabs = status.Browser.ActiveTabs
 				capability.BrowserBusy = status.Browser.BusyTabs
 				for _, tab := range status.Browser.Tabs {
+					modelChoices := cleanList(tab.Models, MaximumBrowserModelChoices, MaximumBrowserChoiceBytes)
+					reasoningLevels := cleanList(tab.ReasoningLevels, MaximumBrowserReasoningLevels, MaximumBrowserChoiceBytes)
 					capability.BrowserSessions = append(capability.BrowserSessions, BrowserSessionCapability{
 						TabID: tab.ID, Profile: truncate(tab.Profile, 40), State: truncate(tab.State, 40),
+						SessionKey: truncate(tab.SessionKey, MaximumBrowserSessionKeyBytes), SessionKeySupported: tab.SessionKeySupported,
+						CanCreateFreshChat: tab.CanCreateFreshChat, DefaultFreshChat: tab.DefaultFreshChat,
 						CurrentModel: truncate(tab.CurrentModel, 100), CurrentReasoning: truncate(tab.CurrentReasoning, 100),
+						ModelChoices: modelChoices, ReasoningLevels: reasoningLevels,
 					})
 				}
 			}
@@ -871,7 +971,7 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 						continue
 					}
 					tasks, vision, embedding := modelTasksFromCapabilities(model.Name, model.Capabilities)
-					runtimeModel := ModelCapability{Name: model.Name, Provider: provider, Size: model.Size, VRAM: model.VRAM, Loaded: model.Loaded, Vision: vision, Embedding: embedding, Tasks: allowedModelTasks(tasks)}
+					runtimeModel := ModelCapability{Name: model.Name, Provider: provider, Size: model.Size, VRAM: model.VRAM, Available: model.Available || model.Loaded, Loaded: model.Loaded, Vision: vision, Embedding: embedding, Tasks: allowedModelTasks(tasks), CapabilitiesVerified: model.CapabilitiesVerified, CapabilitySource: model.CapabilitySource}
 					key := modelCapabilityKey(provider, model.Name)
 					if existing, ok := runtimeModels[key]; ok {
 						runtimeModels[key] = mergeModelCapability(existing, runtimeModel)
@@ -900,8 +1000,10 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 					if !strings.EqualFold(runtimeModel.Provider, provider) {
 						continue
 					}
-					inventoryAvailable = true
-					if modelAllowed(runtimeModel.Name) && containsFold(runtimeModel.Tasks, task) {
+					if runtimeModel.Available {
+						inventoryAvailable = true
+					}
+					if runtimeModel.Available && runtimeModel.CapabilitiesVerified && modelAllowed(runtimeModel.Name) && containsFold(runtimeModel.Tasks, task) {
 						return true, true
 					}
 				}
@@ -910,17 +1012,28 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 			providerSupportsRouteTask := func(provider, routeModel, task string) bool {
 				model := strings.TrimSpace(routeModel)
 				if model == "" || strings.EqualFold(model, "auto") {
-					// A non-empty runtime model list is authoritative for automatic
-					// selection. Keep the historical optimistic behavior when the
-					// inventory is unavailable, but do not advertise a task when every
-					// discovered model is incapable of it.
-					if supports, inventoryAvailable := runtimeProviderSupportsTask(provider, task); inventoryAvailable {
+					// Ollama auto-selection is fail closed: a live daemon is not enough.
+					// At least one currently available model must carry provider-verified
+					// capability evidence for this task. Other engines retain their
+					// historical route behavior until they publish equivalent evidence.
+					if supports, inventoryAvailable := runtimeProviderSupportsTask(provider, task); inventoryAvailable || strings.EqualFold(provider, "ollama") {
 						return supports
 					}
 					return true
 				}
 				if runtimeModel, knownByRuntime := runtimeModels[modelCapabilityKey(provider, model)]; knownByRuntime {
-					return modelAllowed(runtimeModel.Name) && containsFold(runtimeModel.Tasks, task)
+					if !runtimeModel.Available || !modelAllowed(runtimeModel.Name) {
+						return false
+					}
+					if runtimeModel.CapabilitiesVerified || !strings.EqualFold(provider, "ollama") {
+						return containsFold(runtimeModel.Tasks, task)
+					}
+					// An explicit configured model is an operator choice. Older
+					// Ollama versions may prove that it is installed without
+					// publishing capability metadata; keep that fixed route usable.
+					// Name-inferred tasks are never used to make an automatic route
+					// eligible, and verified incompatible evidence still rejects it.
+					return true
 				}
 				if _, inventoryAvailable := runtimeProviderSupportsTask(provider, task); inventoryAvailable {
 					// A non-empty inventory is authoritative: a configured fixed
@@ -987,11 +1100,11 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 					addModel(model)
 				}
 			}
-			for _, tab := range status.Browser.Tabs {
+			for _, tab := range capability.BrowserSessions {
 				if !providerAllowed("browser") {
 					break
 				}
-				models := append([]string{}, tab.Models...)
+				models := append([]string{}, tab.ModelChoices...)
 				if tab.CurrentModel != "" {
 					models = append(models, tab.CurrentModel)
 				}
@@ -1166,14 +1279,33 @@ func modelCapabilityKey(provider, name string) string {
 }
 
 func mergeModelCapability(current, incoming ModelCapability) ModelCapability {
-	for _, task := range incoming.Tasks {
-		if !containsFold(current.Tasks, task) {
-			current.Tasks = append(current.Tasks, task)
+	mergeCapabilities := current.CapabilitiesVerified == incoming.CapabilitiesVerified
+	replaceCapabilities := incoming.CapabilitiesVerified && !current.CapabilitiesVerified
+	if replaceCapabilities {
+		// Provider evidence replaces name inference; never retain an inferred
+		// generation/vision flag under a verified embedding-only label.
+		current.Tasks = append([]string(nil), incoming.Tasks...)
+		current.Vision = incoming.Vision
+		current.Embedding = incoming.Embedding
+	} else if mergeCapabilities {
+		for _, task := range incoming.Tasks {
+			if !containsFold(current.Tasks, task) {
+				current.Tasks = append(current.Tasks, task)
+			}
 		}
+		current.Vision = current.Vision || incoming.Vision
+		current.Embedding = current.Embedding || incoming.Embedding
 	}
-	current.Vision = current.Vision || incoming.Vision
-	current.Embedding = current.Embedding || incoming.Embedding
+	current.Available = current.Available || incoming.Available
 	current.Loaded = current.Loaded || incoming.Loaded
+	if incoming.CapabilitiesVerified {
+		current.CapabilitiesVerified = true
+		if incoming.CapabilitySource != "" {
+			current.CapabilitySource = incoming.CapabilitySource
+		}
+	} else if current.CapabilitySource == "" {
+		current.CapabilitySource = incoming.CapabilitySource
+	}
 	if incoming.Size > current.Size {
 		current.Size = incoming.Size
 	}

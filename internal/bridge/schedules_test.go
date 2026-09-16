@@ -408,6 +408,156 @@ func TestScheduleFileHandoffRequiresVerifiedBytes(t *testing.T) {
 	}
 }
 
+func TestScheduleLocalImageHandoffPreservesVerifiedProvenance(t *testing.T) {
+	cfg := config.Config{
+		Storage: config.Storage{Directory: t.TempDir(), Inbox: t.TempDir()},
+		Routes: map[string]config.Route{
+			"default": {Provider: "browser", BrowserProfile: "chatgpt", TimeoutSeconds: 5},
+			"local":   {Provider: "ollama", TimeoutSeconds: 5},
+		},
+		Providers: config.Providers{Ollama: config.OllamaProvider{Images: true}},
+	}
+	server, err := NewServer(cfg, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := append([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}, []byte("verified schedule image")...)
+	digest := sha256.Sum256(data)
+	canonicalDigest := hex.EncodeToString(digest[:])
+	previous := Output{Artifacts: []Artifact{{
+		Name: "image.png", MediaType: "IMAGE/PNG", DataBase64: base64.StdEncoding.EncodeToString(data),
+		Size: 1, SHA256: strings.ToUpper(canonicalDigest), URL: "https://example.invalid/untrusted.png",
+	}}}
+	base := Job{ID: "schedule-local-image", Route: "default", SessionID: "schedule-owner"}
+	step := ScheduleStep{Job: Job{Route: "local", Prompt: "Describe the verified image.", Output: OutputSpec{Mode: "text"}}, UsePreviousArtifact: "image"}
+	job, err := server.nextScheduleStep(base, step, 1, previous)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.ImageBase64 != previous.Artifacts[0].DataBase64 || job.ImageMediaType != "image/png" || job.SessionID != base.SessionID {
+		t.Fatalf("verified local image was not carried in the job: %+v", job)
+	}
+	provenance, ok := job.Metadata["contextbridge_input_artifact"].(map[string]interface{})
+	if !ok || provenance["name"] != "image.png" || provenance["media_type"] != "image/png" || provenance["size"] != len(data) || provenance["sha256"] != canonicalDigest || provenance["source_job_id"] != base.ID || provenance["source"] != "schedule_previous_step" {
+		t.Fatalf("canonical provenance was not preserved: %#v", provenance)
+	}
+	cfg.Routes["llama"] = config.Route{Provider: "local-llama", TimeoutSeconds: 5}
+	cfg.Engines = map[string]config.Engine{"local-llama": {Type: "llama_cpp", URL: "http://127.0.0.1:1"}}
+	server, err = NewServer(cfg, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	step.Job.Route = "llama"
+	llamaJob, err := server.nextScheduleStep(base, step, 1, previous)
+	if err != nil || llamaJob.ImageBase64 != previous.Artifacts[0].DataBase64 || llamaJob.ImageMediaType != "image/png" {
+		t.Fatalf("verified llama.cpp image handoff failed: job=%+v err=%v", llamaJob, err)
+	}
+
+	step.Job.Route = "local"
+	step.UsePreviousArtifact = "file"
+	if _, err := server.nextScheduleStep(base, step, 1, previous); err == nil || !strings.Contains(err.Error(), "verified images only") {
+		t.Fatalf("local arbitrary-file handoff did not fail closed: %v", err)
+	}
+	cfg.Providers.Ollama.Images = false
+	server, err = NewServer(cfg, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	step.UsePreviousArtifact = "image"
+	if _, err := server.nextScheduleStep(base, step, 1, previous); err == nil || !strings.Contains(err.Error(), "image input is disabled") {
+		t.Fatalf("disabled Ollama image input did not fail closed: %v", err)
+	}
+}
+
+func TestScheduleLocalImageHandoffRejectsOversizeAndTamperedBytes(t *testing.T) {
+	cfg := config.Config{
+		Storage:   config.Storage{Directory: t.TempDir(), Inbox: t.TempDir()},
+		Routes:    map[string]config.Route{"local": {Provider: "ollama", TimeoutSeconds: 5}},
+		Providers: config.Providers{Ollama: config.OllamaProvider{Images: true}},
+	}
+	server, err := NewServer(cfg, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := Job{ID: "schedule-bounds", Route: "local", SessionID: "schedule-owner"}
+	step := ScheduleStep{Job: Job{Route: "local", Prompt: "Inspect.", Output: OutputSpec{Mode: "text"}}, UsePreviousArtifact: "image"}
+	for _, test := range []struct {
+		name     string
+		artifact Artifact
+	}{
+		{name: "oversize", artifact: func() Artifact {
+			data := append([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}, make([]byte, 8<<20)...)
+			digest := sha256.Sum256(data)
+			return Artifact{Name: "large.png", MediaType: "image/png", DataBase64: base64.StdEncoding.EncodeToString(data), SHA256: hex.EncodeToString(digest[:])}
+		}()},
+		{name: "tampered digest", artifact: Artifact{Name: "bad.png", MediaType: "image/png", DataBase64: base64.StdEncoding.EncodeToString([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}), SHA256: strings.Repeat("0", 64)}},
+		{name: "wrong media", artifact: func() Artifact {
+			data := []byte("not a png")
+			digest := sha256.Sum256(data)
+			return Artifact{Name: "fake.png", MediaType: "image/png", DataBase64: base64.StdEncoding.EncodeToString(data), SHA256: hex.EncodeToString(digest[:])}
+		}()},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := server.nextScheduleStep(base, step, 1, Output{Artifacts: []Artifact{test.artifact}}); err == nil {
+				t.Fatal("unverified local image handoff was accepted")
+			}
+		})
+	}
+}
+
+func TestScheduleAPIDoesNotInheritBrowserSelectionAcrossLocalRoute(t *testing.T) {
+	cfg := config.Config{
+		Server:  config.Server{Token: "test-token"},
+		Storage: config.Storage{Directory: t.TempDir(), Inbox: t.TempDir()},
+		Routes: map[string]config.Route{
+			"browser": {Provider: "browser", BrowserProfile: "chatgpt", TimeoutSeconds: 5},
+			"local":   {Provider: "ollama", Model: "auto", Task: "vision", TimeoutSeconds: 5},
+		},
+		Providers: config.Providers{Ollama: config.OllamaProvider{Images: true}},
+	}
+	server, err := NewServer(cfg, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	payload := map[string]interface{}{
+		"name": "browser to local vision",
+		"job": map[string]interface{}{
+			"route": "browser", "provider": "browser", "model": "GPT explicit", "reasoning": "high", "prompt": "Create one image.",
+			"output": map[string]interface{}{"mode": "text", "artifacts": true},
+		},
+		"steps": []interface{}{map[string]interface{}{
+			"name": "local inspection", "use_previous_artifact": "image",
+			"job": map[string]interface{}{"route": "local", "prompt": "Describe the image.", "output": map[string]interface{}{"mode": "text"}},
+		}},
+		"timing": map[string]interface{}{"type": "interval", "interval_seconds": 3600},
+	}
+	raw, _ := json.Marshal(payload)
+	request, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/schedules", bytes.NewReader(raw))
+	request.Header.Set("Authorization", "Bearer test-token")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("cross-provider schedule was rejected: %s %s", response.Status, body)
+	}
+	var schedule Schedule
+	if err := json.NewDecoder(response.Body).Decode(&schedule); err != nil {
+		t.Fatal(err)
+	}
+	if len(schedule.Steps) != 1 {
+		t.Fatalf("saved steps = %#v", schedule.Steps)
+	}
+	local := schedule.Steps[0].Job
+	if local.Provider != "ollama" || local.Model != "" || local.Reasoning != "" || local.Route != "local" || local.Task != "vision" || outputMode(local.Output) != "text" {
+		t.Fatalf("browser selection leaked into local follow-up: %+v", local)
+	}
+}
+
 func TestScheduleAPIAndStatusRedaction(t *testing.T) {
 	cfg := config.Config{Server: config.Server{Token: "test-token"}, Storage: config.Storage{Directory: t.TempDir(), Inbox: t.TempDir()}, Routes: map[string]config.Route{"default": {Provider: "browser", BrowserProfile: "chatgpt", TimeoutSeconds: 5}}}
 	server, err := NewServer(cfg, log.New(io.Discard, "", 0))

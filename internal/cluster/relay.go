@@ -3,6 +3,7 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -21,28 +22,29 @@ import (
 )
 
 type RelayConfig struct {
-	Version            string
-	Listen             string
-	PublicURL          string
-	Database           string
-	AdminToken         string
-	AllowedOrigins     []string
-	MaxJobBytes        int64
-	MaxQueuedJobs      int
-	PairingTTL         time.Duration
-	AssignmentTTL      time.Duration
-	DispatchEvery      time.Duration
-	Pricing            Pricing
-	AllowedTasks       []string
-	MaxAttempts        int
-	Pipelines          map[string]Pipeline
-	MaxPipelineRuntime time.Duration
-	JobTimeout         time.Duration
-	RetentionMaxAge    time.Duration
-	MaxTerminalJobs    int
-	MaxEvents          int
-	MaxTerminalRuns    int
-	RetentionSweep     time.Duration
+	Version              string
+	Listen               string
+	PublicURL            string
+	Database             string
+	AdminToken           string
+	AllowedOrigins       []string
+	MaxJobBytes          int64
+	MaxQueuedJobs        int
+	PairingTTL           time.Duration
+	AssignmentTTL        time.Duration
+	DispatchEvery        time.Duration
+	Pricing              Pricing
+	AllowedTasks         []string
+	MaxAttempts          int
+	Pipelines            map[string]Pipeline
+	MaxPipelineRuntime   time.Duration
+	JobTimeout           time.Duration
+	RetentionMaxAge      time.Duration
+	MaxTerminalJobs      int
+	MaxEvents            int
+	MaxTerminalRuns      int
+	MaxSessionPlacements int
+	RetentionSweep       time.Duration
 }
 
 const (
@@ -348,6 +350,9 @@ func applyRetentionDefaults(cfg *RelayConfig) error {
 	if cfg.MaxTerminalRuns == 0 {
 		cfg.MaxTerminalRuns = DefaultMaxTerminalPipelineRuns
 	}
+	if cfg.MaxSessionPlacements == 0 {
+		cfg.MaxSessionPlacements = DefaultMaxSessionPlacements
+	}
 	if cfg.RetentionSweep == 0 {
 		cfg.RetentionSweep = time.Duration(DefaultRetentionSweepSeconds) * time.Second
 	}
@@ -368,6 +373,7 @@ func relayRetentionPolicy(cfg RelayConfig) RetentionPolicy {
 		MaxTerminalJobs:         cfg.MaxTerminalJobs,
 		MaxEvents:               cfg.MaxEvents,
 		MaxTerminalPipelineRuns: cfg.MaxTerminalRuns,
+		MaxSessionPlacements:    cfg.MaxSessionPlacements,
 	}
 }
 
@@ -505,7 +511,19 @@ func (r *Relay) handleNodes(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	// Opaque session selectors are routing-only evidence. They are not useful
+	// to API clients and must not let one producer correlate another producer's
+	// browser conversation across node snapshots.
+	redactNodeRoutingEvidence(nodes)
 	writeJSON(w, http.StatusOK, nodes)
+}
+
+func redactNodeRoutingEvidence(nodes []Node) {
+	for nodeIndex := range nodes {
+		for sessionIndex := range nodes[nodeIndex].Capabilities.BrowserSessions {
+			nodes[nodeIndex].Capabilities.BrowserSessions[sessionIndex].SessionKey = ""
+		}
+	}
 }
 
 func (r *Relay) handleEvents(w http.ResponseWriter, req *http.Request) {
@@ -518,20 +536,17 @@ func (r *Relay) handleEvents(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Relay) handleJobs(w http.ResponseWriter, req *http.Request) {
-	jobs, err := r.store.ListJobs(queryLimit(req, 100, 1000), cleanLabel(req.URL.Query().Get("status"), 20))
+	limit := queryLimit(req, 100, 1000)
+	status := cleanLabel(req.URL.Query().Get("status"), 20)
+	record, _ := tokenRecord(req.Context())
+	owner := ""
+	if record.Role == "producer" {
+		owner = record.Subject
+	}
+	jobs, err := r.store.ListJobsForOwner(limit, status, owner)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
-	}
-	record, _ := tokenRecord(req.Context())
-	if record.Role == "producer" {
-		filtered := jobs[:0]
-		for _, job := range jobs {
-			if job.OwnerSubject == record.Subject {
-				filtered = append(filtered, job)
-			}
-		}
-		jobs = filtered
 	}
 	writeJSON(w, http.StatusOK, jobs)
 }
@@ -574,6 +589,11 @@ func (r *Relay) handleCancel(w http.ResponseWriter, req *http.Request) {
 		// to cancel; otherwise a phantom cancel could poison the worker's bounded
 		// cancel-before-dispatch cache.
 		r.cancelWorkerExecution(job.AssignedNode, job.ID)
+	} else {
+		// No dispatch can still be running: either this was only an encrypted
+		// queue binding, or markStoreTerminal won the pre-dispatch race and made
+		// beginDispatch fail closed. The logical session can be used again.
+		_, _ = r.store.ReleaseBrowserSessionJobLock(job.ID)
 	}
 	writeJSON(w, http.StatusOK, job)
 }
@@ -620,7 +640,18 @@ func (r *Relay) handleSubmit(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusForbidden, err)
 		return
 	}
-	if err := r.validateRequirements(input.Requirements); err != nil {
+	if (input.Requirements.BrowserTabID != 0 || input.Requirements.BrowserSessionRecovery) && input.AssignmentID == "" {
+		writeError(w, http.StatusUnprocessableEntity, errors.New("browser tab and recovery requirements are relay-assigned and cannot be submitted directly"))
+		return
+	}
+	validatedRequirements := input.Requirements
+	if input.AssignmentID != "" {
+		// The reservation owns this value and ConsumeReservationAdmitted compares
+		// the entire authenticated assignment before accepting the sealed job.
+		validatedRequirements.BrowserTabID = 0
+		validatedRequirements.BrowserSessionRecovery = false
+	}
+	if err := r.validateRequirements(validatedRequirements); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err)
 		return
 	}
@@ -724,6 +755,10 @@ func (r *Relay) handleReserve(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	record, _ := tokenRecord(req.Context())
+	if input.Requirements.BrowserTabID != 0 || input.Requirements.BrowserSessionRecovery {
+		writeError(w, http.StatusUnprocessableEntity, errors.New("browser tab and recovery requirements are relay-assigned"))
+		return
+	}
 	if err := scopeRequirements(&input.Requirements, record); err != nil {
 		writeError(w, http.StatusForbidden, err)
 		return
@@ -737,22 +772,32 @@ func (r *Relay) handleReserve(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	nodes, _ := r.store.ListNodes()
-	routingRequirements := r.withSessionAffinity(input.Requirements, record.Subject)
+	routingRequirements, requiredSessionNode := r.withSessionAffinity(input.Requirements, record.Subject)
 	candidates := RankWithEstimate(nodes, routingRequirements, r.store.EstimateVRAM(input.Requirements))
-	if len(candidates) == 0 {
+	node, found := firstSessionCandidate(candidates, requiredSessionNode)
+	if !found {
 		writeError(w, http.StatusServiceUnavailable, errors.New("no online node satisfies these requirements"))
 		return
 	}
-	node := candidates[0].Node
 	if node.PublicKey == "" {
 		writeError(w, http.StatusServiceUnavailable, errors.New("selected node has no encryption key"))
 		return
 	}
 	secret, _ := randomToken("as_")
+	assignedRequirements := input.Requirements
+	assignedRequirements.BrowserSessionRecovery = routingRequirements.BrowserSessionRecovery
+	if strings.EqualFold(input.Requirements.Provider, "browser") && len(node.Capabilities.BrowserSessions) > 0 {
+		session, ok := selectReadyBrowserSession(node.Capabilities.BrowserSessions, routingRequirements)
+		if !ok || session.TabID <= 0 {
+			writeError(w, http.StatusServiceUnavailable, errors.New("selected node no longer has the required browser tab"))
+			return
+		}
+		assignedRequirements.BrowserTabID = selectedBrowserTabBinding(routingRequirements, session)
+	}
 	assignment := Assignment{
 		ID: randomID("assignment"), JobID: randomID("job"), NodeID: node.ID, NodeName: node.Name,
 		PublicKey: node.PublicKey, Attempt: 1, OwnerSubject: record.Subject, TenantID: input.TenantID,
-		ExpiresAt: time.Now().UTC().Add(r.cfg.AssignmentTTL), Requirements: input.Requirements,
+		ExpiresAt: time.Now().UTC().Add(r.cfg.AssignmentTTL), Requirements: assignedRequirements,
 	}
 	ownerLimit := maxActiveReservationsPerOwner
 	if r.cfg.MaxQueuedJobs < ownerLimit {
@@ -770,6 +815,8 @@ func (r *Relay) handleReserve(w http.ResponseWriter, req *http.Request) {
 			status = http.StatusTooManyRequests
 		} else if errors.Is(err, ErrReservationCapacity) {
 			status = http.StatusServiceUnavailable
+		} else if errors.Is(err, ErrBrowserSessionBusy) {
+			status = http.StatusConflict
 		}
 		writeError(w, status, err)
 		return
@@ -903,14 +950,16 @@ func (r *Relay) handleWorker(w http.ResponseWriter, req *http.Request) {
 			}
 		case "result":
 			usage := priceUsage(message.Usage, r.cfg.Pricing)
-			job, completeErr := r.store.CompleteJob(message.JobID, node.ID, message.Attempt, message.Result, message.SealedResult, usage, message.Error)
+			job, completeErr := r.store.CompleteJob(message.JobID, node.ID, message.Attempt, message.Result, message.SealedResult, usage, message.Error, message.Execution)
 			// Only the current assignment generation may release the worker slot.
 			// A final job can still receive its matching late result after a producer
 			// cancellation or relay timeout. That matching result proves execution
 			// really ended, so the slot is safe to release even though the store
 			// rejects the state transition. The timeout itself is not such proof.
 			final := job.Status == JobCompleted || job.Status == JobFailed || job.Status == JobCancelled
-			if completeErr == nil || (final && job.AssignedNode == node.ID && job.Attempt == message.Attempt) || worker.matchesDispatch(message.JobID, message.Attempt) {
+			executionEnded := completeErr == nil || (final && job.AssignedNode == node.ID && job.Attempt == message.Attempt) || worker.matchesDispatch(message.JobID, message.Attempt)
+			if executionEnded {
+				_, _ = r.store.ReleaseBrowserSessionJobLock(message.JobID)
 				worker.release(message.JobID)
 				r.signalDispatch()
 			}
@@ -968,10 +1017,28 @@ func (r *Relay) dispatch() {
 	}
 	r.mu.RUnlock()
 	for _, queued := range jobs {
-		routingRequirements := r.withSessionAffinity(queued.Requirements, queued.OwnerSubject)
+		if busy, busyErr := r.store.BrowserSessionBusy(queued.OwnerSubject, queued.Requirements, queued.ID); busyErr != nil || busy {
+			continue
+		}
+		routingRequirements := queued.Requirements
+		requiredSessionNode := ""
+		sealedAssignment := queued.SealedPayload != nil
+		if sealedAssignment {
+			requiredSessionNode = queued.AssignedNode
+			if routingRequirements.BrowserTabID > 0 {
+				// The reservation authenticated this exact tab in JobAAD. If it
+				// disappears, wait for it instead of mutating encrypted context.
+				routingRequirements.BrowserSessionRecovery = false
+			}
+		} else {
+			routingRequirements, requiredSessionNode = r.withSessionAffinity(queued.Requirements, queued.OwnerSubject)
+		}
 		estimatedVRAM := r.store.EstimateVRAM(queued.Requirements)
 		candidates := RankWithEstimate(nodes, routingRequirements, estimatedVRAM)
 		for _, candidate := range candidates {
+			if requiredSessionNode != "" && candidate.Node.ID != requiredSessionNode {
+				continue
+			}
 			if queued.AssignedNode != "" && queued.AssignedNode != candidate.Node.ID {
 				continue
 			}
@@ -981,6 +1048,20 @@ func (r *Relay) dispatch() {
 			if worker == nil {
 				continue
 			}
+			browserTabID := queued.Requirements.BrowserTabID
+			browserSessionRecovery := routingRequirements.BrowserSessionRecovery
+			if sealedAssignment {
+				browserSessionRecovery = queued.Requirements.BrowserSessionRecovery
+			}
+			if strings.EqualFold(queued.Requirements.Provider, "browser") && len(candidate.Node.Capabilities.BrowserSessions) > 0 {
+				session, ok := selectReadyBrowserSession(candidate.Node.Capabilities.BrowserSessions, routingRequirements)
+				if !ok || session.TabID <= 0 {
+					continue
+				}
+				if !sealedAssignment {
+					browserTabID = selectedBrowserTabBinding(routingRequirements, session)
+				}
+			}
 			if !r.beginAdmission() {
 				return
 			}
@@ -988,7 +1069,13 @@ func (r *Relay) dispatch() {
 				r.endAdmission()
 				continue
 			}
-			job, assignErr := r.store.AssignJob(queued.ID, candidate.Node.ID)
+			var job Job
+			var assignErr error
+			if strings.EqualFold(queued.Requirements.Provider, "browser") {
+				job, assignErr = r.store.AssignBrowserJob(queued.ID, candidate.Node.ID, browserTabID, browserSessionRecovery)
+			} else {
+				job, assignErr = r.store.AssignJob(queued.ID, candidate.Node.ID)
+			}
 			if assignErr != nil {
 				worker.release(queued.ID)
 				r.endAdmission()
@@ -1058,6 +1145,8 @@ func (r *Relay) runMaintenance(now time.Time) {
 				// hung provider work; the slot remains occupied until the matching
 				// result or connection teardown proves execution has actually ended.
 				r.cancelWorkerExecution(job.AssignedNode, job.ID)
+			} else {
+				_, _ = r.store.ReleaseBrowserSessionJobLock(job.ID)
 			}
 			_ = r.store.AddEvent(Event{Kind: "job." + job.Status, Message: job.Error, JobID: job.ID, NodeID: job.AssignedNode})
 		}
@@ -1162,8 +1251,8 @@ func (r *Relay) pruneRetentionIfDue(now time.Time) {
 		r.logger.Printf("relay history retention failed: %v", err)
 		return
 	}
-	if pruned.Jobs > 0 || pruned.Events > 0 || pruned.PipelineRuns > 0 {
-		r.logger.Printf("relay history retention removed %d terminal jobs, %d events, and %d terminal pipeline runs", pruned.Jobs, pruned.Events, pruned.PipelineRuns)
+	if pruned.Jobs > 0 || pruned.Events > 0 || pruned.PipelineRuns > 0 || pruned.SessionPlacements > 0 {
+		r.logger.Printf("relay history retention removed %d terminal jobs, %d events, %d terminal pipeline runs, and %d session placements", pruned.Jobs, pruned.Events, pruned.PipelineRuns, pruned.SessionPlacements)
 	}
 }
 
@@ -1177,6 +1266,25 @@ func (r *Relay) ownerQueueLimit() int {
 func scopeNodeCapabilities(capabilities *Capabilities, record TokenRecord) {
 	if len(record.Groups) > 0 {
 		capabilities.Groups = intersectFold(capabilities.Groups, record.Groups)
+	}
+	if len(capabilities.BrowserSessions) > MaximumBrowserSessions {
+		capabilities.BrowserSessions = capabilities.BrowserSessions[:MaximumBrowserSessions]
+	}
+	for index := range capabilities.BrowserSessions {
+		session := &capabilities.BrowserSessions[index]
+		session.Profile = cleanLabel(session.Profile, 40)
+		session.State = cleanLabel(session.State, 40)
+		session.SessionKey = cleanBrowserSessionKey(session.SessionKey)
+		if session.TabID <= 0 || (!strings.EqualFold(session.Profile, "chatgpt") && !strings.EqualFold(session.Profile, "gemini")) {
+			session.CanCreateFreshChat = false
+		}
+		if !session.CanCreateFreshChat {
+			session.DefaultFreshChat = false
+		}
+		session.CurrentModel = cleanLabel(session.CurrentModel, MaximumBrowserChoiceBytes)
+		session.CurrentReasoning = cleanLabel(session.CurrentReasoning, MaximumBrowserChoiceBytes)
+		session.ModelChoices = cleanList(session.ModelChoices, MaximumBrowserModelChoices, MaximumBrowserChoiceBytes)
+		session.ReasoningLevels = cleanList(session.ReasoningLevels, MaximumBrowserReasoningLevels, MaximumBrowserChoiceBytes)
 	}
 }
 
@@ -1210,6 +1318,7 @@ func (r *Relay) validateRequirements(requirements Requirements) error {
 	for name, value := range map[string]string{
 		"task":            requirements.Task,
 		"model":           requirements.Model,
+		"reasoning":       requirements.Reasoning,
 		"group":           requirements.Group,
 		"browser_profile": requirements.BrowserProfile,
 	} {
@@ -1244,6 +1353,21 @@ func (r *Relay) validateRequirements(requirements Requirements) error {
 			return errors.New("requirements.browser_profile must be at most 80 bytes without surrounding whitespace or control characters")
 		}
 	}
+	if requirements.Reasoning != "" && !strings.EqualFold(requirements.Provider, "browser") {
+		return errors.New("requirements.reasoning requires provider browser")
+	}
+	if requirements.BrowserTabID < 0 {
+		return errors.New("requirements.browser_tab_id is invalid")
+	}
+	if requirements.BrowserTabID > 0 && !strings.EqualFold(requirements.Provider, "browser") {
+		return errors.New("requirements.browser_tab_id requires provider browser")
+	}
+	if (requirements.BrowserFreshChat || requirements.BrowserEphemeralChat) && !strings.EqualFold(requirements.Provider, "browser") {
+		return errors.New("browser fresh-chat requirements require provider browser")
+	}
+	if requirements.BrowserEphemeralChat && !requirements.BrowserFreshChat {
+		return errors.New("requirements.browser_ephemeral_chat requires browser_fresh_chat")
+	}
 	return nil
 }
 
@@ -1261,11 +1385,71 @@ func validateTenantID(tenantID string) error {
 	return nil
 }
 
-func (r *Relay) withSessionAffinity(requirements Requirements, owner string) Requirements {
-	if nodeID, ok := r.store.RecentSessionNode(owner, requirements.SessionID); ok && !contains(requirements.PreferredNodes, nodeID) {
-		requirements.PreferredNodes = append([]string{nodeID}, requirements.PreferredNodes...)
+func (r *Relay) withSessionAffinity(requirements Requirements, owner string) (Requirements, string) {
+	requiredNode := ""
+	if strings.EqualFold(requirements.Provider, "browser") && requirements.BrowserProfile != "" && !requirements.BrowserEphemeralChat {
+		requirements.BrowserSessionKey = browserSessionRoutingKey(owner, requirements)
 	}
-	return requirements
+	// Per-job chats have no durable affinity. A per-session fresh-chat request,
+	// however, must reuse the placement created by its first completed turn even
+	// before the next heartbeat advertises the new tab.
+	if requirements.BrowserEphemeralChat {
+		return requirements, requiredNode
+	}
+	if nodeID, tabID, ok := r.store.RecentSessionPlacement(owner, requirements); ok {
+		if !contains(requirements.PreferredNodes, nodeID) {
+			requirements.PreferredNodes = append([]string{nodeID}, requirements.PreferredNodes...)
+		}
+		if strings.EqualFold(requirements.Provider, "browser") && requirements.BrowserTabID == 0 && tabID > 0 {
+			requirements.BrowserTabID = tabID
+			requirements.BrowserSessionRecovery = true
+			requiredNode = nodeID
+		}
+	}
+	return requirements, requiredNode
+}
+
+func firstSessionCandidate(candidates []Candidate, requiredNode string) (Node, bool) {
+	for _, candidate := range candidates {
+		if requiredNode == "" || candidate.Node.ID == requiredNode {
+			return candidate.Node, true
+		}
+	}
+	return Node{}, false
+}
+
+func selectedBrowserTabBinding(requirements Requirements, selected BrowserSessionCapability) int {
+	if requirements.BrowserSessionRecovery && requirements.BrowserTabID > 0 && selected.TabID != requirements.BrowserTabID {
+		if requirements.BrowserSessionKey != "" && selected.SessionKey == requirements.BrowserSessionKey {
+			return selected.TabID
+		}
+		// The previous tab disappeared. Leave execution unpinned so the extension
+		// can prove the saved conversation URL on any attached tab on this node;
+		// its completion reports the actual replacement tab.
+		return 0
+	}
+	return selected.TabID
+}
+
+func browserSessionRoutingKey(owner string, requirements Requirements) string {
+	owner = strings.TrimSpace(owner)
+	if owner == "" || !strings.EqualFold(strings.TrimSpace(requirements.Provider), "browser") || strings.TrimSpace(requirements.BrowserProfile) == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(owner + "\x00" + canonicalSessionID(requirements.SessionID)))
+	return fmt.Sprintf("cb:%x", sum[:])
+}
+
+func cleanBrowserSessionKey(value string) string {
+	if len(value) != 67 || !strings.HasPrefix(value, "cb:") {
+		return ""
+	}
+	for _, character := range value[3:] {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return ""
+		}
+	}
+	return value
 }
 
 func (r *Relay) authorize(roles ...string) func(http.HandlerFunc) http.HandlerFunc {

@@ -525,14 +525,24 @@ func selftestNodeAdvertisesTarget(node cluster.Node, kind, requestedLocalModel s
 
 func compatibleSelftestModels(models []cluster.ModelCapability, requested string) []cluster.ModelCapability {
 	compatible := make([]cluster.ModelCapability, 0, len(models))
+	explicit := strings.TrimSpace(requested) != ""
 	for _, model := range models {
 		if !strings.EqualFold(strings.TrimSpace(model.Provider), "ollama") || strings.TrimSpace(model.Name) == "" {
 			continue
 		}
-		if requested != "" && !strings.EqualFold(strings.TrimSpace(model.Name), requested) {
+		if explicit && !strings.EqualFold(strings.TrimSpace(model.Name), requested) {
 			continue
 		}
-		if !containsFolded(model.Tasks, "generation") {
+		if explicit {
+			if model.CapabilitySource != "" && !model.Available {
+				continue
+			}
+			if model.CapabilitiesVerified && !containsFolded(model.Tasks, "generation") {
+				continue
+			}
+		} else if !model.Available || !model.CapabilitiesVerified || !containsFolded(model.Tasks, "generation") {
+			// Automatic readiness is based only on provider-verified, currently
+			// available capability evidence. A model name is not a capability.
 			continue
 		}
 		compatible = append(compatible, model)
@@ -703,6 +713,10 @@ func buildSelftestRequest(target selftestTarget, spec selftestJobSpec, runID str
 		return cluster.SubmitRequest{}, err
 	}
 	requirements := cluster.Requirements{Task: "generation", Provider: provider, BrowserProfile: profile, Model: model, SessionID: sessionID, PreferredNodes: []string{target.NodeID}}
+	if provider == "browser" && metadata["contextbridge_new_chat"] == true {
+		requirements.BrowserFreshChat = true
+		requirements.BrowserEphemeralChat = metadata["contextbridge_new_chat_per_job"] == true
+	}
 	return cluster.SubmitRequest{Source: "cluster-selftest", Requirements: requirements, Payload: payload, MaxAttempts: 1}, nil
 }
 

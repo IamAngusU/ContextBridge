@@ -350,8 +350,11 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 	}
 	requirements := cluster.Requirements{Task: "generation", Provider: s.provider, BrowserProfile: s.profile, Group: s.group, SessionID: s.sessionID}
 	requirements.Vision = s.imageBase64 != ""
-	if !strings.EqualFold(s.provider, "browser") {
-		requirements.Model = s.model
+	requirements.Model = s.model
+	if strings.EqualFold(s.provider, "browser") {
+		requirements.Reasoning = s.reasoning
+		requirements.BrowserFreshChat = s.newChat || s.newChatPerJob
+		requirements.BrowserEphemeralChat = s.newChatPerJob
 	}
 	input := cluster.SubmitRequest{
 		Source:       "terminal-chat",

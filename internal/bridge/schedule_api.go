@@ -98,18 +98,27 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "at most four follow-up steps"})
 			return
 		}
+		baseRouteName := input.Job.Route
+		if baseRouteName == "" {
+			baseRouteName = "default"
+		}
 		for index := range input.Steps {
 			step := &input.Steps[index]
 			if step.Job.Route == "" {
 				step.Job.Route = input.Job.Route
 			}
-			if step.Job.Provider == "" {
+			stepRouteName := step.Job.Route
+			if stepRouteName == "" {
+				stepRouteName = "default"
+			}
+			inheritSelection := stepRouteName == baseRouteName
+			if inheritSelection && step.Job.Provider == "" {
 				step.Job.Provider = input.Job.Provider
 			}
-			if step.Job.Model == "" {
+			if inheritSelection && step.Job.Model == "" {
 				step.Job.Model = input.Job.Model
 			}
-			if step.Job.Reasoning == "" {
+			if inheritSelection && step.Job.Reasoning == "" {
 				step.Job.Reasoning = input.Job.Reasoning
 			}
 			if len(step.Name) > 100 || strings.IndexFunc(step.Name, unicode.IsControl) >= 0 || step.Job.ID != "" || step.Job.SessionID != "" {
@@ -125,6 +134,10 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			stepRoute := s.cfg.Route(step.Job.Route)
+			if routeTask := strings.TrimSpace(stepRoute.Task); routeTask != "" {
+				step.Job.Task = routeTask
+			}
+			applyTaskOutput(&step.Job, stepRoute.Task)
 			if step.Job.Provider != "" {
 				allowed := strings.EqualFold(step.Job.Provider, stepRoute.Provider)
 				for _, candidate := range stepRoute.Fallback {
@@ -149,10 +162,22 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
 					provider = step.Job.Provider
 				}
 				engine, ok := s.cfg.Engine(provider)
-				if !ok || engine.Type != "browser" {
-					writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "artifact handoff needs a browser provider"})
+				if !ok {
+					writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "artifact handoff provider is unavailable"})
 					return
 				}
+				if engine.Type != "browser" && (step.UsePreviousArtifact != "image" || (engine.Type != "ollama" && engine.Type != "llama_cpp")) {
+					writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "local model artifact handoff supports verified images only"})
+					return
+				}
+				if engine.Type == "ollama" && !s.cfg.Providers.Ollama.Images {
+					writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "local Ollama image input is disabled"})
+					return
+				}
+				// Persist the provider binding for an artifact-carrying step. A
+				// fallback with a different upload contract must not report success
+				// after silently dropping the verified bytes.
+				step.Job.Provider = provider
 			}
 			if err := validateJob(step.Job); err != nil {
 				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "follow-up: " + err.Error()})

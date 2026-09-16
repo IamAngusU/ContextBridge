@@ -26,24 +26,28 @@ type Job struct {
 	SessionID string `json:"session_id,omitempty"`
 	// ContextBridgeSessionKey is worker-derived for clustered browser jobs.
 	// It survives the local bridge queue so the extension can isolate producers.
-	ContextBridgeSessionKey string                 `json:"contextbridge_session_key,omitempty"`
-	BrowserProfile          string                 `json:"browser_profile,omitempty"`
-	Model                   string                 `json:"model,omitempty"`
-	Reasoning               string                 `json:"reasoning,omitempty"`
-	Kind                    string                 `json:"kind,omitempty"`
-	Task                    string                 `json:"task,omitempty"`
-	Prompt                  string                 `json:"prompt"`
-	Text                    string                 `json:"text,omitempty"`
-	Texts                   []string               `json:"texts,omitempty"`
-	TenantID                string                 `json:"tenant_id,omitempty"`
-	Documents               []vectorstore.Document `json:"documents,omitempty"`
-	Query                   string                 `json:"query,omitempty"`
-	TopK                    int                    `json:"top_k,omitempty"`
-	ImageBase64             string                 `json:"image_base64,omitempty"`
-	ImageMediaType          string                 `json:"image_media_type,omitempty"`
-	Metadata                map[string]interface{} `json:"metadata,omitempty"`
-	Output                  OutputSpec             `json:"output,omitempty"`
-	CreatedAt               time.Time              `json:"created_at,omitempty"`
+	ContextBridgeSessionKey string `json:"contextbridge_session_key,omitempty"`
+	// ContextBridgeBrowserTabID is worker/relay routing metadata. Cluster jobs
+	// use it to keep the local lease on the exact browser tab whose telemetry
+	// satisfied the requested profile/model/reasoning.
+	ContextBridgeBrowserTabID int                    `json:"contextbridge_browser_tab_id,omitempty"`
+	BrowserProfile            string                 `json:"browser_profile,omitempty"`
+	Model                     string                 `json:"model,omitempty"`
+	Reasoning                 string                 `json:"reasoning,omitempty"`
+	Kind                      string                 `json:"kind,omitempty"`
+	Task                      string                 `json:"task,omitempty"`
+	Prompt                    string                 `json:"prompt"`
+	Text                      string                 `json:"text,omitempty"`
+	Texts                     []string               `json:"texts,omitempty"`
+	TenantID                  string                 `json:"tenant_id,omitempty"`
+	Documents                 []vectorstore.Document `json:"documents,omitempty"`
+	Query                     string                 `json:"query,omitempty"`
+	TopK                      int                    `json:"top_k,omitempty"`
+	ImageBase64               string                 `json:"image_base64,omitempty"`
+	ImageMediaType            string                 `json:"image_media_type,omitempty"`
+	Metadata                  map[string]interface{} `json:"metadata,omitempty"`
+	Output                    OutputSpec             `json:"output,omitempty"`
+	CreatedAt                 time.Time              `json:"created_at,omitempty"`
 }
 
 type OutputSpec struct {
@@ -80,10 +84,12 @@ type Decision struct {
 }
 
 type Submission struct {
-	Job      Job       `json:"job"`
-	Decision *Decision `json:"decision,omitempty"`
-	Output   *Output   `json:"output,omitempty"`
-	Status   string    `json:"status"`
+	Job                              Job       `json:"job"`
+	Decision                         *Decision `json:"decision,omitempty"`
+	Output                           *Output   `json:"output,omitempty"`
+	ContextBridgeBrowserTabID        int       `json:"contextbridge_browser_tab_id,omitempty"`
+	ContextBridgeEphemeralBrowserTab bool      `json:"contextbridge_ephemeral_browser_tab,omitempty"`
+	Status                           string    `json:"status"`
 }
 
 type Output struct {
@@ -105,6 +111,11 @@ type Output struct {
 	OutputTokens      uint64              `json:"output_tokens,omitempty"`
 	TotalTokens       uint64              `json:"total_tokens,omitempty"`
 	Artifacts         []Artifact          `json:"artifacts,omitempty"`
+	// ContextBridgeBrowserTabID is internal execution metadata reported by the
+	// browser extension. It records the concrete tab that actually executed a
+	// job, which can differ from the routing tab when a fresh chat was created.
+	ContextBridgeBrowserTabID        int  `json:"contextbridge_browser_tab_id,omitempty"`
+	ContextBridgeEphemeralBrowserTab bool `json:"contextbridge_ephemeral_browser_tab,omitempty"`
 	// Truncated is set when a text result exceeded output.max_bytes. It keeps
 	// bounded responses explicit so callers never mistake a prefix for the
 	// complete model answer.
@@ -178,17 +189,29 @@ func NormalizeOutput(raw []byte, spec OutputSpec, provider, model string, latenc
 		artifacts = NormalizeArtifacts(envelope.Artifacts, spec)
 	}
 	selectedModel, selectedReasoning := "", ""
-	if provider == "browser" && envelope.Error == "" {
-		selectedModel = truncateUTF8(strings.TrimSpace(envelope.SelectedModel), 100)
-		selectedReasoning = truncateUTF8(strings.TrimSpace(envelope.SelectedReasoning), 100)
+	executedBrowserTabID := 0
+	if provider == "browser" {
+		if envelope.ContextBridgeBrowserTabID > 0 {
+			executedBrowserTabID = envelope.ContextBridgeBrowserTabID
+		}
+		if envelope.Error == "" {
+			selectedModel = truncateUTF8(strings.TrimSpace(envelope.SelectedModel), 100)
+			selectedReasoning = truncateUTF8(strings.TrimSpace(envelope.SelectedReasoning), 100)
+		}
+	}
+	outputError := func(message string) Output {
+		result := OutputError(mode, provider, model, message, latency)
+		result.ContextBridgeBrowserTabID = executedBrowserTabID
+		result.ContextBridgeEphemeralBrowserTab = envelope.ContextBridgeEphemeralBrowserTab
+		return result
 	}
 	if mode == "decision" {
 		decision := NormalizeDecision(raw, provider, model, latency)
-		return Output{Mode: mode, Decision: &decision, Model: decision.Model, SelectedModel: selectedModel, SelectedReasoning: selectedReasoning, Provider: provider, LatencyMS: decision.LatencyMS, Artifacts: artifacts}
+		return Output{Mode: mode, Decision: &decision, Model: decision.Model, SelectedModel: selectedModel, SelectedReasoning: selectedReasoning, Provider: provider, LatencyMS: decision.LatencyMS, Artifacts: artifacts, ContextBridgeBrowserTabID: executedBrowserTabID, ContextBridgeEphemeralBrowserTab: envelope.ContextBridgeEphemeralBrowserTab}
 	}
 	if json.Unmarshal(raw, &envelope) == nil && envelope.Mode == mode {
 		if envelope.Error != "" {
-			return OutputError(mode, provider, model, envelope.Error, latency)
+			return outputError(envelope.Error)
 		}
 		if mode == "json" && len(envelope.JSON) > 0 {
 			raw = envelope.JSON
@@ -204,7 +227,7 @@ func NormalizeOutput(raw []byte, spec OutputSpec, provider, model string, latenc
 			}
 		}
 		if verified < spec.MinArtifacts {
-			return OutputError(mode, provider, model, fmt.Sprintf("artifacts_missing: expected %d file(s), received %d", spec.MinArtifacts, verified), latency)
+			return outputError(fmt.Sprintf("artifacts_missing: expected %d file(s), received %d", spec.MinArtifacts, verified))
 		}
 	}
 	if spec.MinImages > 0 {
@@ -215,7 +238,7 @@ func NormalizeOutput(raw []byte, spec OutputSpec, provider, model string, latenc
 			}
 		}
 		if verified < spec.MinImages {
-			return OutputError(mode, provider, model, fmt.Sprintf("images_missing: expected %d image(s), received %d", spec.MinImages, verified), latency)
+			return outputError(fmt.Sprintf("images_missing: expected %d image(s), received %d", spec.MinImages, verified))
 		}
 	}
 	if spec.MinMedia > 0 {
@@ -226,7 +249,7 @@ func NormalizeOutput(raw []byte, spec OutputSpec, provider, model string, latenc
 			}
 		}
 		if verified < spec.MinMedia {
-			return OutputError(mode, provider, model, fmt.Sprintf("media_missing: expected %d audio/video file(s), received %d", spec.MinMedia, verified), latency)
+			return outputError(fmt.Sprintf("media_missing: expected %d audio/video file(s), received %d", spec.MinMedia, verified))
 		}
 	}
 
@@ -239,9 +262,9 @@ func NormalizeOutput(raw []byte, spec OutputSpec, provider, model string, latenc
 			truncated = true
 		}
 		if clean == "" {
-			return OutputError(mode, provider, model, "empty_response", latency)
+			return outputError("empty_response")
 		}
-		return Output{Mode: mode, Text: clean, Model: model, SelectedModel: selectedModel, SelectedReasoning: selectedReasoning, Provider: provider, LatencyMS: latency.Milliseconds(), Artifacts: artifacts, Truncated: truncated}
+		return Output{Mode: mode, Text: clean, Model: model, SelectedModel: selectedModel, SelectedReasoning: selectedReasoning, Provider: provider, LatencyMS: latency.Milliseconds(), Artifacts: artifacts, Truncated: truncated, ContextBridgeBrowserTabID: executedBrowserTabID, ContextBridgeEphemeralBrowserTab: envelope.ContextBridgeEphemeralBrowserTab}
 	}
 
 	if start := strings.IndexAny(clean, "[{"); start >= 0 {
@@ -256,20 +279,20 @@ func NormalizeOutput(raw []byte, spec OutputSpec, provider, model string, latenc
 		}
 	}
 	if len(clean) > limit || !json.Valid([]byte(clean)) {
-		return OutputError(mode, provider, model, "invalid_json", latency)
+		return outputError("invalid_json")
 	}
 	if len(spec.RequiredKeys) > 0 {
 		var object map[string]interface{}
 		if json.Unmarshal([]byte(clean), &object) != nil {
-			return OutputError(mode, provider, model, "json_object_required", latency)
+			return outputError("json_object_required")
 		}
 		for _, key := range spec.RequiredKeys {
 			if _, ok := object[key]; !ok {
-				return OutputError(mode, provider, model, "missing_required_key:"+key, latency)
+				return outputError("missing_required_key:" + key)
 			}
 		}
 	}
-	return Output{Mode: mode, JSON: json.RawMessage(clean), Model: model, SelectedModel: selectedModel, SelectedReasoning: selectedReasoning, Provider: provider, LatencyMS: latency.Milliseconds(), Artifacts: artifacts}
+	return Output{Mode: mode, JSON: json.RawMessage(clean), Model: model, SelectedModel: selectedModel, SelectedReasoning: selectedReasoning, Provider: provider, LatencyMS: latency.Milliseconds(), Artifacts: artifacts, ContextBridgeBrowserTabID: executedBrowserTabID, ContextBridgeEphemeralBrowserTab: envelope.ContextBridgeEphemeralBrowserTab}
 }
 
 // NormalizeArtifacts applies the protocol's bounded, deterministic artifact

@@ -2,6 +2,88 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.70 - 2026-09-16
+
+### Added
+
+- `contextbridge mcp serve` provides a bounded, local-only MCP stdio server for
+  authenticated status, single-attempt job submission, and stored-result lookup;
+  it exposes no arbitrary shell, remote MCP transport, MCP client, artifacts,
+  experimental tasks, or misleading provider cancellation
+- `contextbridge benchmark` measures authenticated durable queue operations,
+  small E2EE round trips, production artifact verification, benchmark-process
+  resources while hosting one fresh idle relay, release/extension size, Bolt
+  growth, and typed heartbeat payloads including per-hour application traffic;
+  unsupported measurements are labeled unavailable instead of reported as zero
+
+### Changed
+
+- automatic Ollama routing now selects only available models with runtime-verified
+  compatible capabilities, prefers a compatible already-loaded model, and never
+  upgrades name inference into authorization; an explicit model remains a
+  documented operator override unless runtime evidence proves incompatibility
+- scheduled follow-ups can pass the immediately preceding verified image bytes
+  to Ollama or llama.cpp after recomputing SHA-256, media signature, and size;
+  local handoff remains image-only, URL-free, provider-pinned, and limited to 8 MiB
+- producer-scoped job history now uses an atomically maintained owner/time index;
+  legacy databases migrate it once at open and normal reads never decode another
+  producer's records
+- browser scheduling now evaluates profile and explicit model against the same
+  waiting tab's bounded capability record instead of combining evidence from
+  different tabs on one node; current-selection and legacy-node compatibility
+  remain explicit fallbacks
+- browser follow-ups persist the tab that actually executed, then reconcile it
+  with a producer-scoped opaque session selector from fresh extension telemetry;
+  moved conversations are recovered on the same worker without exposing their
+  URL, title, prompt, or public session name through the relay API
+- fresh per-session and disposable per-job browser requests are authenticated
+  routing requirements; an otherwise occupied tab can act only as a verified
+  launcher for a separate ChatGPT/Gemini conversation, never as free capacity
+- opaque session placements now share the mandatory retention age and have an
+  independent guarded count, so durable affinity cannot grow the relay database
+  without bound after detailed jobs are pruned
+- browser session bootstrap is serialized by a durable producer/session lock;
+  concurrent N:N submitters cannot create two authoritative conversations for
+  one logical session, cancelled pre-dispatch reservations are released, and
+  dispatched ownership survives cancellation until matching completion or teardown
+
+### Fixed
+
+- MCP job metadata is now a runtime-enforced closed allowlist, and MCP status
+  removes endpoint URLs and credential-shaped fields before returning data to a
+  model-controlled host
+- cluster workers strip producer-supplied browser recovery/routing controls even
+  for provider-auto routes, and reject malformed local responses that omit the
+  required compact job envelope instead of echoing untrusted input upstream
+- Chromium MV3 restarts restore exact durable browser claims and reserve their
+  tabs before polling; a read-only generation-bound lease check, identity-token
+  release, duplicate-claim quarantine, deadline, and bounded backoff prevent both
+  double sends and a fixed 15-second false release window
+- a job obtained by an older long poll during lease recovery is returned to the
+  browser queue without provider action and preserves sent-unknown observation state
+- fresh-chat URL promotion now tolerates a delayed owned user turn without
+  cancelling a valid lease, re-reads stale tab snapshots after concurrent
+  promotion, and never reads response DOM before conversation ownership proof
+- pipeline jobs persist their run/step/parent metadata in the admission transaction;
+  a failed intermediate or final run checkpoint stops subsequent external work
+  and is never presented as a durable completion
+- Windows schedule persistence uses a unique synced temporary file plus bounded
+  replace retries, avoiding transient sharing-violation failures without losing
+  the previous valid schedule file
+- an accepted local stop flushes its confirmation before process cancellation
+  and closes post-response keep-alive connections without making HTTP shutdown
+  wait on the request that initiated it
+
+### Tested
+
+- regression coverage includes restart/action interleavings, stale generations,
+  duplicate claims, job-deadline expiry, non-renewing lease reads, safe lease
+  return, owner-index migration/isolation/retention, checkpoint write failures,
+  evidence-based local model selection, verified local image handoff, moved-tab
+  session recovery, all-tabs-bound fresh launch, permission/tab-limit checks,
+  actual execution-tab feedback, per-job affinity exclusion, concurrent session
+  bootstrap, and repeated race-instrumented local shutdown
+
 ## 0.5.69 - 2026-09-15
 
 ### Fixed

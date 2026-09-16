@@ -318,6 +318,45 @@ func TestBrowserJobRoundTrip(t *testing.T) {
 	if leaseResp.StatusCode != http.StatusOK {
 		t.Fatalf("lease renewal returned %s", leaseResp.Status)
 	}
+	leaseStatusReq, _ := http.NewRequest(http.MethodGet, httpServer.URL+"/v1/browser/jobs/"+work.Job.ID+"/lease", nil)
+	leaseStatusReq.Header.Set("Authorization", "Bearer "+cfg.Server.Token)
+	leaseStatusReq.Header.Set("X-ContextBridge-Lease-Generation", strconv.FormatUint(work.LeaseGeneration, 10))
+	leaseStatusResp, leaseStatusErr := http.DefaultClient.Do(leaseStatusReq)
+	if leaseStatusErr != nil {
+		t.Fatal(leaseStatusErr)
+	}
+	var leaseStatus struct {
+		OK             bool      `json:"ok"`
+		LeaseExpiresAt time.Time `json:"lease_expires_at"`
+	}
+	if err := json.NewDecoder(leaseStatusResp.Body).Decode(&leaseStatus); err != nil {
+		t.Fatal(err)
+	}
+	leaseStatusResp.Body.Close()
+	if leaseStatusResp.StatusCode != http.StatusOK || !leaseStatus.OK || leaseStatus.LeaseExpiresAt.IsZero() {
+		t.Fatalf("unexpected read-only lease status: %s %#v", leaseStatusResp.Status, leaseStatus)
+	}
+	wrongLeaseStatusReq, _ := http.NewRequest(http.MethodGet, httpServer.URL+"/v1/browser/jobs/"+work.Job.ID+"/lease", nil)
+	wrongLeaseStatusReq.Header.Set("Authorization", "Bearer "+cfg.Server.Token)
+	wrongLeaseStatusReq.Header.Set("X-ContextBridge-Lease-Generation", strconv.FormatUint(work.LeaseGeneration+1, 10))
+	wrongLeaseStatusResp, wrongLeaseStatusErr := http.DefaultClient.Do(wrongLeaseStatusReq)
+	if wrongLeaseStatusErr != nil {
+		t.Fatal(wrongLeaseStatusErr)
+	}
+	wrongLeaseStatusResp.Body.Close()
+	if wrongLeaseStatusResp.StatusCode != http.StatusConflict {
+		t.Fatalf("wrong lease generation returned %s", wrongLeaseStatusResp.Status)
+	}
+	claimGetReq, _ := http.NewRequest(http.MethodGet, httpServer.URL+"/v1/browser/jobs/"+work.Job.ID+"/claim", nil)
+	claimGetReq.Header.Set("Authorization", "Bearer "+cfg.Server.Token)
+	claimGetResp, claimGetErr := http.DefaultClient.Do(claimGetReq)
+	if claimGetErr != nil {
+		t.Fatal(claimGetErr)
+	}
+	claimGetResp.Body.Close()
+	if claimGetResp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("GET claim returned %s", claimGetResp.Status)
+	}
 	claimReq, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/browser/jobs/"+work.Job.ID+"/claim", bytes.NewReader([]byte(`{"action":"send"}`)))
 	claimReq.Header.Set("Authorization", "Bearer "+cfg.Server.Token)
 	claimReq.Header.Set("Content-Type", "application/json")
@@ -379,6 +418,62 @@ func TestBrowserJobRoundTrip(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("submission did not complete")
+	}
+}
+
+func TestBrowserNextEndpointHonorsRelaySelectedTab(t *testing.T) {
+	cfg := config.Config{
+		Version:   1,
+		Server:    config.Server{Listen: "127.0.0.1:32145", Token: "test-token-that-is-long-enough"},
+		Storage:   config.Storage{Directory: t.TempDir(), Inbox: t.TempDir()},
+		Providers: config.Providers{Browser: config.BrowserProvider{LeaseSeconds: 5}},
+	}
+	server, err := NewServer(cfg, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.store.Queue(Job{ID: "endpoint-exact-tab", Prompt: "exact", ContextBridgeBrowserTabID: 42}, nil, time.Second)
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	poll := func(tab string) (*http.Response, browserJob) {
+		req, _ := http.NewRequest(http.MethodGet, httpServer.URL+"/v1/browser/jobs/next?wait=0&tab_id="+tab, nil)
+		req.Header.Set("Authorization", "Bearer "+cfg.Server.Token)
+		response, requestErr := http.DefaultClient.Do(req)
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		var work browserJob
+		if response.StatusCode == http.StatusOK {
+			if err := json.NewDecoder(response.Body).Decode(&work); err != nil {
+				t.Fatal(err)
+			}
+		}
+		response.Body.Close()
+		return response, work
+	}
+	if response, _ := poll("41"); response.StatusCode != http.StatusNoContent {
+		t.Fatalf("wrong tab poll returned %s, want 204", response.Status)
+	}
+	response, work := poll("42")
+	if response.StatusCode != http.StatusOK || work.Job.ContextBridgeBrowserTabID != 42 {
+		t.Fatalf("designated tab did not receive pinned work: %s %#v", response.Status, work)
+	}
+	release, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/browser/jobs/"+work.Job.ID+"/release", nil)
+	release.Header.Set("Authorization", "Bearer "+cfg.Server.Token)
+	release.Header.Set("X-ContextBridge-Lease-Generation", strconv.FormatUint(work.LeaseGeneration, 10))
+	released, err := http.DefaultClient.Do(release)
+	if err != nil {
+		t.Fatal(err)
+	}
+	released.Body.Close()
+	if released.StatusCode != http.StatusOK {
+		t.Fatalf("release returned %s", released.Status)
+	}
+	if response, _ := poll("41"); response.StatusCode != http.StatusNoContent {
+		t.Fatalf("wrong tab leased returned work: %s", response.Status)
+	}
+	if response, _ := poll("invalid"); response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("malformed tab id returned %s, want 400", response.Status)
 	}
 }
 

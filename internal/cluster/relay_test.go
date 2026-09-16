@@ -33,6 +33,19 @@ func TestRateLimitClientKeyTrustsOnlyLoopbackProxy(t *testing.T) {
 	}
 }
 
+func TestPublicNodeResponseRedactsBrowserSessionKeys(t *testing.T) {
+	nodes := []Node{{ID: "node-a", Capabilities: Capabilities{BrowserSessions: []BrowserSessionCapability{{
+		TabID: 7, Profile: "chatgpt", SessionKey: "cb:" + strings.Repeat("a", 64), SessionKeySupported: true,
+	}}}}}
+	redactNodeRoutingEvidence(nodes)
+	if nodes[0].Capabilities.BrowserSessions[0].SessionKey != "" {
+		t.Fatal("routing-only browser session key remained in a public node response")
+	}
+	if !nodes[0].Capabilities.BrowserSessions[0].SessionKeySupported {
+		t.Fatal("redaction removed non-sensitive compatibility metadata")
+	}
+}
+
 func TestDecodeJSONEnforcesExactBodyLimit(t *testing.T) {
 	raw := []byte(`{"ok":true}`)
 	var exact struct {
@@ -124,6 +137,49 @@ func TestWorkerReservationCancellationAfterDispatchRequiresWorkerCancel(t *testi
 	}
 }
 
+func TestRelayCancelBeforeDispatchReleasesBrowserSessionLock(t *testing.T) {
+	admin := "admin_012345678901234567890123456789012345"
+	relay, err := NewRelay(RelayConfig{Database: filepath.Join(t.TempDir(), "relay.db"), AdminToken: admin}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+	producerToken, _, err := relay.store.CreateToken("producer", "producer-a", nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requirements := Requirements{Task: "generation", Provider: "browser", BrowserProfile: "chatgpt", SessionID: "cancel-before-dispatch"}
+	job, err := relay.store.CreateJob(SubmitRequest{OwnerSubject: "producer-a", Requirements: requirements, Payload: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err = relay.store.AssignBrowserJob(job.ID, "node-a", 42, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := newWorkerConnection(nil, 1)
+	if !worker.reserve(job.ID) {
+		t.Fatal("test worker slot could not be reserved")
+	}
+	relay.mu.Lock()
+	relay.workers["node-a"] = worker
+	relay.mu.Unlock()
+
+	request := httptest.NewRequest(http.MethodDelete, "/v1/cluster/jobs/"+job.ID, nil)
+	request.Header.Set("Authorization", "Bearer "+producerToken)
+	response := httptest.NewRecorder()
+	relay.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("cancel returned %d: %s", response.Code, response.Body.String())
+	}
+	if busy, err := relay.store.BrowserSessionBusy("producer-a", requirements, ""); err != nil || busy {
+		t.Fatalf("never-dispatched cancellation retained the session lock: busy=%v err=%v", busy, err)
+	}
+	if worker.beginDispatch(job.ID, job.Attempt) {
+		t.Fatal("cancelled pre-dispatch reservation still began dispatch")
+	}
+}
+
 func TestMatchingResultReleasesReservationAfterCancelledRecordIsPruned(t *testing.T) {
 	store, err := OpenStore(filepath.Join(t.TempDir(), "relay.db"))
 	if err != nil {
@@ -131,7 +187,7 @@ func TestMatchingResultReleasesReservationAfterCancelledRecordIsPruned(t *testin
 	}
 	defer store.Close()
 
-	job, err := store.CreateJob(SubmitRequest{Payload: json.RawMessage(`{}`)})
+	job, err := store.CreateJob(SubmitRequest{Requirements: Requirements{Provider: "ollama"}, Payload: json.RawMessage(`{}`)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +216,7 @@ func TestMatchingResultReleasesReservationAfterCancelledRecordIsPruned(t *testin
 		t.Fatal(err)
 	}
 	if _, err := store.PruneRetention(time.Now().UTC(), RetentionPolicy{
-		MaxAge: 24 * time.Hour, MaxTerminalJobs: 1, MaxEvents: 1, MaxTerminalPipelineRuns: 1,
+		MaxAge: 24 * time.Hour, MaxTerminalJobs: 1, MaxEvents: 1, MaxTerminalPipelineRuns: 1, MaxSessionPlacements: 1,
 	}); err != nil {
 		t.Fatal(err)
 	}

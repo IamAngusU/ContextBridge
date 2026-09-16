@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"math"
+	"strings"
 	"testing"
 	"time"
 )
@@ -113,11 +114,180 @@ func TestBrowserProfileRequirementIsAHardReadyTabFilter(t *testing.T) {
 	}
 }
 
+func TestBrowserProfileAndModelMustMatchTheSameReadyTab(t *testing.T) {
+	node := Node{ID: "split-browser", Connected: true, LastSeen: time.Now().UTC(), Capabilities: Capabilities{
+		Tasks: []string{"generation"}, Providers: []string{"browser"}, MaxConcurrent: 2, BrowserTabs: 2,
+		BrowserSessions: []BrowserSessionCapability{
+			{TabID: 1, Profile: "chatgpt", State: "waiting", CurrentModel: "GPT-5.6 Sol", ModelChoices: []string{"GPT-5.6 Sol", "GPT-5.5"}},
+			{TabID: 2, Profile: "gemini", State: "waiting", CurrentModel: "3.6 Flash", ModelChoices: []string{"3.6 Flash", "3.1 Pro"}},
+		},
+		// The node-wide inventory intentionally contains both labels. It must not
+		// allow the scheduler to combine a profile from one tab with a model that
+		// exists only on another tab.
+		Models: []ModelCapability{
+			{Name: "GPT-5.6 Sol", Provider: "browser", Tasks: []string{"generation"}},
+			{Name: "3.1 Pro", Provider: "browser", Tasks: []string{"generation"}},
+		},
+	}}
+
+	if got := Rank([]Node{node}, Requirements{Task: "generation", Provider: "browser", BrowserProfile: "chatgpt", Model: "3.1 Pro"}); len(got) != 0 {
+		t.Fatalf("profile and model were combined across tabs: %#v", got)
+	}
+	if got := Rank([]Node{node}, Requirements{Task: "generation", Provider: "browser", BrowserProfile: "gemini", Model: "3.1 Pro"}); len(got) != 1 {
+		t.Fatalf("valid same-tab browser model choice was rejected: %#v", got)
+	}
+	if got := Rank([]Node{node}, Requirements{Task: "generation", Provider: "browser", BrowserProfile: "chatgpt", Model: "GPT-5.6 Sol"}); len(got) != 1 {
+		t.Fatalf("current model from an older per-tab advertisement was rejected: %#v", got)
+	}
+
+	legacy := node
+	legacy.ID = "legacy-browser"
+	legacy.Capabilities.BrowserSessions = nil
+	if got := Rank([]Node{legacy}, Requirements{Task: "generation", Provider: "browser", Model: "GPT-5.6 Sol"}); len(got) != 1 {
+		t.Fatalf("legacy model-only browser inventory lost compatibility: %#v", got)
+	}
+}
+
+func TestBrowserTabModelChoiceFoldsNBSPAndExcludesBusyTabs(t *testing.T) {
+	node := Node{ID: "browser", Connected: true, LastSeen: time.Now().UTC(), Capabilities: Capabilities{
+		Tasks: []string{"generation"}, Providers: []string{"browser"}, MaxConcurrent: 2, BrowserTabs: 2, BrowserBusy: 1,
+		BrowserSessions: []BrowserSessionCapability{
+			{TabID: 1, Profile: "chatgpt", State: "working", ModelChoices: []string{"GPT-5.6\u00a0Sol"}},
+			{TabID: 2, Profile: "gemini", State: "waiting", ModelChoices: []string{"3.6 Flash"}},
+		},
+		Models: []ModelCapability{{Name: "GPT-5.6\u00a0Sol", Provider: "browser", Tasks: []string{"generation"}}},
+	}}
+
+	request := Requirements{Task: "generation", Provider: "browser", BrowserProfile: "chatgpt", Model: "GPT-5.6 Sol"}
+	if got := Rank([]Node{node}, request); len(got) != 0 {
+		t.Fatalf("busy matching browser tab was considered schedulable: %#v", got)
+	}
+	node.Capabilities.BrowserSessions[0].State = "waiting"
+	node.Capabilities.BrowserBusy = 0
+	if got := Rank([]Node{node}, request); len(got) != 1 {
+		t.Fatalf("NBSP-equivalent model label was not accepted on a ready tab: %#v", got)
+	}
+}
+
+func TestBrowserSessionBoundTabsAreReservedForAffinityAndRecoverMovedConversation(t *testing.T) {
+	sessions := []BrowserSessionCapability{
+		{TabID: 41, Profile: "chatgpt", State: "session_bound", CurrentModel: "GPT-5.6 Sol"},
+		{TabID: 42, Profile: "chatgpt", State: "waiting", CurrentModel: "GPT-5.6 Sol"},
+	}
+	newSession := Requirements{Task: "generation", Provider: "browser", BrowserProfile: "chatgpt", Model: "GPT-5.6 Sol"}
+	selected, ok := selectReadyBrowserSession(sessions, newSession)
+	if !ok || selected.TabID != 42 {
+		t.Fatalf("new session stole an occupied browser conversation: %#v %v", selected, ok)
+	}
+	affinity := newSession
+	affinity.BrowserTabID = 41
+	affinity.BrowserSessionRecovery = true
+	selected, ok = selectReadyBrowserSession(sessions, affinity)
+	if !ok || selected.TabID != 41 || selectedBrowserTabBinding(affinity, selected) != 41 {
+		t.Fatalf("same-session affinity did not reuse its bound tab: %#v %v", selected, ok)
+	}
+
+	// The old tab vanished and the saved conversation was reopened elsewhere.
+	// The relay must stay on the same node but leave execution unpinned so the
+	// extension can prove the saved URL and report the replacement tab.
+	sessions = []BrowserSessionCapability{
+		{TabID: 42, Profile: "chatgpt", State: "waiting", CurrentModel: "GPT-5.6 Sol"},
+		{TabID: 43, Profile: "chatgpt", State: "session_bound", CurrentModel: "GPT-5.6 Sol"},
+	}
+	selected, ok = selectReadyBrowserSession(sessions, affinity)
+	if !ok || selectedBrowserTabBinding(affinity, selected) != 0 {
+		t.Fatalf("moved-session recovery stayed pinned to a vanished tab: %#v %v", selected, ok)
+	}
+
+	workingOld := append([]BrowserSessionCapability{{TabID: 41, Profile: "chatgpt", State: "working", CurrentModel: "GPT-5.6 Sol"}}, sessions...)
+	if selected, ok = selectReadyBrowserSession(workingOld, affinity); ok {
+		t.Fatalf("a busy existing session silently escaped to another tab: %#v", selected)
+	}
+	navigatedOld := append([]BrowserSessionCapability{{TabID: 41, Profile: "gemini", State: "waiting", CurrentModel: "3.6 Flash"}}, sessions...)
+	if selected, ok = selectReadyBrowserSession(navigatedOld, affinity); !ok || selectedBrowserTabBinding(affinity, selected) != 0 {
+		t.Fatalf("an incompatible reused tab id blocked saved-URL recovery: %#v %v", selected, ok)
+	}
+}
+
+func TestOpaqueBrowserSessionKeyOverridesStaleTabPlacement(t *testing.T) {
+	requirements := Requirements{
+		Task: "generation", Provider: "browser", BrowserProfile: "chatgpt", Model: "GPT-5.6 Sol",
+		BrowserTabID: 41, BrowserSessionRecovery: true, BrowserSessionKey: "cb:" + strings.Repeat("a", 64),
+	}
+	sessions := []BrowserSessionCapability{
+		{TabID: 41, Profile: "chatgpt", State: "session_bound", SessionKeySupported: true, CurrentModel: "GPT-5.6 Sol"},
+		{TabID: 42, Profile: "chatgpt", State: "waiting", SessionKeySupported: true, SessionKey: requirements.BrowserSessionKey, CurrentModel: "GPT-5.6 Sol"},
+	}
+	selected, ok := selectReadyBrowserSession(sessions, requirements)
+	if !ok || selected.TabID != 42 || selectedBrowserTabBinding(requirements, selected) != 42 {
+		t.Fatalf("live opaque session evidence did not override stale tab placement: %#v %v", selected, ok)
+	}
+	sessions = append(sessions, BrowserSessionCapability{
+		TabID: 43, Profile: "chatgpt", State: "waiting", SessionKeySupported: true,
+		SessionKey: requirements.BrowserSessionKey, CurrentModel: "GPT-5.6 Sol",
+	})
+	if selected, ok = selectReadyBrowserSession(sessions, requirements); ok {
+		t.Fatalf("duplicate session-key claims did not fail closed: %#v", selected)
+	}
+}
+
+func TestOpaqueBrowserSessionKeyEvidenceIsProfileScoped(t *testing.T) {
+	key := "cb:" + strings.Repeat("a", 64)
+	sessions := []BrowserSessionCapability{
+		{TabID: 41, Profile: "chatgpt", State: "session_bound", SessionKeySupported: true, SessionKey: key},
+		{TabID: 42, Profile: "gemini", State: "session_bound", SessionKeySupported: true, SessionKey: key},
+		{TabID: 43, Profile: "custom-secure", State: "session_bound", SessionKeySupported: true, SessionKey: key},
+	}
+	for _, profile := range []string{"chatgpt", "gemini", "custom-secure"} {
+		selected, ok := selectReadyBrowserSession(sessions, Requirements{
+			Task: "generation", Provider: "browser", BrowserProfile: profile, BrowserSessionKey: key,
+		})
+		if !ok || selected.Profile != profile {
+			t.Fatalf("opaque session evidence crossed profile %q: %#v %v", profile, selected, ok)
+		}
+	}
+}
+
+func TestFreshBrowserChatCanUseBoundTabOnlyAsLauncher(t *testing.T) {
+	requirements := Requirements{Task: "generation", Provider: "browser", BrowserProfile: "chatgpt", BrowserFreshChat: true}
+	sessions := []BrowserSessionCapability{
+		{TabID: 11, Profile: "chatgpt", State: "session_bound", SessionKeySupported: true, CanCreateFreshChat: true},
+		{TabID: 12, Profile: "chatgpt", State: "session_bound", SessionKeySupported: true, CanCreateFreshChat: true},
+	}
+	selected, ok := selectReadyBrowserSession(sessions, requirements)
+	if !ok || selected.TabID != 11 {
+		t.Fatalf("fresh job could not use a bound tab as a deterministic launcher: %#v %v", selected, ok)
+	}
+	sessions[0].CanCreateFreshChat = false
+	sessions[1].CanCreateFreshChat = false
+	if selected, ok = selectReadyBrowserSession(sessions, requirements); ok {
+		t.Fatalf("fresh job used a launcher without verified creation capability: %#v", selected)
+	}
+	if selected, ok = selectReadyBrowserSession([]BrowserSessionCapability{{
+		TabID: 13, Profile: "chatgpt", State: "waiting", SessionKeySupported: true,
+		DefaultFreshChat: true, CanCreateFreshChat: false,
+	}}, Requirements{Task: "generation", Provider: "browser", BrowserProfile: "chatgpt"}); ok {
+		t.Fatalf("extension default fresh mode leased a waiting tab without creation capability: %#v", selected)
+	}
+	sessions[1].CanCreateFreshChat = true
+	sessions[1].DefaultFreshChat = true
+	requirements.BrowserFreshChat = false
+	if selected, ok = selectReadyBrowserSession(sessions, requirements); !ok || selected.TabID != 12 {
+		t.Fatalf("extension default fresh-chat mode was not routable: %#v %v", selected, ok)
+	}
+	requirements.BrowserTabID = 99
+	if selected, ok = selectReadyBrowserSession(sessions, requirements); ok {
+		t.Fatalf("a missing established session silently launched another chat: %#v", selected)
+	}
+}
+
 func TestBusyBrowserTabsDoNotHideLocalModelCapacity(t *testing.T) {
 	now := time.Now().UTC()
 	node := Node{ID: "mixed", Connected: true, LastSeen: now, Capabilities: Capabilities{
 		Tasks: []string{"generation"}, Providers: []string{"browser", "ollama"},
-		MaxConcurrent: 4, Running: 1, BrowserTabs: 1, BrowserBusy: 1,
+		AutomaticTasks: map[string][]string{"ollama": {"generation"}},
+		Models:         []ModelCapability{{Name: "local-text", Provider: "ollama", Tasks: []string{"generation"}, Available: true, CapabilitiesVerified: true}},
+		MaxConcurrent:  4, Running: 1, BrowserTabs: 1, BrowserBusy: 1,
 	}}
 	if got := Rank([]Node{node}, Requirements{Task: "generation", Provider: "browser"}); len(got) != 0 {
 		t.Fatalf("browser job routed to a worker with no free tab: %#v", got)
@@ -164,9 +334,10 @@ func TestRequestedModelMustProvideRequestedModality(t *testing.T) {
 func TestModelLessRequestRequiresOneModelToSatisfyTaskAndModality(t *testing.T) {
 	node := Node{ID: "split", Connected: true, LastSeen: time.Now().UTC(), Capabilities: Capabilities{
 		Tasks: []string{"generation", "vision"}, Providers: []string{"ollama"}, MaxConcurrent: 2,
+		AutomaticTasks: map[string][]string{"ollama": {"generation"}},
 		Models: []ModelCapability{
-			{Name: "text-only", Provider: "ollama", Tasks: []string{"generation"}},
-			{Name: "vision-only", Provider: "ollama", Vision: true, Tasks: []string{"vision"}},
+			{Name: "text-only", Provider: "ollama", Tasks: []string{"generation"}, Available: true, CapabilitiesVerified: true},
+			{Name: "vision-only", Provider: "ollama", Vision: true, Tasks: []string{"vision"}, Available: true, CapabilitiesVerified: true},
 		},
 	}}
 	if got := Rank([]Node{node}, Requirements{Task: "generation", Provider: "ollama", Vision: true}); len(got) != 0 {
@@ -181,13 +352,101 @@ func TestModelLessRequestRequiresOneModelToSatisfyTaskAndModality(t *testing.T) 
 func TestAutomaticModelSelectorUsesCompatibleAuthoritativeModel(t *testing.T) {
 	node := Node{ID: "auto", Connected: true, LastSeen: time.Now().UTC(), Capabilities: Capabilities{
 		Tasks: []string{"generation", "vision"}, Providers: []string{"ollama"}, MaxConcurrent: 2,
+		AutomaticTasks: map[string][]string{"ollama": {"generation"}},
 		Models: []ModelCapability{
-			{Name: "text-only", Provider: "ollama", Tasks: []string{"generation"}},
-			{Name: "vision-model", Provider: "ollama", Vision: true, Tasks: []string{"generation", "vision"}},
+			{Name: "text-only", Provider: "ollama", Tasks: []string{"generation"}, Available: true, CapabilitiesVerified: true},
+			{Name: "vision-model", Provider: "ollama", Vision: true, Tasks: []string{"generation", "vision"}, Available: true, CapabilitiesVerified: true},
 		},
 	}}
 	if got := Rank([]Node{node}, Requirements{Task: "generation", Provider: "ollama", Model: "auto", Vision: true}); len(got) != 1 {
 		t.Fatalf("auto selector did not use a compatible authoritative model: %#v", got)
+	}
+}
+
+func TestAutomaticOllamaSelectorRequiresAvailabilityAndVerifiedCapabilities(t *testing.T) {
+	base := Capabilities{
+		Tasks: []string{"generation"}, Providers: []string{"ollama"},
+		AutomaticTasks: map[string][]string{"ollama": {"generation"}}, MaxConcurrent: 1,
+	}
+	for _, test := range []struct {
+		name  string
+		model ModelCapability
+	}{
+		{name: "name inference", model: ModelCapability{Name: "obvious-text-name", Provider: "ollama", Tasks: []string{"generation"}, Available: true}},
+		{name: "not available", model: ModelCapability{Name: "text", Provider: "ollama", Tasks: []string{"generation"}, CapabilitiesVerified: true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			capabilities := base
+			capabilities.Models = []ModelCapability{test.model}
+			node := Node{ID: test.name, Connected: true, LastSeen: time.Now().UTC(), Capabilities: capabilities}
+			if got := Rank([]Node{node}, Requirements{Task: "generation", Provider: "ollama"}); len(got) != 0 {
+				t.Fatalf("unproven automatic model was scheduled: %#v", got)
+			}
+		})
+	}
+}
+
+func TestExplicitOllamaModelPreservesOperatorChoiceWithoutCapabilityEvidence(t *testing.T) {
+	node := Node{ID: "legacy", Connected: true, LastSeen: time.Now().UTC(), Capabilities: Capabilities{
+		Tasks: []string{"generation"}, Providers: []string{"ollama"}, MaxConcurrent: 1,
+		Models: []ModelCapability{{
+			Name: "legacy-model", Provider: "ollama", Tasks: []string{"embedding"}, Available: true,
+			CapabilitySource: "name_inference",
+		}},
+	}}
+	if got := Rank([]Node{node}, Requirements{Task: "generation", Provider: "ollama", Model: "legacy-model"}); len(got) != 1 {
+		t.Fatalf("explicit available model was rejected from unverified name inference: %#v", got)
+	}
+	if got := Rank([]Node{node}, Requirements{Task: "generation", Provider: "ollama"}); len(got) != 0 {
+		t.Fatalf("automatic request trusted the same unverified model: %#v", got)
+	}
+	node.Capabilities.Models[0].CapabilitiesVerified = true
+	if got := Rank([]Node{node}, Requirements{Task: "generation", Provider: "ollama", Model: "legacy-model"}); len(got) != 0 {
+		t.Fatalf("verified incompatible explicit model was scheduled: %#v", got)
+	}
+}
+
+func TestFeatureOnlyAutomaticOllamaRequestRequiresVerifiedAvailableModel(t *testing.T) {
+	base := ModelCapability{Name: "vision", Provider: "ollama", Tasks: []string{"vision"}, Vision: true}
+	for _, test := range []struct {
+		name  string
+		model ModelCapability
+		want  int
+	}{
+		{name: "name inference", model: func() ModelCapability { item := base; item.Available = true; return item }()},
+		{name: "unavailable", model: func() ModelCapability { item := base; item.CapabilitiesVerified = true; return item }()},
+		{name: "verified available", model: func() ModelCapability {
+			item := base
+			item.Available = true
+			item.CapabilitiesVerified = true
+			return item
+		}(), want: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			node := Node{ID: test.name, Connected: true, LastSeen: time.Now().UTC(), Capabilities: Capabilities{
+				Providers: []string{"ollama"}, MaxConcurrent: 1, Models: []ModelCapability{test.model},
+			}}
+			if got := Rank([]Node{node}, Requirements{Provider: "ollama", Vision: true}); len(got) != test.want {
+				t.Fatalf("feature-only auto request ranked %d nodes, want %d: %#v", len(got), test.want, got)
+			}
+		})
+	}
+}
+
+func TestAutomaticOllamaSelectorPrefersLoadedCompatibleNode(t *testing.T) {
+	now := time.Now().UTC()
+	capabilities := func(loaded bool) Capabilities {
+		return Capabilities{
+			Tasks: []string{"generation"}, Providers: []string{"ollama"}, AutomaticTasks: map[string][]string{"ollama": {"generation"}}, MaxConcurrent: 1,
+			Models: []ModelCapability{{Name: "text", Provider: "ollama", Tasks: []string{"generation"}, Available: true, Loaded: loaded, CapabilitiesVerified: true}},
+		}
+	}
+	ranked := Rank([]Node{
+		{ID: "cold", Connected: true, LastSeen: now, Capabilities: capabilities(false)},
+		{ID: "loaded", Connected: true, LastSeen: now, Capabilities: capabilities(true)},
+	}, Requirements{Task: "generation", Provider: "ollama"})
+	if len(ranked) != 2 || ranked[0].Node.ID != "loaded" {
+		t.Fatalf("loaded compatible model was not preferred: %#v", ranked)
 	}
 }
 
@@ -235,24 +494,24 @@ func TestRequestedModelMustProvideRequestedTask(t *testing.T) {
 
 func TestModelLessTaskUsesAuthoritativeProviderInventory(t *testing.T) {
 	base := Capabilities{
-		Tasks: []string{"generation"}, Providers: []string{"browser", "ollama"}, MaxConcurrent: 2,
+		Tasks: []string{"generation"}, Providers: []string{"browser", "ollama"}, AutomaticTasks: map[string][]string{"ollama": {"generation"}}, MaxConcurrent: 2,
 	}
 	node := Node{ID: "mixed", Connected: true, LastSeen: time.Now().UTC()}
 
 	node.Capabilities = base
-	node.Capabilities.Models = []ModelCapability{{Name: "embed-only", Provider: "ollama", Embedding: true, Tasks: []string{"embedding"}}}
+	node.Capabilities.Models = []ModelCapability{{Name: "embed-only", Provider: "ollama", Embedding: true, Tasks: []string{"embedding"}, Available: true, CapabilitiesVerified: true}}
 	if got := Rank([]Node{node}, Requirements{Task: "generation", Provider: "ollama"}); len(got) != 0 {
 		t.Fatalf("global task advertisement bypassed authoritative embedding-only inventory: %#v", got)
 	}
 
-	node.Capabilities.Models = []ModelCapability{{Name: "text-model", Provider: "ollama", Tasks: []string{"generation"}}}
+	node.Capabilities.Models = []ModelCapability{{Name: "text-model", Provider: "ollama", Tasks: []string{"generation"}, Available: true, CapabilitiesVerified: true}}
 	if got := Rank([]Node{node}, Requirements{Task: "generation", Provider: "ollama"}); len(got) != 1 {
 		t.Fatalf("capable provider inventory was rejected: %#v", got)
 	}
 
 	node.Capabilities.Models = nil
-	if got := Rank([]Node{node}, Requirements{Task: "generation", Provider: "ollama"}); len(got) != 1 {
-		t.Fatalf("unavailable inventory did not fall back to worker task advertisement: %#v", got)
+	if got := Rank([]Node{node}, Requirements{Task: "generation", Provider: "ollama"}); len(got) != 0 {
+		t.Fatalf("automatic Ollama request ignored missing model evidence: %#v", got)
 	}
 }
 

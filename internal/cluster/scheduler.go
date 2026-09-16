@@ -51,6 +51,11 @@ func RankWithEstimate(nodes []Node, requirements Requirements, estimatedVRAM uin
 		if strings.EqualFold(requirements.Provider, "browser") && node.Capabilities.BrowserTabs > 0 {
 			score += float64(node.Capabilities.BrowserBusy) / float64(node.Capabilities.BrowserTabs) * 40
 		}
+		if isAutomaticOllamaRequest(requirements) && hasLoadedAutomaticModel(node.Capabilities.Models, requirements) {
+			// Loading a cold model is valid, but an already loaded compatible
+			// model avoids a cold start when otherwise similar workers compete.
+			score -= 6
+		}
 		if requirements.MinFreeVRAM == 0 && estimatedVRAM > 0 {
 			if hasVRAM(node, estimatedVRAM) {
 				score -= 10
@@ -90,6 +95,8 @@ func hasVRAM(node Node, required uint64) bool {
 
 func matchesNode(node Node, requirements Requirements) bool {
 	capability := node.Capabilities
+	explicitModel := strings.TrimSpace(requirements.Model) != "" && !strings.EqualFold(strings.TrimSpace(requirements.Model), "auto")
+	explicitReasoning := strings.TrimSpace(requirements.Reasoning) != ""
 	if requirements.Group != "" && !containsFold(capability.Groups, requirements.Group) {
 		return false
 	}
@@ -101,22 +108,35 @@ func matchesNode(node Node, requirements Requirements) bool {
 	if requirements.Provider != "" && !containsFold(capability.Providers, requirements.Provider) {
 		return false
 	}
-	if requirements.BrowserProfile != "" {
-		if !strings.EqualFold(requirements.Provider, "browser") || !hasReadyBrowserProfile(capability.BrowserSessions, requirements.BrowserProfile) {
+	if requirements.BrowserProfile != "" && !strings.EqualFold(requirements.Provider, "browser") {
+		return false
+	}
+	if strings.EqualFold(requirements.Provider, "browser") && len(capability.BrowserSessions) > 0 && (requirements.BrowserProfile != "" || explicitModel || explicitReasoning || requirements.BrowserTabID > 0) {
+		if _, ok := selectReadyBrowserSession(capability.BrowserSessions, requirements); !ok {
 			return false
 		}
+	} else if requirements.BrowserProfile != "" || requirements.BrowserTabID > 0 {
+		// A profile-specific request has never been safe to place from only the
+		// node-wide browser counters. Older workers without session telemetry
+		// remain compatible for model-only jobs through the global inventory.
+		return false
 	}
 	if strings.EqualFold(requirements.Provider, "browser") && ((capability.BrowserTabs > 0 && capability.BrowserBusy >= capability.BrowserTabs) || (capability.AutomaticTasks != nil && capability.BrowserTabs <= 0)) {
 		return false
 	}
-	explicitModel := strings.TrimSpace(requirements.Model) != "" && !strings.EqualFold(strings.TrimSpace(requirements.Model), "auto")
 	if explicitModel {
 		if !selectedModelSupports(capability.Models, requirements) {
 			return false
 		}
 	} else if requirements.Task != "" {
-		automaticTasksAreAuthoritative := strings.TrimSpace(requirements.Provider) != "" && capability.AutomaticTasks != nil
+		automaticTasksAreAuthoritative := strings.TrimSpace(requirements.Provider) != "" && (capability.AutomaticTasks != nil || isAutomaticOllamaRequest(requirements))
 		if automaticTasksAreAuthoritative && !providerTaskSupported(capability.AutomaticTasks, requirements.Provider, requirements.Task) {
+			return false
+		}
+		if isAutomaticOllamaRequest(requirements) && !modelSupports(capability.Models, requirements) {
+			// Automatic Ollama placement always requires a currently available,
+			// provider-verified compatible model. An AutomaticTasks entry alone
+			// describes route intent, not executable model evidence.
 			return false
 		}
 		modelsAreAuthoritative := hasProviderModelInventory(capability.Models, requirements.Provider)
@@ -129,8 +149,14 @@ func matchesNode(node Node, requirements Requirements) bool {
 		if !automaticTasksAreAuthoritative && !modelsAreAuthoritative && !requirements.Vision && !requirements.Embedding && !containsFold(capability.Tasks, requirements.Task) && !modelSupports(capability.Models, requirements) {
 			return false
 		}
-	} else if (requirements.Vision || requirements.Embedding) && !modelFeature(capability.Models, requirements.Model, requirements.Provider, requirements.Vision, requirements.Embedding) {
-		return false
+	} else if requirements.Vision || requirements.Embedding {
+		if isAutomaticOllamaRequest(requirements) {
+			if !modelSupports(capability.Models, requirements) {
+				return false
+			}
+		} else if !modelFeature(capability.Models, requirements.Model, requirements.Provider, requirements.Vision, requirements.Embedding) {
+			return false
+		}
 	}
 	if requirements.MinFreeVRAM > 0 {
 		found := false
@@ -156,18 +182,168 @@ func providerTaskSupported(tasks map[string][]string, provider, task string) boo
 	return false
 }
 
-func hasReadyBrowserProfile(sessions []BrowserSessionCapability, wanted string) bool {
+func modelIfExplicit(model string, explicit bool) string {
+	if !explicit {
+		return ""
+	}
+	return model
+}
+
+func selectReadyBrowserSession(sessions []BrowserSessionCapability, requirements Requirements) (BrowserSessionCapability, bool) {
+	wantedModel := strings.TrimSpace(requirements.Model)
+	if strings.EqualFold(wantedModel, "auto") {
+		wantedModel = ""
+	}
+	wantedReasoning := strings.TrimSpace(requirements.Reasoning)
+	wantedSessionKey := cleanBrowserSessionKey(requirements.BrowserSessionKey)
+	sessionKeySupported := false
+	sessionKeyMatches := 0
 	for _, session := range sessions {
-		if strings.EqualFold(strings.TrimSpace(session.Profile), strings.TrimSpace(wanted)) && strings.EqualFold(strings.TrimSpace(session.State), "waiting") {
+		// The opaque selector intentionally has the same owner/session digest
+		// across providers. Count routing evidence only inside the requested
+		// browser profile, otherwise a legitimate ChatGPT and Gemini session
+		// would look like a duplicate claim for either one.
+		if session.TabID <= 0 || requirements.BrowserProfile != "" &&
+			!strings.EqualFold(strings.TrimSpace(session.Profile), strings.TrimSpace(requirements.BrowserProfile)) {
+			continue
+		}
+		if session.SessionKeySupported {
+			sessionKeySupported = true
+		}
+		if wantedSessionKey != "" && session.SessionKey == wantedSessionKey {
+			sessionKeyMatches++
+		}
+	}
+	// Two tabs claiming the same logical browser session is ambiguous routing
+	// evidence. The extension normally resolves this in favor of the recorded
+	// tab; a compromised or inconsistent heartbeat must fail closed here.
+	if sessionKeyMatches > 1 {
+		return BrowserSessionCapability{}, false
+	}
+	authoritativeSessionMatch := wantedSessionKey != "" && sessionKeySupported && sessionKeyMatches == 1
+	var selected BrowserSessionCapability
+	selectedScore := -1
+	requiredTabMatchesSelection := false
+	if requirements.BrowserTabID > 0 {
+		for _, session := range sessions {
+			if session.TabID == requirements.BrowserTabID && browserSessionSelectionMatches(session, requirements, wantedModel, wantedReasoning) &&
+				(!authoritativeSessionMatch || session.SessionKey == wantedSessionKey) &&
+				!(sessionKeySupported && wantedSessionKey != "" && requirements.BrowserSessionRecovery && session.SessionKey != wantedSessionKey) {
+				requiredTabMatchesSelection = true
+				break
+			}
+		}
+	}
+	for _, session := range sessions {
+		state := strings.TrimSpace(session.State)
+		keyMatch := authoritativeSessionMatch && session.SessionKey == wantedSessionKey
+		if authoritativeSessionMatch && !keyMatch {
+			continue
+		}
+		exactTab := requirements.BrowserTabID > 0 && session.TabID == requirements.BrowserTabID &&
+			!(sessionKeySupported && wantedSessionKey != "" && requirements.BrowserSessionRecovery && session.SessionKey != wantedSessionKey)
+		allowRecoveryTab := requirements.BrowserSessionRecovery && (requirements.BrowserTabID == 0 || !requiredTabMatchesSelection)
+		if requirements.BrowserProfile != "" && !strings.EqualFold(strings.TrimSpace(session.Profile), strings.TrimSpace(requirements.BrowserProfile)) {
+			continue
+		}
+		if wantedModel != "" && !browserModelEqual(session.CurrentModel, wantedModel) && !containsBrowserModel(session.ModelChoices, wantedModel) {
+			continue
+		}
+		if wantedReasoning != "" && !browserModelEqual(session.CurrentReasoning, wantedReasoning) && !containsBrowserModel(session.ReasoningLevels, wantedReasoning) {
+			continue
+		}
+		if requirements.BrowserTabID > 0 && !exactTab && !allowRecoveryTab && !keyMatch {
+			continue
+		}
+		freshLauncher := !keyMatch && requirements.BrowserTabID == 0 && session.CanCreateFreshChat && (requirements.BrowserFreshChat || session.DefaultFreshChat)
+		switch {
+		case keyMatch:
+			if !strings.EqualFold(state, "waiting") && !strings.EqualFold(state, "session_bound") {
+				continue
+			}
+		case exactTab:
+			if !strings.EqualFold(state, "waiting") && !strings.EqualFold(state, "session_bound") {
+				continue
+			}
+		case allowRecoveryTab:
+			if !strings.EqualFold(state, "waiting") && !(freshLauncher && strings.EqualFold(state, "session_bound")) {
+				continue
+			}
+		case strings.EqualFold(state, "waiting"):
+			if (requirements.BrowserFreshChat || session.DefaultFreshChat) && !freshLauncher {
+				continue
+			}
+		case freshLauncher && strings.EqualFold(state, "session_bound"):
+			// A bound tab is only a launcher. The extension creates and proves a
+			// separate fresh conversation before any prompt is sent.
+		default:
+			continue
+		}
+		score := 0
+		if keyMatch {
+			score += 1000
+		}
+		if exactTab {
+			score += 100
+		}
+		if strings.EqualFold(state, "waiting") {
+			score += 10
+		}
+		if wantedModel != "" && browserModelEqual(session.CurrentModel, wantedModel) {
+			score += 2
+		}
+		if wantedReasoning != "" && browserModelEqual(session.CurrentReasoning, wantedReasoning) {
+			score++
+		}
+		if selectedScore < score || selectedScore == score && (selected.TabID == 0 || session.TabID < selected.TabID) {
+			selected, selectedScore = session, score
+		}
+	}
+	return selected, selectedScore >= 0
+}
+
+func browserSessionSelectionMatches(session BrowserSessionCapability, requirements Requirements, wantedModel, wantedReasoning string) bool {
+	if requirements.BrowserProfile != "" && !strings.EqualFold(strings.TrimSpace(session.Profile), strings.TrimSpace(requirements.BrowserProfile)) {
+		return false
+	}
+	if wantedModel != "" && !browserModelEqual(session.CurrentModel, wantedModel) && !containsBrowserModel(session.ModelChoices, wantedModel) {
+		return false
+	}
+	if wantedReasoning != "" && !browserModelEqual(session.CurrentReasoning, wantedReasoning) && !containsBrowserModel(session.ReasoningLevels, wantedReasoning) {
+		return false
+	}
+	return true
+}
+
+func modelSupports(models []ModelCapability, requirements Requirements) bool {
+	for _, model := range models {
+		if isAutomaticOllamaRequest(requirements) && (!model.Available || !model.CapabilitiesVerified) {
+			continue
+		}
+		if modelMatchesProvider(model, requirements.Provider) && (requirements.Task == "" || containsFold(model.Tasks, requirements.Task)) && (!requirements.Vision || model.Vision) && (!requirements.Embedding || model.Embedding) {
 			return true
 		}
 	}
 	return false
 }
 
-func modelSupports(models []ModelCapability, requirements Requirements) bool {
+func isAutomaticOllamaRequest(requirements Requirements) bool {
+	return strings.EqualFold(strings.TrimSpace(requirements.Provider), "ollama") &&
+		(strings.TrimSpace(requirements.Model) == "" || strings.EqualFold(strings.TrimSpace(requirements.Model), "auto"))
+}
+
+func hasLoadedAutomaticModel(models []ModelCapability, requirements Requirements) bool {
+	if !isAutomaticOllamaRequest(requirements) {
+		return false
+	}
 	for _, model := range models {
-		if modelMatchesProvider(model, requirements.Provider) && requirements.Task != "" && containsFold(model.Tasks, requirements.Task) && (!requirements.Vision || model.Vision) && (!requirements.Embedding || model.Embedding) {
+		if !model.Loaded || !model.Available || !model.CapabilitiesVerified || !modelMatchesProvider(model, requirements.Provider) {
+			continue
+		}
+		if requirements.Task != "" && !containsFold(model.Tasks, requirements.Task) {
+			continue
+		}
+		if (!requirements.Vision || model.Vision) && (!requirements.Embedding || model.Embedding) {
 			return true
 		}
 	}
@@ -195,7 +371,17 @@ func selectedModelSupports(models []ModelCapability, requirements Requirements) 
 		if strings.EqualFold(requirements.Provider, "browser") {
 			matches = browserModelEqual(model.Name, requirements.Model)
 		}
-		if matches && (requirements.Task == "" || containsFold(model.Tasks, requirements.Task)) && (!requirements.Vision || model.Vision) && (!requirements.Embedding || model.Embedding) {
+		if !matches {
+			continue
+		}
+		if strings.EqualFold(requirements.Provider, "ollama") && !model.CapabilitiesVerified && strings.EqualFold(strings.TrimSpace(model.CapabilitySource), "name_inference") {
+			// A fixed Ollama model is an explicit operator choice. Availability
+			// evidence may exist on daemons that cannot report capabilities; in
+			// that case do not turn a name inference into an incompatibility.
+			// Automatic selection follows the stricter modelSupports path.
+			return model.Available
+		}
+		if (requirements.Task == "" || containsFold(model.Tasks, requirements.Task)) && (!requirements.Vision || model.Vision) && (!requirements.Embedding || model.Embedding) {
 			return true
 		}
 	}

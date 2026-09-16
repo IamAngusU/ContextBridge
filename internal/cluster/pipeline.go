@@ -128,14 +128,21 @@ func (r *Relay) executePipeline(parent context.Context, run PipelineRun, pipelin
 				r.failPipeline(&run, errors.New("relay is stopping"))
 				return
 			}
-			job, err := r.store.CreateJobAdmitted(SubmitRequest{OwnerSubject: run.OwnerSubject, Source: "pipeline:" + run.Pipeline, Requirements: requirements, Payload: payload, MaxAttempts: step.Retries + 1}, r.cfg.MaxQueuedJobs, r.ownerQueueLimit())
+			job, err := r.store.CreateJobAdmitted(SubmitRequest{
+				OwnerSubject: run.OwnerSubject,
+				Source:       "pipeline:" + run.Pipeline,
+				Requirements: requirements,
+				Payload:      payload,
+				MaxAttempts:  step.Retries + 1,
+				Pipeline:     run.Pipeline,
+				Step:         step.Name,
+				ParentID:     run.ID,
+			}, r.cfg.MaxQueuedJobs, r.ownerQueueLimit())
 			r.endAdmission()
 			if err != nil {
 				r.failPipeline(&run, err)
 				return
 			}
-			job.Pipeline, job.Step, job.ParentID = run.Pipeline, step.Name, run.ID
-			_ = r.store.SaveJob(job)
 			r.signalDispatch()
 			job, err = r.waitJob(ctx, job.ID, step.TimeoutSeconds)
 			run.Steps = append(run.Steps, job)
@@ -151,7 +158,10 @@ func (r *Relay) executePipeline(parent context.Context, run PipelineRun, pipelin
 			values["steps."+step.Name+".output"] = job.Result
 			run.Output = job.Result
 			mergeUsage(&run.Usage, job.Usage)
-			_ = r.store.SavePipelineRun(run)
+			if err := r.store.SavePipelineRun(run); err != nil {
+				r.failPipeline(&run, fmt.Errorf("save checkpoint after step %s: %w", step.Name, err))
+				return
+			}
 			if step.ContinuePath == "" || !jsonPathEquals(job.Result, step.ContinuePath, step.ContinueEquals) {
 				break
 			}
@@ -163,8 +173,13 @@ func (r *Relay) executePipeline(parent context.Context, run PipelineRun, pipelin
 	}
 	run.Status = "completed"
 	run.FinishedAt = time.Now().UTC()
-	_ = r.store.SavePipelineRun(run)
-	_ = r.store.AddEvent(Event{Kind: "pipeline.completed", Message: "Pipeline " + run.Pipeline + " completed", JobID: run.ID})
+	if err := r.store.SavePipelineRun(run); err != nil {
+		r.failPipeline(&run, fmt.Errorf("save completed pipeline: %w", err))
+		return
+	}
+	if err := r.store.AddEvent(Event{Kind: "pipeline.completed", Message: "Pipeline " + run.Pipeline + " completed", JobID: run.ID}); err != nil {
+		r.logger.Printf("pipeline %s completed but its event could not be saved: %v", run.ID, err)
+	}
 }
 
 func clonePipeline(pipeline Pipeline) Pipeline {
@@ -256,8 +271,13 @@ func (r *Relay) failPipeline(run *PipelineRun, err error) {
 	run.Status = "failed"
 	run.Error = cleanLabel(err.Error(), 500)
 	run.FinishedAt = time.Now().UTC()
-	_ = r.store.SavePipelineRun(*run)
-	_ = r.store.AddEvent(Event{Kind: "pipeline.failed", Message: run.Error, JobID: run.ID})
+	if saveErr := r.store.SavePipelineRun(*run); saveErr != nil {
+		r.logger.Printf("pipeline %s failed and its terminal checkpoint could not be saved: %v (pipeline error: %v)", run.ID, saveErr, err)
+		return
+	}
+	if eventErr := r.store.AddEvent(Event{Kind: "pipeline.failed", Message: run.Error, JobID: run.ID}); eventErr != nil {
+		r.logger.Printf("pipeline %s failed but its event could not be saved: %v", run.ID, eventErr)
+	}
 }
 
 func renderPipelineInput(template string, values map[string]json.RawMessage) (json.RawMessage, error) {

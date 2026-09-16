@@ -9,13 +9,14 @@ import (
 var completionRootCommands = []string{
 	"init", "serve", "run", "stop", "console", "submit", "schedule", "result", "review",
 	"health", "dashboard", "status", "browser", "doctor", "hardware", "models",
-	"pull", "runtime", "relay", "pair", "worker", "cluster", "selftest", "update", "completion", "version", "help",
+	"pull", "runtime", "mcp", "benchmark", "relay", "pair", "worker", "cluster", "selftest", "update", "completion", "version", "help",
 }
 
 var completionSubcommands = map[string][]string{
 	"schedule":   {"add", "list", "show", "pause", "resume", "run", "delete"},
 	"browser":    {"inspect"},
 	"runtime":    {"install"},
+	"mcp":        {"serve"},
 	"cluster":    {"status", "submit", "chat", "selftest", "login", "token", "pairing", "configure", "dashboard", "pipeline"},
 	"update":     {"status", "check", "apply", "enable", "disable", "auto"},
 	"completion": {"powershell", "bash", "zsh"},
@@ -52,6 +53,7 @@ $script:ContextBridgeSubcommands = @{
     schedule = @('add','list','show','pause','resume','run','delete')
     browser = @('inspect')
     runtime = @('install')
+    mcp = @('serve')
     cluster = @('status','submit','chat','selftest','login','token','pairing','configure','dashboard','pipeline')
     update = @('status','check','apply','enable','disable','auto')
     completion = @('powershell','bash','zsh')
@@ -75,6 +77,8 @@ $script:ContextBridgeOptions = @{
     'models' = @('--config','--json','--discover')
     'pull' = @('--config')
     'runtime install' = @('--config')
+    'mcp serve' = @('--config')
+    'benchmark' = @('--json','--samples','--warmup','--database-jobs','--idle-duration','--binary','--extension-root')
     'relay' = @('--config')
     'pair' = @('--config','--relay','--identity','--name')
     'worker' = @('--config','--relay','--identity','--name','--slots','--providers','--models','--tasks','--groups','--no-updates','--topmost')
@@ -104,7 +108,7 @@ $script:ContextBridgeTakesValue = @(
     '--token','--provider','--group','--model','--profile','--reasoning','--session','--prompt',
     '--min-artifacts','--min-images','--local-model','--timeout','--job-timeout','--poll',
     '--mode','--relay-url','--public-url','--listen','--role','--subject','--approve','--deny',
-    '--managed-service'
+    '--managed-service','--samples','--warmup','--database-jobs','--idle-duration','--binary','--extension-root'
 )
 Register-ArgumentCompleter -Native -CommandName contextbridge, cb -ScriptBlock {
     param($wordToComplete, $commandAst, $cursorPosition)
@@ -166,7 +170,7 @@ _contextbridge_complete() {
   if (( COMP_CWORD > 2 )); then
     subcommand="${COMP_WORDS[2]:-}"
     case "$command" in
-      schedule|browser|runtime|cluster|update)
+      schedule|browser|runtime|mcp|cluster|update)
         if [[ -n "$subcommand" && "$subcommand" != -* ]]; then
           option_key="$command $subcommand"
         fi
@@ -175,8 +179,11 @@ _contextbridge_complete() {
   fi
 
   case "$previous" in
-    --config|--file|--artifacts|--attach-image|--identity|--job-dir|--token-file)
+    --config|--file|--artifacts|--attach-image|--identity|--job-dir|--token-file|--binary)
       if declare -F _filedir >/dev/null 2>&1; then _filedir; else COMPREPLY=( $(compgen -f -- "$current") ); fi
+      return ;;
+    --extension-root)
+      if declare -F _filedir >/dev/null 2>&1; then _filedir -d; else COMPREPLY=( $(compgen -d -- "$current") ); fi
       return ;;
     --provider) candidates="browser ollama nuextract jina" ;;
     --profile) candidates="chatgpt gemini" ;;
@@ -204,6 +211,8 @@ _contextbridge_complete() {
       "cluster token") candidates="--config --role --subject" ;;
       "cluster pairing") candidates="--config --approve --deny" ;;
       "browser inspect") candidates="--config --tab" ;;
+      "mcp serve") candidates="--config" ;;
+      benchmark) candidates="--json --samples --warmup --database-jobs --idle-duration --binary --extension-root" ;;
       "schedule add") candidates="--config --file" ;;
       "schedule "*) candidates="--config --file" ;;
       init|serve|console|result|health|pull|relay) candidates="--config" ;;
@@ -221,12 +230,13 @@ _contextbridge_complete() {
       update|"update "*) candidates="--config --force --json --managed-service --relay-only" ;;
     esac
   elif [ "$COMP_CWORD" -eq 1 ]; then
-    candidates="init serve run stop console submit schedule result review health dashboard status browser doctor hardware models pull runtime relay pair worker cluster selftest update completion version help"
+    candidates="init serve run stop console submit schedule result review health dashboard status browser doctor hardware models pull runtime mcp benchmark relay pair worker cluster selftest update completion version help"
   elif [ "$COMP_CWORD" -eq 2 ]; then
     case "$command" in
       schedule) candidates="add list show pause resume run delete" ;;
       browser) candidates="inspect" ;;
       runtime) candidates="install" ;;
+      mcp) candidates="serve" ;;
       cluster) candidates="status submit chat selftest login token pairing configure dashboard pipeline" ;;
       update) candidates="status check apply enable disable auto" ;;
       completion) candidates="powershell bash zsh" ;;
@@ -264,6 +274,8 @@ root=(
     'models:Show model inventory'
     'pull:Download a managed model'
     'runtime:Manage local runtimes'
+    'mcp:Expose bounded local tools over MCP stdio'
+    'benchmark:Measure bridge-only overhead and resource footprint'
     'relay:Run a relay'
     'pair:Pair this worker'
     'worker:Run a worker'
@@ -300,6 +312,16 @@ case "$words[2]" in
       return
     fi
     _arguments "${config[@]}" '1:runtime:(llama.cpp)'
+    ;;
+  mcp)
+    if (( CURRENT == 3 )); then
+      _values 'MCP action' serve
+      return
+    fi
+    _arguments "${config[@]}"
+    ;;
+  benchmark)
+    _arguments '--json[Print machine-readable JSON]' '--samples[Timed samples per operation and concurrency]:count:' '--warmup[Warm-up samples per operation]:count:' '--database-jobs[Jobs used for database growth measurement]:count:' '--idle-duration[Idle relay sampling duration]:duration:' '--binary[Binary whose size is reported]:binary:_files' '--extension-root[Extension source root]:directory:_directories'
     ;;
   cluster)
     if (( CURRENT == 3 )); then

@@ -11,7 +11,7 @@ body:
     attributes:
       label: ContextBridge version
       description: Paste the output of `contextbridge version`; include the popup version for browser issues.
-      placeholder: v0.5.66 (core), v0.5.66 (extension)
+      placeholder: v0.5.70 (core), v0.5.70 (extension)
     validations:
       required: true
   - type: dropdown
