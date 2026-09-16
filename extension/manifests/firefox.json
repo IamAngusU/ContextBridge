@@ -8,7 +8,7 @@
   "optional_permissions": ["tabs"],
   "optional_host_permissions": ["http://127.0.0.1/*", "http://localhost/*", "https://*/*", "http://*/*"],
   "background": {
-    "scripts": ["profiles.js", "background.js"]
+    "scripts": ["profiles.js", "background.js", "browser-recovery.js"]
   },
   "action": {
     "default_title": "ContextBridge",
