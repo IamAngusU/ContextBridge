@@ -37,7 +37,7 @@
     if (!claim || claim.state !== 'observation_handoff') return false;
     // Reuse the production recovery proof, but present the handoff as the
     // sent-unknown state it came from. This performs no provider or bridge I/O.
-    return Boolean(recoveredLeaseFromClaim(cfg, jobId, { ...claim, state: 'sent_unknown' }, tab));
+    return Boolean(recoveredLeaseFromClaim(cfg, jobId, { ...claim, state: 'sent_unkown' }, tab));
   }
 
   async function adoptObservationLease(work) {
@@ -83,15 +83,58 @@
     return tabId;
   }
 
+  function activeObservationHandoffsForTab(cfg, tabId) {
+    const now = Date.now();
+    return Object.entries(cfg.browserJobClaims || {}).filter(([, claim]) =>
+      claim?.state === 'observation_handoff'
+      && Number(claim?.tabId || 0) === Number(tabId || 0)
+      && now - Number(claim?.at || 0) <= 24 * 60 * 60 * 1000
+      && recoveredLeaseDeadline(claim) > now);
+  }
+
+  async function releaseUntouchedObservationLease(work) {
+    const jobId = String(work?.job?.id || '');
+    const generation = Number(work?.lease_generation || 0);
+    if (!jobId || !Number.isSafeInteger(generation) || generation <= 0) return;
+    const released = await releaseBrowserLease(await settings(), jobId, generation);
+    if (!released) throw new Error('The observation handoff lease could not be returned without provider action');
+  }
+
   // Observation-only re-leases may be delivered through the original routing
   // poller. Redirect only those already-sent jobs to the exact tab proven by
-  // the durable claim. Initial jobs and all side-effecting work keep the normal
-  // processWork path unchanged.
+  // the durable claim. While that handoff exists, any unrelated lease that
+  // lands on its execution tab is returned untouched instead of being allowed
+  // to modify the conversation before the missing result is observed.
   processWork = async function processWorkWithMV3Continuation(cfg, work, claimedTabId) {
-    if (work?.observation_only === true) {
+    const jobId = String(work?.job?.id || '');
+    const live = await settings();
+    const ownClaim = live.browserJobClaims?.[jobId];
+    const tabHandoffs = activeObservationHandoffsForTab(live, claimedTabId);
+
+    if (tabHandoffs.length && !tabHandoffs.some(([handoffJobId]) => handoffJobId === jobId)) {
+      await releaseUntouchedObservationLease(work);
+      return;
+    }
+
+    if (ownClaim?.state === 'observation_handoff') {
+      // The queue's sentUnknown bit is the server-side proof that this new
+      // generation is observation-only. Never execute a handoff as an initial
+      // job, even if a malformed local response claimed otherwise.
+      if (work?.observation_only !== true) {
+        await releaseUntouchedObservationLease(work);
+        return;
+      }
+      const owners = activeObservationHandoffsForTab(live, Number(ownClaim.tabId || 0));
+      if (owners.length !== 1 || owners[0][0] !== jobId) {
+        await releaseUntouchedObservationLease(work);
+        return;
+      }
       const recoveredTabId = await adoptObservationLease(work);
       if (recoveredTabId > 0) return coreProcessWork(await settings(), work, recoveredTabId);
+      await releaseUntouchedObservationLease(work);
+      return;
     }
+
     return coreProcessWork(cfg, work, claimedTabId);
   };
 
@@ -115,7 +158,7 @@
 
         // Once the durable handoff is recorded, the old generation may no
         // longer authorize provider work. Releasing it merely accelerates the
-        // observation-only re-lease; if transport is unavailable, the lease
+        // observation-only re-lease: if transport is unavailable, the lease
         // expires normally and the same queue semantics take over later.
         try { await releaseBrowserLease(await settings(), lease.jobId, lease.generation); }
         catch (_) { /* Transport uncertainty is resolved by normal lease expiry. */ }
@@ -145,7 +188,7 @@
     if (message?.type === 'authorize-browser-job-action' && message?.action === 'observe') {
       // A provider-tab message itself can be the event that wakes an MV3
       // worker. Let the core authorization finish first, then hand off only if
-      // it reconstructed a recovered sent-unknown lease.
+      // it reconstructed a recovered sent-unkown lease.
       setTimeout(() => { void scheduleRecoveredObservationHandoff(); }, 0);
     }
     return false;

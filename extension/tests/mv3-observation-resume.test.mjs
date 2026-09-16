@@ -77,7 +77,7 @@ function harness({ releaseFails = false, quarantined = false } = {}) {
     recoveredLeaseDeadline: (claim) => Date.parse(claim.deadline),
     recoveredLeaseFromClaim: (cfg, jobId, claim, tab) => {
       const binding = cfg.sessionBindings?.[claim.sessionKey];
-      if (jobId !== 'job1' || claim.state !== 'sent_unknown' || !binding || binding.tabId !== claim.tabId
+      if (jobId !== 'job1' || claim.state !== 'sent_unkown' || !binding || binding.tabId !== claim.tabId
           || binding.url !== claim.expectedURL || tab?.url !== claim.expectedURL) return null;
       return { jobId, generation: claim.generation, tabId: claim.tabId };
     },
@@ -168,6 +168,30 @@ test('next observation lease adopts the exact execution tab and a new durable ge
   assert.equal(calls.core[0].work.job.contextbridge_browser_tab_id, 22);
   assert.equal(state.browserJobClaims.job1.generation, 8);
   assert.equal(state.browserJobClaims.job1.state, 'sent_unknown');
+});
+
+test('handoff reservation returns unrelated work on the execution tab untouched', async () => {
+  const { context, calls } = harness();
+  await context.ContextBridgeBrowserRecovery.handoffRecoveredSentUnknownClaims();
+
+  const unrelated = { observation_only: false, lease_generation: 3, job: { id: 'other-job' } };
+  const result = await context.processWork({ current: true }, unrelated, 22);
+
+  assert.equal(result, undefined);
+  assert.equal(calls.core.length, 0);
+  assert.deepEqual(calls.released.at(-1), { jobId: 'other-job', generation: 3 });
+});
+
+test('a durable handoff can never execute again as side-effecting work', async () => {
+  const { context, calls } = harness();
+  await context.ContextBridgeBrowserRecovery.handoffRecoveredSentUnknownClaims();
+
+  const malformed = { observation_only: false, lease_generation: 8, job: { id: 'job1', contextbridge_browser_tab_id: 11 } };
+  const result = await context.processWork({ current: true }, malformed, 11);
+
+  assert.equal(result, undefined);
+  assert.equal(calls.core.length, 0);
+  assert.deepEqual(calls.released.at(-1), { jobId: 'job1', generation: 8 });
 });
 
 test('ordinary work never uses durable handoff routing', async () => {
