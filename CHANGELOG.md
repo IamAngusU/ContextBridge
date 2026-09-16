@@ -2,6 +2,25 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.71 - 2026-09-16
+
+### Fixed
+
+- a supporting browser progress scan can no longer cancel an otherwise valid
+  job when ChatGPT briefly exposes an intermediate conversation URL; provider
+  action gates and the final exact ownership check remain authoritative
+- the periodic progress observer is stopped and drained before final lease and
+  conversation validation, preventing a late diagnostic scan from racing a
+  completed short response
+- bounded browser failure telemetry now records an enumerated local lease
+  cancellation reason without retaining prompt text, response text, or URLs
+
+### Tested
+
+- regression coverage proves that a transient URL mismatch skips response DOM
+  sampling without cancelling the job, while the authoritative action gate
+  continues to reject a real conversation change
+
 ## 0.5.70 - 2026-09-16
 
 ### Added

@@ -753,7 +753,12 @@ async function processWork(cfg, work, claimedTabId) {
       if (leaseState.cancelled || leaseState.renewing) return;
       leaseState.renewing = true;
       renewLease(cfg, work.job.id, leaseGeneration)
-        .then((ok) => { if (!ok) leaseState.cancelled = true; })
+        .then((ok) => {
+          if (!ok) {
+            leaseState.cancelReason = 'renewal_rejected';
+            leaseState.cancelled = true;
+          }
+        })
         // A transport failure is not authoritative lease loss. The next
         // renewal or action gate retries, while a real HTTP 409 cancels.
         .catch((error) => { leaseState.lastRenewalError = error?.message || String(error); })
@@ -916,6 +921,14 @@ async function processWork(cfg, work, claimedTabId) {
         args: [resumeJob, effectiveProfile, work.deadline, null, recoveryTab.url, { jobId: work.job.id, generation: leaseGeneration }] });
       answer = resumed?.[0]?.result;
     }
+    // The periodic progress observer is supporting evidence only. Stop it as
+    // soon as the authoritative provider automation returns so a late sample
+    // cannot race final ownership/lease validation.
+    if (progressTimer) {
+      clearInterval(progressTimer);
+      progressTimer = 0;
+    }
+    for (let attempt = 0; progressBusy && attempt < 200; attempt += 1) await delay(25);
     if (shouldForegroundStalledTab(binding, effectiveProfile, answer)) {
       // An automatically created background tab can be throttled by the
       // browser. Foreground it only after proving this is our submitted turn,
@@ -1044,7 +1057,9 @@ async function processWork(cfg, work, claimedTabId) {
       ? { verdict: 'review', flags: [failureCode], confidence: 0.4, model: effectiveProfile?.label || 'browser' }
       : { mode, error: failureCode, model: effectiveProfile?.label || 'browser' };
     const tabFailures = { ...(await api.storage.local.get({ tabFailures: {} })).tabFailures };
-    if (tabId) tabFailures[tabId] = { code: failureCode, reason: failureReason === 'other' ? classifyFailureReason(error.message) : failureReason, at: new Date().toISOString() };
+    if (tabId) tabFailures[tabId] = { code: failureCode,
+      reason: failureReason === 'other' ? classifyFailureReason(error.message) : failureReason,
+      lease_reason: String(leaseState?.cancelReason || '').slice(0, 60), at: new Date().toISOString() };
     // A failed website job is visible on its tab and in its job result; it is
     // not a failure of the local browser-bridge connection itself.
     await api.storage.local.set({ tabFailures });
@@ -1738,7 +1753,7 @@ async function commitActiveLeaseConversation(lease, sourceURL, targetURL) {
   return updated;
 }
 
-async function assertActiveLeaseConversation(lease) {
+async function assertActiveLeaseConversation(lease, cancelOnMismatch = true) {
   if (!lease || lease.cancelled || stopRequested) throw new Error('The browser job lease was cancelled');
   const tab = await readActiveLeaseTab(lease);
   if (lease.cancelled || stopRequested) throw new Error('The browser job lease was cancelled');
@@ -1755,7 +1770,10 @@ async function assertActiveLeaseConversation(lease) {
     error.code = 'browser_session_changed';
     throw error;
   }
-  lease.cancelled = true;
+  if (cancelOnMismatch) {
+    lease.cancelReason = 'conversation_changed';
+    lease.cancelled = true;
+  }
   throw new Error('The conversation URL changed; no provider content was observed');
 }
 
@@ -1772,7 +1790,11 @@ async function readActiveLeaseTab(lease) {
 }
 
 async function captureTabProgress(tabId, selectors, lease = null) {
-  if (lease) await assertActiveLeaseConversation(lease);
+  // Progress is intentionally non-authoritative. A provider can expose a
+  // transient URL while canonicalizing a newly-created conversation. Skip the
+  // sample, but leave cancellation to the injected action gate or final
+  // ownership check, both of which have the full job context.
+  if (lease) await assertActiveLeaseConversation(lease, false);
   if (progressScriptsInFlight.has(tabId)) throw new Error('The prior browser progress scan is still pending');
   const raw = api.scripting.executeScript({ target: { tabId }, func: captureProgress, args: [selectors, lease?.expectedURL || ''] });
   progressScriptsInFlight.set(tabId, raw);
@@ -1782,7 +1804,7 @@ async function captureTabProgress(tabId, selectors, lease = null) {
     if (progressScriptsInFlight.get(tabId) === raw) progressScriptsInFlight.delete(tabId);
   });
   const results = await withDeadline(raw, 5000);
-  if (lease) await assertActiveLeaseConversation(lease);
+  if (lease) await assertActiveLeaseConversation(lease, false);
   return results?.[0]?.result || { text: '', busy: false };
 }
 
@@ -1878,8 +1900,12 @@ async function browserLeaseStatus(cfg, jobId, generation) {
 }
 
 async function requireActiveBrowserLease(cfg, lease) {
-  if (!lease || lease.cancelled || stopRequested) throw browserLeaseLost('The browser job lease was cancelled');
+  if (!lease || lease.cancelled || stopRequested) {
+    const reason = stopRequested ? 'connection_stopped' : String(lease?.cancelReason || 'cancelled');
+    throw browserLeaseLost(`The browser job lease was cancelled (${reason})`);
+  }
   if (!await renewLease(cfg, lease.jobId, lease.generation)) {
+    lease.cancelReason = 'renewal_rejected';
     lease.cancelled = true;
     throw browserLeaseLost('The browser job lease was lost');
   }
@@ -1913,6 +1939,7 @@ async function authorizeBrowserJobAction(message, sender) {
   const cfg = await settings();
   if (activeBrowserLeases.get(jobId) !== lease || lease.cancelled) return { ok: false, error: 'browser_job_lease_lost' };
   if (!cfg.running || !configuredTabIDs(cfg).includes(lease.tabId)) {
+    lease.cancelReason = 'tab_detached';
     lease.cancelled = true;
     return { ok: false, error: 'browser_job_cancelled' };
   }
@@ -1927,6 +1954,7 @@ async function authorizeBrowserJobAction(message, sender) {
       && new URL(expectedURL).origin === new URL(lease.expectedURL).origin;
   } catch (_) {}
   if (!tab?.url || !expectedURL || (expectedURL !== lease.expectedURL && !staleFreshObserver)) {
+    lease.cancelReason = 'conversation_changed';
     lease.cancelled = true;
     return { ok: false, error: 'browser_conversation_changed' };
   }
@@ -1943,6 +1971,7 @@ async function authorizeBrowserJobAction(message, sender) {
       if (action === 'observe' && isPendingLeaseConversation(lease, tab) && !lease.cancelled) {
         return { ok: false, error: 'browser_conversation_unverified' };
       }
+      lease.cancelReason = 'conversation_changed';
       lease.cancelled = true;
       return { ok: false, error: 'browser_conversation_changed' };
     }
@@ -1955,7 +1984,10 @@ async function authorizeBrowserJobAction(message, sender) {
     if (activeBrowserLeases.get(jobId) !== lease || lease.cancelled) return { ok: false, error: 'browser_job_lease_lost' };
     if (!renewed) {
       if (lease.recovered) await rejectRecoveredBrowserLease(lease);
-      else lease.cancelled = true;
+      else {
+        lease.cancelReason = 'renewal_rejected';
+        lease.cancelled = true;
+      }
       return { ok: false, error: 'browser_job_lease_lost' };
     }
     return { ok: true, expectedURL: lease.expectedURL };
@@ -1966,11 +1998,15 @@ async function authorizeBrowserJobAction(message, sender) {
   if (activeBrowserLeases.get(jobId) !== lease || lease.cancelled) return { ok: false, error: 'browser_job_lease_lost' };
   if (!claimed) {
     if (lease.recovered) await rejectRecoveredBrowserLease(lease);
-    else lease.cancelled = true;
+    else {
+      lease.cancelReason = 'action_rejected';
+      lease.cancelled = true;
+    }
     return { ok: false, error: 'browser_job_lease_lost' };
   }
   lease.sentUnknown = true;
   if (!await markBrowserJobSentUnknown(jobId, generation, action)) {
+    lease.cancelReason = 'claim_persistence_failed';
     lease.cancelled = true;
     return { ok: false, error: 'browser_claim_persistence_failed' };
   }

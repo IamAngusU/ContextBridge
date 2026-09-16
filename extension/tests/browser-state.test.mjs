@@ -2658,6 +2658,30 @@ for (const observer of ['progress', 'action']) {
 }
 
 {
+  // A provider can briefly expose a different URL while canonicalizing a
+  // newly-created conversation. A supporting progress scan must fail closed
+  // for that sample without cancelling the authoritative job lease. The
+  // injected action gate and final ownership check remain authoritative.
+  const previousTabGet = chrome.tabs.get;
+  const previousExecute = chrome.scripting.executeScript;
+  const lease = { jobId: 'transient-progress-url', generation: 6, tabId: 34,
+    expectedURL: 'https://chatgpt.com/c/owned', cancelled: false };
+  let pageReads = 0;
+  chrome.tabs.get = async () => ({ id: 34, url: 'https://chatgpt.com/c/transient' });
+  chrome.scripting.executeScript = async () => { pageReads += 1; return [{ result: {} }]; };
+  try {
+    await assert.rejects(context.captureTabProgress(34, { response: ['#response'] }, lease),
+      /conversation URL changed/i);
+    assert.equal(lease.cancelled, false,
+      'a non-authoritative progress sample must not cancel a valid provider job');
+    assert.equal(pageReads, 0, 'a mismatched progress sample must not read provider response DOM');
+  } finally {
+    chrome.tabs.get = previousTabGet;
+    chrome.scripting.executeScript = previousExecute;
+  }
+}
+
+{
   const previousLocation = context.location;
   const previousDocument = context.document;
   const previousTabGet = chrome.tabs.get;
