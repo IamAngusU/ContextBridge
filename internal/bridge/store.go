@@ -99,9 +99,10 @@ type BrowserTabStatus struct {
 }
 
 type BrowserTabFailure struct {
-	Code   string    `json:"code"`
-	Reason string    `json:"reason,omitempty"`
-	At     time.Time `json:"at"`
+	Code        string    `json:"code"`
+	Reason      string    `json:"reason,omitempty"`
+	LeaseReason string    `json:"lease_reason,omitempty"`
+	At          time.Time `json:"at"`
 }
 
 // BrowserDOMSnapshot contains selector diagnostics only. It deliberately never

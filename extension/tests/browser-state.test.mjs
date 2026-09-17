@@ -12,6 +12,8 @@ assert.match(source, /jobs\/next\?wait=25[\s\S]{0,300}fetchWithTimeout|fetchWith
   'the relay long poll must have an abortable deadline');
 assert.match(source, /jobs\/next\?wait=25[^`]{0,300}tab_id=/,
   'each extension poller must identify its concrete browser tab to the local lease boundary');
+assert.match(source, /MAX_CONCURRENT_BROWSER_POLLS\s*=\s*4/,
+  'long polls must leave browser connections available for lease and completion control requests');
 assert.match(source, /leaseState\?\.tabId[\s\S]{0,180}contextbridge_browser_tab_id/,
   'completion metadata must identify only a successfully resolved execution tab');
 assert.equal(source.includes("add(href, cleanFileName(anchor.download"), true,
@@ -47,6 +49,21 @@ const chrome = {
 const context = vm.createContext({ chrome, console, URL, TextEncoder, AbortController, setTimeout, clearTimeout, setInterval, clearInterval, Date, Promise });
 vm.runInContext(source, context);
 context.crypto = webcrypto;
+{
+  const held = await Promise.all(Array.from({ length: 4 }, () => context.acquireBrowserPollRequest()));
+  assert.deepEqual(held, [true, true, true, true]);
+  assert.equal(vm.runInContext('activeBrowserPollRequests', context), 4);
+  let fifthResolved = false;
+  const fifth = context.acquireBrowserPollRequest().then((value) => { fifthResolved = true; return value; });
+  await Promise.resolve();
+  assert.equal(fifthResolved, false, 'a fifth long poll must wait instead of consuming the lease-control connection budget');
+  context.releaseBrowserPollRequest();
+  assert.equal(await fifth, true, 'the oldest waiting tab should inherit the next poll slot');
+  assert.equal(vm.runInContext('activeBrowserPollRequests', context), 4);
+  for (let index = 0; index < 4; index += 1) context.releaseBrowserPollRequest();
+  assert.equal(vm.runInContext('activeBrowserPollRequests', context), 0);
+}
+
 {
   const previousResolve = context.resolveWorkTab;
   const previousRenew = context.renewLease;
@@ -224,7 +241,7 @@ context.crypto = webcrypto;
   assert.equal(typeof alarmListener, 'function', 'a suspended worker must have an alarm wake listener');
   await context.startHeartbeat();
   assert.ok(alarmCalls.some(([action, name, minutes, delay]) => action === 'create'
-    && name === 'contextbridge-heartbeat' && minutes === 0.5 && delay === 0.5));
+    && name === 'contextbridge-heartbeat' && minutes === 1 && delay === 1));
   await context.startHeartbeat();
   assert.equal(alarmCalls.filter(([action]) => action === 'create').length, 1, 'restarting an active worker must not postpone the alarm');
   await context.stopHeartbeat();
@@ -584,10 +601,11 @@ const element = (text = '', attributes = {}) => ({
   const input = element();
   const send = element();
   const markdown = element('CB45-LIVE-OK');
+  const copy = element('', { 'data-testid': 'copy-turn-action-button', 'aria-label': 'Copy' });
   const response = {
     ...element('Thinking chrome outside the answer'),
     matches: (selector) => selector === 'section[data-turn="assistant"]',
-    querySelectorAll: (selector) => selector === '.markdown' ? [markdown] : []
+    querySelectorAll: (selector) => selector === '.markdown' ? [markdown] : selector === 'button' ? [copy] : []
   };
   context.document = {
     querySelectorAll(selector) {
@@ -654,6 +672,18 @@ const element = (text = '', attributes = {}) => ({
 }
 
 {
+  const modelControl = element('Neuestes', { 'data-testid': 'model-switcher-dropdown-button' });
+  context.document = {
+    querySelectorAll(selector) {
+      return selector === 'button, [role="button"]' ? [modelControl] : [];
+    }
+  };
+  const capabilities = context.inspectPageCapabilities();
+  assert.equal(capabilities.currentModel, 'Neuestes',
+    'ChatGPT\'s rolling latest-model option is a real model selection, not unknown metadata');
+}
+
+{
   // ChatGPT can show only an icon labelled "Modell wechseln" while the
   // selected full name is exposed inside its model menu.
   let menuOpen = false;
@@ -662,7 +692,7 @@ const element = (text = '', attributes = {}) => ({
     click() { menuOpen = !menuOpen; },
     getAttribute(name) { return name === 'aria-expanded' ? String(menuOpen) : name === 'aria-label' ? 'Modell wechseln' : null; }
   };
-  const selected = element('GPT-5.6 Sol\nSchnell', { 'aria-checked': 'true' });
+  const selected = element('Neuestes\nEmpfohlen', { 'aria-checked': 'true' });
   const other = element('GPT-5.5', { 'aria-checked': 'false' });
   const composer = element('');
   context.KeyboardEvent = class {};
@@ -678,11 +708,11 @@ const element = (text = '', attributes = {}) => ({
   assert.equal(context.safeToDiscoverPageCapabilities(), true);
   assert.equal(context.inspectPageCapabilities().currentModel, '');
   menuOpen = true;
-  assert.equal(context.inspectPageCapabilities().currentModel, 'GPT-5.6 Sol');
+  assert.equal(context.inspectPageCapabilities().currentModel, 'Neuestes');
   menuOpen = false;
   const capabilities = await context.discoverPageCapabilities();
-  assert.equal(capabilities.currentModel, 'GPT-5.6 Sol');
-  assert.deepEqual(Array.from(capabilities.models), ['GPT-5.6 Sol', 'GPT-5.5']);
+  assert.equal(capabilities.currentModel, 'Neuestes');
+  assert.deepEqual(Array.from(capabilities.models), ['Neuestes', 'GPT-5.5']);
   assert.equal(menuOpen, false);
 }
 
@@ -1002,6 +1032,37 @@ const element = (text = '', attributes = {}) => ({
   assert.equal(switched, true);
   assert.equal(result.error, 'Switched composer was used');
   delete context.PointerEvent;
+}
+
+{
+  // The rolling selector is localized by ChatGPT. An English CLI request for
+  // "Latest" must match the German "Neuestes" option without guessing a
+  // concrete GPT version or clicking an already-selected item.
+  let menuOpen = true;
+  let modelClicks = 0;
+  const trigger = {
+    ...element('Mittel', { 'aria-haspopup': 'menu' }),
+    getAttribute(name) { return name === 'aria-expanded' ? String(menuOpen) : name === 'aria-haspopup' ? 'menu' : null; },
+    click() { menuOpen = !menuOpen; }
+  };
+  const latest = { ...element('Neuestes', { 'aria-checked': 'true' }), click() { modelClicks++; } };
+  const input = { ...element(''), closest: () => ({ querySelectorAll: () => [trigger] }),
+    focus() { throw new Error('Latest model selection was retained'); } };
+  context.KeyboardEvent = class {};
+  context.document = {
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === 'button[aria-haspopup="menu"]') return [trigger];
+      if (selector.includes('[data-radix-collection-item]')) return menuOpen ? [trigger, latest] : [trigger];
+      return [];
+    },
+    dispatchEvent() { menuOpen = false; }
+  };
+  const result = await context.automate({ prompt: 'not sent', model: 'Latest', output: { mode: 'text' } },
+    { name: 'chatgpt', selectors: { input: ['#input'], response: [], submit: [] } },
+    new Date(Date.now() + 12000).toISOString());
+  assert.equal(result.error, 'Latest model selection was retained');
+  assert.equal(modelClicks, 0);
 }
 
 {
@@ -1455,7 +1516,9 @@ for (const kind of ['image', 'file']) {
     if (event.type === 'change') preview = true;
   } };
   const send = { ...element('', { 'aria-label': 'Send message' }), click() { sent = true; input.value = ''; } };
-  const answer = element(`${kind} accepted`);
+  const copy = element('', { 'data-testid': 'copy-turn-action-button', 'aria-label': 'Copy' });
+  const answer = { ...element(`${kind} accepted`),
+    querySelectorAll: (selector) => selector === 'button' ? [copy] : [] };
   context.document = { querySelectorAll(selector) {
     if (selector === '#input') return [input];
     if (selector === '#send') return [send];
@@ -1905,6 +1968,165 @@ for (const [renderedUserText, shouldPass] of [['', true], ['A different visible 
   );
   assert.equal(result.code, 'stalled_response');
   assert.equal(result.recoverable, true);
+}
+
+{
+  let sent = false;
+  let responseReads = 0;
+  let now = Date.now();
+  class FastDate extends Date {
+    static now() { now += 1000; return now; }
+    static parse(value) { return Date.parse(value); }
+  }
+  class TextArea {
+    constructor() { this.value = ''; this.offsetWidth = 1; }
+    getClientRects() { return [1]; }
+    focus() {}
+    dispatchEvent() {}
+  }
+  const input = new TextArea();
+  const send = { ...element(), click() { sent = true; } };
+  const copy = element('', { 'data-testid': 'copy-turn-action-button', 'aria-label': 'Copy' });
+  const partial = { ...element('CB-GPT-0571-C'), querySelectorAll: () => [] };
+  const finished = {
+    ...element('CB-GPT-0571-COMPLETE-OK'),
+    querySelectorAll(selector) { return selector === 'button' ? [copy] : []; }
+  };
+  const document = {
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === '#send') return [send];
+      if (selector === '#response' && sent) {
+        responseReads += 1;
+        return [responseReads < 4 ? partial : finished];
+      }
+      return [];
+    }
+  };
+  const isolated = vm.createContext({ document, window: {}, HTMLTextAreaElement: TextArea,
+    HTMLInputElement: class {}, InputEvent: class {}, Event: class {},
+    setTimeout: (callback) => callback(), clearTimeout() {}, Date: FastDate, Promise });
+  const injectedAutomate = vm.runInContext(`(${context.automate.toString()})`, isolated);
+  const result = await injectedAutomate(
+    { prompt: 'CB-GPT-0571-COMPLETE-OK', output: { mode: 'text' } },
+    { name: 'chatgpt', selectors: { input: ['#input'], submit: ['#send'], response: ['#response'] } },
+    new Date(Date.now() + 3600000).toISOString()
+  );
+  assert.equal(result.ok, true);
+  assert.equal(result.text, 'CB-GPT-0571-COMPLETE-OK',
+    'a transient ChatGPT prefix without Copy must not be accepted as the final answer');
+}
+
+{
+  let sent = false;
+  let now = Date.now();
+  class FastDate extends Date {
+    static now() { now += 1000; return now; }
+    static parse(value) { return Date.parse(value); }
+  }
+  class TextArea {
+    constructor() { this.value = ''; this.offsetWidth = 1; }
+    getClientRects() { return [1]; }
+    focus() {}
+    dispatchEvent() {}
+  }
+  const input = new TextArea();
+  const send = { ...element(), click() { sent = true; } };
+  const copy = element('', { 'data-testid': 'copy-turn-action-button', 'aria-label': 'Copy' });
+  const partialWithCopy = {
+    ...element('CB-GPT-0571-'),
+    querySelectorAll(selector) { return selector === 'button' ? [copy] : []; }
+  };
+  const document = {
+    visibilityState: 'hidden',
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === '#send') return [send];
+      if (selector === '#response') return sent ? [partialWithCopy] : [];
+      return [];
+    }
+  };
+  const isolated = vm.createContext({ document, window: {}, HTMLTextAreaElement: TextArea,
+    HTMLInputElement: class {}, InputEvent: class {}, Event: class {},
+    setTimeout: (callback) => callback(), clearTimeout() {}, Date: FastDate, Promise });
+  const injectedAutomate = vm.runInContext(`(${context.automate.toString()})`, isolated);
+  const result = await injectedAutomate(
+    { prompt: 'CB-GPT-0571-COMPLETE-OK', metadata: { contextbridge_wake_hidden_text: true }, output: { mode: 'text' } },
+    { name: 'chatgpt', selectors: { input: ['#input'], submit: ['#send'], response: ['#response'] } },
+    new Date(Date.now() + 3600000).toISOString()
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'stalled_response');
+  assert.equal(result.text, 'CB-GPT-0571-',
+    'Copy mounted in a hidden auto-created ChatGPT tab is not final until the exact owned tab is woken');
+}
+
+{
+  let sent = false;
+  let now = Date.now();
+  class FastDate extends Date {
+    static now() { now += 5000; return now; }
+    static parse(value) { return Date.parse(value); }
+  }
+  class TextArea {
+    constructor() { this.value = ''; this.offsetWidth = 1; }
+    getClientRects() { return [1]; }
+    focus() {}
+    dispatchEvent() {}
+  }
+  const input = new TextArea();
+  const send = { ...element(), click() { sent = true; } };
+  const partial = { ...element('CB-GPT-PARTIAL'), querySelectorAll: () => [] };
+  const document = {
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === '#send') return [send];
+      if (selector === '#response') return sent ? [partial] : [];
+      return [];
+    }
+  };
+  const isolated = vm.createContext({ document, window: {}, HTMLTextAreaElement: TextArea,
+    HTMLInputElement: class {}, InputEvent: class {}, Event: class {},
+    setTimeout: (callback) => callback(), clearTimeout() {}, Date: FastDate, Promise });
+  const injectedAutomate = vm.runInContext(`(${context.automate.toString()})`, isolated);
+  const result = await injectedAutomate(
+    { prompt: 'CB-GPT-PARTIAL', output: { mode: 'text' } },
+    { name: 'chatgpt', selectors: { input: ['#input'], submit: ['#send'], response: ['#response'] } },
+    new Date(Date.now() + 3600000).toISOString()
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'stalled_response');
+  assert.equal(result.recoverable, true);
+}
+
+{
+  let now = Date.now();
+  class FastDate extends Date {
+    static now() { now += 5000; return now; }
+    static parse(value) { return Date.parse(value); }
+  }
+  const input = element();
+  const finished = { ...element('CB-GPT-0571-FULL-TURN-OK'), querySelectorAll: () => [] };
+  const document = {
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === '#response') return [finished];
+      return [];
+    }
+  };
+  const isolated = vm.createContext({ document, window: {}, HTMLTextAreaElement: class {},
+    HTMLInputElement: class {}, InputEvent: class {}, Event: class {},
+    setTimeout: (callback) => callback(), clearTimeout() {}, Date: FastDate, Promise });
+  const injectedAutomate = vm.runInContext(`(${context.automate.toString()})`, isolated);
+  const result = await injectedAutomate(
+    { prompt: 'ignored', metadata: { contextbridge_resume_only: true, contextbridge_foreground_recovery: true,
+      contextbridge_baseline_text: 'CB-GPT-0571-F' }, output: { mode: 'text' } },
+    { name: 'chatgpt', selectors: { input: ['#input'], submit: ['#send'], response: ['#response'] } },
+    new Date(Date.now() + 3600000).toISOString()
+  );
+  assert.equal(result.ok, true, result.error);
+  assert.equal(result.text, 'CB-GPT-0571-FULL-TURN-OK',
+    'an owned foreground recovery may accept only text that advanced beyond the held partial baseline');
 }
 
 for (const disabled of [true, false]) {
@@ -2610,6 +2832,70 @@ for (const disabled of [true, false]) {
   chrome.storage.local.set = previousStorageSet;
 }
 
+{
+  // ChatGPT can stabilize a short answer before its newly-created user turn
+  // receives the durable identifier used for ownership. Finalization may
+  // retry that proof, but must not resend or accept content before it exists.
+  const previousSettings = context.settings;
+  const previousTabGet = chrome.tabs.get;
+  const previousExecute = chrome.scripting.executeScript;
+  const previousStorageSet = chrome.storage.local.set;
+  const previousDelay = context.delay;
+  const activeLeases = vm.runInContext('activeBrowserLeases', context);
+  const freshURL = 'https://chatgpt.com/';
+  const intermediateURL = 'https://chatgpt.com/?model=auto';
+  const provisionalURL = 'https://chatgpt.com/c/WEB:1b4e8854-9828-4046-bc4d-d994dfacbed8';
+  const permanentURL = 'https://chatgpt.com/c/late-owned-turn';
+  const state = { running: true, tabIds: [35], sessionBindingsMigrated: true,
+    sessionBindings: { late: { tabId: 35, url: freshURL, autoCreated: true } },
+    browserJobClaims: { 'late-proof': { generation: 7, sessionKey: 'late', tabId: 35,
+      expectedURL: freshURL, state: 'sent_unknown', at: Date.now() } } };
+  let proofCalls = 0;
+  context.settings = async () => state;
+  context.delay = async () => {};
+  let currentURL = intermediateURL;
+  chrome.tabs.get = async () => ({ id: 35, url: currentURL });
+  chrome.scripting.executeScript = async () => {
+    proofCalls += 1;
+    return [{ result: proofCalls < 3 ? null : { id: 'late-owned', digest: 'c'.repeat(64), provider: 'chatgpt' } }];
+  };
+  chrome.storage.local.set = async (update) => Object.assign(state, update);
+  const lease = { jobId: 'late-proof', generation: 7, tabId: 35, expectedURL: freshURL,
+    sessionKey: 'late', prompt: 'owned prompt', profileName: 'chatgpt', sentUnknown: true, cancelled: false };
+  assert.equal(context.isPendingLeaseConversation({ ...lease, expectedURL: intermediateURL }, { url: permanentURL }), true,
+    'a provider routing query already present before Send must still permit exact-turn proof of the final chat URL');
+  activeLeases.set(lease.jobId, lease);
+  try {
+    const intermediate = await context.waitForActiveLeaseConversationProof(lease, new Date(Date.now() + 5000).toISOString());
+    assert.equal(intermediate.url, intermediateURL);
+    assert.equal(proofCalls, 3, 'finalization should wait for the late ownership node without resending');
+    assert.equal(lease.cancelled, false);
+    assert.equal(lease.expectedURL, intermediateURL);
+    currentURL = provisionalURL;
+    const provisional = await context.waitForActiveLeaseConversationProof(lease, new Date(Date.now() + 5000).toISOString());
+    assert.equal(provisional.url, provisionalURL);
+    assert.equal(proofCalls, 4, 'the same owned turn should prove ChatGPT\'s provisional conversation URL');
+    assert.equal(lease.expectedURL, provisionalURL);
+    currentURL = permanentURL;
+    const tab = await context.waitForActiveLeaseConversationProof(lease, new Date(Date.now() + 5000).toISOString());
+    assert.equal(tab.url, permanentURL);
+    assert.equal(proofCalls, 5, 'the same owned turn should prove ChatGPT\'s canonical URL without resending');
+    assert.equal(lease.expectedURL, permanentURL);
+    assert.equal(state.sessionBindings.late.url, permanentURL);
+    assert.equal(state.browserJobClaims['late-proof'].expectedURL, permanentURL);
+    assert.equal(context.isChatGPTProvisionalConversationTransition(
+      new URL('https://chatgpt.com/c/ordinary-a'), new URL('https://chatgpt.com/c/ordinary-b')), false,
+    'two ordinary ChatGPT conversations must never be treated as one ownership chain');
+  } finally {
+    activeLeases.delete(lease.jobId);
+    context.settings = previousSettings;
+    context.delay = previousDelay;
+    chrome.tabs.get = previousTabGet;
+    chrome.scripting.executeScript = previousExecute;
+    chrome.storage.local.set = previousStorageSet;
+  }
+}
+
 for (const observer of ['progress', 'action']) {
   // A tab lookup can retain its fresh-page snapshot while a different
   // observer completes ownership promotion. That snapshot must be refreshed.
@@ -2654,6 +2940,30 @@ for (const observer of ['progress', 'action']) {
     chrome.tabs.get = previousTabGet;
     chrome.scripting.executeScript = previousExecute;
     chrome.storage.local.set = previousStorageSet;
+  }
+}
+
+{
+  // A provider can briefly expose a different URL while canonicalizing a
+  // newly-created conversation. A supporting progress scan must fail closed
+  // for that sample without cancelling the authoritative job lease. The
+  // injected action gate and final ownership check remain authoritative.
+  const previousTabGet = chrome.tabs.get;
+  const previousExecute = chrome.scripting.executeScript;
+  const lease = { jobId: 'transient-progress-url', generation: 6, tabId: 34,
+    expectedURL: 'https://chatgpt.com/c/owned', cancelled: false };
+  let pageReads = 0;
+  chrome.tabs.get = async () => ({ id: 34, url: 'https://chatgpt.com/c/transient' });
+  chrome.scripting.executeScript = async () => { pageReads += 1; return [{ result: {} }]; };
+  try {
+    await assert.rejects(context.captureTabProgress(34, { response: ['#response'] }, lease),
+      /conversation URL changed/i);
+    assert.equal(lease.cancelled, false,
+      'a non-authoritative progress sample must not cancel a valid provider job');
+    assert.equal(pageReads, 0, 'a mismatched progress sample must not read provider response DOM');
+  } finally {
+    chrome.tabs.get = previousTabGet;
+    chrome.scripting.executeScript = previousExecute;
   }
 }
 
@@ -2709,8 +3019,9 @@ for (const proofDelay of [2500, Infinity]) {
     input.value = '';
     context.location.href = permanentURL;
   } };
+  const copy = element('', { 'data-testid': 'copy-turn-action-button', 'aria-label': 'Copy' });
   const response = { ...element('Owned answer'), matches: () => true,
-    querySelectorAll: (selector) => selector === '.markdown' ? [element('Owned answer')] : [] };
+    querySelectorAll: (selector) => selector === '.markdown' ? [element('Owned answer')] : selector === 'button' ? [copy] : [] };
   context.document = { querySelectorAll(selector) {
     if (selector === '#input') return [input];
     if (selector === '#send') return [send];

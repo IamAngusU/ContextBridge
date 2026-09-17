@@ -25,9 +25,12 @@ function fixture(provider) {
   };
   const editor = new Textarea(oldPrompt);
   const input = { offsetWidth: 1, getClientRects: () => [1], closest: () => null };
+  const copyButton = { offsetWidth: 1, getClientRects: () => [1],
+    getAttribute: (name) => name === 'data-testid' ? 'copy-turn-action-button' : name === 'aria-label' ? 'Copy' : null };
   const answer = {
     offsetWidth: 1, innerText: 'OLD-ANSWER', textContent: 'OLD-ANSWER', identity: 'answer-old',
-    getClientRects: () => [1], querySelector: () => null, querySelectorAll: () => [],
+    getClientRects: () => [1], querySelector: () => null,
+    querySelectorAll: (selector) => provider === 'chatgpt' && selector === 'button' ? [copyButton] : [],
     getAttribute(name) { return name === 'id' ? this.identity : null; },
     closest: () => null, matches: () => false
   };

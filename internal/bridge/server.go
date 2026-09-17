@@ -885,6 +885,11 @@ func (s *Server) handleBrowserHeartbeat(w http.ResponseWriter, r *http.Request) 
 				default:
 					failure.Reason = "other"
 				}
+				switch failure.LeaseReason {
+				case "", "renewal_rejected", "conversation_changed", "tab_detached", "action_rejected", "claim_persistence_failed":
+				default:
+					failure.LeaseReason = ""
+				}
 			}
 		}
 		if dom := status.Tabs[index].DOM; dom != nil {

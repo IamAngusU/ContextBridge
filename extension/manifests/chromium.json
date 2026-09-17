@@ -2,13 +2,13 @@
   "manifest_version": 3,
   "name": "ContextBridge",
   "short_name": "ContextBridge",
-  "version": "0.5.70",
+  "version": "0.5.71",
   "description": "Connect auto-detected or visually taught AI tabs to your local ContextBridge service.",
   "permissions": ["storage", "activeTab", "scripting", "alarms"],
   "optional_permissions": ["tabs"],
   "optional_host_permissions": ["http://127.0.0.1/*", "http://localhost/*", "https://*/*", "http://*/*"],
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background-entry.js"
   },
   "action": {
     "default_title": "ContextBridge",

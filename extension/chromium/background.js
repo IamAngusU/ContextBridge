@@ -31,6 +31,14 @@ let connectionPhase = '';
 let connectionPhaseStartedAt = 0;
 const pollers = new Map();
 const pollAbortControllers = new Map();
+// Chromium limits parallel connections per origin. One 25-second /next
+// request per attached tab can otherwise starve the lease, heartbeat, and
+// completion requests that make an already claimed job authoritative. Keep
+// the number of waiting polls aligned with the worker's current slot budget
+// while allowing any number of attached tabs to take turns fairly.
+const MAX_CONCURRENT_BROWSER_POLLS = 4;
+let activeBrowserPollRequests = 0;
+const browserPollWaiters = [];
 const busyTabs = new Set();
 const freshTabChecks = new Map();
 let freshTabWrite = Promise.resolve();
@@ -42,7 +50,7 @@ const recoveredTabReservations = new Map();
 const rejectedBrowserClaims = new Set();
 const leaseRecoveryTasks = new Set();
 const PENDING_COMPLETION_MAX_BYTES = 512 * 1024;
-const acceptedModelLabel = /^(?:gpt[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:astra|sol|terra|luna|pro|mini|nano|codex|thinking|instant))?|gemini(?:[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:pro|flash|lite|thinking|preview|experimental))*)?|astra|sol|terra|luna|\d+(?:\.\d+)?\s+(?:pro|flash|astra|sol|terra|luna))$/i;
+const acceptedModelLabel = /^(?:latest|newest|neuestes|neueste|aktuellstes|aktuellste|gpt[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:astra|sol|terra|luna|pro|mini|nano|codex|thinking|instant))?|gemini(?:[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:pro|flash|lite|thinking|preview|experimental))*)?|astra|sol|terra|luna|\d+(?:\.\d+)?\s+(?:pro|flash|astra|sol|terra|luna))$/i;
 
 // Do not resume eagerly while this module is being evaluated. On Chromium an
 // MV3 worker is loaded before the event that woke it is dispatched; an eager
@@ -232,6 +240,7 @@ function beginBrowserLeaseRecovery() {
   // same worker. Abort it synchronously so it cannot lease a second job for a
   // tab whose durable claim is about to be restored.
   for (const controller of pollAbortControllers.values()) controller.abort();
+  cancelBrowserPollWaiters();
   return task;
 }
 
@@ -252,6 +261,8 @@ async function waitForBrowserLeaseRecovery() {
 async function stopPairing() {
   const generation = ++lifecycleGeneration;
   stopRequested = true;
+  for (const controller of pollAbortControllers.values()) controller.abort();
+  cancelBrowserPollWaiters();
   for (const lease of [...activeBrowserLeases.values()]) cancelRecoveredBrowserLease(lease, true);
   recoveredTabReservations.clear();
   busyTabs.clear();
@@ -302,6 +313,14 @@ function isFreshChatURL(value) {
   try {
     const url = new URL(value);
     if (url.search || url.hash) return false;
+    return isFreshChatPath(url.href);
+  } catch (_) {}
+  return false;
+}
+
+function isFreshChatPath(value) {
+  try {
+    const url = new URL(value);
     if (['chatgpt.com', 'chat.openai.com'].includes(url.hostname)) return url.pathname === '/';
     if (url.hostname === 'gemini.google.com') return url.pathname === '/app' || url.pathname === '/app/';
   } catch (_) {}
@@ -654,6 +673,8 @@ async function pollTab(tabId) {
       try {
 		let requestedProfile = cfg.profile || '';
 		try { requestedProfile = routingProfileName(cfg, await api.tabs.get(tabId)) || requestedProfile; } catch (_) {}
+        const pollSlot = await acquireBrowserPollRequest();
+        if (!pollSlot) continue;
         const pollController = new AbortController();
         pollAbortControllers.set(tabId, pollController);
         let response;
@@ -663,6 +684,7 @@ async function pollTab(tabId) {
           cache: 'no-store', signal: pollController.signal
           }, 35000);
         } finally {
+          releaseBrowserPollRequest();
           if (pollAbortControllers.get(tabId) === pollController) pollAbortControllers.delete(tabId);
         }
         if (response.status === 204) continue;
@@ -705,6 +727,34 @@ async function pollTab(tabId) {
         await delay(2000);
       }
   }
+}
+
+function acquireBrowserPollRequest() {
+  if (stopRequested) return Promise.resolve(false);
+  if (activeBrowserPollRequests < MAX_CONCURRENT_BROWSER_POLLS) {
+    activeBrowserPollRequests += 1;
+    return Promise.resolve(true);
+  }
+  return new Promise((resolve) => browserPollWaiters.push(resolve));
+}
+
+function releaseBrowserPollRequest() {
+  while (browserPollWaiters.length) {
+    const next = browserPollWaiters.shift();
+    if (stopRequested) {
+      next(false);
+      continue;
+    }
+    // Transfer this slot directly to the oldest waiter. The active count does
+    // not change until that waiter eventually releases it.
+    next(true);
+    return;
+  }
+  activeBrowserPollRequests = Math.max(0, activeBrowserPollRequests - 1);
+}
+
+function cancelBrowserPollWaiters() {
+  while (browserPollWaiters.length) browserPollWaiters.shift()(false);
 }
 
 async function processWork(cfg, work, claimedTabId) {
@@ -753,7 +803,12 @@ async function processWork(cfg, work, claimedTabId) {
       if (leaseState.cancelled || leaseState.renewing) return;
       leaseState.renewing = true;
       renewLease(cfg, work.job.id, leaseGeneration)
-        .then((ok) => { if (!ok) leaseState.cancelled = true; })
+        .then((ok) => {
+          if (!ok) {
+            leaseState.cancelReason = 'renewal_rejected';
+            leaseState.cancelled = true;
+          }
+        })
         // A transport failure is not authoritative lease loss. The next
         // renewal or action gate retries, while a real HTTP 409 cancels.
         .catch((error) => { leaseState.lastRenewalError = error?.message || String(error); })
@@ -889,6 +944,12 @@ async function processWork(cfg, work, claimedTabId) {
     } else {
       await rememberBrowserJobClaim(work, tabId, (await assertSessionTab(workSessionKey(work), tabId)).tab.url, initial, effectiveProfile.name);
     }
+    if (!observationOnly && binding?.autoCreated === true && effectiveProfile.name === 'chatgpt'
+        && !work.job.image_base64 && Number(work.job.output?.min_images || 0) === 0
+        && Number(work.job.output?.min_artifacts || 0) === 0 && Number(work.job.output?.min_media || 0) === 0) {
+      automationJob = { ...automationJob, metadata: { ...(automationJob.metadata || {}),
+        contextbridge_wake_hidden_text: true } };
+    }
     try {
       await requireActiveBrowserLease(cfg, leaseState);
       const guarded = await assertSessionTab(workSessionKey(work), tabId);
@@ -916,25 +977,34 @@ async function processWork(cfg, work, claimedTabId) {
         args: [resumeJob, effectiveProfile, work.deadline, null, recoveryTab.url, { jobId: work.job.id, generation: leaseGeneration }] });
       answer = resumed?.[0]?.result;
     }
+    // The periodic progress observer is supporting evidence only. Stop it as
+    // soon as the authoritative provider automation returns so a late sample
+    // cannot race final ownership/lease validation.
+    if (progressTimer) {
+      clearInterval(progressTimer);
+      progressTimer = 0;
+    }
+    for (let attempt = 0; progressBusy && attempt < 200; attempt += 1) await delay(25);
     if (shouldForegroundStalledTab(binding, effectiveProfile, answer)) {
       // An automatically created background tab can be throttled by the
       // browser. Foreground it only after proving this is our submitted turn,
       // then observe without sending again. Keep the tab visible if it wakes.
       try {
         await assertRecoveryTab(workSessionKey(work), tabId);
-        const proof = await api.scripting.executeScript({ target: { tabId }, func: inspectLatestOwnedTurn,
-          args: [work.job.prompt, effectiveProfile.name] });
+        const proof = await waitForExactOwnedTurnProof(workSessionKey(work), tabId, effectiveProfile, work.job.prompt,
+          Math.min(15000, Math.max(0, (Date.parse(work.deadline || '') || Date.now() + 15000) - Date.now() - 5000)));
         const remaining = (Date.parse(work.deadline || '') || Date.now() + 45000) - Date.now() - 5000;
-        if (proof?.[0]?.result && remaining >= 10000 && !(await api.tabs.get(tabId)).active) {
+        if (proof && remaining >= 10000 && !(await api.tabs.get(tabId)).active) {
           progressSequence += 1;
           await reportProgress(cfg, work.job.id, { sequence: progressSequence, text: '', phase: 'recovering',
             detail: 'Foregrounding a stalled, ContextBridge-created tab without resending', busy: true });
 	          await requireActiveBrowserLease(cfg, leaseState);
 	          await api.tabs.update(tabId, { active: true });
-	          const resumeJob = { ...work.job, metadata: { ...(work.job.metadata || {}), contextbridge_resume_only: true, contextbridge_baseline_text: baselineText } };
+	          const resumeJob = { ...work.job, metadata: { ...(work.job.metadata || {}), contextbridge_resume_only: true,
+	            contextbridge_foreground_recovery: true, contextbridge_baseline_text: String(answer?.text || baselineText) } };
 	          const observationTab = await assertRecoveryTab(workSessionKey(work), tabId);
           const observed = await api.scripting.executeScript({ target: { tabId }, func: automate,
-            args: [resumeJob, effectiveProfile, new Date(Date.now() + Math.min(35000, remaining)).toISOString(), null,
+            args: [resumeJob, effectiveProfile, new Date(Date.now() + Math.min(60000, remaining)).toISOString(), null,
               observationTab.url, { jobId: work.job.id, generation: leaseGeneration }] });
           if (observed?.[0]?.result?.ok) answer = observed[0].result;
         }
@@ -942,32 +1012,40 @@ async function processWork(cfg, work, claimedTabId) {
     }
     if (!answer?.ok && answer?.recoverable) {
       failureCode = 'browser_recovery_unsafe';
-      await assertRecoveryTab(workSessionKey(work), tabId);
-      const proofResult = await api.scripting.executeScript({ target: { tabId }, func: inspectLatestOwnedTurn,
-        args: [work.job.prompt, effectiveProfile.name] });
-      const recoveryTurn = proofResult?.[0]?.result;
-      if (!recoveryTurn) throw new Error('The submitted ContextBridge turn could not be verified; no reload was performed');
+      const firstRecovery = await requireStableRecoveryState(workSessionKey(work), tabId, effectiveProfile,
+        work.job.prompt, false, 10000);
+      let recoveryTurn = firstRecovery.ownedTurn;
       await rememberSessionURL(workSessionKey(work), tabId);
       await rememberOwnedTurn(workSessionKey(work), tabId, recoveryTurn);
-      const expectedTurn = { ownedTurn: recoveryTurn };
-      const firstSafeState = await requireSafeReloadState(tabId, effectiveProfile, expectedTurn, false);
+      let firstSafeState = firstRecovery.state;
       failureCode = 'browser_recovery_failed';
       progressSequence += 1;
       await reportProgress(cfg, work.job.id, { sequence: progressSequence, text: '', phase: 'recovering', detail: answer.error || 'Recovering browser tab', percent: Number(answer.percent) || 0, busy: true });
-      await delay(2500);
-      failureCode = 'browser_recovery_unsafe';
-      await assertRecoveryTab(workSessionKey(work), tabId);
-      const secondSafeState = await requireSafeReloadState(tabId, effectiveProfile, expectedTurn, false);
-      if (firstSafeState.fingerprint !== secondSafeState.fingerprint) {
-        throw new Error('Automatic reload skipped: the response changed during verification; the tab was left untouched');
-      }
+      const stabilityDeadline = Math.min(Date.now() + 20000, (Date.parse(work.deadline || '') || Infinity) - 5000);
+      let responseStable = false;
+      do {
+        await delay(Math.min(2500, Math.max(0, stabilityDeadline - Date.now())));
+        failureCode = 'browser_recovery_unsafe';
+        const secondRecovery = await requireStableRecoveryState(workSessionKey(work), tabId, effectiveProfile,
+          work.job.prompt, false, Math.min(10000, Math.max(0, stabilityDeadline - Date.now())));
+        recoveryTurn = secondRecovery.ownedTurn;
+        await rememberOwnedTurn(workSessionKey(work), tabId, recoveryTurn);
+        const secondSafeState = secondRecovery.state;
+        if (firstSafeState.fingerprint === secondSafeState.fingerprint) {
+          responseStable = true;
+          break;
+        }
+        firstSafeState = secondSafeState;
+      } while (Date.now() < stabilityDeadline);
+      if (!responseStable) throw new Error('Automatic reload skipped: the response changed during verification; the tab was left untouched');
       failureCode = 'browser_recovery_failed';
       await requireActiveBrowserLease(cfg, leaseState);
       await api.tabs.reload(tabId);
       await waitForTabReady(tabId, effectiveProfile.selectors, 30000);
-      await assertRecoveryTab(workSessionKey(work), tabId);
       failureCode = 'browser_recovery_unsafe';
-      await requireSafeReloadState(tabId, effectiveProfile, expectedTurn, false);
+      const reloadedRecovery = await requireStableRecoveryState(workSessionKey(work), tabId, effectiveProfile,
+        work.job.prompt, false, 15000);
+      await rememberOwnedTurn(workSessionKey(work), tabId, reloadedRecovery.ownedTurn);
       failureCode = 'browser_recovery_failed';
       const resumeJob = { ...work.job, metadata: { ...(work.job.metadata || {}), contextbridge_resume_only: true, contextbridge_baseline_text: baselineText } };
       const recoveryTab = await assertRecoveryTab(workSessionKey(work), tabId);
@@ -988,12 +1066,11 @@ async function processWork(cfg, work, claimedTabId) {
     failureCode = 'browser_lease_lost';
     await requireActiveBrowserLease(cfg, leaseState);
     failureCode = 'browser_session_changed';
-    tab = await assertActiveLeaseConversation(leaseState);
+    tab = await waitForActiveLeaseConversationProof(leaseState, work.deadline);
     await assertSessionTab(leaseState.sessionKey, tabId);
     try {
-      const owned = await api.scripting.executeScript({ target: { tabId }, func: inspectLatestOwnedTurn,
-        args: [work.job.prompt, effectiveProfile.name, true, effectiveProfile.selectors] });
-      submittedTurn = owned?.[0]?.result || null;
+      submittedTurn = await waitForExactOwnedTurnProof(workSessionKey(work), tabId, effectiveProfile,
+        work.job.prompt, 10000, true);
     } catch (_) { /* Some text-only providers lack a stable turn identifier. */ }
     if (['chatgpt', 'gemini'].includes(effectiveProfile.name) && !submittedTurn
         && !(effectiveProfile.name === 'gemini' && work.job.image_base64 && answer.submitted_prompt_verified === true)) {
@@ -1011,7 +1088,7 @@ async function processWork(cfg, work, claimedTabId) {
         busy: true
       });
       answer.artifacts = await hydrateArtifactReferences(answer.artifacts, tab.url, work.job.output || {});
-      tab = await assertActiveLeaseConversation(leaseState);
+      tab = await waitForActiveLeaseConversationProof(leaseState, work.deadline);
       await assertSessionTab(leaseState.sessionKey, tabId);
     }
     if (!String(answer.text || '').trim()) {
@@ -1033,7 +1110,7 @@ async function processWork(cfg, work, claimedTabId) {
     // the model/reasoning requested by the remote job.
 	if (answer.selected_model) decision.selected_model = String(answer.selected_model).slice(0, 100);
 	if (answer.selected_reasoning) decision.selected_reasoning = String(answer.selected_reasoning).slice(0, 100);
-    tab = await assertActiveLeaseConversation(leaseState);
+    tab = await waitForActiveLeaseConversationProof(leaseState, work.deadline);
     await assertSessionTab(leaseState.sessionKey, tabId);
     if (!editTarget) await releaseOwnedDraftIfEmpty(tabId, effectiveProfile);
     jobCompleted = true;
@@ -1044,7 +1121,9 @@ async function processWork(cfg, work, claimedTabId) {
       ? { verdict: 'review', flags: [failureCode], confidence: 0.4, model: effectiveProfile?.label || 'browser' }
       : { mode, error: failureCode, model: effectiveProfile?.label || 'browser' };
     const tabFailures = { ...(await api.storage.local.get({ tabFailures: {} })).tabFailures };
-    if (tabId) tabFailures[tabId] = { code: failureCode, reason: failureReason === 'other' ? classifyFailureReason(error.message) : failureReason, at: new Date().toISOString() };
+    if (tabId) tabFailures[tabId] = { code: failureCode,
+      reason: failureReason === 'other' ? classifyFailureReason(error.message) : failureReason,
+      lease_reason: String(leaseState?.cancelReason || '').slice(0, 60), at: new Date().toISOString() };
     // A failed website job is visible on its tab and in its job result; it is
     // not a failure of the local browser-bridge connection itself.
     await api.storage.local.set({ tabFailures });
@@ -1460,7 +1539,13 @@ async function inspectRecoveryState(selectors, provider, expected) {
     const text = normalize(value);
     if (!text) return false;
     const matchesOwned = Boolean(expectedDigest && turnID === expected?.ownedTurn?.id && await digest(text) === expectedDigest);
-    const matchesPrompt = Boolean(!expectedDigest && expectedPrompt && text === expectedPrompt);
+    // ChatGPT can remount a completed user turn with a new data-turn-id while
+    // an inactive/minimized tab finishes rendering.  The exact normalized
+    // prompt on the newest user turn, inside the already session-bound tab, is
+    // still authoritative ownership evidence.  Keep the transient id+digest
+    // check as the preferred path, but do not let an id-only remount make a
+    // safely owned turn unrecoverable.
+    const matchesPrompt = Boolean(expectedPrompt && text === expectedPrompt);
     if (!matchesOwned && !matchesPrompt) return false;
     turnText = text;
     ownedTurnMatches = true;
@@ -1547,6 +1632,48 @@ async function requireSafeReloadState(tabId, profile, expected, requireFinishedA
   const reason = unsafeReloadReason(state, requireFinishedAnswer);
   if (reason) throw new Error(`Automatic reload skipped: ${reason}; the tab was left untouched`);
   return state;
+}
+
+async function waitForExactOwnedTurnProof(sessionKey, tabId, profile, prompt, timeoutMilliseconds = 10000,
+    requireResponseAfter = false) {
+  const deadline = Date.now() + Math.max(0, Number(timeoutMilliseconds) || 0);
+  do {
+    await assertRecoveryTab(sessionKey, tabId);
+    const result = await withDeadline(api.scripting.executeScript({ target: { tabId }, func: inspectLatestOwnedTurn,
+      args: [prompt, profile.name, requireResponseAfter, requireResponseAfter ? profile.selectors : null] }), 3000).catch(() => null);
+    const proof = result?.[0]?.result || null;
+    if (proof) {
+      await assertRecoveryTab(sessionKey, tabId);
+      return proof;
+    }
+    if (Date.now() >= deadline) break;
+    await delay(Math.min(250, Math.max(0, deadline - Date.now())));
+  } while (Date.now() < deadline);
+  return null;
+}
+
+async function requireStableRecoveryState(sessionKey, tabId, profile, prompt, requireFinishedAnswer,
+    timeoutMilliseconds = 10000) {
+  const deadline = Date.now() + Math.max(0, Number(timeoutMilliseconds) || 0);
+  let lastMismatch = null;
+  do {
+    const remaining = Math.max(0, deadline - Date.now());
+    const ownedTurn = await waitForExactOwnedTurnProof(sessionKey, tabId, profile, prompt, Math.min(3000, remaining));
+    if (ownedTurn) {
+      try {
+        const state = await requireSafeReloadState(tabId, profile, { ownedTurn, prompt }, requireFinishedAnswer);
+        await assertRecoveryTab(sessionKey, tabId);
+        return { state, ownedTurn };
+      } catch (error) {
+        if (!/latest user message is not the expected ContextBridge turn/i.test(String(error?.message || ''))) throw error;
+        lastMismatch = error;
+      }
+    }
+    if (Date.now() >= deadline) break;
+    await delay(Math.min(250, Math.max(0, deadline - Date.now())));
+  } while (Date.now() < deadline);
+  if (lastMismatch) throw lastMismatch;
+  throw new Error('The submitted ContextBridge turn could not be verified; no reload was performed');
 }
 
 async function recoverPriorStall(work, tabId, profile, ownedTurn, cfg = null, lease = null) {
@@ -1690,14 +1817,48 @@ function isPendingLeaseConversation(lease, tab) {
   try {
     const before = new URL(lease.expectedURL);
     const after = new URL(tab.url);
-    return before.origin === after.origin && isFreshChatURL(before.href) && !isFreshChatURL(after.href);
+    // The provider can apply model/routing query parameters before Send. The
+    // page is still a fresh-chat path, and promotion remains contingent on
+    // finding the exact ContextBridge prompt as the newest owned user turn.
+    return before.origin === after.origin && before.href !== after.href && isFreshChatPath(before.href);
   } catch (_) { return false; }
+}
+
+function isChatGPTProvisionalConversationTransition(before, after) {
+  if (!before || !after || before.origin !== after.origin
+      || !['chatgpt.com', 'chat.openai.com'].includes(before.hostname)) return false;
+  const provisional = /^\/c\/WEB:[0-9a-f-]{36}$/i;
+  const canonical = /^\/c\/[0-9a-z-]{12,100}$/i;
+  return provisional.test(before.pathname) && canonical.test(after.pathname)
+    && !provisional.test(after.pathname);
+}
+
+function isOwnedLeaseConversationTransition(lease, tab) {
+  if (!lease?.sentUnknown || !lease.expectedURL || !lease.sessionKey || !lease.ownedTurn?.id
+      || !lease.ownedTurn?.digest || !['chatgpt', 'gemini'].includes(lease.profileName) || !tab?.url) return false;
+  try {
+    const before = new URL(lease.expectedURL);
+    const after = new URL(tab.url);
+    if (before.origin !== after.origin || before.href === after.href) return false;
+    // Providers can first add routing parameters to the fresh root and only
+    // later publish /c/... or /app/... . ChatGPT additionally replaces its
+    // explicit /c/WEB:<UUID> provisional identifier with a canonical server
+    // identifier. Every transition still re-proves the identical owned turn.
+    // Arbitrary changes between two normal conversation paths are ineligible.
+    return before.pathname === after.pathname
+      || (isFreshChatPath(before.href) && !isFreshChatPath(after.href))
+      || isChatGPTProvisionalConversationTransition(before, after);
+  } catch (_) { return false; }
+}
+
+function isVerifiableLeaseConversationTransition(lease, tab) {
+  return isPendingLeaseConversation(lease, tab) || isOwnedLeaseConversationTransition(lease, tab);
 }
 
 async function promoteActiveLeaseConversation(lease, tab) {
   if (!lease || lease.cancelled || stopRequested) return false;
   if (tab?.url === lease.expectedURL) return true;
-  if (!isPendingLeaseConversation(lease, tab)) return false;
+  if (!isVerifiableLeaseConversationTransition(lease, tab)) return false;
   // Progress sampling and the injected observer can see the first chat URL
   // change together. Share one proof/CAS instead of letting one caller cancel
   // a lease while the other is still committing the same verified transition.
@@ -1717,6 +1878,9 @@ async function commitActiveLeaseConversation(lease, sourceURL, targetURL) {
     func: inspectLatestOwnedTurn, args: [lease.prompt || '', lease.profileName, false, null, lease.promptProof || null] }), 5000).catch(() => null);
   const ownedTurn = proof?.[0]?.result;
   if (!ownedTurn) return false;
+  const priorOwnedTurn = lease.ownedTurn;
+  if (priorOwnedTurn && (ownedTurn.id !== priorOwnedTurn.id || ownedTurn.digest !== priorOwnedTurn.digest
+      || ownedTurn.provider !== priorOwnedTurn.provider)) return false;
   const verifiedTab = await withDeadline(api.tabs.get(lease.tabId), 2500).catch(() => null);
   if (lease.cancelled || stopRequested || verifiedTab?.url !== targetURL) return false;
   const updated = await serializeSessionWrite(() => serializeBrowserClaimWrite(async () => {
@@ -1731,6 +1895,7 @@ async function commitActiveLeaseConversation(lease, sourceURL, targetURL) {
     const browserJobClaims = { ...cfg.browserJobClaims,
       [lease.jobId]: { ...existing, expectedURL: targetURL, ownedTurn, at: Date.now() } };
     await api.storage.local.set({ sessionBindings: bindings, browserJobClaims });
+    lease.priorExpectedURLs = [...new Set([...(lease.priorExpectedURLs || []), sourceURL])].slice(-3);
     lease.expectedURL = targetURL;
     lease.ownedTurn = ownedTurn;
     return true;
@@ -1738,7 +1903,7 @@ async function commitActiveLeaseConversation(lease, sourceURL, targetURL) {
   return updated;
 }
 
-async function assertActiveLeaseConversation(lease) {
+async function assertActiveLeaseConversation(lease, cancelOnMismatch = true) {
   if (!lease || lease.cancelled || stopRequested) throw new Error('The browser job lease was cancelled');
   const tab = await readActiveLeaseTab(lease);
   if (lease.cancelled || stopRequested) throw new Error('The browser job lease was cancelled');
@@ -1750,13 +1915,37 @@ async function assertActiveLeaseConversation(lease) {
   // A provider can publish its conversation URL before the corresponding
   // user turn mounts. Skip this progress sample without poisoning the live
   // lease. No response content is read until the ownership proof succeeds.
-  if (isPendingLeaseConversation(lease, tab)) {
+  if (isVerifiableLeaseConversationTransition(lease, tab)) {
     const error = new Error('The submitted ContextBridge turn could not be verified after the conversation URL changed; no provider content was observed');
     error.code = 'browser_session_changed';
     throw error;
   }
-  lease.cancelled = true;
+  if (cancelOnMismatch) {
+    lease.cancelReason = 'conversation_changed';
+    lease.cancelled = true;
+  }
   throw new Error('The conversation URL changed; no provider content was observed');
+}
+
+async function waitForActiveLeaseConversationProof(lease, jobDeadline = '', timeoutMilliseconds = 15000) {
+  const suppliedDeadline = Date.parse(String(jobDeadline || ''));
+  const deadline = Math.min(Date.now() + Math.max(0, Number(timeoutMilliseconds) || 0),
+    Number.isFinite(suppliedDeadline) ? suppliedDeadline : Infinity);
+  let lastError = null;
+  do {
+    try { return await assertActiveLeaseConversation(lease); }
+    catch (error) {
+      lastError = error;
+      // Fresh-chat providers can commit the permanent conversation URL after
+      // the answer has already stabilized but before their owned user-turn
+      // node receives its durable identifier. Retry only that exact,
+      // non-cancelling ownership proof. No response DOM is read and Send is
+      // never authorized again during this bounded finalization window.
+      if (error?.code !== 'browser_session_changed' || lease?.cancelled || stopRequested || Date.now() >= deadline) throw error;
+      await delay(Math.min(250, Math.max(0, deadline - Date.now())));
+    }
+  } while (Date.now() < deadline);
+  throw lastError || new Error('The submitted ContextBridge turn could not be verified after the conversation URL changed; no provider content was observed');
 }
 
 async function readActiveLeaseTab(lease) {
@@ -1772,7 +1961,11 @@ async function readActiveLeaseTab(lease) {
 }
 
 async function captureTabProgress(tabId, selectors, lease = null) {
-  if (lease) await assertActiveLeaseConversation(lease);
+  // Progress is intentionally non-authoritative. A provider can expose a
+  // transient URL while canonicalizing a newly-created conversation. Skip the
+  // sample, but leave cancellation to the injected action gate or final
+  // ownership check, both of which have the full job context.
+  if (lease) await assertActiveLeaseConversation(lease, false);
   if (progressScriptsInFlight.has(tabId)) throw new Error('The prior browser progress scan is still pending');
   const raw = api.scripting.executeScript({ target: { tabId }, func: captureProgress, args: [selectors, lease?.expectedURL || ''] });
   progressScriptsInFlight.set(tabId, raw);
@@ -1782,7 +1975,7 @@ async function captureTabProgress(tabId, selectors, lease = null) {
     if (progressScriptsInFlight.get(tabId) === raw) progressScriptsInFlight.delete(tabId);
   });
   const results = await withDeadline(raw, 5000);
-  if (lease) await assertActiveLeaseConversation(lease);
+  if (lease) await assertActiveLeaseConversation(lease, false);
   return results?.[0]?.result || { text: '', busy: false };
 }
 
@@ -1878,8 +2071,12 @@ async function browserLeaseStatus(cfg, jobId, generation) {
 }
 
 async function requireActiveBrowserLease(cfg, lease) {
-  if (!lease || lease.cancelled || stopRequested) throw browserLeaseLost('The browser job lease was cancelled');
+  if (!lease || lease.cancelled || stopRequested) {
+    const reason = stopRequested ? 'connection_stopped' : String(lease?.cancelReason || 'cancelled');
+    throw browserLeaseLost(`The browser job lease was cancelled (${reason})`);
+  }
   if (!await renewLease(cfg, lease.jobId, lease.generation)) {
+    lease.cancelReason = 'renewal_rejected';
     lease.cancelled = true;
     throw browserLeaseLost('The browser job lease was lost');
   }
@@ -1913,6 +2110,7 @@ async function authorizeBrowserJobAction(message, sender) {
   const cfg = await settings();
   if (activeBrowserLeases.get(jobId) !== lease || lease.cancelled) return { ok: false, error: 'browser_job_lease_lost' };
   if (!cfg.running || !configuredTabIDs(cfg).includes(lease.tabId)) {
+    lease.cancelReason = 'tab_detached';
     lease.cancelled = true;
     return { ok: false, error: 'browser_job_cancelled' };
   }
@@ -1920,13 +2118,10 @@ async function authorizeBrowserJobAction(message, sender) {
   const tab = await readActiveLeaseTab(lease);
   if (activeBrowserLeases.get(jobId) !== lease || lease.cancelled) return { ok: false, error: 'browser_job_lease_lost' };
   const expectedURL = String(message?.expectedURL || '');
-  let staleFreshObserver = false;
-  try {
-    staleFreshObserver = action === 'observe' && expectedURL !== lease.expectedURL && tab?.url === lease.expectedURL
-      && isFreshChatURL(expectedURL) && !isFreshChatURL(lease.expectedURL)
-      && new URL(expectedURL).origin === new URL(lease.expectedURL).origin;
-  } catch (_) {}
-  if (!tab?.url || !expectedURL || (expectedURL !== lease.expectedURL && !staleFreshObserver)) {
+  const staleExpectedObserver = action === 'observe' && expectedURL !== lease.expectedURL
+    && tab?.url === lease.expectedURL && (lease.priorExpectedURLs || []).includes(expectedURL);
+  if (!tab?.url || !expectedURL || (expectedURL !== lease.expectedURL && !staleExpectedObserver)) {
+    lease.cancelReason = 'conversation_changed';
     lease.cancelled = true;
     return { ok: false, error: 'browser_conversation_changed' };
   }
@@ -1935,14 +2130,15 @@ async function authorizeBrowserJobAction(message, sender) {
     if (action === 'observe') {
       for (let attempt = 0; attempt < 3 && !promoted; attempt += 1) {
         try { promoted = await promoteActiveLeaseConversation(lease, tab); } catch (_) {}
-        if (promoted || !isPendingLeaseConversation(lease, tab) || lease.cancelled) break;
+        if (promoted || !isVerifiableLeaseConversationTransition(lease, tab) || lease.cancelled) break;
         if (attempt < 2) await delay(250);
       }
     }
     if (!promoted) {
-      if (action === 'observe' && isPendingLeaseConversation(lease, tab) && !lease.cancelled) {
+      if (action === 'observe' && isVerifiableLeaseConversationTransition(lease, tab) && !lease.cancelled) {
         return { ok: false, error: 'browser_conversation_unverified' };
       }
+      lease.cancelReason = 'conversation_changed';
       lease.cancelled = true;
       return { ok: false, error: 'browser_conversation_changed' };
     }
@@ -1955,7 +2151,10 @@ async function authorizeBrowserJobAction(message, sender) {
     if (activeBrowserLeases.get(jobId) !== lease || lease.cancelled) return { ok: false, error: 'browser_job_lease_lost' };
     if (!renewed) {
       if (lease.recovered) await rejectRecoveredBrowserLease(lease);
-      else lease.cancelled = true;
+      else {
+        lease.cancelReason = 'renewal_rejected';
+        lease.cancelled = true;
+      }
       return { ok: false, error: 'browser_job_lease_lost' };
     }
     return { ok: true, expectedURL: lease.expectedURL };
@@ -1966,11 +2165,15 @@ async function authorizeBrowserJobAction(message, sender) {
   if (activeBrowserLeases.get(jobId) !== lease || lease.cancelled) return { ok: false, error: 'browser_job_lease_lost' };
   if (!claimed) {
     if (lease.recovered) await rejectRecoveredBrowserLease(lease);
-    else lease.cancelled = true;
+    else {
+      lease.cancelReason = 'action_rejected';
+      lease.cancelled = true;
+    }
     return { ok: false, error: 'browser_job_lease_lost' };
   }
   lease.sentUnknown = true;
   if (!await markBrowserJobSentUnknown(jobId, generation, action)) {
+    lease.cancelReason = 'claim_persistence_failed';
     lease.cancelled = true;
     return { ok: false, error: 'browser_claim_persistence_failed' };
   }
@@ -2837,6 +3040,17 @@ function automate(job, profile, jobDeadline, editTarget = null, expectedConversa
       .filter(Boolean)
       .join('|');
   };
+  const responseCompletionReady = (element) => {
+    if (!element?.querySelectorAll) return false;
+    const scope = element.closest?.('section[data-turn="assistant"], article[data-testid^="conversation-turn-"]') || element;
+    const buttons = boundedNodes(scope, 'button', 128);
+    // ChatGPT can keep turn actions in the DOM but hide them until hover.
+    // Their exact semantic label is supporting completion evidence even when
+    // a minimized window reports zero layout dimensions; hidden auto-created
+    // tabs receive the stronger wake-and-stabilize check below.
+    return buttons.some((button) => /copy|kopieren/i.test(
+      `${button.getAttribute?.('data-testid') || ''} ${button.getAttribute?.('aria-label') || ''}`));
+  };
   const pageState = () => {
     let percent = 0;
     let detail = '';
@@ -3218,6 +3432,8 @@ function automate(job, profile, jobDeadline, editTarget = null, expectedConversa
 		const triggers = kind === 'model' && profile.name === 'gemini' ? [geminiModePicker()].filter(Boolean)
 			: triggerSelectors.flatMap((selector) => { try { return [...document.querySelectorAll(selector)].filter(isVisible); } catch (_) { return []; } });
 		const normalizedValue = (value) => normalizedWords(value).join(' ');
+		const normalizedModelValue = (value) => /^(?:latest|newest|neuestes|neueste|aktuellstes|aktuellste)$/.test(normalizedValue(value))
+			? 'latest' : normalizedValue(value);
 		const geminiModeLabel = (element) => {
 			const primary = visibleText(element.querySelector?.('.picker-primary-text, .mode-name, .model-name'));
 			const secondary = visibleText(element.querySelector?.('.picker-secondary-text'));
@@ -3252,11 +3468,11 @@ function automate(job, profile, jobDeadline, editTarget = null, expectedConversa
 			const before = new Set([...document.querySelectorAll(candidateSelector)].filter(isVisible));
 			const candidates = () => [...document.querySelectorAll(candidateSelector)]
 				.filter((element) => element !== modelTrigger && isVisible(element) && (alreadyOpen || !before.has(element)));
-			const modelPattern = /^(?:GPT[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:Sol(?: Pro)?|Pro|Terra|Luna|Mini|Nano|Codex))?|Astra|Sol|Terra|Luna)$/i;
+			const modelPattern = /^(?:Latest|Newest|Neuestes|Neueste|Aktuellstes|Aktuellste|GPT[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:Sol(?: Pro)?|Pro|Terra|Luna|Mini|Nano|Codex))?|Astra|Sol|Terra|Luna)$/i;
 			const modelLabel = (element) => String(element?.innerText || element?.textContent || '')
 				.split('\n').map((line) => line.replace(/\s+/g, ' ').trim())
 				.find((line) => modelPattern.test(line)) || visibleText(element);
-			const modelMatches = (element) => normalizedValue(modelLabel(element)) === normalizedValue(requested);
+			const modelMatches = (element) => normalizedModelValue(modelLabel(element)) === normalizedModelValue(requested);
 			const activate = async (element, opened) => {
 				if (typeof PointerEvent === 'function') {
 					element.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, buttons: 1, pointerType: 'mouse', isPrimary: true }));
@@ -4047,8 +4263,42 @@ function automate(job, profile, jobDeadline, editTarget = null, expectedConversa
 		// textbox plus a stable new assistant turn is a valid finished state.
 		const stableFor = sawBusy ? 1300 : (profile.name === 'gemini' ? 6000 : 2600);
 		const composerFinished = !(selectors.submit || []).length || state.composerReady
-			|| (state.inputReady && (sawBusy || profile.name === 'gemini'));
-        if (Date.now() - stableSince >= stableFor && structured && !busy && composerFinished) {
+			|| (state.inputReady && (sawBusy || profile.name === 'gemini'
+				|| job.metadata?.contextbridge_foreground_recovery === true));
+		const stableAge = Date.now() - stableSince;
+		const foregroundRecovery = profile.name === 'chatgpt' && plainTextJob
+			&& job.metadata?.contextbridge_foreground_recovery === true;
+		const foregroundRecoveryReady = foregroundRecovery && Boolean(previousText)
+			&& stableAge >= 15000 && (latest !== previousText || responseCompletionReady(latestElement));
+		const completionReady = profile.name !== 'chatgpt' || !plainTextJob
+			|| (foregroundRecovery ? foregroundRecoveryReady : responseCompletionReady(latestElement));
+		// ChatGPT can now mount Copy while a hidden auto-created tab exposes only
+		// the first rendered text chunk. Wake that exact owned tab before accepting
+		// any plain-text result. The browser window itself may remain minimized.
+		if (profile.name === 'chatgpt' && plainTextJob && !resumeOnly && !editTarget
+			&& job.metadata?.contextbridge_wake_hidden_text === true
+			&& document.visibilityState !== 'visible' && changedResponse && structured && !busy
+			&& composerFinished && stableAge >= stableFor) {
+			resolve({ ok: false, text: latest,
+				error: 'ChatGPT rendered text in a hidden owned tab; waking it before accepting the final turn',
+				code: 'stalled_response', recoverable: job.metadata?.contextbridge_auto_reload !== false });
+			return;
+		}
+		// A background ChatGPT tab can temporarily expose only the first rendered
+		// text chunk while both Stop and streaming attributes are absent. Never
+		// accept a plain-text prefix without completion evidence, and treat Copy as
+		// supporting rather than authoritative evidence in hidden owned tabs. After
+		// a bounded wait, hand the exact owned
+		// turn to the existing foreground/reload recovery path instead of waiting
+		// until the whole job deadline.
+		if (profile.name === 'chatgpt' && plainTextJob && changedResponse && structured && !busy
+			&& composerFinished && !completionReady && stableAge >= 15000) {
+			resolve({ ok: false, text: latest,
+				error: 'ChatGPT text stabilized before its completion controls appeared; waking the owned tab to finish rendering',
+				code: 'stalled_response', recoverable: job.metadata?.contextbridge_auto_reload !== false });
+			return;
+		}
+        if (stableAge >= stableFor && structured && !busy && composerFinished && completionReady) {
 		  const filesMissing = job.output?.min_artifacts > artifactCount;
 		  const imagesMissing = job.output?.min_images > imageCount;
 		  const mediaMissing = job.output?.min_media > mediaCount;
@@ -4372,8 +4622,11 @@ function reconcileHeartbeatAlarm() {
     if (!existing && api.alarms.create) {
       try {
         await Promise.resolve(api.alarms.create(HEARTBEAT_ALARM, {
-          delayInMinutes: 0.5,
-          periodInMinutes: 0.5
+          // One minute also works on Chromium variants that have not adopted
+          // Chrome's newer 30-second minimum. The ordinary five-second
+          // heartbeat remains active while the MV3 worker is awake.
+          delayInMinutes: 1,
+          periodInMinutes: 1
         }));
       } catch (_) {
         heartbeatAlarmRegistered = false;
@@ -4878,7 +5131,7 @@ function watchPageCapabilityInteractions() {
   const runtime = (globalThis.browser || globalThis.chrome)?.runtime;
   if (!runtime?.sendMessage || !document?.addEventListener) return false;
   if (globalThis.__contextbridgeCapabilityWatch) return true;
-  const relevant = /(?:gpt[\s._-]*\d|gemini|modell|model|denk|reason|effort|thinking|sofort|instant|niedrig|low|mittel|medium|hoch|high|pro|max)/i;
+  const relevant = /(?:gpt[\s._-]*\d|gemini|modell|model|latest|newest|neuest|aktuellst|denk|reason|effort|thinking|sofort|instant|niedrig|low|mittel|medium|hoch|high|pro|max)/i;
   let timer = 0;
   const observe = (event) => {
     if (event.isTrusted !== true) return;
@@ -4923,7 +5176,7 @@ function inspectPageCapabilities() {
     || document.querySelector?.('form[data-type="unified-composer"]') || document.querySelector?.('form');
   const controls = boundedElements(composer || document, 'button, [role="button"]').filter(visible);
   const options = boundedElements(document, '[role="menuitem"], [role="menuitemradio"], [role="option"], [aria-checked], [aria-selected]').filter(visible);
-  const modelPattern = /^(?:gpt[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:astra|sol|terra|luna|pro|mini|nano|codex|thinking|instant))?|gemini(?:[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:pro|flash|lite|thinking|preview|experimental))*)?|astra|sol|terra|luna|\d+(?:\.\d+)?\s+(?:pro|flash|astra|sol|terra|luna))$/i;
+  const modelPattern = /^(?:latest|newest|neuestes|neueste|aktuellstes|aktuellste|gpt[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:astra|sol|terra|luna|pro|mini|nano|codex|thinking|instant))?|gemini(?:[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:pro|flash|lite|thinking|preview|experimental))*)?|astra|sol|terra|luna|\d+(?:\.\d+)?\s+(?:pro|flash|astra|sol|terra|luna))$/i;
   const reasoningPattern = /^(?:instant|sofort|fast|schnell|low|niedrig|medium|mittel|high|hoch|very high|sehr hoch|xhigh|pro|max|maximum)$/i;
   const semantic = (element, pattern) => pattern.test(`${element.getAttribute('data-testid') || ''} ${element.getAttribute('aria-label') || ''}`);
   const modelOptionLabel = (element) => {
@@ -5144,7 +5397,7 @@ async function discoverPageCapabilities() {
     element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0, buttons: 1 }));
     return true;
   };
-  const modelPattern = /^(?:gpt[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:astra|sol|terra|luna|pro|mini|nano|codex|thinking|instant))?|gemini(?:[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:pro|flash|lite|thinking|preview|experimental))*)?|astra|sol|terra|luna|\d+(?:\.\d+)?\s+(?:pro|flash|astra|sol|terra|luna))$/i;
+  const modelPattern = /^(?:latest|newest|neuestes|neueste|aktuellstes|aktuellste|gpt[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:astra|sol|terra|luna|pro|mini|nano|codex|thinking|instant))?|gemini(?:[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:pro|flash|lite|thinking|preview|experimental))*)?|astra|sol|terra|luna|\d+(?:\.\d+)?\s+(?:pro|flash|astra|sol|terra|luna))$/i;
   const reasoningPattern = /^(?:instant|sofort|fast|schnell|low|niedrig|medium|mittel|high|hoch|very high|sehr hoch|xhigh|pro|max|maximum)$/i;
   const semantic = (element, pattern) => pattern.test(`${element.getAttribute('data-testid') || ''} ${element.getAttribute('aria-label') || ''}`);
   const modelOptionLabel = (element) => {

@@ -2,6 +2,64 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.71 - 2026-09-16
+
+### Fixed
+
+- a short fresh-chat answer can no longer be rejected as
+  `browser_session_changed` merely because ChatGPT or Gemini publishes the
+  permanent conversation URL just before its owned user-turn identifier; the
+  extension retries only the exact bounded ownership proof and never Send
+- provider routing parameters followed by a final conversation URL can now be
+  adopted as one ownership chain only while the same bound user-turn identity
+  remains present; unrelated conversation paths continue to fail closed
+- a model/routing query already present on the fresh ChatGPT or Gemini path
+  before Send is now classified as fresh for that exact-turn ownership proof
+- ChatGPT's explicit `/c/WEB:<UUID>` provisional conversation address can now
+  become its canonical `/c/<ID>` address only while the identical owned turn
+  remains provable; ordinary conversation-to-conversation changes stay blocked
+- attached tabs now share a fair four-request long-poll budget, preventing a
+  large tab pool from starving authoritative lease, heartbeat, and completion
+  traffic on Chromium's per-origin connection limit
+- the MV3 recovery alarm now uses the one-minute interval supported across
+  Chromium variants while awake workers retain their five-second heartbeat
+- the local service accepts and bounds the extension's enumerated lease-failure
+  diagnostic instead of rejecting the complete 0.5.71 heartbeat as unknown
+- a supporting browser progress scan can no longer cancel an otherwise valid
+  job when ChatGPT briefly exposes an intermediate conversation URL; provider
+  action gates and the final exact ownership check remain authoritative
+- the periodic progress observer is stopped and drained before final lease and
+  conversation validation, preventing a late diagnostic scan from racing a
+  completed short response
+- bounded browser failure telemetry now records an enumerated local lease
+  cancellation reason without retaining prompt text, response text, or URLs
+- a background ChatGPT text prefix is no longer accepted merely because its
+  DOM stopped changing briefly or already exposes Copy; an auto-created hidden
+  text tab enters bounded wake/stabilization recovery before acceptance,
+  without restoring the browser window or resending the prompt
+- ChatGPT's localized rolling model choice (`Neuestes` / `Latest`) is now
+  reported and selectable as an explicit automatic model choice without
+  pretending it is a fixed GPT version
+- a minimized ChatGPT tab may remount the newest user turn with a different
+  transient DOM identifier while it finishes rendering; recovery now retains
+  ownership through the exact normalized prompt in the same session-bound
+  conversation instead of rejecting the completed answer
+
+### Tested
+
+- regression coverage proves that a transient URL mismatch skips response DOM
+  sampling without cancelling the job, while the authoritative action gate
+  continues to reject a real conversation change
+- regression coverage holds a partial ChatGPT answer without completion
+  controls, accepts the later complete turn, and routes a permanently partial
+  owned turn into recovery instead of returning truncated text
+- regression coverage remounts only ChatGPT's transient user-turn identifier
+  between the ownership and reload-safety probes and proves that the exact
+  newest prompt remains owned without weakening conversation or draft guards
+- foreground recovery retains the held partial answer as its baseline and can
+  accept only a different, longer-stabilized owned response, covering minimized
+  Chromium tabs whose action controls and turn identifiers remount late
+
 ## 0.5.70 - 2026-09-16
 
 ### Added
