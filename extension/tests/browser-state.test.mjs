@@ -2021,6 +2021,50 @@ for (const [renderedUserText, shouldPass] of [['', true], ['A different visible 
   let sent = false;
   let now = Date.now();
   class FastDate extends Date {
+    static now() { now += 1000; return now; }
+    static parse(value) { return Date.parse(value); }
+  }
+  class TextArea {
+    constructor() { this.value = ''; this.offsetWidth = 1; }
+    getClientRects() { return [1]; }
+    focus() {}
+    dispatchEvent() {}
+  }
+  const input = new TextArea();
+  const send = { ...element(), click() { sent = true; } };
+  const copy = element('', { 'data-testid': 'copy-turn-action-button', 'aria-label': 'Copy' });
+  const partialWithCopy = {
+    ...element('CB-GPT-0571-'),
+    querySelectorAll(selector) { return selector === 'button' ? [copy] : []; }
+  };
+  const document = {
+    visibilityState: 'hidden',
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === '#send') return [send];
+      if (selector === '#response') return sent ? [partialWithCopy] : [];
+      return [];
+    }
+  };
+  const isolated = vm.createContext({ document, window: {}, HTMLTextAreaElement: TextArea,
+    HTMLInputElement: class {}, InputEvent: class {}, Event: class {},
+    setTimeout: (callback) => callback(), clearTimeout() {}, Date: FastDate, Promise });
+  const injectedAutomate = vm.runInContext(`(${context.automate.toString()})`, isolated);
+  const result = await injectedAutomate(
+    { prompt: 'CB-GPT-0571-COMPLETE-OK', metadata: { contextbridge_wake_hidden_text: true }, output: { mode: 'text' } },
+    { name: 'chatgpt', selectors: { input: ['#input'], submit: ['#send'], response: ['#response'] } },
+    new Date(Date.now() + 3600000).toISOString()
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'stalled_response');
+  assert.equal(result.text, 'CB-GPT-0571-',
+    'Copy mounted in a hidden auto-created ChatGPT tab is not final until the exact owned tab is woken');
+}
+
+{
+  let sent = false;
+  let now = Date.now();
+  class FastDate extends Date {
     static now() { now += 5000; return now; }
     static parse(value) { return Date.parse(value); }
   }

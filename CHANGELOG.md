@@ -34,9 +34,9 @@ All notable changes are documented here. ContextBridge follows semantic versioni
 - bounded browser failure telemetry now records an enumerated local lease
   cancellation reason without retaining prompt text, response text, or URLs
 - a background ChatGPT text prefix is no longer accepted merely because its
-  DOM stopped changing briefly; the finished turn must expose its provider
-  completion control, otherwise the exact owned tab enters bounded wake/reload
-  recovery without resending the prompt
+  DOM stopped changing briefly or already exposes Copy; an auto-created hidden
+  text tab enters bounded wake/stabilization recovery before acceptance,
+  without restoring the browser window or resending the prompt
 - ChatGPT's localized rolling model choice (`Neuestes` / `Latest`) is now
   reported and selectable as an explicit automatic model choice without
   pretending it is a fixed GPT version

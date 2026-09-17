@@ -944,6 +944,12 @@ async function processWork(cfg, work, claimedTabId) {
     } else {
       await rememberBrowserJobClaim(work, tabId, (await assertSessionTab(workSessionKey(work), tabId)).tab.url, initial, effectiveProfile.name);
     }
+    if (!observationOnly && binding?.autoCreated === true && effectiveProfile.name === 'chatgpt'
+        && !work.job.image_base64 && Number(work.job.output?.min_images || 0) === 0
+        && Number(work.job.output?.min_artifacts || 0) === 0 && Number(work.job.output?.min_media || 0) === 0) {
+      automationJob = { ...automationJob, metadata: { ...(automationJob.metadata || {}),
+        contextbridge_wake_hidden_text: true } };
+    }
     try {
       await requireActiveBrowserLease(cfg, leaseState);
       const guarded = await assertSessionTab(workSessionKey(work), tabId);
@@ -3038,9 +3044,10 @@ function automate(job, profile, jobDeadline, editTarget = null, expectedConversa
     if (!element?.querySelectorAll) return false;
     const scope = element.closest?.('section[data-turn="assistant"], article[data-testid^="conversation-turn-"]') || element;
     const buttons = boundedNodes(scope, 'button', 128);
-    // ChatGPT can keep finished-turn actions in the DOM but hide them until
-    // hover. Their exact semantic label is completion evidence even when a
-    // minimized window reports zero layout dimensions for the button.
+    // ChatGPT can keep turn actions in the DOM but hide them until hover.
+    // Their exact semantic label is supporting completion evidence even when
+    // a minimized window reports zero layout dimensions; hidden auto-created
+    // tabs receive the stronger wake-and-stabilize check below.
     return buttons.some((button) => /copy|kopieren/i.test(
       `${button.getAttribute?.('data-testid') || ''} ${button.getAttribute?.('aria-label') || ''}`));
   };
@@ -4259,15 +4266,29 @@ function automate(job, profile, jobDeadline, editTarget = null, expectedConversa
 			|| (state.inputReady && (sawBusy || profile.name === 'gemini'
 				|| job.metadata?.contextbridge_foreground_recovery === true));
 		const stableAge = Date.now() - stableSince;
-		const foregroundRecoveryReady = profile.name === 'chatgpt' && plainTextJob
-			&& job.metadata?.contextbridge_foreground_recovery === true && Boolean(previousText)
-			&& latest !== previousText && stableAge >= 15000;
+		const foregroundRecovery = profile.name === 'chatgpt' && plainTextJob
+			&& job.metadata?.contextbridge_foreground_recovery === true;
+		const foregroundRecoveryReady = foregroundRecovery && Boolean(previousText)
+			&& stableAge >= 15000 && (latest !== previousText || responseCompletionReady(latestElement));
 		const completionReady = profile.name !== 'chatgpt' || !plainTextJob
-			|| responseCompletionReady(latestElement) || foregroundRecoveryReady;
+			|| (foregroundRecovery ? foregroundRecoveryReady : responseCompletionReady(latestElement));
+		// ChatGPT can now mount Copy while a hidden auto-created tab exposes only
+		// the first rendered text chunk. Wake that exact owned tab before accepting
+		// any plain-text result. The browser window itself may remain minimized.
+		if (profile.name === 'chatgpt' && plainTextJob && !resumeOnly && !editTarget
+			&& job.metadata?.contextbridge_wake_hidden_text === true
+			&& document.visibilityState !== 'visible' && changedResponse && structured && !busy
+			&& composerFinished && stableAge >= stableFor) {
+			resolve({ ok: false, text: latest,
+				error: 'ChatGPT rendered text in a hidden owned tab; waking it before accepting the final turn',
+				code: 'stalled_response', recoverable: job.metadata?.contextbridge_auto_reload !== false });
+			return;
+		}
 		// A background ChatGPT tab can temporarily expose only the first rendered
-		// text chunk while both Stop and streaming attributes are absent. The Copy
-		// action is mounted only for a finished assistant turn, so never accept a
-		// plain-text prefix without it. After a bounded wait, hand the exact owned
+		// text chunk while both Stop and streaming attributes are absent. Never
+		// accept a plain-text prefix without completion evidence, and treat Copy as
+		// supporting rather than authoritative evidence in hidden owned tabs. After
+		// a bounded wait, hand the exact owned
 		// turn to the existing foreground/reload recovery path instead of waiting
 		// until the whole job deadline.
 		if (profile.name === 'chatgpt' && plainTextJob && changedResponse && structured && !busy
