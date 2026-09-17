@@ -103,3 +103,28 @@ func TestChatProfileRejectsNonBrowserProvider(t *testing.T) {
 		t.Fatalf("local provider accepted a browser profile: %v", err)
 	}
 }
+
+func TestChatRejectsBashContinuationInWindowsStyleInvocation(t *testing.T) {
+	err := clusterChatCommand([]string{`\\`})
+	if err == nil || !strings.Contains(err.Error(), "Bash only") || !strings.Contains(err.Error(), "Windows CMD") {
+		t.Fatalf("stray Bash continuation should fail with a cross-shell hint: %v", err)
+	}
+}
+
+func TestInteractiveChatDoesNotSubmitPastedFlags(t *testing.T) {
+	for _, line := range []string{
+		`--config /var/lib/contextbridge/config.yml \\`,
+		`--profile=chatgpt`,
+		`--prompt "hello"`,
+		`\\`,
+	} {
+		if !looksLikePastedChatFlag(line) {
+			t.Fatalf("pasted command fragment was not recognized: %q", line)
+		}
+	}
+	for _, line := range []string{"Explain --profile in prose", "normal prompt", "/settings"} {
+		if looksLikePastedChatFlag(line) {
+			t.Fatalf("ordinary interactive input was misclassified: %q", line)
+		}
+	}
+}

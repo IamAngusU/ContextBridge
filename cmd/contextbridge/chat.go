@@ -48,6 +48,13 @@ func clusterChatCommand(args []string) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
+	if flags.NArg() > 0 {
+		extra := strings.Join(flags.Args(), " ")
+		if strings.Trim(extra, `\\`) == "" {
+			return errors.New(`unexpected "\\": backslash line continuation works in Bash only; use ^ in Windows CMD, a backtick in PowerShell, or paste the command on one line`)
+		}
+		return fmt.Errorf("unexpected cluster chat argument %q; pass the message with --prompt or start interactive chat without extra arguments", extra)
+	}
 	if *minArtifacts < 0 || *minArtifacts > 12 {
 		return errors.New("--min-artifacts must be between 0 and 12")
 	}
@@ -132,6 +139,10 @@ func clusterChatCommand(args []string) error {
 			fmt.Println(message)
 			continue
 		}
+		if looksLikePastedChatFlag(line) {
+			fmt.Fprintln(os.Stderr, `  ! this looks like a pasted command option, not a chat message; use /exit and paste the complete command on one line (Bash: \, CMD: ^, PowerShell: backtick)`)
+			continue
+		}
 		if err := state.turn(ctx, line); err != nil {
 			fmt.Fprintln(os.Stderr, "  !", err)
 			if ctx.Err() != nil {
@@ -140,6 +151,24 @@ func clusterChatCommand(args []string) error {
 		}
 	}
 	return scanner.Err()
+}
+
+func looksLikePastedChatFlag(line string) bool {
+	first := strings.Fields(strings.TrimSpace(line))
+	if len(first) == 0 {
+		return false
+	}
+	if strings.Trim(first[0], `\\`) == "" {
+		return true
+	}
+	for _, name := range []string{"--config", "--token", "--provider", "--group", "--model", "--profile", "--reasoning",
+		"--e2ee", "--session", "--prompt", "--artifacts", "--min-artifacts", "--image", "--min-images", "--music",
+		"--attach-image", "--new-chat", "--new-chat-per-job", "--foreground-new-chat"} {
+		if first[0] == name || strings.HasPrefix(first[0], name+"=") {
+			return true
+		}
+	}
+	return false
 }
 
 func readChatImage(path string) ([]byte, string, error) {
