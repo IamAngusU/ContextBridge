@@ -302,6 +302,14 @@ function isFreshChatURL(value) {
   try {
     const url = new URL(value);
     if (url.search || url.hash) return false;
+    return isFreshChatPath(url.href);
+  } catch (_) {}
+  return false;
+}
+
+function isFreshChatPath(value) {
+  try {
+    const url = new URL(value);
     if (['chatgpt.com', 'chat.openai.com'].includes(url.hostname)) return url.pathname === '/';
     if (url.hostname === 'gemini.google.com') return url.pathname === '/app' || url.pathname === '/app/';
   } catch (_) {}
@@ -1709,10 +1717,30 @@ function isPendingLeaseConversation(lease, tab) {
   } catch (_) { return false; }
 }
 
+function isOwnedLeaseConversationTransition(lease, tab) {
+  if (!lease?.sentUnknown || !lease.expectedURL || !lease.sessionKey || !lease.ownedTurn?.id
+      || !lease.ownedTurn?.digest || !['chatgpt', 'gemini'].includes(lease.profileName) || !tab?.url) return false;
+  try {
+    const before = new URL(lease.expectedURL);
+    const after = new URL(tab.url);
+    if (before.origin !== after.origin || before.href === after.href) return false;
+    // Providers can first add routing parameters to the fresh root and only
+    // later publish /c/... or /app/... . Once the exact owned turn has been
+    // proven, also accept query/hash canonicalization of that same path. A
+    // different non-fresh conversation path is never eligible.
+    return before.pathname === after.pathname
+      || (isFreshChatPath(before.href) && !isFreshChatPath(after.href));
+  } catch (_) { return false; }
+}
+
+function isVerifiableLeaseConversationTransition(lease, tab) {
+  return isPendingLeaseConversation(lease, tab) || isOwnedLeaseConversationTransition(lease, tab);
+}
+
 async function promoteActiveLeaseConversation(lease, tab) {
   if (!lease || lease.cancelled || stopRequested) return false;
   if (tab?.url === lease.expectedURL) return true;
-  if (!isPendingLeaseConversation(lease, tab)) return false;
+  if (!isVerifiableLeaseConversationTransition(lease, tab)) return false;
   // Progress sampling and the injected observer can see the first chat URL
   // change together. Share one proof/CAS instead of letting one caller cancel
   // a lease while the other is still committing the same verified transition.
@@ -1732,6 +1760,9 @@ async function commitActiveLeaseConversation(lease, sourceURL, targetURL) {
     func: inspectLatestOwnedTurn, args: [lease.prompt || '', lease.profileName, false, null, lease.promptProof || null] }), 5000).catch(() => null);
   const ownedTurn = proof?.[0]?.result;
   if (!ownedTurn) return false;
+  const priorOwnedTurn = lease.ownedTurn;
+  if (priorOwnedTurn && (ownedTurn.id !== priorOwnedTurn.id || ownedTurn.digest !== priorOwnedTurn.digest
+      || ownedTurn.provider !== priorOwnedTurn.provider)) return false;
   const verifiedTab = await withDeadline(api.tabs.get(lease.tabId), 2500).catch(() => null);
   if (lease.cancelled || stopRequested || verifiedTab?.url !== targetURL) return false;
   const updated = await serializeSessionWrite(() => serializeBrowserClaimWrite(async () => {
@@ -1746,6 +1777,7 @@ async function commitActiveLeaseConversation(lease, sourceURL, targetURL) {
     const browserJobClaims = { ...cfg.browserJobClaims,
       [lease.jobId]: { ...existing, expectedURL: targetURL, ownedTurn, at: Date.now() } };
     await api.storage.local.set({ sessionBindings: bindings, browserJobClaims });
+    lease.priorExpectedURLs = [...new Set([...(lease.priorExpectedURLs || []), sourceURL])].slice(-3);
     lease.expectedURL = targetURL;
     lease.ownedTurn = ownedTurn;
     return true;
@@ -1765,7 +1797,7 @@ async function assertActiveLeaseConversation(lease, cancelOnMismatch = true) {
   // A provider can publish its conversation URL before the corresponding
   // user turn mounts. Skip this progress sample without poisoning the live
   // lease. No response content is read until the ownership proof succeeds.
-  if (isPendingLeaseConversation(lease, tab)) {
+  if (isVerifiableLeaseConversationTransition(lease, tab)) {
     const error = new Error('The submitted ContextBridge turn could not be verified after the conversation URL changed; no provider content was observed');
     error.code = 'browser_session_changed';
     throw error;
@@ -1968,13 +2000,9 @@ async function authorizeBrowserJobAction(message, sender) {
   const tab = await readActiveLeaseTab(lease);
   if (activeBrowserLeases.get(jobId) !== lease || lease.cancelled) return { ok: false, error: 'browser_job_lease_lost' };
   const expectedURL = String(message?.expectedURL || '');
-  let staleFreshObserver = false;
-  try {
-    staleFreshObserver = action === 'observe' && expectedURL !== lease.expectedURL && tab?.url === lease.expectedURL
-      && isFreshChatURL(expectedURL) && !isFreshChatURL(lease.expectedURL)
-      && new URL(expectedURL).origin === new URL(lease.expectedURL).origin;
-  } catch (_) {}
-  if (!tab?.url || !expectedURL || (expectedURL !== lease.expectedURL && !staleFreshObserver)) {
+  const staleExpectedObserver = action === 'observe' && expectedURL !== lease.expectedURL
+    && tab?.url === lease.expectedURL && (lease.priorExpectedURLs || []).includes(expectedURL);
+  if (!tab?.url || !expectedURL || (expectedURL !== lease.expectedURL && !staleExpectedObserver)) {
     lease.cancelReason = 'conversation_changed';
     lease.cancelled = true;
     return { ok: false, error: 'browser_conversation_changed' };
@@ -1984,12 +2012,12 @@ async function authorizeBrowserJobAction(message, sender) {
     if (action === 'observe') {
       for (let attempt = 0; attempt < 3 && !promoted; attempt += 1) {
         try { promoted = await promoteActiveLeaseConversation(lease, tab); } catch (_) {}
-        if (promoted || !isPendingLeaseConversation(lease, tab) || lease.cancelled) break;
+        if (promoted || !isVerifiableLeaseConversationTransition(lease, tab) || lease.cancelled) break;
         if (attempt < 2) await delay(250);
       }
     }
     if (!promoted) {
-      if (action === 'observe' && isPendingLeaseConversation(lease, tab) && !lease.cancelled) {
+      if (action === 'observe' && isVerifiableLeaseConversationTransition(lease, tab) && !lease.cancelled) {
         return { ok: false, error: 'browser_conversation_unverified' };
       }
       lease.cancelReason = 'conversation_changed';

@@ -10,6 +10,9 @@ All notable changes are documented here. ContextBridge follows semantic versioni
   `browser_session_changed` merely because ChatGPT or Gemini publishes the
   permanent conversation URL just before its owned user-turn identifier; the
   extension retries only the exact bounded ownership proof and never Send
+- provider routing parameters followed by a final conversation URL can now be
+  adopted as one ownership chain only while the same bound user-turn identity
+  remains present; unrelated conversation paths continue to fail closed
 - the MV3 recovery alarm now uses the one-minute interval supported across
   Chromium variants while awake workers retain their five-second heartbeat
 - the local service accepts and bounds the extension's enumerated lease-failure

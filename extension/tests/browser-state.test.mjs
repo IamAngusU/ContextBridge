@@ -2621,6 +2621,7 @@ for (const disabled of [true, false]) {
   const previousDelay = context.delay;
   const activeLeases = vm.runInContext('activeBrowserLeases', context);
   const freshURL = 'https://chatgpt.com/';
+  const intermediateURL = 'https://chatgpt.com/?model=auto';
   const permanentURL = 'https://chatgpt.com/c/late-owned-turn';
   const state = { running: true, tabIds: [35], sessionBindingsMigrated: true,
     sessionBindings: { late: { tabId: 35, url: freshURL, autoCreated: true } },
@@ -2629,7 +2630,8 @@ for (const disabled of [true, false]) {
   let proofCalls = 0;
   context.settings = async () => state;
   context.delay = async () => {};
-  chrome.tabs.get = async () => ({ id: 35, url: permanentURL });
+  let currentURL = intermediateURL;
+  chrome.tabs.get = async () => ({ id: 35, url: currentURL });
   chrome.scripting.executeScript = async () => {
     proofCalls += 1;
     return [{ result: proofCalls < 3 ? null : { id: 'late-owned', digest: 'c'.repeat(64), provider: 'chatgpt' } }];
@@ -2639,10 +2641,15 @@ for (const disabled of [true, false]) {
     sessionKey: 'late', prompt: 'owned prompt', profileName: 'chatgpt', sentUnknown: true, cancelled: false };
   activeLeases.set(lease.jobId, lease);
   try {
-    const tab = await context.waitForActiveLeaseConversationProof(lease, new Date(Date.now() + 5000).toISOString());
-    assert.equal(tab.url, permanentURL);
+    const intermediate = await context.waitForActiveLeaseConversationProof(lease, new Date(Date.now() + 5000).toISOString());
+    assert.equal(intermediate.url, intermediateURL);
     assert.equal(proofCalls, 3, 'finalization should wait for the late ownership node without resending');
     assert.equal(lease.cancelled, false);
+    assert.equal(lease.expectedURL, intermediateURL);
+    currentURL = permanentURL;
+    const tab = await context.waitForActiveLeaseConversationProof(lease, new Date(Date.now() + 5000).toISOString());
+    assert.equal(tab.url, permanentURL);
+    assert.equal(proofCalls, 4, 'the same owned turn should prove the provider\'s final URL without resending');
     assert.equal(lease.expectedURL, permanentURL);
     assert.equal(state.sessionBindings.late.url, permanentURL);
     assert.equal(state.browserJobClaims['late-proof'].expectedURL, permanentURL);
