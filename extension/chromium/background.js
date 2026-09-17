@@ -50,7 +50,7 @@ const recoveredTabReservations = new Map();
 const rejectedBrowserClaims = new Set();
 const leaseRecoveryTasks = new Set();
 const PENDING_COMPLETION_MAX_BYTES = 512 * 1024;
-const acceptedModelLabel = /^(?:gpt[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:astra|sol|terra|luna|pro|mini|nano|codex|thinking|instant))?|gemini(?:[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:pro|flash|lite|thinking|preview|experimental))*)?|astra|sol|terra|luna|\d+(?:\.\d+)?\s+(?:pro|flash|astra|sol|terra|luna))$/i;
+const acceptedModelLabel = /^(?:latest|newest|neuestes|neueste|aktuellstes|aktuellste|gpt[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:astra|sol|terra|luna|pro|mini|nano|codex|thinking|instant))?|gemini(?:[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:pro|flash|lite|thinking|preview|experimental))*)?|astra|sol|terra|luna|\d+(?:\.\d+)?\s+(?:pro|flash|astra|sol|terra|luna))$/i;
 
 // Do not resume eagerly while this module is being evaluated. On Chromium an
 // MV3 worker is loaded before the event that woke it is dispatched; an eager
@@ -2978,6 +2978,12 @@ function automate(job, profile, jobDeadline, editTarget = null, expectedConversa
       .filter(Boolean)
       .join('|');
   };
+  const responseCompletionReady = (element) => {
+    if (!element?.querySelectorAll) return false;
+    const buttons = boundedNodes(element, 'button', 128);
+    return buttons.some((button) => isVisible(button)
+      && /copy|kopieren/i.test(`${button.getAttribute?.('data-testid') || ''} ${button.getAttribute?.('aria-label') || ''}`));
+  };
   const pageState = () => {
     let percent = 0;
     let detail = '';
@@ -3359,6 +3365,8 @@ function automate(job, profile, jobDeadline, editTarget = null, expectedConversa
 		const triggers = kind === 'model' && profile.name === 'gemini' ? [geminiModePicker()].filter(Boolean)
 			: triggerSelectors.flatMap((selector) => { try { return [...document.querySelectorAll(selector)].filter(isVisible); } catch (_) { return []; } });
 		const normalizedValue = (value) => normalizedWords(value).join(' ');
+		const normalizedModelValue = (value) => /^(?:latest|newest|neuestes|neueste|aktuellstes|aktuellste)$/.test(normalizedValue(value))
+			? 'latest' : normalizedValue(value);
 		const geminiModeLabel = (element) => {
 			const primary = visibleText(element.querySelector?.('.picker-primary-text, .mode-name, .model-name'));
 			const secondary = visibleText(element.querySelector?.('.picker-secondary-text'));
@@ -3393,11 +3401,11 @@ function automate(job, profile, jobDeadline, editTarget = null, expectedConversa
 			const before = new Set([...document.querySelectorAll(candidateSelector)].filter(isVisible));
 			const candidates = () => [...document.querySelectorAll(candidateSelector)]
 				.filter((element) => element !== modelTrigger && isVisible(element) && (alreadyOpen || !before.has(element)));
-			const modelPattern = /^(?:GPT[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:Sol(?: Pro)?|Pro|Terra|Luna|Mini|Nano|Codex))?|Astra|Sol|Terra|Luna)$/i;
+			const modelPattern = /^(?:Latest|Newest|Neuestes|Neueste|Aktuellstes|Aktuellste|GPT[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:Sol(?: Pro)?|Pro|Terra|Luna|Mini|Nano|Codex))?|Astra|Sol|Terra|Luna)$/i;
 			const modelLabel = (element) => String(element?.innerText || element?.textContent || '')
 				.split('\n').map((line) => line.replace(/\s+/g, ' ').trim())
 				.find((line) => modelPattern.test(line)) || visibleText(element);
-			const modelMatches = (element) => normalizedValue(modelLabel(element)) === normalizedValue(requested);
+			const modelMatches = (element) => normalizedModelValue(modelLabel(element)) === normalizedModelValue(requested);
 			const activate = async (element, opened) => {
 				if (typeof PointerEvent === 'function') {
 					element.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, buttons: 1, pointerType: 'mouse', isPrimary: true }));
@@ -4189,7 +4197,20 @@ function automate(job, profile, jobDeadline, editTarget = null, expectedConversa
 		const stableFor = sawBusy ? 1300 : (profile.name === 'gemini' ? 6000 : 2600);
 		const composerFinished = !(selectors.submit || []).length || state.composerReady
 			|| (state.inputReady && (sawBusy || profile.name === 'gemini'));
-        if (Date.now() - stableSince >= stableFor && structured && !busy && composerFinished) {
+		const completionReady = profile.name !== 'chatgpt' || !plainTextJob || responseCompletionReady(latestElement);
+		// A background ChatGPT tab can temporarily expose only the first rendered
+		// text chunk while both Stop and streaming attributes are absent. The Copy
+		// action is mounted only for a finished assistant turn, so never accept a
+		// plain-text prefix without it. After a bounded wait, hand the exact owned
+		// turn to the existing foreground/reload recovery path instead of waiting
+		// until the whole job deadline.
+		if (profile.name === 'chatgpt' && plainTextJob && changedResponse && structured && !busy
+			&& composerFinished && !completionReady && Date.now() - stableSince >= 15000) {
+			resolve({ ok: false, error: 'ChatGPT text stabilized before its completion controls appeared; waking the owned tab to finish rendering',
+				code: 'stalled_response', recoverable: job.metadata?.contextbridge_auto_reload !== false });
+			return;
+		}
+        if (Date.now() - stableSince >= stableFor && structured && !busy && composerFinished && completionReady) {
 		  const filesMissing = job.output?.min_artifacts > artifactCount;
 		  const imagesMissing = job.output?.min_images > imageCount;
 		  const mediaMissing = job.output?.min_media > mediaCount;
@@ -5022,7 +5043,7 @@ function watchPageCapabilityInteractions() {
   const runtime = (globalThis.browser || globalThis.chrome)?.runtime;
   if (!runtime?.sendMessage || !document?.addEventListener) return false;
   if (globalThis.__contextbridgeCapabilityWatch) return true;
-  const relevant = /(?:gpt[\s._-]*\d|gemini|modell|model|denk|reason|effort|thinking|sofort|instant|niedrig|low|mittel|medium|hoch|high|pro|max)/i;
+  const relevant = /(?:gpt[\s._-]*\d|gemini|modell|model|latest|newest|neuest|aktuellst|denk|reason|effort|thinking|sofort|instant|niedrig|low|mittel|medium|hoch|high|pro|max)/i;
   let timer = 0;
   const observe = (event) => {
     if (event.isTrusted !== true) return;
@@ -5067,7 +5088,7 @@ function inspectPageCapabilities() {
     || document.querySelector?.('form[data-type="unified-composer"]') || document.querySelector?.('form');
   const controls = boundedElements(composer || document, 'button, [role="button"]').filter(visible);
   const options = boundedElements(document, '[role="menuitem"], [role="menuitemradio"], [role="option"], [aria-checked], [aria-selected]').filter(visible);
-  const modelPattern = /^(?:gpt[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:astra|sol|terra|luna|pro|mini|nano|codex|thinking|instant))?|gemini(?:[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:pro|flash|lite|thinking|preview|experimental))*)?|astra|sol|terra|luna|\d+(?:\.\d+)?\s+(?:pro|flash|astra|sol|terra|luna))$/i;
+  const modelPattern = /^(?:latest|newest|neuestes|neueste|aktuellstes|aktuellste|gpt[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:astra|sol|terra|luna|pro|mini|nano|codex|thinking|instant))?|gemini(?:[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:pro|flash|lite|thinking|preview|experimental))*)?|astra|sol|terra|luna|\d+(?:\.\d+)?\s+(?:pro|flash|astra|sol|terra|luna))$/i;
   const reasoningPattern = /^(?:instant|sofort|fast|schnell|low|niedrig|medium|mittel|high|hoch|very high|sehr hoch|xhigh|pro|max|maximum)$/i;
   const semantic = (element, pattern) => pattern.test(`${element.getAttribute('data-testid') || ''} ${element.getAttribute('aria-label') || ''}`);
   const modelOptionLabel = (element) => {
@@ -5288,7 +5309,7 @@ async function discoverPageCapabilities() {
     element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0, buttons: 1 }));
     return true;
   };
-  const modelPattern = /^(?:gpt[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:astra|sol|terra|luna|pro|mini|nano|codex|thinking|instant))?|gemini(?:[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:pro|flash|lite|thinking|preview|experimental))*)?|astra|sol|terra|luna|\d+(?:\.\d+)?\s+(?:pro|flash|astra|sol|terra|luna))$/i;
+  const modelPattern = /^(?:latest|newest|neuestes|neueste|aktuellstes|aktuellste|gpt[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:astra|sol|terra|luna|pro|mini|nano|codex|thinking|instant))?|gemini(?:[\s._-]*\d+(?:\.\d+)?(?:[\s._-]*(?:pro|flash|lite|thinking|preview|experimental))*)?|astra|sol|terra|luna|\d+(?:\.\d+)?\s+(?:pro|flash|astra|sol|terra|luna))$/i;
   const reasoningPattern = /^(?:instant|sofort|fast|schnell|low|niedrig|medium|mittel|high|hoch|very high|sehr hoch|xhigh|pro|max|maximum)$/i;
   const semantic = (element, pattern) => pattern.test(`${element.getAttribute('data-testid') || ''} ${element.getAttribute('aria-label') || ''}`);
   const modelOptionLabel = (element) => {

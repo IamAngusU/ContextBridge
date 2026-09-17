@@ -601,10 +601,11 @@ const element = (text = '', attributes = {}) => ({
   const input = element();
   const send = element();
   const markdown = element('CB45-LIVE-OK');
+  const copy = element('', { 'data-testid': 'copy-turn-action-button', 'aria-label': 'Copy' });
   const response = {
     ...element('Thinking chrome outside the answer'),
     matches: (selector) => selector === 'section[data-turn="assistant"]',
-    querySelectorAll: (selector) => selector === '.markdown' ? [markdown] : []
+    querySelectorAll: (selector) => selector === '.markdown' ? [markdown] : selector === 'button' ? [copy] : []
   };
   context.document = {
     querySelectorAll(selector) {
@@ -671,6 +672,18 @@ const element = (text = '', attributes = {}) => ({
 }
 
 {
+  const modelControl = element('Neuestes', { 'data-testid': 'model-switcher-dropdown-button' });
+  context.document = {
+    querySelectorAll(selector) {
+      return selector === 'button, [role="button"]' ? [modelControl] : [];
+    }
+  };
+  const capabilities = context.inspectPageCapabilities();
+  assert.equal(capabilities.currentModel, 'Neuestes',
+    'ChatGPT\'s rolling latest-model option is a real model selection, not unknown metadata');
+}
+
+{
   // ChatGPT can show only an icon labelled "Modell wechseln" while the
   // selected full name is exposed inside its model menu.
   let menuOpen = false;
@@ -679,7 +692,7 @@ const element = (text = '', attributes = {}) => ({
     click() { menuOpen = !menuOpen; },
     getAttribute(name) { return name === 'aria-expanded' ? String(menuOpen) : name === 'aria-label' ? 'Modell wechseln' : null; }
   };
-  const selected = element('GPT-5.6 Sol\nSchnell', { 'aria-checked': 'true' });
+  const selected = element('Neuestes\nEmpfohlen', { 'aria-checked': 'true' });
   const other = element('GPT-5.5', { 'aria-checked': 'false' });
   const composer = element('');
   context.KeyboardEvent = class {};
@@ -695,11 +708,11 @@ const element = (text = '', attributes = {}) => ({
   assert.equal(context.safeToDiscoverPageCapabilities(), true);
   assert.equal(context.inspectPageCapabilities().currentModel, '');
   menuOpen = true;
-  assert.equal(context.inspectPageCapabilities().currentModel, 'GPT-5.6 Sol');
+  assert.equal(context.inspectPageCapabilities().currentModel, 'Neuestes');
   menuOpen = false;
   const capabilities = await context.discoverPageCapabilities();
-  assert.equal(capabilities.currentModel, 'GPT-5.6 Sol');
-  assert.deepEqual(Array.from(capabilities.models), ['GPT-5.6 Sol', 'GPT-5.5']);
+  assert.equal(capabilities.currentModel, 'Neuestes');
+  assert.deepEqual(Array.from(capabilities.models), ['Neuestes', 'GPT-5.5']);
   assert.equal(menuOpen, false);
 }
 
@@ -1019,6 +1032,37 @@ const element = (text = '', attributes = {}) => ({
   assert.equal(switched, true);
   assert.equal(result.error, 'Switched composer was used');
   delete context.PointerEvent;
+}
+
+{
+  // The rolling selector is localized by ChatGPT. An English CLI request for
+  // "Latest" must match the German "Neuestes" option without guessing a
+  // concrete GPT version or clicking an already-selected item.
+  let menuOpen = true;
+  let modelClicks = 0;
+  const trigger = {
+    ...element('Mittel', { 'aria-haspopup': 'menu' }),
+    getAttribute(name) { return name === 'aria-expanded' ? String(menuOpen) : name === 'aria-haspopup' ? 'menu' : null; },
+    click() { menuOpen = !menuOpen; }
+  };
+  const latest = { ...element('Neuestes', { 'aria-checked': 'true' }), click() { modelClicks++; } };
+  const input = { ...element(''), closest: () => ({ querySelectorAll: () => [trigger] }),
+    focus() { throw new Error('Latest model selection was retained'); } };
+  context.KeyboardEvent = class {};
+  context.document = {
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === 'button[aria-haspopup="menu"]') return [trigger];
+      if (selector.includes('[data-radix-collection-item]')) return menuOpen ? [trigger, latest] : [trigger];
+      return [];
+    },
+    dispatchEvent() { menuOpen = false; }
+  };
+  const result = await context.automate({ prompt: 'not sent', model: 'Latest', output: { mode: 'text' } },
+    { name: 'chatgpt', selectors: { input: ['#input'], response: [], submit: [] } },
+    new Date(Date.now() + 12000).toISOString());
+  assert.equal(result.error, 'Latest model selection was retained');
+  assert.equal(modelClicks, 0);
 }
 
 {
@@ -1472,7 +1516,9 @@ for (const kind of ['image', 'file']) {
     if (event.type === 'change') preview = true;
   } };
   const send = { ...element('', { 'aria-label': 'Send message' }), click() { sent = true; input.value = ''; } };
-  const answer = element(`${kind} accepted`);
+  const copy = element('', { 'data-testid': 'copy-turn-action-button', 'aria-label': 'Copy' });
+  const answer = { ...element(`${kind} accepted`),
+    querySelectorAll: (selector) => selector === 'button' ? [copy] : [] };
   context.document = { querySelectorAll(selector) {
     if (selector === '#input') return [input];
     if (selector === '#send') return [send];
@@ -1920,6 +1966,91 @@ for (const [renderedUserText, shouldPass] of [['', true], ['A different visible 
     { name: 'chatgpt', selectors: { input: ['#input'], submit: ['#send'], response: ['#response'] } },
     new Date(Date.now() + 3600000).toISOString()
   );
+  assert.equal(result.code, 'stalled_response');
+  assert.equal(result.recoverable, true);
+}
+
+{
+  let sent = false;
+  let responseReads = 0;
+  let now = Date.now();
+  class FastDate extends Date {
+    static now() { now += 1000; return now; }
+    static parse(value) { return Date.parse(value); }
+  }
+  class TextArea {
+    constructor() { this.value = ''; this.offsetWidth = 1; }
+    getClientRects() { return [1]; }
+    focus() {}
+    dispatchEvent() {}
+  }
+  const input = new TextArea();
+  const send = { ...element(), click() { sent = true; } };
+  const copy = element('', { 'data-testid': 'copy-turn-action-button', 'aria-label': 'Copy' });
+  const partial = { ...element('CB-GPT-0571-C'), querySelectorAll: () => [] };
+  const finished = {
+    ...element('CB-GPT-0571-COMPLETE-OK'),
+    querySelectorAll(selector) { return selector === 'button' ? [copy] : []; }
+  };
+  const document = {
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === '#send') return [send];
+      if (selector === '#response' && sent) {
+        responseReads += 1;
+        return [responseReads < 4 ? partial : finished];
+      }
+      return [];
+    }
+  };
+  const isolated = vm.createContext({ document, window: {}, HTMLTextAreaElement: TextArea,
+    HTMLInputElement: class {}, InputEvent: class {}, Event: class {},
+    setTimeout: (callback) => callback(), clearTimeout() {}, Date: FastDate, Promise });
+  const injectedAutomate = vm.runInContext(`(${context.automate.toString()})`, isolated);
+  const result = await injectedAutomate(
+    { prompt: 'CB-GPT-0571-COMPLETE-OK', output: { mode: 'text' } },
+    { name: 'chatgpt', selectors: { input: ['#input'], submit: ['#send'], response: ['#response'] } },
+    new Date(Date.now() + 3600000).toISOString()
+  );
+  assert.equal(result.ok, true);
+  assert.equal(result.text, 'CB-GPT-0571-COMPLETE-OK',
+    'a transient ChatGPT prefix without Copy must not be accepted as the final answer');
+}
+
+{
+  let sent = false;
+  let now = Date.now();
+  class FastDate extends Date {
+    static now() { now += 5000; return now; }
+    static parse(value) { return Date.parse(value); }
+  }
+  class TextArea {
+    constructor() { this.value = ''; this.offsetWidth = 1; }
+    getClientRects() { return [1]; }
+    focus() {}
+    dispatchEvent() {}
+  }
+  const input = new TextArea();
+  const send = { ...element(), click() { sent = true; } };
+  const partial = { ...element('CB-GPT-PARTIAL'), querySelectorAll: () => [] };
+  const document = {
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === '#send') return [send];
+      if (selector === '#response') return sent ? [partial] : [];
+      return [];
+    }
+  };
+  const isolated = vm.createContext({ document, window: {}, HTMLTextAreaElement: TextArea,
+    HTMLInputElement: class {}, InputEvent: class {}, Event: class {},
+    setTimeout: (callback) => callback(), clearTimeout() {}, Date: FastDate, Promise });
+  const injectedAutomate = vm.runInContext(`(${context.automate.toString()})`, isolated);
+  const result = await injectedAutomate(
+    { prompt: 'CB-GPT-PARTIAL', output: { mode: 'text' } },
+    { name: 'chatgpt', selectors: { input: ['#input'], submit: ['#send'], response: ['#response'] } },
+    new Date(Date.now() + 3600000).toISOString()
+  );
+  assert.equal(result.ok, false);
   assert.equal(result.code, 'stalled_response');
   assert.equal(result.recoverable, true);
 }
@@ -2814,8 +2945,9 @@ for (const proofDelay of [2500, Infinity]) {
     input.value = '';
     context.location.href = permanentURL;
   } };
+  const copy = element('', { 'data-testid': 'copy-turn-action-button', 'aria-label': 'Copy' });
   const response = { ...element('Owned answer'), matches: () => true,
-    querySelectorAll: (selector) => selector === '.markdown' ? [element('Owned answer')] : [] };
+    querySelectorAll: (selector) => selector === '.markdown' ? [element('Owned answer')] : selector === 'button' ? [copy] : [] };
   context.document = { querySelectorAll(selector) {
     if (selector === '#input') return [input];
     if (selector === '#send') return [send];
