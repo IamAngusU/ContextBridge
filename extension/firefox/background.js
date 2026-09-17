@@ -1762,6 +1762,15 @@ function isPendingLeaseConversation(lease, tab) {
   } catch (_) { return false; }
 }
 
+function isChatGPTProvisionalConversationTransition(before, after) {
+  if (!before || !after || before.origin !== after.origin
+      || !['chatgpt.com', 'chat.openai.com'].includes(before.hostname)) return false;
+  const provisional = /^\/c\/WEB:[0-9a-f-]{36}$/i;
+  const canonical = /^\/c\/[0-9a-z-]{12,100}$/i;
+  return provisional.test(before.pathname) && canonical.test(after.pathname)
+    && !provisional.test(after.pathname);
+}
+
 function isOwnedLeaseConversationTransition(lease, tab) {
   if (!lease?.sentUnknown || !lease.expectedURL || !lease.sessionKey || !lease.ownedTurn?.id
       || !lease.ownedTurn?.digest || !['chatgpt', 'gemini'].includes(lease.profileName) || !tab?.url) return false;
@@ -1770,11 +1779,13 @@ function isOwnedLeaseConversationTransition(lease, tab) {
     const after = new URL(tab.url);
     if (before.origin !== after.origin || before.href === after.href) return false;
     // Providers can first add routing parameters to the fresh root and only
-    // later publish /c/... or /app/... . Once the exact owned turn has been
-    // proven, also accept query/hash canonicalization of that same path. A
-    // different non-fresh conversation path is never eligible.
+    // later publish /c/... or /app/... . ChatGPT additionally replaces its
+    // explicit /c/WEB:<UUID> provisional identifier with a canonical server
+    // identifier. Every transition still re-proves the identical owned turn.
+    // Arbitrary changes between two normal conversation paths are ineligible.
     return before.pathname === after.pathname
-      || (isFreshChatPath(before.href) && !isFreshChatPath(after.href));
+      || (isFreshChatPath(before.href) && !isFreshChatPath(after.href))
+      || isChatGPTProvisionalConversationTransition(before, after);
   } catch (_) { return false; }
 }
 

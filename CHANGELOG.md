@@ -15,6 +15,9 @@ All notable changes are documented here. ContextBridge follows semantic versioni
   remains present; unrelated conversation paths continue to fail closed
 - a model/routing query already present on the fresh ChatGPT or Gemini path
   before Send is now classified as fresh for that exact-turn ownership proof
+- ChatGPT's explicit `/c/WEB:<UUID>` provisional conversation address can now
+  become its canonical `/c/<ID>` address only while the identical owned turn
+  remains provable; ordinary conversation-to-conversation changes stay blocked
 - attached tabs now share a fair four-request long-poll budget, preventing a
   large tab pool from starving authoritative lease, heartbeat, and completion
   traffic on Chromium's per-origin connection limit

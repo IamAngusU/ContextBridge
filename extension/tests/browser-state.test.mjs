@@ -2639,6 +2639,7 @@ for (const disabled of [true, false]) {
   const activeLeases = vm.runInContext('activeBrowserLeases', context);
   const freshURL = 'https://chatgpt.com/';
   const intermediateURL = 'https://chatgpt.com/?model=auto';
+  const provisionalURL = 'https://chatgpt.com/c/WEB:1b4e8854-9828-4046-bc4d-d994dfacbed8';
   const permanentURL = 'https://chatgpt.com/c/late-owned-turn';
   const state = { running: true, tabIds: [35], sessionBindingsMigrated: true,
     sessionBindings: { late: { tabId: 35, url: freshURL, autoCreated: true } },
@@ -2665,13 +2666,21 @@ for (const disabled of [true, false]) {
     assert.equal(proofCalls, 3, 'finalization should wait for the late ownership node without resending');
     assert.equal(lease.cancelled, false);
     assert.equal(lease.expectedURL, intermediateURL);
+    currentURL = provisionalURL;
+    const provisional = await context.waitForActiveLeaseConversationProof(lease, new Date(Date.now() + 5000).toISOString());
+    assert.equal(provisional.url, provisionalURL);
+    assert.equal(proofCalls, 4, 'the same owned turn should prove ChatGPT\'s provisional conversation URL');
+    assert.equal(lease.expectedURL, provisionalURL);
     currentURL = permanentURL;
     const tab = await context.waitForActiveLeaseConversationProof(lease, new Date(Date.now() + 5000).toISOString());
     assert.equal(tab.url, permanentURL);
-    assert.equal(proofCalls, 4, 'the same owned turn should prove the provider\'s final URL without resending');
+    assert.equal(proofCalls, 5, 'the same owned turn should prove ChatGPT\'s canonical URL without resending');
     assert.equal(lease.expectedURL, permanentURL);
     assert.equal(state.sessionBindings.late.url, permanentURL);
     assert.equal(state.browserJobClaims['late-proof'].expectedURL, permanentURL);
+    assert.equal(context.isChatGPTProvisionalConversationTransition(
+      new URL('https://chatgpt.com/c/ordinary-a'), new URL('https://chatgpt.com/c/ordinary-b')), false,
+    'two ordinary ChatGPT conversations must never be treated as one ownership chain');
   } finally {
     activeLeases.delete(lease.jobId);
     context.settings = previousSettings;
