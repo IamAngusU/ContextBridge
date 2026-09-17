@@ -1755,7 +1755,10 @@ function isPendingLeaseConversation(lease, tab) {
   try {
     const before = new URL(lease.expectedURL);
     const after = new URL(tab.url);
-    return before.origin === after.origin && isFreshChatURL(before.href) && !isFreshChatURL(after.href);
+    // The provider can apply model/routing query parameters before Send. The
+    // page is still a fresh-chat path, and promotion remains contingent on
+    // finding the exact ContextBridge prompt as the newest owned user turn.
+    return before.origin === after.origin && before.href !== after.href && isFreshChatPath(before.href);
   } catch (_) { return false; }
 }
 

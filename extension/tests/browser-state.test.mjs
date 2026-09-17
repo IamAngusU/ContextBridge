@@ -2656,6 +2656,8 @@ for (const disabled of [true, false]) {
   chrome.storage.local.set = async (update) => Object.assign(state, update);
   const lease = { jobId: 'late-proof', generation: 7, tabId: 35, expectedURL: freshURL,
     sessionKey: 'late', prompt: 'owned prompt', profileName: 'chatgpt', sentUnknown: true, cancelled: false };
+  assert.equal(context.isPendingLeaseConversation({ ...lease, expectedURL: intermediateURL }, { url: permanentURL }), true,
+    'a provider routing query already present before Send must still permit exact-turn proof of the final chat URL');
   activeLeases.set(lease.jobId, lease);
   try {
     const intermediate = await context.waitForActiveLeaseConversationProof(lease, new Date(Date.now() + 5000).toISOString());

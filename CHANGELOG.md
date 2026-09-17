@@ -13,6 +13,8 @@ All notable changes are documented here. ContextBridge follows semantic versioni
 - provider routing parameters followed by a final conversation URL can now be
   adopted as one ownership chain only while the same bound user-turn identity
   remains present; unrelated conversation paths continue to fail closed
+- a model/routing query already present on the fresh ChatGPT or Gemini path
+  before Send is now classified as fresh for that exact-turn ownership proof
 - attached tabs now share a fair four-request long-poll budget, preventing a
   large tab pool from starving authoritative lease, heartbeat, and completion
   traffic on Chromium's per-origin connection limit
