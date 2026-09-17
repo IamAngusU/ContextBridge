@@ -224,7 +224,7 @@ context.crypto = webcrypto;
   assert.equal(typeof alarmListener, 'function', 'a suspended worker must have an alarm wake listener');
   await context.startHeartbeat();
   assert.ok(alarmCalls.some(([action, name, minutes, delay]) => action === 'create'
-    && name === 'contextbridge-heartbeat' && minutes === 0.5 && delay === 0.5));
+    && name === 'contextbridge-heartbeat' && minutes === 1 && delay === 1));
   await context.startHeartbeat();
   assert.equal(alarmCalls.filter(([action]) => action === 'create').length, 1, 'restarting an active worker must not postpone the alarm');
   await context.stopHeartbeat();
@@ -2608,6 +2608,52 @@ for (const disabled of [true, false]) {
   chrome.tabs.get = previousTabGet;
   chrome.scripting.executeScript = previousExecute;
   chrome.storage.local.set = previousStorageSet;
+}
+
+{
+  // ChatGPT can stabilize a short answer before its newly-created user turn
+  // receives the durable identifier used for ownership. Finalization may
+  // retry that proof, but must not resend or accept content before it exists.
+  const previousSettings = context.settings;
+  const previousTabGet = chrome.tabs.get;
+  const previousExecute = chrome.scripting.executeScript;
+  const previousStorageSet = chrome.storage.local.set;
+  const previousDelay = context.delay;
+  const activeLeases = vm.runInContext('activeBrowserLeases', context);
+  const freshURL = 'https://chatgpt.com/';
+  const permanentURL = 'https://chatgpt.com/c/late-owned-turn';
+  const state = { running: true, tabIds: [35], sessionBindingsMigrated: true,
+    sessionBindings: { late: { tabId: 35, url: freshURL, autoCreated: true } },
+    browserJobClaims: { 'late-proof': { generation: 7, sessionKey: 'late', tabId: 35,
+      expectedURL: freshURL, state: 'sent_unknown', at: Date.now() } } };
+  let proofCalls = 0;
+  context.settings = async () => state;
+  context.delay = async () => {};
+  chrome.tabs.get = async () => ({ id: 35, url: permanentURL });
+  chrome.scripting.executeScript = async () => {
+    proofCalls += 1;
+    return [{ result: proofCalls < 3 ? null : { id: 'late-owned', digest: 'c'.repeat(64), provider: 'chatgpt' } }];
+  };
+  chrome.storage.local.set = async (update) => Object.assign(state, update);
+  const lease = { jobId: 'late-proof', generation: 7, tabId: 35, expectedURL: freshURL,
+    sessionKey: 'late', prompt: 'owned prompt', profileName: 'chatgpt', sentUnknown: true, cancelled: false };
+  activeLeases.set(lease.jobId, lease);
+  try {
+    const tab = await context.waitForActiveLeaseConversationProof(lease, new Date(Date.now() + 5000).toISOString());
+    assert.equal(tab.url, permanentURL);
+    assert.equal(proofCalls, 3, 'finalization should wait for the late ownership node without resending');
+    assert.equal(lease.cancelled, false);
+    assert.equal(lease.expectedURL, permanentURL);
+    assert.equal(state.sessionBindings.late.url, permanentURL);
+    assert.equal(state.browserJobClaims['late-proof'].expectedURL, permanentURL);
+  } finally {
+    activeLeases.delete(lease.jobId);
+    context.settings = previousSettings;
+    context.delay = previousDelay;
+    chrome.tabs.get = previousTabGet;
+    chrome.scripting.executeScript = previousExecute;
+    chrome.storage.local.set = previousStorageSet;
+  }
 }
 
 for (const observer of ['progress', 'action']) {

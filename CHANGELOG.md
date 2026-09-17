@@ -6,6 +6,12 @@ All notable changes are documented here. ContextBridge follows semantic versioni
 
 ### Fixed
 
+- a short fresh-chat answer can no longer be rejected as
+  `browser_session_changed` merely because ChatGPT or Gemini publishes the
+  permanent conversation URL just before its owned user-turn identifier; the
+  extension retries only the exact bounded ownership proof and never Send
+- the MV3 recovery alarm now uses the one-minute interval supported across
+  Chromium variants while awake workers retain their five-second heartbeat
 - a supporting browser progress scan can no longer cancel an otherwise valid
   job when ChatGPT briefly exposes an intermediate conversation URL; provider
   action gates and the final exact ownership check remain authoritative

@@ -1001,7 +1001,7 @@ async function processWork(cfg, work, claimedTabId) {
     failureCode = 'browser_lease_lost';
     await requireActiveBrowserLease(cfg, leaseState);
     failureCode = 'browser_session_changed';
-    tab = await assertActiveLeaseConversation(leaseState);
+    tab = await waitForActiveLeaseConversationProof(leaseState, work.deadline);
     await assertSessionTab(leaseState.sessionKey, tabId);
     try {
       const owned = await api.scripting.executeScript({ target: { tabId }, func: inspectLatestOwnedTurn,
@@ -1024,7 +1024,7 @@ async function processWork(cfg, work, claimedTabId) {
         busy: true
       });
       answer.artifacts = await hydrateArtifactReferences(answer.artifacts, tab.url, work.job.output || {});
-      tab = await assertActiveLeaseConversation(leaseState);
+      tab = await waitForActiveLeaseConversationProof(leaseState, work.deadline);
       await assertSessionTab(leaseState.sessionKey, tabId);
     }
     if (!String(answer.text || '').trim()) {
@@ -1046,7 +1046,7 @@ async function processWork(cfg, work, claimedTabId) {
     // the model/reasoning requested by the remote job.
 	if (answer.selected_model) decision.selected_model = String(answer.selected_model).slice(0, 100);
 	if (answer.selected_reasoning) decision.selected_reasoning = String(answer.selected_reasoning).slice(0, 100);
-    tab = await assertActiveLeaseConversation(leaseState);
+    tab = await waitForActiveLeaseConversationProof(leaseState, work.deadline);
     await assertSessionTab(leaseState.sessionKey, tabId);
     if (!editTarget) await releaseOwnedDraftIfEmpty(tabId, effectiveProfile);
     jobCompleted = true;
@@ -1775,6 +1775,27 @@ async function assertActiveLeaseConversation(lease, cancelOnMismatch = true) {
     lease.cancelled = true;
   }
   throw new Error('The conversation URL changed; no provider content was observed');
+}
+
+async function waitForActiveLeaseConversationProof(lease, jobDeadline = '', timeoutMilliseconds = 15000) {
+  const suppliedDeadline = Date.parse(String(jobDeadline || ''));
+  const deadline = Math.min(Date.now() + Math.max(0, Number(timeoutMilliseconds) || 0),
+    Number.isFinite(suppliedDeadline) ? suppliedDeadline : Infinity);
+  let lastError = null;
+  do {
+    try { return await assertActiveLeaseConversation(lease); }
+    catch (error) {
+      lastError = error;
+      // Fresh-chat providers can commit the permanent conversation URL after
+      // the answer has already stabilized but before their owned user-turn
+      // node receives its durable identifier. Retry only that exact,
+      // non-cancelling ownership proof. No response DOM is read and Send is
+      // never authorized again during this bounded finalization window.
+      if (error?.code !== 'browser_session_changed' || lease?.cancelled || stopRequested || Date.now() >= deadline) throw error;
+      await delay(Math.min(250, Math.max(0, deadline - Date.now())));
+    }
+  } while (Date.now() < deadline);
+  throw lastError || new Error('The submitted ContextBridge turn could not be verified after the conversation URL changed; no provider content was observed');
 }
 
 async function readActiveLeaseTab(lease) {
@@ -4408,8 +4429,11 @@ function reconcileHeartbeatAlarm() {
     if (!existing && api.alarms.create) {
       try {
         await Promise.resolve(api.alarms.create(HEARTBEAT_ALARM, {
-          delayInMinutes: 0.5,
-          periodInMinutes: 0.5
+          // One minute also works on Chromium variants that have not adopted
+          // Chrome's newer 30-second minimum. The ordinary five-second
+          // heartbeat remains active while the MV3 worker is awake.
+          delayInMinutes: 1,
+          periodInMinutes: 1
         }));
       } catch (_) {
         heartbeatAlarmRegistered = false;
