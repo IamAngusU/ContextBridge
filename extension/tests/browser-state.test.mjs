@@ -2055,6 +2055,36 @@ for (const [renderedUserText, shouldPass] of [['', true], ['A different visible 
   assert.equal(result.recoverable, true);
 }
 
+{
+  let now = Date.now();
+  class FastDate extends Date {
+    static now() { now += 5000; return now; }
+    static parse(value) { return Date.parse(value); }
+  }
+  const input = element();
+  const finished = { ...element('CB-GPT-0571-FULL-TURN-OK'), querySelectorAll: () => [] };
+  const document = {
+    querySelectorAll(selector) {
+      if (selector === '#input') return [input];
+      if (selector === '#response') return [finished];
+      return [];
+    }
+  };
+  const isolated = vm.createContext({ document, window: {}, HTMLTextAreaElement: class {},
+    HTMLInputElement: class {}, InputEvent: class {}, Event: class {},
+    setTimeout: (callback) => callback(), clearTimeout() {}, Date: FastDate, Promise });
+  const injectedAutomate = vm.runInContext(`(${context.automate.toString()})`, isolated);
+  const result = await injectedAutomate(
+    { prompt: 'ignored', metadata: { contextbridge_resume_only: true, contextbridge_foreground_recovery: true,
+      contextbridge_baseline_text: 'CB-GPT-0571-F' }, output: { mode: 'text' } },
+    { name: 'chatgpt', selectors: { input: ['#input'], submit: ['#send'], response: ['#response'] } },
+    new Date(Date.now() + 3600000).toISOString()
+  );
+  assert.equal(result.ok, true, result.error);
+  assert.equal(result.text, 'CB-GPT-0571-FULL-TURN-OK',
+    'an owned foreground recovery may accept only text that advanced beyond the held partial baseline');
+}
+
 for (const disabled of [true, false]) {
   let sent = false;
   let now = Date.now();

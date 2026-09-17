@@ -49,6 +49,9 @@ All notable changes are documented here. ContextBridge follows semantic versioni
 - regression coverage holds a partial ChatGPT answer without completion
   controls, accepts the later complete turn, and routes a permanently partial
   owned turn into recovery instead of returning truncated text
+- foreground recovery retains the held partial answer as its baseline and can
+  accept only a different, longer-stabilized owned response, covering minimized
+  Chromium tabs whose action controls and turn identifiers remount late
 
 ## 0.5.70 - 2026-09-16
 

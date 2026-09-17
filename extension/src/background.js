@@ -985,16 +985,25 @@ async function processWork(cfg, work, claimedTabId) {
       // then observe without sending again. Keep the tab visible if it wakes.
       try {
         await assertRecoveryTab(workSessionKey(work), tabId);
-        const proof = await api.scripting.executeScript({ target: { tabId }, func: inspectLatestOwnedTurn,
-          args: [work.job.prompt, effectiveProfile.name] });
+        let proof = null;
+        const proofDeadline = Math.min(Date.now() + 5000, Date.parse(work.deadline || '') || Infinity);
+        do {
+          const candidate = await api.scripting.executeScript({ target: { tabId }, func: inspectLatestOwnedTurn,
+            args: [work.job.prompt, effectiveProfile.name] });
+          proof = candidate?.[0]?.result || null;
+          if (proof || Date.now() >= proofDeadline) break;
+          await delay(250);
+          await assertRecoveryTab(workSessionKey(work), tabId);
+        } while (Date.now() < proofDeadline);
         const remaining = (Date.parse(work.deadline || '') || Date.now() + 45000) - Date.now() - 5000;
-        if (proof?.[0]?.result && remaining >= 10000 && !(await api.tabs.get(tabId)).active) {
+        if (proof && remaining >= 10000 && !(await api.tabs.get(tabId)).active) {
           progressSequence += 1;
           await reportProgress(cfg, work.job.id, { sequence: progressSequence, text: '', phase: 'recovering',
             detail: 'Foregrounding a stalled, ContextBridge-created tab without resending', busy: true });
 	          await requireActiveBrowserLease(cfg, leaseState);
 	          await api.tabs.update(tabId, { active: true });
-	          const resumeJob = { ...work.job, metadata: { ...(work.job.metadata || {}), contextbridge_resume_only: true, contextbridge_baseline_text: baselineText } };
+	          const resumeJob = { ...work.job, metadata: { ...(work.job.metadata || {}), contextbridge_resume_only: true,
+	            contextbridge_foreground_recovery: true, contextbridge_baseline_text: String(answer?.text || baselineText) } };
 	          const observationTab = await assertRecoveryTab(workSessionKey(work), tabId);
           const observed = await api.scripting.executeScript({ target: { tabId }, func: automate,
             args: [resumeJob, effectiveProfile, new Date(Date.now() + Math.min(35000, remaining)).toISOString(), null,
@@ -2980,9 +2989,13 @@ function automate(job, profile, jobDeadline, editTarget = null, expectedConversa
   };
   const responseCompletionReady = (element) => {
     if (!element?.querySelectorAll) return false;
-    const buttons = boundedNodes(element, 'button', 128);
-    return buttons.some((button) => isVisible(button)
-      && /copy|kopieren/i.test(`${button.getAttribute?.('data-testid') || ''} ${button.getAttribute?.('aria-label') || ''}`));
+    const scope = element.closest?.('section[data-turn="assistant"], article[data-testid^="conversation-turn-"]') || element;
+    const buttons = boundedNodes(scope, 'button', 128);
+    // ChatGPT can keep finished-turn actions in the DOM but hide them until
+    // hover. Their exact semantic label is completion evidence even when a
+    // minimized window reports zero layout dimensions for the button.
+    return buttons.some((button) => /copy|kopieren/i.test(
+      `${button.getAttribute?.('data-testid') || ''} ${button.getAttribute?.('aria-label') || ''}`));
   };
   const pageState = () => {
     let percent = 0;
@@ -4196,8 +4209,14 @@ function automate(job, profile, jobDeadline, editTarget = null, expectedConversa
 		// textbox plus a stable new assistant turn is a valid finished state.
 		const stableFor = sawBusy ? 1300 : (profile.name === 'gemini' ? 6000 : 2600);
 		const composerFinished = !(selectors.submit || []).length || state.composerReady
-			|| (state.inputReady && (sawBusy || profile.name === 'gemini'));
-		const completionReady = profile.name !== 'chatgpt' || !plainTextJob || responseCompletionReady(latestElement);
+			|| (state.inputReady && (sawBusy || profile.name === 'gemini'
+				|| job.metadata?.contextbridge_foreground_recovery === true));
+		const stableAge = Date.now() - stableSince;
+		const foregroundRecoveryReady = profile.name === 'chatgpt' && plainTextJob
+			&& job.metadata?.contextbridge_foreground_recovery === true && Boolean(previousText)
+			&& latest !== previousText && stableAge >= 15000;
+		const completionReady = profile.name !== 'chatgpt' || !plainTextJob
+			|| responseCompletionReady(latestElement) || foregroundRecoveryReady;
 		// A background ChatGPT tab can temporarily expose only the first rendered
 		// text chunk while both Stop and streaming attributes are absent. The Copy
 		// action is mounted only for a finished assistant turn, so never accept a
@@ -4205,12 +4224,13 @@ function automate(job, profile, jobDeadline, editTarget = null, expectedConversa
 		// turn to the existing foreground/reload recovery path instead of waiting
 		// until the whole job deadline.
 		if (profile.name === 'chatgpt' && plainTextJob && changedResponse && structured && !busy
-			&& composerFinished && !completionReady && Date.now() - stableSince >= 15000) {
-			resolve({ ok: false, error: 'ChatGPT text stabilized before its completion controls appeared; waking the owned tab to finish rendering',
+			&& composerFinished && !completionReady && stableAge >= 15000) {
+			resolve({ ok: false, text: latest,
+				error: 'ChatGPT text stabilized before its completion controls appeared; waking the owned tab to finish rendering',
 				code: 'stalled_response', recoverable: job.metadata?.contextbridge_auto_reload !== false });
 			return;
 		}
-        if (Date.now() - stableSince >= stableFor && structured && !busy && composerFinished && completionReady) {
+        if (stableAge >= stableFor && structured && !busy && composerFinished && completionReady) {
 		  const filesMissing = job.output?.min_artifacts > artifactCount;
 		  const imagesMissing = job.output?.min_images > imageCount;
 		  const mediaMissing = job.output?.min_media > mediaCount;
