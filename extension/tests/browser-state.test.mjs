@@ -12,6 +12,8 @@ assert.match(source, /jobs\/next\?wait=25[\s\S]{0,300}fetchWithTimeout|fetchWith
   'the relay long poll must have an abortable deadline');
 assert.match(source, /jobs\/next\?wait=25[^`]{0,300}tab_id=/,
   'each extension poller must identify its concrete browser tab to the local lease boundary');
+assert.match(source, /MAX_CONCURRENT_BROWSER_POLLS\s*=\s*4/,
+  'long polls must leave browser connections available for lease and completion control requests');
 assert.match(source, /leaseState\?\.tabId[\s\S]{0,180}contextbridge_browser_tab_id/,
   'completion metadata must identify only a successfully resolved execution tab');
 assert.equal(source.includes("add(href, cleanFileName(anchor.download"), true,
@@ -47,6 +49,21 @@ const chrome = {
 const context = vm.createContext({ chrome, console, URL, TextEncoder, AbortController, setTimeout, clearTimeout, setInterval, clearInterval, Date, Promise });
 vm.runInContext(source, context);
 context.crypto = webcrypto;
+{
+  const held = await Promise.all(Array.from({ length: 4 }, () => context.acquireBrowserPollRequest()));
+  assert.deepEqual(held, [true, true, true, true]);
+  assert.equal(vm.runInContext('activeBrowserPollRequests', context), 4);
+  let fifthResolved = false;
+  const fifth = context.acquireBrowserPollRequest().then((value) => { fifthResolved = true; return value; });
+  await Promise.resolve();
+  assert.equal(fifthResolved, false, 'a fifth long poll must wait instead of consuming the lease-control connection budget');
+  context.releaseBrowserPollRequest();
+  assert.equal(await fifth, true, 'the oldest waiting tab should inherit the next poll slot');
+  assert.equal(vm.runInContext('activeBrowserPollRequests', context), 4);
+  for (let index = 0; index < 4; index += 1) context.releaseBrowserPollRequest();
+  assert.equal(vm.runInContext('activeBrowserPollRequests', context), 0);
+}
+
 {
   const previousResolve = context.resolveWorkTab;
   const previousRenew = context.renewLease;

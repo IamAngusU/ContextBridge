@@ -13,6 +13,9 @@ All notable changes are documented here. ContextBridge follows semantic versioni
 - provider routing parameters followed by a final conversation URL can now be
   adopted as one ownership chain only while the same bound user-turn identity
   remains present; unrelated conversation paths continue to fail closed
+- attached tabs now share a fair four-request long-poll budget, preventing a
+  large tab pool from starving authoritative lease, heartbeat, and completion
+  traffic on Chromium's per-origin connection limit
 - the MV3 recovery alarm now uses the one-minute interval supported across
   Chromium variants while awake workers retain their five-second heartbeat
 - the local service accepts and bounds the extension's enumerated lease-failure

@@ -31,6 +31,14 @@ let connectionPhase = '';
 let connectionPhaseStartedAt = 0;
 const pollers = new Map();
 const pollAbortControllers = new Map();
+// Chromium limits parallel connections per origin. One 25-second /next
+// request per attached tab can otherwise starve the lease, heartbeat, and
+// completion requests that make an already claimed job authoritative. Keep
+// the number of waiting polls aligned with the worker's current slot budget
+// while allowing any number of attached tabs to take turns fairly.
+const MAX_CONCURRENT_BROWSER_POLLS = 4;
+let activeBrowserPollRequests = 0;
+const browserPollWaiters = [];
 const busyTabs = new Set();
 const freshTabChecks = new Map();
 let freshTabWrite = Promise.resolve();
@@ -232,6 +240,7 @@ function beginBrowserLeaseRecovery() {
   // same worker. Abort it synchronously so it cannot lease a second job for a
   // tab whose durable claim is about to be restored.
   for (const controller of pollAbortControllers.values()) controller.abort();
+  cancelBrowserPollWaiters();
   return task;
 }
 
@@ -252,6 +261,8 @@ async function waitForBrowserLeaseRecovery() {
 async function stopPairing() {
   const generation = ++lifecycleGeneration;
   stopRequested = true;
+  for (const controller of pollAbortControllers.values()) controller.abort();
+  cancelBrowserPollWaiters();
   for (const lease of [...activeBrowserLeases.values()]) cancelRecoveredBrowserLease(lease, true);
   recoveredTabReservations.clear();
   busyTabs.clear();
@@ -662,6 +673,8 @@ async function pollTab(tabId) {
       try {
 		let requestedProfile = cfg.profile || '';
 		try { requestedProfile = routingProfileName(cfg, await api.tabs.get(tabId)) || requestedProfile; } catch (_) {}
+        const pollSlot = await acquireBrowserPollRequest();
+        if (!pollSlot) continue;
         const pollController = new AbortController();
         pollAbortControllers.set(tabId, pollController);
         let response;
@@ -671,6 +684,7 @@ async function pollTab(tabId) {
           cache: 'no-store', signal: pollController.signal
           }, 35000);
         } finally {
+          releaseBrowserPollRequest();
           if (pollAbortControllers.get(tabId) === pollController) pollAbortControllers.delete(tabId);
         }
         if (response.status === 204) continue;
@@ -713,6 +727,34 @@ async function pollTab(tabId) {
         await delay(2000);
       }
   }
+}
+
+function acquireBrowserPollRequest() {
+  if (stopRequested) return Promise.resolve(false);
+  if (activeBrowserPollRequests < MAX_CONCURRENT_BROWSER_POLLS) {
+    activeBrowserPollRequests += 1;
+    return Promise.resolve(true);
+  }
+  return new Promise((resolve) => browserPollWaiters.push(resolve));
+}
+
+function releaseBrowserPollRequest() {
+  while (browserPollWaiters.length) {
+    const next = browserPollWaiters.shift();
+    if (stopRequested) {
+      next(false);
+      continue;
+    }
+    // Transfer this slot directly to the oldest waiter. The active count does
+    // not change until that waiter eventually releases it.
+    next(true);
+    return;
+  }
+  activeBrowserPollRequests = Math.max(0, activeBrowserPollRequests - 1);
+}
+
+function cancelBrowserPollWaiters() {
+  while (browserPollWaiters.length) browserPollWaiters.shift()(false);
 }
 
 async function processWork(cfg, work, claimedTabId) {
