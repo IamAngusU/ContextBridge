@@ -137,7 +137,11 @@ async function exerciseRecoveryAfterSubmit(unsafeDraft, decoratedTurn = false, c
     completions.push({ jobID, decision, generation });
     return true;
   };
-  if (changingResponse) site.setMutateOnDelay(() => site.setResponseText('Changed during recovery'));
+  if (changingResponse === 'continuous') {
+    site.setMutateOnDelay((tick) => site.setResponseText(`Changed during recovery ${tick}`));
+  } else if (changingResponse) {
+    site.setMutateOnDelay(() => site.setResponseText('Changed during recovery'));
+  }
   await site.context.processWork({ useVisualProfile: false, preserveDrafts: false, pendingCompletions: {} }, site.work, 7);
   return { site, automations, completion: completions.at(-1) };
 }
@@ -216,6 +220,13 @@ async function exerciseRecoveryAfterSubmit(unsafeDraft, decoratedTurn = false, c
 
 {
   const { site, automations, completion } = await exerciseRecoveryAfterSubmit(false, false, true);
+  assert.equal(automations, 2);
+  assert.equal(site.reloads(), 1);
+  assert.equal(completion.decision.text, 'Recovered answer');
+}
+
+{
+  const { site, automations, completion } = await exerciseRecoveryAfterSubmit(false, false, 'continuous');
   assert.equal(automations, 1);
   assert.equal(site.reloads(), 0);
   assert.equal(completion.decision.error, 'browser_recovery_unsafe');

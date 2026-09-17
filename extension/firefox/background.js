@@ -985,16 +985,8 @@ async function processWork(cfg, work, claimedTabId) {
       // then observe without sending again. Keep the tab visible if it wakes.
       try {
         await assertRecoveryTab(workSessionKey(work), tabId);
-        let proof = null;
-        const proofDeadline = Math.min(Date.now() + 5000, Date.parse(work.deadline || '') || Infinity);
-        do {
-          const candidate = await api.scripting.executeScript({ target: { tabId }, func: inspectLatestOwnedTurn,
-            args: [work.job.prompt, effectiveProfile.name] });
-          proof = candidate?.[0]?.result || null;
-          if (proof || Date.now() >= proofDeadline) break;
-          await delay(250);
-          await assertRecoveryTab(workSessionKey(work), tabId);
-        } while (Date.now() < proofDeadline);
+        const proof = await waitForExactOwnedTurnProof(workSessionKey(work), tabId, effectiveProfile, work.job.prompt,
+          Math.min(15000, Math.max(0, (Date.parse(work.deadline || '') || Date.now() + 15000) - Date.now() - 5000)));
         const remaining = (Date.parse(work.deadline || '') || Date.now() + 45000) - Date.now() - 5000;
         if (proof && remaining >= 10000 && !(await api.tabs.get(tabId)).active) {
           progressSequence += 1;
@@ -1006,7 +998,7 @@ async function processWork(cfg, work, claimedTabId) {
 	            contextbridge_foreground_recovery: true, contextbridge_baseline_text: String(answer?.text || baselineText) } };
 	          const observationTab = await assertRecoveryTab(workSessionKey(work), tabId);
           const observed = await api.scripting.executeScript({ target: { tabId }, func: automate,
-            args: [resumeJob, effectiveProfile, new Date(Date.now() + Math.min(35000, remaining)).toISOString(), null,
+            args: [resumeJob, effectiveProfile, new Date(Date.now() + Math.min(60000, remaining)).toISOString(), null,
               observationTab.url, { jobId: work.job.id, generation: leaseGeneration }] });
           if (observed?.[0]?.result?.ok) answer = observed[0].result;
         }
@@ -1014,32 +1006,40 @@ async function processWork(cfg, work, claimedTabId) {
     }
     if (!answer?.ok && answer?.recoverable) {
       failureCode = 'browser_recovery_unsafe';
-      await assertRecoveryTab(workSessionKey(work), tabId);
-      const proofResult = await api.scripting.executeScript({ target: { tabId }, func: inspectLatestOwnedTurn,
-        args: [work.job.prompt, effectiveProfile.name] });
-      const recoveryTurn = proofResult?.[0]?.result;
-      if (!recoveryTurn) throw new Error('The submitted ContextBridge turn could not be verified; no reload was performed');
+      const firstRecovery = await requireStableRecoveryState(workSessionKey(work), tabId, effectiveProfile,
+        work.job.prompt, false, 10000);
+      let recoveryTurn = firstRecovery.ownedTurn;
       await rememberSessionURL(workSessionKey(work), tabId);
       await rememberOwnedTurn(workSessionKey(work), tabId, recoveryTurn);
-      const expectedTurn = { ownedTurn: recoveryTurn };
-      const firstSafeState = await requireSafeReloadState(tabId, effectiveProfile, expectedTurn, false);
+      let firstSafeState = firstRecovery.state;
       failureCode = 'browser_recovery_failed';
       progressSequence += 1;
       await reportProgress(cfg, work.job.id, { sequence: progressSequence, text: '', phase: 'recovering', detail: answer.error || 'Recovering browser tab', percent: Number(answer.percent) || 0, busy: true });
-      await delay(2500);
-      failureCode = 'browser_recovery_unsafe';
-      await assertRecoveryTab(workSessionKey(work), tabId);
-      const secondSafeState = await requireSafeReloadState(tabId, effectiveProfile, expectedTurn, false);
-      if (firstSafeState.fingerprint !== secondSafeState.fingerprint) {
-        throw new Error('Automatic reload skipped: the response changed during verification; the tab was left untouched');
-      }
+      const stabilityDeadline = Math.min(Date.now() + 20000, (Date.parse(work.deadline || '') || Infinity) - 5000);
+      let responseStable = false;
+      do {
+        await delay(Math.min(2500, Math.max(0, stabilityDeadline - Date.now())));
+        failureCode = 'browser_recovery_unsafe';
+        const secondRecovery = await requireStableRecoveryState(workSessionKey(work), tabId, effectiveProfile,
+          work.job.prompt, false, Math.min(10000, Math.max(0, stabilityDeadline - Date.now())));
+        recoveryTurn = secondRecovery.ownedTurn;
+        await rememberOwnedTurn(workSessionKey(work), tabId, recoveryTurn);
+        const secondSafeState = secondRecovery.state;
+        if (firstSafeState.fingerprint === secondSafeState.fingerprint) {
+          responseStable = true;
+          break;
+        }
+        firstSafeState = secondSafeState;
+      } while (Date.now() < stabilityDeadline);
+      if (!responseStable) throw new Error('Automatic reload skipped: the response changed during verification; the tab was left untouched');
       failureCode = 'browser_recovery_failed';
       await requireActiveBrowserLease(cfg, leaseState);
       await api.tabs.reload(tabId);
       await waitForTabReady(tabId, effectiveProfile.selectors, 30000);
-      await assertRecoveryTab(workSessionKey(work), tabId);
       failureCode = 'browser_recovery_unsafe';
-      await requireSafeReloadState(tabId, effectiveProfile, expectedTurn, false);
+      const reloadedRecovery = await requireStableRecoveryState(workSessionKey(work), tabId, effectiveProfile,
+        work.job.prompt, false, 15000);
+      await rememberOwnedTurn(workSessionKey(work), tabId, reloadedRecovery.ownedTurn);
       failureCode = 'browser_recovery_failed';
       const resumeJob = { ...work.job, metadata: { ...(work.job.metadata || {}), contextbridge_resume_only: true, contextbridge_baseline_text: baselineText } };
       const recoveryTab = await assertRecoveryTab(workSessionKey(work), tabId);
@@ -1063,9 +1063,8 @@ async function processWork(cfg, work, claimedTabId) {
     tab = await waitForActiveLeaseConversationProof(leaseState, work.deadline);
     await assertSessionTab(leaseState.sessionKey, tabId);
     try {
-      const owned = await api.scripting.executeScript({ target: { tabId }, func: inspectLatestOwnedTurn,
-        args: [work.job.prompt, effectiveProfile.name, true, effectiveProfile.selectors] });
-      submittedTurn = owned?.[0]?.result || null;
+      submittedTurn = await waitForExactOwnedTurnProof(workSessionKey(work), tabId, effectiveProfile,
+        work.job.prompt, 10000, true);
     } catch (_) { /* Some text-only providers lack a stable turn identifier. */ }
     if (['chatgpt', 'gemini'].includes(effectiveProfile.name) && !submittedTurn
         && !(effectiveProfile.name === 'gemini' && work.job.image_base64 && answer.submitted_prompt_verified === true)) {
@@ -1621,6 +1620,48 @@ async function requireSafeReloadState(tabId, profile, expected, requireFinishedA
   const reason = unsafeReloadReason(state, requireFinishedAnswer);
   if (reason) throw new Error(`Automatic reload skipped: ${reason}; the tab was left untouched`);
   return state;
+}
+
+async function waitForExactOwnedTurnProof(sessionKey, tabId, profile, prompt, timeoutMilliseconds = 10000,
+    requireResponseAfter = false) {
+  const deadline = Date.now() + Math.max(0, Number(timeoutMilliseconds) || 0);
+  do {
+    await assertRecoveryTab(sessionKey, tabId);
+    const result = await withDeadline(api.scripting.executeScript({ target: { tabId }, func: inspectLatestOwnedTurn,
+      args: [prompt, profile.name, requireResponseAfter, requireResponseAfter ? profile.selectors : null] }), 3000).catch(() => null);
+    const proof = result?.[0]?.result || null;
+    if (proof) {
+      await assertRecoveryTab(sessionKey, tabId);
+      return proof;
+    }
+    if (Date.now() >= deadline) break;
+    await delay(Math.min(250, Math.max(0, deadline - Date.now())));
+  } while (Date.now() < deadline);
+  return null;
+}
+
+async function requireStableRecoveryState(sessionKey, tabId, profile, prompt, requireFinishedAnswer,
+    timeoutMilliseconds = 10000) {
+  const deadline = Date.now() + Math.max(0, Number(timeoutMilliseconds) || 0);
+  let lastMismatch = null;
+  do {
+    const remaining = Math.max(0, deadline - Date.now());
+    const ownedTurn = await waitForExactOwnedTurnProof(sessionKey, tabId, profile, prompt, Math.min(3000, remaining));
+    if (ownedTurn) {
+      try {
+        const state = await requireSafeReloadState(tabId, profile, { ownedTurn }, requireFinishedAnswer);
+        await assertRecoveryTab(sessionKey, tabId);
+        return { state, ownedTurn };
+      } catch (error) {
+        if (!/latest user message is not the expected ContextBridge turn/i.test(String(error?.message || ''))) throw error;
+        lastMismatch = error;
+      }
+    }
+    if (Date.now() >= deadline) break;
+    await delay(Math.min(250, Math.max(0, deadline - Date.now())));
+  } while (Date.now() < deadline);
+  if (lastMismatch) throw lastMismatch;
+  throw new Error('The submitted ContextBridge turn could not be verified; no reload was performed');
 }
 
 async function recoverPriorStall(work, tabId, profile, ownedTurn, cfg = null, lease = null) {
