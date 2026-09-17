@@ -12,6 +12,8 @@ All notable changes are documented here. ContextBridge follows semantic versioni
   extension retries only the exact bounded ownership proof and never Send
 - the MV3 recovery alarm now uses the one-minute interval supported across
   Chromium variants while awake workers retain their five-second heartbeat
+- the local service accepts and bounds the extension's enumerated lease-failure
+  diagnostic instead of rejecting the complete 0.5.71 heartbeat as unknown
 - a supporting browser progress scan can no longer cancel an otherwise valid
   job when ChatGPT briefly exposes an intermediate conversation URL; provider
   action gates and the final exact ownership check remain authoritative
