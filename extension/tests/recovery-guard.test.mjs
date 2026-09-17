@@ -16,6 +16,7 @@ async function fixture() {
   let attachment = false;
   let draft = '';
   let turnText = 'OWNED-TURN';
+  let turnID = 'owned-id';
   let responseText = 'Completed answer';
   let mutateOnDelay = null;
   const url = 'https://chatgpt.com/c/owned-conversation';
@@ -47,7 +48,7 @@ async function fixture() {
     }
   };
   const turn = {
-    getAttribute(name) { return name === 'data-turn-id' ? 'owned-id' : null; },
+    getAttribute(name) { return name === 'data-turn-id' ? turnID : null; },
     querySelector() { return content; },
     compareDocumentPosition() { return 4; }
   };
@@ -104,6 +105,7 @@ async function fixture() {
     setAttachment: (value) => { attachment = value; },
     setDraft: (value) => { draft = value; },
     setTurnText: (value) => { turnText = value; },
+    setTurnID: (value) => { turnID = value; },
     setResponseText: (value) => { responseText = value; },
     setURL: (value) => { currentURL = value; },
     setMutateOnDelay: (value) => { mutateOnDelay = value; }
@@ -144,6 +146,27 @@ async function exerciseRecoveryAfterSubmit(unsafeDraft, decoratedTurn = false, c
   }
   await site.context.processWork({ useVisualProfile: false, preserveDrafts: false, pendingCompletions: {} }, site.work, 7);
   return { site, automations, completion: completions.at(-1) };
+}
+
+{
+  const site = await fixture();
+  site.setStopVisible(false);
+  site.setTurnText('NEW-TURN');
+  const originalExecute = site.chrome.scripting.executeScript;
+  let proofCaptured = false;
+  site.chrome.scripting.executeScript = async (request) => {
+    const result = await originalExecute(request);
+    if (request.func === site.context.inspectLatestOwnedTurn && result?.[0]?.result && !proofCaptured) {
+      proofCaptured = true;
+      site.setTurnID('remounted-id');
+    }
+    return result;
+  };
+  const recovered = await site.context.requireStableRecoveryState(
+    site.context.workSessionKey(site.work), 7, site.profile, 'NEW-TURN', false, 10000);
+  assert.equal(recovered.state.owned_turn_matches, true,
+    'an exact newest prompt stays owned when ChatGPT remounts only its transient turn id');
+  assert.equal(site.reloads(), 0);
 }
 
 {

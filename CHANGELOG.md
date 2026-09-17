@@ -40,6 +40,10 @@ All notable changes are documented here. ContextBridge follows semantic versioni
 - ChatGPT's localized rolling model choice (`Neuestes` / `Latest`) is now
   reported and selectable as an explicit automatic model choice without
   pretending it is a fixed GPT version
+- a minimized ChatGPT tab may remount the newest user turn with a different
+  transient DOM identifier while it finishes rendering; recovery now retains
+  ownership through the exact normalized prompt in the same session-bound
+  conversation instead of rejecting the completed answer
 
 ### Tested
 
@@ -49,6 +53,9 @@ All notable changes are documented here. ContextBridge follows semantic versioni
 - regression coverage holds a partial ChatGPT answer without completion
   controls, accepts the later complete turn, and routes a permanently partial
   owned turn into recovery instead of returning truncated text
+- regression coverage remounts only ChatGPT's transient user-turn identifier
+  between the ownership and reload-safety probes and proves that the exact
+  newest prompt remains owned without weakening conversation or draft guards
 - foreground recovery retains the held partial answer as its baseline and can
   accept only a different, longer-stabilized owned response, covering minimized
   Chromium tabs whose action controls and turn identifiers remount late

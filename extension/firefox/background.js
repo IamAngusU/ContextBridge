@@ -1533,7 +1533,13 @@ async function inspectRecoveryState(selectors, provider, expected) {
     const text = normalize(value);
     if (!text) return false;
     const matchesOwned = Boolean(expectedDigest && turnID === expected?.ownedTurn?.id && await digest(text) === expectedDigest);
-    const matchesPrompt = Boolean(!expectedDigest && expectedPrompt && text === expectedPrompt);
+    // ChatGPT can remount a completed user turn with a new data-turn-id while
+    // an inactive/minimized tab finishes rendering.  The exact normalized
+    // prompt on the newest user turn, inside the already session-bound tab, is
+    // still authoritative ownership evidence.  Keep the transient id+digest
+    // check as the preferred path, but do not let an id-only remount make a
+    // safely owned turn unrecoverable.
+    const matchesPrompt = Boolean(expectedPrompt && text === expectedPrompt);
     if (!matchesOwned && !matchesPrompt) return false;
     turnText = text;
     ownedTurnMatches = true;
@@ -1649,7 +1655,7 @@ async function requireStableRecoveryState(sessionKey, tabId, profile, prompt, re
     const ownedTurn = await waitForExactOwnedTurnProof(sessionKey, tabId, profile, prompt, Math.min(3000, remaining));
     if (ownedTurn) {
       try {
-        const state = await requireSafeReloadState(tabId, profile, { ownedTurn }, requireFinishedAnswer);
+        const state = await requireSafeReloadState(tabId, profile, { ownedTurn, prompt }, requireFinishedAnswer);
         await assertRecoveryTab(sessionKey, tabId);
         return { state, ownedTurn };
       } catch (error) {
