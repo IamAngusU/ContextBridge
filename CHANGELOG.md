@@ -31,6 +31,10 @@ All notable changes are documented here. ContextBridge follows semantic versioni
   a prototype placeholder
 - prototype state controls and demonstration credentials are excluded from the
   packaged extension
+- the browser popup now has one bounded content scrollbar instead of competing
+  page and card scrollbars at Chromium's 600-pixel popup limit
+- language and appearance share one footer preference control, leaving the
+  header focused on the live connection state
 
 ## 0.5.71 - 2026-09-16
 

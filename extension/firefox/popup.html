@@ -15,10 +15,6 @@
         <div class="brand-subtitle" data-i18n="subtitle">Local browser bridge</div>
       </div>
       <div class="header-actions">
-        <button class="language-button" id="language-button" type="button" aria-label="Language" aria-expanded="false"><span id="language-code">EN</span><svg viewBox="0 0 24 24" fill="none"><path d="m8 10 4 4 4-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-        <button class="header-icon" id="appearance-button" type="button" aria-label="Appearance and text size" aria-expanded="false">
-          <svg viewBox="0 0 24 24" fill="none"><path d="M5 18 10.5 5h2L18 18M7.2 13h8.6M18 9.5h3M19.5 8v3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </button>
         <button class="connection-pill" id="connection-button" type="button" data-state="idle" aria-expanded="false"><i></i><span id="connection-label">Not connected</span></button>
       </div>
     </header>
@@ -137,7 +133,7 @@
       </div>
     </main>
 
-    <footer class="app-footer"><div class="privacy-copy" data-i18n="privacy">Only explicitly selected pages and the local loopback service are in scope.</div><div id="angusu-badge-mount"></div></footer>
+    <footer class="app-footer"><div class="privacy-copy" data-i18n="privacy">Only explicitly selected pages and the local loopback service are in scope.</div><div class="footer-actions"><button class="preferences-button" id="preferences-button" type="button" aria-label="Language and appearance" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none"><path d="M12 3a9 9 0 1 0 0 18M3.6 9h16.8M3.6 15h16.8M12 3c2.2 2.4 3.3 5.4 3.3 9S14.2 18.6 12 21M12 3C9.8 5.4 8.7 8.4 8.7 12s1.1 6.6 3.3 9" stroke="currentColor" stroke-width="1.45" stroke-linecap="round"/><path d="M17.5 17.5h3M19 16v3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span id="language-code">EN</span><span class="preferences-aa">Aa</span></button><div id="angusu-badge-mount"></div></div></footer>
   </aside>
 
   <div class="popover" id="page-menu" role="dialog" aria-label="Current page actions">
@@ -158,11 +154,6 @@
     <div class="popover-section"><button class="soft-button full-width" id="manage-access" type="button">Manage attached tabs</button></div>
   </div>
 
-  <div class="popover" id="language-popover" role="dialog" aria-label="Language">
-    <div class="popover-head"><div><strong id="language-title">Language</strong><span id="language-subtitle">Interface language · designed to scale beyond two locales</span></div></div>
-    <div class="popover-section language-list" id="language-list"></div>
-  </div>
-
   <div class="popover session-popover" id="session-policy-popover" role="dialog" aria-label="New session behavior">
     <div class="popover-head"><div><strong id="session-popover-title">New session behavior</strong><span id="session-popover-copy">Choose how new browser sessions get a conversation. Existing reservations are never silently reused.</span></div></div>
     <div class="popover-section option-stack" id="session-options" role="radiogroup" aria-label="New browser session behavior">
@@ -172,9 +163,10 @@
     </div>
   </div>
 
-  <div class="popover" id="appearance-popover" role="dialog" aria-label="Appearance settings">
-    <div class="popover-head"><div><strong id="appearance-title">Appearance</strong><span id="appearance-copy">Choose a readable text size and theme. System follows your browser or OS preference.</span></div></div>
-    <div class="popover-section"><div class="appearance-grid"><button class="appearance-option" type="button" data-size="compact"><span>Aa</span><small>Compact</small></button><button class="appearance-option active" type="button" data-size="comfortable"><span>Aa</span><small>Comfortable</small></button><button class="appearance-option" type="button" data-size="large"><span>Aa</span><small>Large</small></button></div><div class="theme-row"><button class="theme-option" type="button" data-theme-option="system">System</button><button class="theme-option active" type="button" data-theme-option="light">Light</button><button class="theme-option" type="button" data-theme-option="dark">Dark</button></div></div>
+  <div class="popover preferences-popover" id="preferences-popover" role="dialog" aria-label="Language and appearance">
+    <div class="popover-head"><div><strong id="preferences-title">Language & appearance</strong><span id="preferences-copy">Keep the header focused on connection state.</span></div></div>
+    <div class="popover-section"><div class="preference-label" id="language-title">Language</div><div class="language-list" id="language-list"></div></div>
+    <div class="popover-section"><div class="preference-label" id="appearance-title">Text size</div><div class="appearance-grid"><button class="appearance-option" type="button" data-size="compact"><span>Aa</span><small>Compact</small></button><button class="appearance-option active" type="button" data-size="comfortable"><span>Aa</span><small>Comfortable</small></button><button class="appearance-option" type="button" data-size="large"><span>Aa</span><small>Large</small></button></div><div class="preference-label preference-label-spaced">Theme</div><div class="theme-row"><button class="theme-option" type="button" data-theme-option="system">System</button><button class="theme-option active" type="button" data-theme-option="light">Light</button><button class="theme-option" type="button" data-theme-option="dark">Dark</button></div></div>
   </div>
 
   <div class="popover" id="connection-popover" role="dialog" aria-label="Connection details">
