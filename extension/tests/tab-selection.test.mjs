@@ -9,8 +9,15 @@ for (const browser of ['chromium', 'firefox']) {
 
 const source = fs.readFileSync(new URL('../src/popup.js', import.meta.url), 'utf8');
 const markup = fs.readFileSync(new URL('../src/popup.html', import.meta.url), 'utf8');
+const visibleControl = {
+  url: 'bridge-url', token: 'pairing-token', 'toggle-token': 'show-token',
+  'scan-capabilities': 'scan-model', teach: 'customize-detection', test: 'test-service',
+  'select-ai-tabs': 'attach-fresh', 'all-tabs': 'show-all-tabs', stop: 'disconnect-button',
+  'release-session-tab': 'release-session'
+};
 for (const [, id] of source.matchAll(/\$\('([^']+)'\)/g)) {
-  assert.ok(markup.includes(`id="${id}"`), `Popup is missing #${id}`);
+  const renderedID = visibleControl[id] || id;
+  assert.ok(markup.includes(`id="${renderedID}"`), `Popup is missing #${id} (rendered as #${renderedID})`);
 }
 const listeners = new Map();
 const elements = new Map();
@@ -128,8 +135,8 @@ assert.equal(statuses.at(-1).state, 'idle');
 await listeners.get('toggle-current-tab:click')();
 assert.deepEqual(Array.from(stored.tabIds), []);
 assert.deepEqual(Array.from(stored.autoAttachBlockedTabIds), [31, 52]);
-element('url').value = 'http://127.0.0.1:32145';
-element('token').value = 'test-token';
+element('bridge-url').value = 'http://127.0.0.1:32145';
+element('pairing-token').value = 'test-token';
 const requestsBeforeConnect = permissionRequests.length;
 await listeners.get('pair:click')();
 assert.deepEqual(Array.from(stored.tabIds), [52]);
@@ -173,7 +180,7 @@ assert.equal(stored.sessionMode, 'new_chat_per_job');
 element('auto-close-finished').checked = true;
 await listeners.get('auto-close-finished:change')();
 assert.equal(stored.autoCloseFinishedChats, true);
-await listeners.get('release-session-tab:click')();
+await listeners.get('release-session:click')();
 assert.equal(runtimeMessages.at(-1), 'release-session-tab');
 stored.lastError = 'The browser tab did not finish reloading';
 startError = 'Local ContextBridge did not accept the browser connection';

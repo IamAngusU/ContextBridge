@@ -57,7 +57,10 @@ const acceptedModelLabel = /^(?:latest|newest|neuestes|neueste|aktuellstes|aktue
 // normal resume can therefore race the stricter restart policy and briefly
 // reconnect even when the user disabled automatic reconnect. Each wake path
 // below supplies the lifecycle intent that applies to it.
-api.runtime.onInstalled.addListener(() => resume(true));
+api.runtime.onInstalled.addListener((details) => {
+  void resume(true);
+  if (details?.reason === 'install') void api.tabs.create({ url: api.runtime.getURL('wizard.html') });
+});
 api.runtime.onStartup.addListener(() => resume(true));
 // Chromium MV3 may suspend the service worker despite an interval or a
 // pending long poll. An alarm wakes a fresh worker so it can re-register the

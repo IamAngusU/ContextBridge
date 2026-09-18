@@ -1,89 +1,200 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="light" data-text="comfortable">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>ContextBridge</title>
-  <link rel="stylesheet" href="popup.css">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ContextBridge</title>
+<link rel="stylesheet" href="popup.css">
 </head>
 <body>
-  <main>
+<aside class="popup" aria-label="ContextBridge browser extension">
     <header class="app-header">
-      <img src="icons/contextbridge-mark.webp" width="32" height="32" alt="">
-      <div class="brand"><strong>ContextBridge</strong><span id="version"></span></div>
-      <span class="connection" id="connection" data-state="idle"><i aria-hidden="true"></i><span id="status">Not connected</span></span>
+      <div class="brand-mark"><img src="data:image/webp;base64,UklGRvYDAABXRUJQVlA4TOoDAAAvf8AfAAVtAYAMSdKXRPd0j2dt27Zt27Zt27Zt2x4b3eOpmunY3buOrIiqer2L6P8E4P8zzN/ez9YKD1eCBnZ2ryGAnT1tDf+0rW/94N9tKnWmC+wsc2kIEG1IO1AayLajH6oEijbju1AblO3lZTsw0E6+9wdDKbs3kpcspK/deyvJdImTXMBVHpirTH9sJu/iEDBaEADUO1lkEu1AaTBeFkDjd2bQD5QHTmng2izvSh3gFQcwWpcV2xu4TQBDdEknw8CCYLacopkg0BRwUYo+GKyqjFeGbzxYFiyRsREsLCxLwiuXlcEBAUUtwNJ6CjgN1hai8zUxoES9Tl3+vc9g6gLC9fPE4wfo+zZunNXcoQCf2T6AatWN39Hkr+opXGZbqRC6XUPzF3Si7WPrSKv4Hi0xIZB0gq0UqXgMWuRg0jWuQiBfQKvcSorkyia1Rss8TamE3F7SNeu4QpnG5qGEF4jzenKMukZw/mTLoPRCyd92Dq7tBoDABqP2phhwgzAU2dMpU+V4N9YDsqvnWV3lpr9SyXxplBVSomaGgXrFjRm02/4uIH8qZaWMHyMCwNjQKd8pd/xsQIEplFUSose6wHhHj9s+P/f+xbUdrSZ+ihuY6+zP/ZcH/6j1HEUmU1ZzJc8KAoElFycg4kNwtTupo8wkyhqetAUhINQ17Dlmvc1GsYmUtRzpi8NAcvOTGspNEJG2OBwYi3cc1KqkCkD5deli4ihLjMpYEg6MTS/riFh4f1SgAkDwpK9CYimTjPEuDwfGxtd96DdlTXkFAEf32z5hjYzI21QCGGud8yFZP91KAQDqHND4YijOSCVtd3lgrHRQR/XXI1wKABVPsMVSYJKCfqQKMJbekY/Gxi8IVwAYlcsUR3LeoOgnagFjsbXZaLxnVbACdNF44kkQccOPdrA6MIYu9iDvhxIKMI0niwaOfpdjPZG3Z5UHxsCZKch+S8X5mgVDaAIDxseixEYKMJKnhijHoO8oc51KmM4yQlKbpyj1qApEsuyT0+Ieyj2r9Iglximk/mUfCj4jCnuLqHqiCEWfUnrM897JV3a3hsL3Kj3nwYVcxdfnoPiZSp+ZtKYsoYs9KF+vrORhwoSqxgXOSkEz7gTVUsgeWd0g16Q4NOXNIKXefJjexYiAMVFoxrwHwx2gvEMA+g4UVwkY8R1Vv1czulJxcgQY6YyTgJi+siyl5MxIVP8Epu2LUrU7S/o1qFatYf/lD3Q00jyOF2LYzTMCba5Cms0FP0d7C7qO9hZxD+2txle0NeeMLLS15q/QYqWVO1CIdha+LAutV1KpxeloxVLCWk29qaM1F3pio/iTsvC/0AM=" alt=""></div>
+      <div class="brand-copy">
+        <div class="brand-line"><strong>ContextBridge</strong><span class="version" id="version">v0.5.72</span><span class="alpha-badge" id="alpha-mark" title="Alpha">a</span></div>
+        <div class="brand-subtitle" data-i18n="subtitle">Local browser bridge</div>
+      </div>
+      <div class="header-actions">
+        <button class="language-button" id="language-button" type="button" aria-label="Language" aria-expanded="false"><span id="language-code">EN</span><svg viewBox="0 0 24 24" fill="none"><path d="m8 10 4 4 4-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <button class="header-icon" id="appearance-button" type="button" aria-label="Appearance and text size" aria-expanded="false">
+          <svg viewBox="0 0 24 24" fill="none"><path d="M5 18 10.5 5h2L18 18M7.2 13h8.6M18 9.5h3M19.5 8v3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <button class="connection-pill" id="connection-button" type="button" data-state="idle" aria-expanded="false"><i></i><span id="connection-label">Not connected</span></button>
+      </div>
     </header>
 
-    <section class="step" aria-labelledby="tab-heading">
-      <div class="step-heading"><span>01</span><h1 id="tab-heading">Current AI page</h1></div>
-      <div class="profile-state" id="current-page">
-        <span class="profile-signal" aria-hidden="true"></span>
-        <div><strong id="current-provider">Detecting page…</strong><small id="current-tab-state">ChatGPT and Gemini are recognized automatically.</small></div>
-      </div>
-      <small class="session-advisory" id="session-health" hidden></small>
-      <button id="toggle-current-tab" class="primary full" type="button" disabled>Attach this page</button>
-      <button id="release-session-tab" class="text-button" type="button" hidden>Use this page for a new session</button>
-      <label class="mode" id="edit-last-message-row" hidden><input id="edit-last-message" type="checkbox"><span>Edit the last ContextBridge message on this page for follow-up jobs</span></label>
-      <small class="field-hint" id="edit-last-message-hint" hidden>Text only. The first job uses a new empty chat. Existing personal messages and messages with files are never rewritten.</small>
-      <small class="field-hint" id="attached-summary">No AI tabs attached yet.</small>
-    </section>
+    <main class="app-body">
+      <section class="current-panel" id="current-panel">
+        <div class="section-kicker"><span data-i18n="currentTab">Current browser tab</span><button class="scope-chip" id="scope-button" type="button" aria-label="Explain page access" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none"><rect x="5" y="10" width="14" height="10" rx="2" stroke="currentColor" stroke-width="1.6"/><path d="M8 10V7a4 4 0 0 1 8 0v3" stroke="currentColor" stroke-width="1.6"/></svg><span id="scope-label">No access</span></button></div>
 
-    <section class="step final-step" aria-labelledby="pair-heading">
-      <div class="step-heading"><span>02</span><h2 id="pair-heading">Connection</h2></div>
-      <button id="pair" class="primary full" type="button">Connect</button>
-      <button id="stop" class="secondary full" type="button" hidden>Disconnect</button>
-      <small class="field-hint" id="connect-hint">If no tab is attached yet, Connect asks to use the current AI page. No separate test is required.</small>
-      <label class="mode"><input id="auto-reconnect" type="checkbox" checked><span>Reconnect automatically after an update or connection loss</span></label>
-      <small class="field-hint">A deliberate Disconnect stays disconnected. Temporary failures retry without reloading a chat page; rejected permissions or pairing require a manual fix.</small>
-      <label class="mode"><input id="auto-update" type="checkbox" disabled><span>Automatically install verified updates</span></label>
-      <small class="field-hint" id="auto-update-state">Off by default. Connect to change this PC's setting.</small>
-      <label class="session-mode">New browser session<select id="session-mode"><option value="manual">Use an unassigned attached tab</option><option value="new_chat">Open a new chat per session</option><option value="new_chat_per_job">Open a new chat per job</option></select></label>
-      <small class="field-hint">Sessions never share a conversation. In manual mode, open a new empty chat in an attached tab and use “Use this page for a new session” to free it. A job can opt in with <code>metadata.contextbridge_new_chat: true</code> (per session) or <code>metadata.contextbridge_new_chat_per_job: true</code> (per job).</small>
-    </section>
-
-    <details class="advanced" id="manage-tabs">
-      <summary>Manage other tabs</summary>
-      <div class="advanced-body">
-        <label class="select-field"><span class="sr-only">Browser tabs</span><select id="tab" size="5"></select></label>
-        <label class="tab-filter">Show <select id="tab-filter" aria-label="Filter browser tabs"><option value="all">All tabs</option><option value="attached">Attached</option><option value="available">Not attached</option></select></label>
-        <small class="field-hint" id="tab-state">Selecting a tab alone never grants access.</small>
-        <small class="session-advisory" id="tab-session-health" hidden></small>
-        <button id="toggle-selected-tab" class="secondary full" type="button">Attach selected tab</button>
-        <button id="select-ai-tabs" class="secondary full" type="button">Attach fresh ChatGPT + Gemini chats</button>
-        <label class="mode"><input id="auto-attach-fresh" type="checkbox"><span>Auto-attach new, empty AI chats while connected</span></label>
-        <label class="mode"><input id="preserve-drafts" type="checkbox"><span>Before a job, save my unsent draft locally, then clear it</span></label>
-        <small class="field-hint">Optional. Plain-text drafts stay on this PC in ~/.contextbridge/draft-history.jsonl (1 MiB, oldest first). If saving fails, the draft stays in the editor and the job does not send.</small>
-        <label class="mode"><input id="auto-close-finished" type="checkbox"><span>Close finished ContextBridge-created per-job tabs when idle</span></label>
-        <small class="field-hint">Optional. Only background tabs created for a completed job, with no draft, attachment, or active generation, can close after a 2-minute grace period. Personal and manually attached tabs never close automatically.</small>
-        <small class="field-hint">Existing conversations need an explicit click. Detaching prevents new jobs but cannot unsend work already on a website.</small>
-        <button id="all-tabs" class="text-button" type="button">Show tabs from every window</button>
-        <button id="detach-all" class="text-button" type="button">Detach all tabs</button>
-      </div>
-    </details>
-
-    <details class="advanced" id="advanced-setup">
-      <summary>Advanced setup and diagnostics</summary>
-      <div class="advanced-body">
-        <div class="profile-state" id="profile-state">
-          <span class="profile-signal" aria-hidden="true"></span>
-          <div><strong id="profile-title">No visual profile yet</strong><small id="profile-copy">Built-in detection is used for ChatGPT and Gemini.</small></div>
+        <div id="valid-page">
+          <div class="provider-row">
+            <div class="provider-icon" id="provider-icon" data-provider="chatgpt"><img id="provider-logo" src="data:image/webp;base64,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" alt=""></div>
+            <div class="provider-copy"><strong id="provider-name">ChatGPT</strong><span id="provider-meta">chatgpt.com · current tab</span></div>
+            <span class="status-chip" id="page-state" data-state="ready">Ready</span>
+          </div>
+          <div class="context-tags" id="context-tags"></div>
+          <div class="page-action-row">
+            <button class="primary-button" id="main-action" type="button">
+              <span class="button-label" id="main-action-label"></span>
+              <span class="button-progress"><span class="spinner"></span><span id="connect-progress-copy">Connecting</span></span>
+              <span class="progress-rail"></span>
+            </button>
+            <div class="page-status" id="page-status" hidden></div>
+            <button class="quick-detach" id="quick-detach" type="button" hidden><span>Detach</span></button>
+            <button class="icon-button" id="page-menu-button" type="button" aria-label="Page actions" aria-expanded="false">
+              <svg viewBox="0 0 24 24" fill="none"><circle cx="5" cy="12" r="1.35" fill="currentColor"/><circle cx="12" cy="12" r="1.35" fill="currentColor"/><circle cx="19" cy="12" r="1.35" fill="currentColor"/></svg>
+            </button>
+          </div>
+          <div class="action-explainer" id="action-explainer"><span id="action-explainer-copy"></span></div>
         </div>
-        <button id="teach" class="secondary full" type="button">Customize detection for selected tab</button>
-        <button id="verify" class="secondary full" type="button" disabled>Test selected page profile</button>
-        <button id="scan-capabilities" class="secondary full" type="button" disabled>Scan model choices</button>
-        <label>Local bridge URL<input id="url" value="http://127.0.0.1:32145" spellcheck="false"></label>
-        <label>Pairing token<div class="secret-row"><input id="token" type="password" autocomplete="off" spellcheck="false"><button id="toggle-token" class="secondary compact" type="button">Show</button></div></label>
-        <label class="mode"><input id="visual-mode" type="checkbox" checked><span>Use automatic or customized page detection</span></label>
-        <label id="yaml-profile-row">Accepted server profile<select id="profile"><option value="chatgpt">ChatGPT</option></select></label>
-        <button id="test" class="secondary full" type="button">Test local connection</button>
-        <button id="export-profile" class="secondary full" type="button" disabled>Copy profile as YAML</button>
-        <button id="remove-profile" class="danger full" type="button" disabled>Forget customized profile</button>
-      </div>
-    </details>
 
-    <p class="privacy">Access is requested only for the page you select and the local ContextBridge service.</p>
-  </main>
-  <script src="profiles.js"></script>
-  <script src="popup.js"></script>
+        <div class="invalid-page" id="invalid-page" hidden>
+          <div class="invalid-icon"><svg viewBox="0 0 24 24" fill="none"><path d="M6 7h12v10H6z" stroke="currentColor" stroke-width="1.5"/><path d="m8.5 14 7-7M15.5 14l-7-7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></div>
+          <h2 id="invalid-title">No supported AI page here</h2>
+          <p id="invalid-copy">Open a fresh AI chat, then open ContextBridge again. Nothing is shared until you explicitly connect that page.</p>
+          <div class="provider-links">
+            <a class="provider-link" href="https://chatgpt.com/" target="_blank" rel="noreferrer"><span class="mini-brand"><img src="data:image/webp;base64,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" alt=""></span><span><strong data-i18n="openChatGPT">Open ChatGPT</strong><small>chatgpt.com</small></span><svg viewBox="0 0 24 24" fill="none"><path d="M7 17 17 7M8 7h9v9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
+            <a class="provider-link gemini" href="https://gemini.google.com/app" target="_blank" rel="noreferrer"><span class="mini-brand"><img src="data:image/webp;base64,UklGRiIKAABXRUJQVlA4TBUKAAAvf8AfEAGHbdtIEhzl/rv+C57Pxl4BEf2fAP3bqhQ55ToDKFcJxgTTr4+lniY25WXbwuEZxj3Mqw/+z2cYPT9gpXaMG1LH1DF1TBVTTrmC37XEL1W5U8MFB5DbSHIkcXdPvQ5pQvtv3em7l2w1BawBTiTZdqomqnQl+19TlEhk5kfhNLZtV1mfLJ9EHoIO/VdACRnuDA08SRL9nwBc27h6VMk5quorVlQRhaaKAHAssxEqKADQqxgylOFpO91sDmLypCZPZJPNMSwAIAQANo+bp9UBFMYhAEBbPW12KF5YDABAvENoE64PPEXewHoIAOnZeuvw7Y/tAIAQimAeBWptSNGw/lEdEJaeeAD7DxbCCmGPI8WbIEzkcHjoLMHhmSsS6VrlOBACQNlRSQhpdk0v0YWQG0EpnRCWNaARFPuzqbJ1XF3QtW1LkeTsyJoRM0sfyMwstSWL3fk6WfKYm/Kt1RURGZmVzxuDbm1ty7Zon/vBNXTJSWmAHlh/K8RE7lRBH4QzFUxombt+30O3tq1lWzWf7/mw1KEErYJB5NAHg1oI9UoNN7YS3CPXBvh5v+9ZEiBJMm2rzn22bdu27fe+bdu2bdu2bdvGs23cA8GNJEVS5HLj1s3GLfwAArjLK5/NxxYfPmaanSDkQGB2jJApAcnByDnxsxmQnHvPCWMFm3xf/PJELjWopXQoidJj9695pQZXCttAhImk1Hy97o5APhBML+GfGIjXSxYAJgLp4czBGCV5wavCAgBCGESrH/bnBXPlPQAGCpxGp7xM9AEAKAKM5qmDcV4KGwUAIggKy3BUZeXMd/IoBwAIigjyDNuy8tE/33cDN5gIEEzM9E8KjtFtod7AtNbXYDmm5WTOJIjgeAcAmapqDpePFqjJCN7hFFAcFwgA0FDMTMSajJSO0xgd7Q6EALPyH75/zgat+cAf2l11E6qTgdEHB/MxmUvRAgDRXAjRwPj2yHd/u+WjGBeObc1FNDAQzBqRjvdffR0k4rGNAAFHDARFVNl/P9FIxjduP5uPnrYz1NNB7+Lsu+qLc3NKsjcc2FrN0GsGrBlq/F///WaRitu26yjt7yIEAABKEaVr9pydfCgkAmX2eAiIphtRDwkBBIl+69OdQYmI1Znm9QYCAHHTXj9kD1irfvPrBuRm4ar9XVQEVHMKnZ0oAIgACur2XPnjyb1kiDl47Jd/y/AJtG0C0RlSDAiBkchxOpalAO14V7cRoDNxNVQIAFpSSsG1DMjzjm+qJkXPv5AoQpURX/zdP6yvaOgcb+3URLtSFIJ6eet/EbvnYNaitnZ920j0a6AQFKFL/90j7Jyr/6uXusb13WFCpwCCIoTB9JfEZz9/yq45OLbYGvquJ+pRzQFQDy3pqTBtwcgdc46ApgXXt4t25QdABEFrCWbulgfsFaC86HpAgO5Kivp1aKCIbHvmYSMh3Sezg5KoLLu+u1jnIBQUERRy9vDHSXe07JELaUB1wPUB1ah2aGclZJkIXT+vzqjbH2WmM9SXXN8+3Mqvv24EBf2YTpeNzzsDsqU8oDLmehBQr7RUkKN/YtQXBuDkrvjnwmVdChp3fT2ot5IAiCMxUIhoWvncr2aifT9YxzCG8wrXdza0WBAIigiRD9a+P97shEtTX3WF7hrXV4Na+fULEsFAUG1za83vyxy07gA7wRQvEWCF68fk1+xFoRAiKORtOAzFy5Pz4dsv/cuMYdAF610PQMBIQY5nA0WUKKfC+6n4e1Le/eMbs/kwRiEYgA1cXy82VhAI1LnY/0FrYZt1bg5qTsbH+zvbg2aVRhcIBFjr+oVZhgpSkCfAtJXN2Xh9aW5G5Un4aH/rMc+aIwNEAQBhrev7ZY4AqoZuQarHC4BiUNQQ7J7XbjVyt+aNj78o3PfHu8xgta03ZAEYen8dYkWZu1bupsDxkkAbTk/a8/S1S7ch3ZBPnk7n+39rfjE3UkwtmXWuHylzQO8PsTQUcoVukRsFqIBxKE63C782wSZ8fOGpz0cXH8+fOaKmkl4j2UHXhxgvs3BcrFMQ4fho/ygpQGLhCS6yLuLLSs6ebOrnhIaVFjlnzBGPtrJrXB9ixPUEGFgJLKx0cyIKAPo9bZeCy5dX51PUD/Lh/tH49sXpc60QVqjhr+Qi9P6Bbu76eh+9NwOL1Gfiph86ir7b41GxHsdpj/BnABdwtcACL9AK2uclgBHX98scYsz1QFh4pk3H7k4KAFACKAVgYWHoAoW4CKBwP2oaiYzNkgua59uZDgj9ocSI/AY+gPWbFoOfYV0oXPl3ds/QON6CelzHKFhAiHZeaq68aQ62pWfTmaWzWGcvywWpKaG/3hFI8SA0OWamYRIAaFz7dSYWwAdCsXPGcpRu5PoQQ/+EmlqPPIh8rJzs+mMVvm9nnjOX5P88La1wDeJpXN/Ou9idQKscnFj648nLo1ubF5IZ9+AgtW/h+ijGXD9yPGFbOMzAPQC2Bh/RB3LTkbVtC5pP5PqqqYQOjBKNpYfOzkU+OEnwFyOhdGUzUzsgXe/6EEvyGwgaaZ9/9ptQDU4Y5LN2qodbuD7EgvxK6B/vEHF5Puy2ohacOD9EUo6zh5Q2769P4foS8LpoKf4DcGpwFAYXp9IuHNzA9SEGR6Gt7G6ff+8T2ENQhT4QSqMLyta8vwbCQg26r3b6cs0xtIHdxPIgTh0+xTqy2vUhlkUHUbsrz7j8CewpP1Ou4wuIW7se9fZ4jXawr6AjjEzUbOt6FBbbV7C7QNOBOwq2dD1+X1+auWCPiXMntbG2hu1cX6i5+loL2Gdu0Ry83cr1tqoXHlzsAHvNlakZ4/Hq99cVMVVCCnYLQg+LBuPN4vvrIdcXQxPsOv6lYDbl9a6HJiRg37k+tykity1wwKDrbep7PwMwH7jb6te5Xgx+8oUs2D1Qc5QNcc37a1g9/Pd5XZAgOBusFoZdD6AzH5YTSJFfv/hkmtwYdT2AzLS5gxyg49rsgzKh/US10D2MqDMEkCQoCbrWrl+20hvfPTMBaQJBTnZd3wINxxUL8oAuJXpSMrIZW887XgiJQDkMi9Gz+51GDYJfvfXcFGQKjtx59UIS4zHojyEAlA9Hg0CyvPjV84DFn3hp2HSkDrIlOLYwKfSd2bqDdFjTCs39iYrGPnmebD6ghG2goQAAcPrF1hUkjIOVhXainbFAJO/8F1szgj/BqQLtRERhCUiZW4fdMhLbHRSqri7ul+QE72PcboAWbQZJM7GrmRTTbrEwK0/5/yzK6wVmduNNVtCKDRWR4NkYAtJmXsu9Yp7Wz/+/18wLhIn3x4bp2EVU5gWexZgPAFGAsRfkBfNiL9+bC0jns61PDF7/8OiVBPkAFL3EF5A4EI2LoITIUZA608GlEsDU3Jqbywsnj9BBLY/cuH4oN6gt42OhHEUgd+we4xlIjjw243l2btk/PvznRXaQi3xwl0cAAA==" alt=""></span><span><strong data-i18n="openGemini">Open Gemini</strong><small>gemini.google.com</small></span><svg viewBox="0 0 24 24" fill="none"><path d="M7 17 17 7M8 7h9v9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
+          </div>
+          <button class="teach-link" id="teach-page-link" type="button" hidden><span><strong data-i18n="useThisSite">Use this AI site instead</strong><span data-i18n="useThisSiteCopy">Teach ContextBridge its prompt, send, response and optional upload controls.</span></span><svg viewBox="0 0 24 24" fill="none"><path d="M4 20h4L19 9l-4-4L4 16v4Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="m13.5 6.5 4 4" stroke="currentColor" stroke-width="1.6"/></svg></button>
+        </div>
+
+        <div class="health-advisory" id="health-advisory" hidden><svg viewBox="0 0 24 24" fill="none"><path d="M12 3 2.8 20h18.4L12 3Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M12 9v5M12 17.5v.1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span id="health-copy"></span></div>
+      </section>
+
+      <section class="bridge-route" aria-label="Extension to local bridge connection">
+        <div class="route-node"><div class="route-icon"><img src="data:image/webp;base64,UklGRvYDAABXRUJQVlA4TOoDAAAvf8AfAAVtAYAMSdKXRPd0j2dt27Zt27Zt27Zt2x4b3eOpmunY3buOrIiqer2L6P8E4P8zzN/ez9YKD1eCBnZ2ryGAnT1tDf+0rW/94N9tKnWmC+wsc2kIEG1IO1AayLajH6oEijbju1AblO3lZTsw0E6+9wdDKbs3kpcspK/deyvJdImTXMBVHpirTH9sJu/iEDBaEADUO1lkEu1AaTBeFkDjd2bQD5QHTmng2izvSh3gFQcwWpcV2xu4TQBDdEknw8CCYLacopkg0BRwUYo+GKyqjFeGbzxYFiyRsREsLCxLwiuXlcEBAUUtwNJ6CjgN1hai8zUxoES9Tl3+vc9g6gLC9fPE4wfo+zZunNXcoQCf2T6AatWN39Hkr+opXGZbqRC6XUPzF3Si7WPrSKv4Hi0xIZB0gq0UqXgMWuRg0jWuQiBfQKvcSorkyia1Rss8TamE3F7SNeu4QpnG5qGEF4jzenKMukZw/mTLoPRCyd92Dq7tBoDABqP2phhwgzAU2dMpU+V4N9YDsqvnWV3lpr9SyXxplBVSomaGgXrFjRm02/4uIH8qZaWMHyMCwNjQKd8pd/xsQIEplFUSose6wHhHj9s+P/f+xbUdrSZ+ihuY6+zP/ZcH/6j1HEUmU1ZzJc8KAoElFycg4kNwtTupo8wkyhqetAUhINQ17Dlmvc1GsYmUtRzpi8NAcvOTGspNEJG2OBwYi3cc1KqkCkD5deli4ihLjMpYEg6MTS/riFh4f1SgAkDwpK9CYimTjPEuDwfGxtd96DdlTXkFAEf32z5hjYzI21QCGGud8yFZP91KAQDqHND4YijOSCVtd3lgrHRQR/XXI1wKABVPsMVSYJKCfqQKMJbekY/Gxi8IVwAYlcsUR3LeoOgnagFjsbXZaLxnVbACdNF44kkQccOPdrA6MIYu9iDvhxIKMI0niwaOfpdjPZG3Z5UHxsCZKch+S8X5mgVDaAIDxseixEYKMJKnhijHoO8oc51KmM4yQlKbpyj1qApEsuyT0+Ieyj2r9Iglximk/mUfCj4jCnuLqHqiCEWfUnrM897JV3a3hsL3Kj3nwYVcxdfnoPiZSp+ZtKYsoYs9KF+vrORhwoSqxgXOSkEz7gTVUsgeWd0g16Q4NOXNIKXefJjexYiAMVFoxrwHwx2gvEMA+g4UVwkY8R1Vv1czulJxcgQY6YyTgJi+siyl5MxIVP8Epu2LUrU7S/o1qFatYf/lD3Q00jyOF2LYzTMCba5Cms0FP0d7C7qO9hZxD+2txle0NeeMLLS15q/QYqWVO1CIdha+LAutV1KpxeloxVLCWk29qaM1F3pio/iTsvC/0AM=" alt=""></div><div class="route-copy"><strong data-i18n="browserPool">Browser pool</strong><span id="route-extension-meta">0 slots</span></div></div>
+        <div class="route-line" id="route-line" data-state="idle"><span class="packet"></span></div>
+        <div class="route-node"><div class="route-icon"><svg viewBox="0 0 24 24" fill="none"><rect x="3" y="4" width="18" height="16" rx="3" stroke="currentColor" stroke-width="1.5"/><path d="m7 9 3 3-3 3M12 15h5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></div><div class="route-copy"><strong data-i18n="localService">Local service</strong><span id="route-service-meta">not checked</span></div></div>
+      </section>
+
+      <section class="telemetry" aria-label="Browser bridge telemetry">
+        <div class="metric"><div class="metric-label" data-i18n="attached">Attached</div><div class="metric-value-wrap"><span class="metric-value" id="metric-tabs">0 <small>/ 16</small></span></div></div>
+        <div class="metric"><div class="metric-label" data-i18n="free">Free</div><div class="metric-value-wrap"><span class="metric-value" id="metric-ready">0</span></div></div>
+        <div class="metric"><div class="metric-label" data-i18n="working">Working</div><div class="metric-value-wrap"><span class="metric-value" id="metric-busy">0</span></div></div>
+        <div class="metric"><div class="metric-label" data-i18n="heartbeat">Heartbeat</div><div class="metric-value-wrap"><span class="metric-value" id="metric-heartbeat">—</span></div></div>
+      </section>
+
+      <button class="command-row" id="copy-console" type="button" aria-label="Copy cb console command">
+        <span class="command-prompt">›</span><span class="command-copy"><code>cb console</code><span id="console-caption">read-only live view</span></span><span class="shell-badge">PS · CMD</span><svg viewBox="0 0 24 24" fill="none"><rect x="8" y="8" width="11" height="11" rx="2" stroke="currentColor" stroke-width="1.5"/><path d="M16 8V5H5v11h3" stroke="currentColor" stroke-width="1.5"/></svg>
+      </button>
+      <button class="session-policy" id="session-policy-button" type="button" aria-expanded="false">
+        <span class="session-policy-kicker">NEW SESSIONS</span>
+        <span class="session-policy-copy"><strong id="session-policy-value">Reuse attached chat</strong><span id="session-policy-hint">You decide when a clean chat becomes available again.</span></span>
+        <svg viewBox="0 0 24 24" fill="none"><path d="m9 7 5 5-5 5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+
+      <div class="accordion" id="accordion">
+        <section class="disclosure" data-disclosure="automation">
+          <button class="disclosure-trigger" type="button" aria-expanded="false"><span class="disclosure-title" data-i18n="automationSafety">Automation & safety</span><span class="disclosure-meta" id="automation-meta">4 preferences</span><svg viewBox="0 0 24 24" fill="none"><path d="m7 9 5 5 5-5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <div class="disclosure-shell"><div class="disclosure-inner"><div class="disclosure-content">
+            <p class="section-intro" data-i18n="automationIntro">Automate routine browser housekeeping without taking ownership away from you.</p>
+            <div class="setting-list">
+              <div class="setting-row"><div class="setting-copy"><strong data-i18n="reconnectTitle">Reconnect automatically</strong><span data-i18n="reconnectCopy">Restore the existing attached-tab connection after an update or temporary local-service loss. A deliberate Disconnect stays off.</span></div><div class="toggle-control"><span class="toggle-state"></span><button class="switch" type="button" role="switch" aria-checked="true" data-setting="reconnect"></button></div></div>
+              <div class="setting-row"><div class="setting-copy"><strong data-i18n="draftTitle">Protect unsent drafts</strong><span data-i18n="draftCopy">Before a job, save plain text locally and clear only the exact unchanged draft. If saving fails, the job does not send.</span></div><div class="toggle-control"><span class="toggle-state"></span><button class="switch" type="button" role="switch" aria-checked="false" data-setting="preserve_drafts"></button></div></div>
+              <div class="setting-row"><div class="setting-copy"><strong data-i18n="freshTitle">Attach verified fresh chats</strong><span data-i18n="freshCopy">While connected, attach only new empty ChatGPT or Gemini pages after a two-pass freshness check.</span></div><div class="toggle-control"><span class="toggle-state"></span><button class="switch" type="button" role="switch" aria-checked="false" data-setting="auto_attach"></button></div></div>
+              <div class="setting-row"><div class="setting-copy"><strong data-i18n="closeTitle">Close finished job tabs</strong><span data-i18n="closeCopy">Only ContextBridge-created per-job tabs can close, after two idle minutes and only when no draft, file or generation remains.</span></div><div class="toggle-control"><span class="toggle-state"></span><button class="switch" type="button" role="switch" aria-checked="false" data-setting="auto_close"></button></div></div>
+            </div>
+          </div></div></div>
+        </section>
+
+        <section class="disclosure" data-disclosure="tabs">
+          <button class="disclosure-trigger" type="button" aria-expanded="false"><span class="disclosure-title" data-i18n="tabsAccess">Tabs & access</span><span class="disclosure-meta" id="tabs-meta">0 attached</span><svg viewBox="0 0 24 24" fill="none"><path d="m7 9 5 5 5-5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <div class="disclosure-shell"><div class="disclosure-inner"><div class="disclosure-content">
+            <div class="permission-banner" id="tabs-permission" hidden><div><strong>Only the current window is visible</strong><span>Grant optional tab-list access to manage AI tabs in other browser windows. This still does not attach them.</span></div><button class="soft-button" type="button" id="show-all-tabs">Show all windows</button></div>
+            <div class="filter-bar" role="tablist" aria-label="Filter browser tabs"><button class="filter-button active" type="button" data-filter="all">All</button><button class="filter-button" type="button" data-filter="attached">Attached</button><button class="filter-button" type="button" data-filter="available">Available</button></div>
+            <div class="tab-list" id="tab-list"></div>
+            <div class="section-actions"><button class="soft-button" type="button" id="attach-fresh">Attach fresh ChatGPT + Gemini chats</button><button class="ghost-button danger" type="button" id="detach-all">Detach all</button></div>
+          </div></div></div>
+        </section>
+
+        <section class="disclosure" data-disclosure="detection">
+          <button class="disclosure-trigger" type="button" aria-expanded="false"><span class="disclosure-title" data-i18n="detectionModel">Detection & model</span><span class="disclosure-meta" id="detection-meta">Not detected</span><svg viewBox="0 0 24 24" fill="none"><path d="m7 9 5 5 5-5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <div class="disclosure-shell"><div class="disclosure-inner"><div class="disclosure-content">
+            <div class="info-box"><div class="info-head"><strong id="profile-title">No page profile</strong><span class="info-tag" id="profile-status">not detected</span></div><p id="profile-copy"></p></div>
+            <div class="evidence-grid"><div class="evidence"><span>Profile</span><strong id="evidence-profile">—</strong></div><div class="evidence"><span>Model</span><strong id="evidence-model">Unknown</strong></div><div class="evidence"><span>Reasoning</span><strong id="evidence-reasoning">Unknown</strong></div><div class="evidence"><span>Controls</span><strong id="evidence-controls">Not scanned</strong></div></div>
+            <div class="section-actions"><button class="soft-button" type="button" id="scan-model">Scan model choices</button><button class="ghost-button" type="button" id="customize-detection">Customize page</button></div>
+            <p class="section-intro" style="margin:.65rem 0 0">ContextBridge reports only visible, bounded provider controls. Unknown model or reasoning values stay unknown instead of being guessed.</p>
+          </div></div></div>
+        </section>
+
+        <section class="disclosure" data-disclosure="service">
+          <button class="disclosure-trigger" type="button" aria-expanded="false"><span class="disclosure-title" data-i18n="serviceDiagnostics">Local service & diagnostics</span><span class="disclosure-meta" id="service-meta">Not checked</span><svg viewBox="0 0 24 24" fill="none"><path d="m7 9 5 5 5-5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <div class="disclosure-shell"><div class="disclosure-inner"><div class="disclosure-content">
+            <div class="info-box"><div class="info-head"><strong id="service-title">Local service not checked</strong><span class="info-tag" id="pairing-status">unknown</span></div><p id="service-copy"></p></div>
+            <div class="field-grid">
+              <div class="field"><label for="bridge-url">Local bridge URL</label><div class="field-wrap"><input id="bridge-url" value="http://127.0.0.1:32145" spellcheck="false"><button class="field-button" type="button" data-copy="#bridge-url">Copy</button></div></div>
+              <div class="field"><label for="pairing-token">Pairing token</label><div class="field-wrap"><input id="pairing-token" type="password" value="" autocomplete="new-password" spellcheck="false"><button class="field-button" id="show-token" type="button">Show</button></div></div>
+            </div>
+            <div class="setting-list">
+              <div class="setting-row"><div class="setting-copy"><strong>Install verified updates automatically</strong><span id="update-copy">Off for this PC. Changes install only while every component is idle.</span></div><div class="toggle-control"><span class="toggle-state"></span><button class="switch" type="button" role="switch" aria-checked="false" data-setting="automatic_updates"></button></div></div>
+            </div>
+            <div class="section-actions"><button class="soft-button" type="button" id="test-service">Test local connection</button><button class="ghost-button" type="button" id="copy-doctor">Copy cb doctor</button></div>
+            <div class="command-help"><div class="command-help-row"><button class="copy-chip" type="button" data-command="cb console">cb console</button><span>Attach a read-only live view to the already running service. Closing it does not stop jobs.</span></div><div class="command-help-row"><button class="copy-chip" type="button" data-command="cb run">cb run</button><span>Start the service in the foreground. Do not launch a second copy merely to view status.</span></div></div>
+          </div></div></div>
+        </section>
+      </div>
+    </main>
+
+    <footer class="app-footer"><div class="privacy-copy" data-i18n="privacy">Only explicitly selected pages and the local loopback service are in scope.</div><div id="angusu-badge-mount"></div></footer>
+  </aside>
+
+  <div class="popover" id="page-menu" role="dialog" aria-label="Current page actions">
+    <div class="popover-head"><div><strong id="tab-controls-title">Tab controls</strong><span id="page-menu-context">ChatGPT · explicitly attached</span></div></div>
+    <div class="popover-section">
+      <button class="popover-action" id="release-session" type="button"><svg viewBox="0 0 24 24" fill="none"><path d="M12 4v16M4 12h16" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span><strong id="release-title">Release for another session</strong><span id="release-copy">Keep this tab attached, but clear its current session reservation. The chat must be empty and idle.</span></span><span class="action-badge" id="release-badge">Empty + idle</span></button>
+      <div class="popover-setting" id="edit-setting" role="group" aria-labelledby="edit-setting-title"><div><div class="setting-title-line"><strong id="edit-setting-title">Edit last ContextBridge prompt</strong><span class="mini-badge">Text follow-ups</span></div><span id="edit-setting-copy">Later text jobs may replace only the last verified prompt sent by ContextBridge. Personal messages, drafts and files are never edited.</span></div><div class="toggle-control"><span class="toggle-state" id="edit-state">Off</span><button class="switch" id="edit-switch" type="button" role="switch" aria-label="Edit last ContextBridge prompt" aria-checked="false"></button></div></div>
+    </div>
+  </div>
+
+  <div class="popover" id="access-popover" role="dialog" aria-label="Page access details">
+    <div class="popover-head"><div><strong id="access-title">Page access</strong><span id="access-copy">ContextBridge works only with tabs you explicitly attach.</span></div></div>
+    <div class="popover-section access-list">
+      <div class="access-row"><svg viewBox="0 0 24 24" fill="none"><rect x="4" y="5" width="16" height="14" rx="2" stroke="currentColor" stroke-width="1.6"/><path d="M4 9h16" stroke="currentColor" stroke-width="1.6"/></svg><div><strong>Browser tab</strong><span>Opening or viewing a chat never attaches it automatically.</span></div><span class="access-value" id="access-tab-value">Not attached</span></div>
+      <div class="access-row"><svg viewBox="0 0 24 24" fill="none"><path d="M12 22s8-3.7 8-10V5l-8-3-8 3v7c0 6.3 8 10 8 10Z" stroke="currentColor" stroke-width="1.6"/><path d="m9 12 2 2 4-5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><div><strong>Site permission</strong><span>The browser grants an origin, while the ContextBridge pool still contains only selected tabs.</span></div><span class="access-value" id="access-origin-value">None</span></div>
+      <div class="access-row"><svg viewBox="0 0 24 24" fill="none"><path d="M7 12h10M12 7l5 5-5 5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><div><strong>Local endpoint</strong><span>The extension connects to the loopback service, not a hosted ContextBridge account.</span></div><span class="access-value">127.0.0.1</span></div>
+    </div>
+    <div class="popover-section"><button class="soft-button full-width" id="manage-access" type="button">Manage attached tabs</button></div>
+  </div>
+
+  <div class="popover" id="language-popover" role="dialog" aria-label="Language">
+    <div class="popover-head"><div><strong id="language-title">Language</strong><span id="language-subtitle">Interface language · designed to scale beyond two locales</span></div></div>
+    <div class="popover-section language-list" id="language-list"></div>
+  </div>
+
+  <div class="popover session-popover" id="session-policy-popover" role="dialog" aria-label="New session behavior">
+    <div class="popover-head"><div><strong id="session-popover-title">New session behavior</strong><span id="session-popover-copy">Choose how new browser sessions get a conversation. Existing reservations are never silently reused.</span></div></div>
+    <div class="popover-section option-stack" id="session-options" role="radiogroup" aria-label="New browser session behavior">
+      <button class="option-card" type="button" role="radio" aria-checked="true" data-mode="manual"><span class="radio-dot"></span><span class="option-copy"><strong data-i18n="sessionManual">Reuse an attached chat</strong><span data-i18n="sessionManualCopy">You decide when a clean attached tab becomes available for another session.</span></span></button>
+      <button class="option-card" type="button" role="radio" aria-checked="false" data-mode="new_chat"><span class="radio-dot"></span><span class="option-copy"><strong data-i18n="sessionPerSession">New chat per session</strong><span data-i18n="sessionPerSessionCopy">Each session gets its own conversation; its follow-ups stay together.</span></span></button>
+      <button class="option-card" type="button" role="radio" aria-checked="false" data-mode="new_chat_per_job"><span class="radio-dot"></span><span class="option-copy"><strong data-i18n="sessionPerJob">New chat for every job</strong><span data-i18n="sessionPerJobCopy">Use isolated disposable chats. Finished ContextBridge-created tabs can close after a grace period.</span></span></button>
+    </div>
+  </div>
+
+  <div class="popover" id="appearance-popover" role="dialog" aria-label="Appearance settings">
+    <div class="popover-head"><div><strong id="appearance-title">Appearance</strong><span id="appearance-copy">Choose a readable text size and theme. System follows your browser or OS preference.</span></div></div>
+    <div class="popover-section"><div class="appearance-grid"><button class="appearance-option" type="button" data-size="compact"><span>Aa</span><small>Compact</small></button><button class="appearance-option active" type="button" data-size="comfortable"><span>Aa</span><small>Comfortable</small></button><button class="appearance-option" type="button" data-size="large"><span>Aa</span><small>Large</small></button></div><div class="theme-row"><button class="theme-option" type="button" data-theme-option="system">System</button><button class="theme-option active" type="button" data-theme-option="light">Light</button><button class="theme-option" type="button" data-theme-option="dark">Dark</button></div></div>
+  </div>
+
+  <div class="popover" id="connection-popover" role="dialog" aria-label="Connection details">
+    <div class="popover-head"><div><strong id="connection-popover-title">Not connected</strong><span id="connection-popover-copy">Connect a supported page when you are ready.</span></div></div>
+    <div class="popover-section"><div class="connection-detail"><div class="connection-detail-row"><span id="endpoint-label">Endpoint</span><strong>127.0.0.1:32145</strong></div><div class="connection-detail-row"><span>Heartbeat</span><strong id="connection-heartbeat">—</strong></div><div class="connection-detail-row"><span id="slots-label">Attached slots</span><strong id="connection-slots">0 / 16</strong></div></div><div class="popover-actions"><button class="soft-button" type="button" id="popover-console">Copy cb console</button><button class="ghost-button danger" type="button" id="disconnect-button">Disconnect</button></div></div>
+  </div>
+
+<div class="legacy-controller" hidden aria-hidden="true">
+  <div id="connection"><span id="status"></span></div>
+  <section id="current-page"><strong id="current-provider"></strong><span id="current-tab-state"></span><button id="toggle-current-tab"></button><div id="edit-last-message-row"><input id="edit-last-message" type="checkbox"></div><span id="edit-last-message-hint"></span><div id="session-health"></div></section>
+  <button id="pair"></button><span id="connect-hint"></span>
+  <input id="auto-reconnect" type="checkbox"><input id="auto-attach-fresh" type="checkbox"><input id="preserve-drafts" type="checkbox"><input id="auto-close-finished" type="checkbox"><input id="auto-update" type="checkbox"><span id="auto-update-state"></span>
+  <select id="session-mode"><option value="manual"></option><option value="new_chat"></option><option value="new_chat_per_job"></option></select>
+  <select id="tab-filter"><option value="all"></option><option value="attached"></option><option value="available"></option></select><select id="tab" multiple></select><span id="tab-state"></span><button id="toggle-selected-tab"></button><div id="tab-session-health"></div><span id="attached-summary"></span>
+  <input id="visual-mode" type="checkbox"><div id="yaml-profile-row"><select id="profile"></select></div><button id="verify"></button><button id="remove-profile"></button><button id="export-profile"></button><div id="profile-state"></div>
+</div>
+<div class="toast-stack" id="toast-stack" aria-live="polite"></div>
+<script src="profiles.js"></script>
+<script src="popup.js"></script>
+<script src="popup-live-ui.js"></script>
+<script src="badge.js"></script>
 </body>
 </html>

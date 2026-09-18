@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ContextBridge setup</title>
+  <link rel="stylesheet" href="wizard.css">
+</head>
+<body>
+<main class="shell">
+  <header class="head">
+    <img class="logo" src="icons/icon-128.png" alt="">
+    <div class="brand"><div><strong>ContextBridge</strong> <span id="version">v0.5.72</span> <span class="alpha">a</span></div><small id="brand-sub">Browser setup</small></div>
+    <button class="lang" id="language" type="button">DE</button>
+  </header>
+  <div class="progress" aria-hidden="true"><i></i><i></i><i></i></div>
+
+  <section class="step active" data-step="0">
+    <div class="kicker" data-i18n="step1">01 · Local service</div>
+    <h1 data-i18n="serviceTitle">Connect this browser to ContextBridge.</h1>
+    <p data-i18n="serviceCopy">The token authorizes only your local service. Page access stays separate and explicit.</p>
+    <div class="field"><label for="bridge-url">Local bridge URL</label><input id="bridge-url" value="http://127.0.0.1:32145" spellcheck="false"></div>
+    <div class="field"><label for="token" data-i18n="tokenLabel">Pairing token</label><div class="token"><input id="token" type="password" autocomplete="new-password" spellcheck="false"><button id="show-token" type="button" data-i18n="show">Show</button></div></div>
+    <div class="check" id="service-state"><i></i><span data-i18n="notChecked">Not checked yet</span></div>
+  </section>
+
+  <section class="step" data-step="1">
+    <div class="kicker" data-i18n="step2">02 · Browser slots</div>
+    <h1 data-i18n="tabsTitle">Choose what ContextBridge may open.</h1>
+    <p data-i18n="tabsCopy">Fresh chats avoid mixing jobs with personal conversations. You can attach an existing page yourself later.</p>
+    <div class="choices" id="slot-choices">
+      <button class="choice" data-choice="both" aria-checked="true"><span class="mark">2</span><span><strong data-i18n="bothTitle">Fresh ChatGPT + Gemini chats</strong><small data-i18n="recommended">Recommended first setup</small></span><b>✓</b></button>
+      <button class="choice" data-choice="chatgpt" aria-checked="false"><span class="mark">◉</span><span><strong>ChatGPT</strong><small>chatgpt.com</small></span><b></b></button>
+      <button class="choice" data-choice="gemini" aria-checked="false"><span class="mark">✦</span><span><strong>Gemini</strong><small>gemini.google.com</small></span><b></b></button>
+      <button class="choice" data-choice="none" aria-checked="false"><span class="mark">0</span><span><strong data-i18n="laterTitle">I will attach pages later</strong><small data-i18n="laterCopy">Finish pairing without opening a site</small></span><b></b></button>
+    </div>
+  </section>
+
+  <section class="step" data-step="2">
+    <div class="kicker" data-i18n="step3">03 · Ready</div>
+    <div class="done">✓</div>
+    <h1 data-i18n="readyTitle">Ready to connect.</h1>
+    <p data-i18n="readyCopy">ContextBridge will request only the selected site permissions, create fresh chats when selected, and connect them to the local service.</p>
+    <div class="review"><div><span data-i18n="service">Service</span><strong id="review-service">Not checked</strong></div><div><span data-i18n="slots">Browser slots</span><strong id="review-slots">ChatGPT + Gemini</strong></div><div><span data-i18n="policy">Session policy</span><strong data-i18n="manual">Manual · change later</strong></div></div>
+  </section>
+
+  <div class="error" id="error" role="alert"></div>
+  <footer><button id="back" class="back" type="button" aria-label="Back">←</button><button id="next" class="next" type="button"><span data-i18n="testContinue">Test & continue</span></button></footer>
+</main>
+<script src="profiles.js"></script>
+<script src="wizard.js"></script>
+</body>
+</html>
