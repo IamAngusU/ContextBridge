@@ -2,6 +2,36 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.72 - 2026-09-18
+
+### Added
+
+- the browser extension now uses the new compact V10 interface while retaining
+  the established explicit tab consent, permission, pairing, draft protection,
+  session isolation, diagnostics, and disconnect controls
+- live models, reasoning levels, tab counters, connection progress, and pool
+  capacity update with reduced-motion-aware ghost reveals and number transitions
+- the local status response can expose an aggregate-only pool capacity view:
+  online and total nodes, busy and total slots, CPU cores, RAM, GPU count, VRAM,
+  and zero-GPU workers; node identities, relay locations, and credentials are
+  never included
+- first installation opens a concise three-step setup wizard: verify the local
+  service, choose fresh browser slots, and connect
+
+### Changed
+
+- the alpha marker remains visually distinct but is semantic text rather than
+  a clickable control
+- advanced session, draft, cleanup, and diagnostic choices remain in the normal
+  popup instead of blocking first-time setup
+
+### Fixed
+
+- the pairing-token Show action now reveals the actual stored value rather than
+  a prototype placeholder
+- prototype state controls and demonstration credentials are excluded from the
+  packaged extension
+
 ## 0.5.71 - 2026-09-16
 
 ### Fixed

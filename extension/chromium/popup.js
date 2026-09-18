@@ -1,5 +1,14 @@
 const api = globalThis.browser || globalThis.chrome;
-const $ = (id) => document.getElementById(id);
+// The V10 surface intentionally uses human-facing IDs. Keep the proven
+// controller behind it through a small semantic alias layer instead of
+// duplicating security-sensitive attach, permission, and pairing logic.
+const visibleControl = {
+  version: 'version', url: 'bridge-url', token: 'pairing-token', 'toggle-token': 'show-token',
+  'scan-capabilities': 'scan-model', teach: 'customize-detection', test: 'test-service',
+  'select-ai-tabs': 'attach-fresh', 'all-tabs': 'show-all-tabs', stop: 'disconnect-button',
+  'release-session-tab': 'release-session'
+};
+const $ = (id) => document.getElementById(visibleControl[id] || id);
 let currentTab = null;
 let currentProfile = null;
 let attachedTabIDs = [];

@@ -22,6 +22,7 @@ node "$root/extension/tests/tab-selection.test.mjs"
 node "$root/extension/tests/tab-consent.test.mjs"
 node "$root/extension/tests/session-isolation.test.mjs"
 node "$root/extension/tests/mv3-observation-resume.test.mjs"
+node "$root/extension/tests/redesign.test.mjs"
 
 for browser in chromium firefox; do
   package="$root/extension/$browser"

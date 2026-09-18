@@ -54,6 +54,9 @@ type Server struct {
 	lifecycleStopOnce   sync.Once
 	stopRequestMu       sync.Mutex
 	lifecycleStopping   bool
+	poolSummaryMu       sync.Mutex
+	poolSummary         interface{}
+	poolSummaryAt       time.Time
 }
 
 const (
@@ -439,6 +442,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"browser":                   s.store.BrowserStatus(),
 		"tunnel":                    s.store.TunnelStatus(),
 		"runtime":                   runtimeStatus,
+		"pool":                      s.readPoolSummary(r.Context()),
 		"metrics":                   s.store.Metrics(),
 		"schedules":                 s.schedules.status(),
 		"updates":                   updateStatus(s.updates),
