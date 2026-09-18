@@ -1441,32 +1441,77 @@ html[data-theme="dark"] .alpha-badge:hover,html[data-theme="dark"] .alpha-badge:
 ::view-transition-old(cb-context-tags) { animation: cb-live-out .18s ease both; }
 ::view-transition-new(cb-context-tags) { animation: cb-live-in .24s var(--ease) both; }
 
-/* Browser-extension surface: keep the supplied V10 composition while the
-   browser, rather than the prototype canvas, owns the outer viewport. */
+/* Browser-extension surface: the browser popup is the app surface. Avoid a
+   second card, inset frame, or outer scrollbar around the supplied V10 UI. */
 html, body {
-  width: calc(var(--popup-width) + 16px);
+  width: var(--popup-width);
   min-height: 0;
-  max-height: 616px;
+  max-height: 600px;
   overflow: hidden;
 }
-body { background: var(--page); }
+body { background: var(--surface); }
 .popup {
   position: relative;
   inset: auto;
-  width: var(--popup-width);
+  width: 100%;
   max-height: 600px;
-  margin: 8px;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
 }
 .prototype-canvas, .extension-anchor, .state-lab, .state-lab-toggle { display:none !important; }
 
-/* The alpha suffix belongs to the version string. It is intentionally not an
-   interactive chip even though its orange typography remains distinctive. */
-.alpha-badge,
-.alpha-badge:hover,
-.alpha-badge:focus-visible {
-  cursor: default !important;
-  pointer-events: none !important;
+/* The alpha suffix remains semantic text. Hover or keyboard focus only reveals
+   an explanatory tooltip; it never behaves like a command button. */
+.alpha-context { position: relative; display: inline-flex; align-items: center; }
+.alpha-badge {
+  cursor: help !important;
+  pointer-events: auto !important;
   text-decoration-color: transparent !important;
+}
+.alpha-tooltip {
+  position: absolute;
+  z-index: 120;
+  top: calc(100% + 10px);
+  left: -12px;
+  width: 232px;
+  padding: 11px 12px;
+  display: grid;
+  gap: 4px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  box-shadow: 0 16px 38px rgba(15, 18, 16, .18);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(-4px) scale(.985);
+  transform-origin: 24px 0;
+  transition: opacity .16s ease, transform .18s var(--ease), visibility 0s linear .18s;
+  font: .72rem/1.45 var(--sans);
+}
+.alpha-tooltip::before {
+  content: "";
+  position: absolute;
+  top: -5px;
+  left: 17px;
+  width: 9px;
+  height: 9px;
+  background: var(--surface);
+  border-top: 1px solid var(--line-strong);
+  border-left: 1px solid var(--line-strong);
+  transform: rotate(45deg);
+}
+.alpha-tooltip strong { font-size: .75rem; }
+.alpha-tooltip > span { color: var(--muted); }
+.alpha-context:hover .alpha-tooltip,
+.alpha-context:focus-within .alpha-tooltip {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0) scale(1);
+  transition-delay: 0s;
 }
 
 .tab-action[disabled], .switch[disabled], .option-card[disabled] {
@@ -1487,20 +1532,21 @@ body { background: var(--page); }
 }
 
 /* The installed browser surface has a hard 600px popup limit. Keep exactly
-   one scroll owner inside the card so Chromium never adds a second outer bar. */
+   one scroll owner inside the full-bleed app surface. */
 html, body {
   height: 600px;
   max-height: 600px;
   overflow: hidden;
 }
 .popup {
-  height: 584px;
-  max-height: 584px;
+  height: 600px;
+  max-height: 600px;
   overflow: hidden;
   display: flex;
   flex-direction: column;
 }
 .app-header, .app-footer { flex: 0 0 auto; }
+.app-header { overflow: visible; z-index: 40; }
 .app-body {
   flex: 1 1 auto;
   min-height: 0;
@@ -1508,15 +1554,16 @@ html, body {
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--ink), transparent 84%) transparent;
+  scrollbar-color: #171916 transparent;
 }
 .app-body::-webkit-scrollbar { width: 8px; }
 .app-body::-webkit-scrollbar-thumb {
-  border: 2px solid transparent;
+  border: 2px solid var(--surface);
   border-radius: 99px;
-  background: color-mix(in srgb, var(--ink), transparent 84%);
+  background: #171916;
   background-clip: padding-box;
 }
+.app-body::-webkit-scrollbar-thumb:hover { background: #000; background-clip: padding-box; }
 .footer-actions { display: flex; align-items: center; gap: 8px; }
 .preferences-button {
   min-height: 34px;

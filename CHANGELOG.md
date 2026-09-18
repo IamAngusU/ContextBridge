@@ -20,8 +20,8 @@ All notable changes are documented here. ContextBridge follows semantic versioni
 
 ### Changed
 
-- the alpha marker remains visually distinct but is semantic text rather than
-  a clickable control
+- the alpha marker remains semantic text rather than a command control, while
+  hover and keyboard focus explain what the alpha label means
 - advanced session, draft, cleanup, and diagnostic choices remain in the normal
   popup instead of blocking first-time setup
 
@@ -31,8 +31,9 @@ All notable changes are documented here. ContextBridge follows semantic versioni
   a prototype placeholder
 - prototype state controls and demonstration credentials are excluded from the
   packaged extension
-- the browser popup now has one bounded content scrollbar instead of competing
-  page and card scrollbars at Chromium's 600-pixel popup limit
+- the browser popup now uses the complete extension surface instead of an
+  inset card and has one graphite content scrollbar at Chromium's 600-pixel
+  popup limit
 - language and appearance share one footer preference control, leaving the
   header focused on the live connection state
 
