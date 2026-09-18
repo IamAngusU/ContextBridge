@@ -1485,3 +1485,66 @@ body { background: var(--page); }
   color: var(--muted);
   font: .72rem/1.35 var(--mono);
 }
+
+/* The installed browser surface has a hard 600px popup limit. Keep exactly
+   one scroll owner inside the card so Chromium never adds a second outer bar. */
+html, body {
+  height: 600px;
+  max-height: 600px;
+  overflow: hidden;
+}
+.popup {
+  height: 584px;
+  max-height: 584px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.app-header, .app-footer { flex: 0 0 auto; }
+.app-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--ink), transparent 84%) transparent;
+}
+.app-body::-webkit-scrollbar { width: 8px; }
+.app-body::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 99px;
+  background: color-mix(in srgb, var(--ink), transparent 84%);
+  background-clip: padding-box;
+}
+.footer-actions { display: flex; align-items: center; gap: 8px; }
+.preferences-button {
+  min-height: 34px;
+  padding: 0 9px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--muted);
+  background: var(--surface);
+  font: 600 .65rem/1 var(--mono);
+  transition: background .16s ease, color .16s ease, border-color .16s ease;
+}
+.preferences-button:hover,
+.preferences-button[aria-expanded="true"] {
+  color: var(--ink);
+  border-color: var(--line-strong);
+  background: var(--surface-soft);
+}
+.preferences-button svg { width: 15px; height: 15px; }
+.preferences-aa { color: var(--quiet); font-family: var(--sans); font-weight: 650; }
+.preferences-popover { max-height: calc(100vh - 16px); overflow-y: auto; }
+.preference-label {
+  margin: 2px 2px 8px;
+  color: var(--quiet);
+  font: 600 .63rem/1 var(--mono);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.preference-label-spaced { margin-top: 12px; }

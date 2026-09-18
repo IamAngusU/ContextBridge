@@ -3,6 +3,8 @@ import fs from 'node:fs';
 
 const popup = fs.readFileSync(new URL('../src/popup.html', import.meta.url), 'utf8');
 const live = fs.readFileSync(new URL('../src/popup-live-ui.js', import.meta.url), 'utf8');
+const styles = fs.readFileSync(new URL('../src/popup.css', import.meta.url), 'utf8');
+const badge = fs.readFileSync(new URL('../src/badge.js', import.meta.url), 'utf8');
 const wizard = fs.readFileSync(new URL('../src/wizard.html', import.meta.url), 'utf8');
 const wizardScript = fs.readFileSync(new URL('../src/wizard.js', import.meta.url), 'utf8');
 
@@ -12,6 +14,12 @@ assert.match(popup, /id="pairing-token"/);
 assert.match(popup, /id="show-token"/);
 assert.match(live, /pool\.capability_view/);
 assert.match(live, /requestAnimationFrame/, 'live values should use motion-aware updates');
+assert.match(popup, /id="preferences-button"/);
+assert.match(popup, /id="preferences-popover"/);
+assert.doesNotMatch(popup, /id="(?:language|appearance)-button"/, 'language and appearance belong to one preference control');
+assert.match(styles, /\.app-body\s*\{[^}]*overflow-y:\s*auto/s, 'the content region must own the only scrollbar');
+assert.match(styles, /\.popup\s*\{[^}]*overflow:\s*hidden/s, 'the popup card must not create a second scrollbar');
+assert.match(badge, /Chantal W\.', role: 'Marketing & Brainstorming'/);
 
 assert.equal((wizard.match(/class="step/g) || []).length, 3, 'setup should stay a concise three-step flow');
 assert.match(wizardScript, /permissions\.request/);

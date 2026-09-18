@@ -560,7 +560,7 @@ const TEAM_MEMBERS = Object.freeze([
     imagePosition: '50% 44%', imageScale: 1.035, imageScaleActive: 1.09
   }),
   Object.freeze({
-    id: 'chantal', name: 'Chantal W.', role: 'Marketing & Graphic Design', kind: 'HUMAN',
+    id: 'chantal', name: 'Chantal W.', role: 'Marketing & Brainstorming', kind: 'HUMAN',
     initials: 'CW', background: '#e5eddc', ink: '#566548', swatch: '#96a782',
     imagePosition: '50% 38%', imageScale: 1.035, imageScaleActive: 1.09
   }),
@@ -1506,5 +1506,4 @@ const badge = createAngusuBadge(BADGE_CONFIG);
 window.badge = badge;
 if (['profile', 'github'].includes(query.get('panel'))) badge.open(query.get('panel'));
 })();
-
 
