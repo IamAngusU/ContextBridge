@@ -9,7 +9,7 @@ import (
 var completionRootCommands = []string{
 	"init", "serve", "run", "stop", "console", "submit", "schedule", "result", "review",
 	"health", "dashboard", "status", "browser", "doctor", "hardware", "models",
-	"pull", "runtime", "mcp", "benchmark", "relay", "pair", "worker", "cluster", "selftest", "update", "completion", "version", "help",
+	"pull", "runtime", "mcp", "benchmark", "relay", "pair", "worker", "cluster", "route", "selftest", "update", "completion", "version", "help",
 }
 
 var completionSubcommands = map[string][]string{
@@ -17,7 +17,8 @@ var completionSubcommands = map[string][]string{
 	"browser":    {"inspect"},
 	"runtime":    {"install"},
 	"mcp":        {"serve"},
-	"cluster":    {"status", "submit", "chat", "selftest", "login", "token", "pairing", "configure", "dashboard", "pipeline"},
+	"cluster":    {"status", "submit", "chat", "selftest", "route", "login", "token", "pairing", "configure", "dashboard", "pipeline"},
+	"route":      {"explain"},
 	"update":     {"status", "check", "apply", "enable", "disable", "auto"},
 	"completion": {"powershell", "bash", "zsh"},
 }
@@ -54,7 +55,8 @@ $script:ContextBridgeSubcommands = @{
     browser = @('inspect')
     runtime = @('install')
     mcp = @('serve')
-    cluster = @('status','submit','chat','selftest','login','token','pairing','configure','dashboard','pipeline')
+    cluster = @('status','submit','chat','selftest','route','login','token','pairing','configure','dashboard','pipeline')
+    route = @('explain')
     update = @('status','check','apply','enable','disable','auto')
     completion = @('powershell','bash','zsh')
 }
@@ -86,6 +88,8 @@ $script:ContextBridgeOptions = @{
     'cluster submit' = @('--config','--file','--token','--wait','--e2ee','--stream','--artifacts')
     'cluster chat' = @('--config','--token','--provider','--group','--model','--profile','--reasoning','--e2ee','--session','--prompt','--artifacts','--min-artifacts','--image','--min-images','--music','--attach-image','--new-chat','--new-chat-per-job','--foreground-new-chat')
     'cluster selftest' = @('--config','--providers','--local-model','--run','--dry-run','--image','--artifacts','--keep-artifacts','--timeout','--job-timeout','--poll')
+    'cluster route' = @('explain','--config','--file','--job','--token','--json')
+    'route explain' = @('--config','--file','--job','--token','--json')
     'selftest' = @('--config','--providers','--local-model','--run','--dry-run','--image','--artifacts','--keep-artifacts','--timeout','--job-timeout','--poll')
     'cluster configure' = @('--config','--mode','--relay-url','--public-url','--name','--listen')
     'cluster dashboard' = @('--config','--no-open')
@@ -103,7 +107,7 @@ $script:ContextBridgeValueOptions = @{
     '--role' = @('producer','observer')
 }
 $script:ContextBridgeTakesValue = @(
-    '--config','--file','--artifacts','--attach-image','--identity','--job-dir','--token-file',
+    '--config','--file','--job','--artifacts','--attach-image','--identity','--job-dir','--token-file',
     '--slots','--tab','--relay','--name','--providers','--models','--tasks','--groups',
     '--token','--provider','--group','--model','--profile','--reasoning','--session','--prompt',
     '--min-artifacts','--min-images','--local-model','--timeout','--job-timeout','--poll',
@@ -170,7 +174,7 @@ _contextbridge_complete() {
   if (( COMP_CWORD > 2 )); then
     subcommand="${COMP_WORDS[2]:-}"
     case "$command" in
-      schedule|browser|runtime|mcp|cluster|update)
+      schedule|browser|runtime|mcp|cluster|route|update)
         if [[ -n "$subcommand" && "$subcommand" != -* ]]; then
           option_key="$command $subcommand"
         fi
@@ -202,6 +206,8 @@ _contextbridge_complete() {
     case "$option_key" in
       "cluster chat") candidates="--config --token --provider --group --model --profile --reasoning --e2ee --session --prompt --artifacts --min-artifacts --image --min-images --music --attach-image --new-chat --new-chat-per-job --foreground-new-chat" ;;
       "cluster selftest") candidates="--config --providers --local-model --run --dry-run --image --artifacts --keep-artifacts --timeout --job-timeout --poll" ;;
+      "cluster route") candidates="--config --file --job --token --json" ;;
+      "route explain") candidates="--config --file --job --token --json" ;;
       "cluster submit") candidates="--config --file --token --wait --e2ee --stream --artifacts" ;;
       "cluster status") candidates="--config --json" ;;
       "cluster configure") candidates="--config --mode --relay-url --public-url --name --listen" ;;
@@ -229,15 +235,18 @@ _contextbridge_complete() {
       hardware) candidates="--json" ;;
       update|"update "*) candidates="--config --force --json --managed-service --relay-only" ;;
     esac
+  elif [[ "$option_key" == "cluster route" && "$COMP_CWORD" -eq 3 ]]; then
+    candidates="explain"
   elif [ "$COMP_CWORD" -eq 1 ]; then
-    candidates="init serve run stop console submit schedule result review health dashboard status browser doctor hardware models pull runtime mcp benchmark relay pair worker cluster selftest update completion version help"
+    candidates="init serve run stop console submit schedule result review health dashboard status browser doctor hardware models pull runtime mcp benchmark relay pair worker cluster route selftest update completion version help"
   elif [ "$COMP_CWORD" -eq 2 ]; then
     case "$command" in
       schedule) candidates="add list show pause resume run delete" ;;
       browser) candidates="inspect" ;;
       runtime) candidates="install" ;;
       mcp) candidates="serve" ;;
-      cluster) candidates="status submit chat selftest login token pairing configure dashboard pipeline" ;;
+      cluster) candidates="status submit chat selftest route login token pairing configure dashboard pipeline" ;;
+      route) candidates="explain" ;;
       update) candidates="status check apply enable disable auto" ;;
       completion) candidates="powershell bash zsh" ;;
       *) candidates="" ;;
@@ -280,6 +289,7 @@ root=(
     'pair:Pair this worker'
     'worker:Run a worker'
     'cluster:Use a remote pool'
+    'route:Explain a preview or durable cluster route'
     'selftest:Wait for and optionally run safe pool checks'
     'update:Manage verified updates'
     'completion:Generate shell completion'
@@ -325,7 +335,7 @@ case "$words[2]" in
     ;;
   cluster)
     if (( CURRENT == 3 )); then
-      _values 'cluster action' status submit chat selftest login token pairing configure dashboard pipeline
+      _values 'cluster action' status submit chat selftest route login token pairing configure dashboard pipeline
       return
     fi
     case "$words[3]" in
@@ -333,6 +343,13 @@ case "$words[2]" in
       submit) _arguments "${config[@]}" '--file[Cluster job JSON]:job file:_files' '--token[Producer token]:token:' '--wait[Wait for a final result]' '--e2ee[Encrypt payload]' '--stream[Stream browser text]' '--artifacts[Artifact output directory]:directory:_directories' ;;
       chat) _arguments "${config[@]}" '--token[Producer token]:token:' '--provider[Generation provider]:provider:(browser ollama nuextract jina)' '--group[Worker group]:group:' '--model[Specific model]:model:' '--profile[Browser profile]:profile:(chatgpt gemini)' '--reasoning[Reasoning level]:level:(instant medium high xhigh pro max)' '--e2ee[Encrypt prompts and results]' '--session[Stable conversation ID]:session:' '--prompt[Send one turn and exit]:prompt:' '--artifacts[Artifact directory or auto/off]:directory:_directories' '--min-artifacts[Required verified files]:count:' '--image[Require a returned image]' '--min-images[Required verified images]:count:' '--music[Require verified music output]' '--attach-image[Attach a local image]:image file:_files' '--new-chat[Open a fresh chat for the session]' '--new-chat-per-job[Open a fresh chat for every turn]' '--foreground-new-chat[Show a newly opened chat]' ;;
       selftest) _arguments "${config[@]}" '--providers[Checks to run]:providers:' '--local-model[Specific local model]:model:' '--run[Run live checks]' '--dry-run[Readiness checks only]' '--image[Also verify one image]' '--artifacts[Artifact directory]:directory:_directories' '--keep-artifacts[Keep temporary artifacts]' '--timeout[Capacity wait timeout]:duration:' '--job-timeout[Per-job timeout]:duration:' '--poll[Polling interval]:duration:' ;;
+      route)
+        if (( CURRENT == 4 )); then
+          _values 'route action' explain
+          return
+        fi
+        _arguments "${config[@]}" '--file[Cluster job JSON for a non-executing preview]:job file:_files' '--job[Assigned job ID]:job ID:' '--token[Producer token]:token:' '--json[Print machine-readable routing evidence]'
+        ;;
       configure) _arguments "${config[@]}" '--mode[Cluster mode]:mode:(local relay worker all)' '--relay-url[Public relay URL]:URL:' '--public-url[Public HTTPS relay URL]:URL:' '--name[Worker node name]:name:' '--listen[Relay listen address]:address:' ;;
       dashboard) _arguments "${config[@]}" '--no-open[Print URL without opening a browser]' ;;
       pipeline) _arguments "${config[@]}" '--name[Pipeline name]:name:' '--file[Pipeline input JSON]:input file:_files' ;;
@@ -341,6 +358,13 @@ case "$words[2]" in
       pairing) _arguments "${config[@]}" '--approve[Approve pairing code]:code:' '--deny[Deny pairing code]:code:' ;;
       *) _arguments '*:argument:' ;;
     esac
+    ;;
+  route)
+    if (( CURRENT == 3 )); then
+      _values 'route action' explain
+      return
+    fi
+    _arguments "${config[@]}" '--file[Cluster job JSON for a non-executing preview]:job file:_files' '--job[Assigned job ID]:job ID:' '--token[Producer token]:token:' '--json[Print machine-readable routing evidence]'
     ;;
   update)
     if (( CURRENT == 3 )); then

@@ -393,8 +393,10 @@ func (r *Relay) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/cluster/jobs", r.authorize("admin", "observer", "producer")(r.handleJobs))
 	mux.HandleFunc("POST /v1/cluster/jobs", r.authorize("admin", "producer")(r.handleSubmit))
 	mux.HandleFunc("GET /v1/cluster/jobs/{id}", r.authorize("admin", "observer", "producer")(r.handleJob))
+	mux.HandleFunc("GET /v1/cluster/jobs/{id}/route", r.authorize("admin", "observer", "producer")(r.handleJobRoute))
 	mux.HandleFunc("DELETE /v1/cluster/jobs/{id}", r.authorize("admin", "producer")(r.handleCancel))
 	mux.HandleFunc("POST /v1/cluster/assign", r.authorize("admin", "producer")(r.handleReserve))
+	mux.HandleFunc("POST /v1/cluster/routes/explain", r.authorize("admin", "producer")(r.handleRouteExplain))
 	mux.HandleFunc("GET /v1/cluster/workers/connect", r.authorize("node")(r.handleWorker))
 	mux.HandleFunc("POST /v1/cluster/tokens", r.authorize("admin")(r.handleCreateToken))
 	mux.HandleFunc("GET /v1/cluster/pipelines", r.authorize("admin", "observer", "producer")(r.handlePipelines))
@@ -562,6 +564,60 @@ func (r *Relay) handleJob(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, jobResponse(job, req.URL.Query().Get("compact") == "1"))
+}
+
+func (r *Relay) handleJobRoute(w http.ResponseWriter, req *http.Request) {
+	job, err := r.store.GetJob(req.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, errors.New("job not found"))
+		return
+	}
+	if !canReadJob(req.Context(), job) {
+		writeError(w, http.StatusForbidden, errors.New("job belongs to another producer"))
+		return
+	}
+	if job.RoutingDecision == nil {
+		writeError(w, http.StatusConflict, errors.New("job has not been assigned; no durable routing decision exists yet"))
+		return
+	}
+	writeJSON(w, http.StatusOK, job.RoutingDecision)
+}
+
+func (r *Relay) handleRouteExplain(w http.ResponseWriter, req *http.Request) {
+	var input AssignmentRequest
+	if err := decodeJSON(req.Body, &input, 64<<10); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	record, _ := tokenRecord(req.Context())
+	if input.Requirements.BrowserTabID != 0 || input.Requirements.BrowserSessionRecovery {
+		writeError(w, http.StatusUnprocessableEntity, errors.New("browser tab and recovery requirements are relay-assigned"))
+		return
+	}
+	if err := scopeRequirements(&input.Requirements, record); err != nil {
+		writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if err := r.validateRequirements(input.Requirements); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err)
+		return
+	}
+	if err := validateTenantID(input.TenantID); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err)
+		return
+	}
+	nodes, err := r.routingNodes()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	routingRequirements, requiredSessionNode := r.withSessionAffinity(input.Requirements, record.Subject)
+	_, decision := rankWithDecision(nodes, routingRequirements, r.store.EstimateVRAM(input.Requirements), time.Now().UTC())
+	decision.ID = randomID("route_preview")
+	decision.Preview = true
+	applyRoutingNodeConstraints(&decision, requiredSessionNode, "")
+	boundRoutingDecision(&decision)
+	writeJSON(w, http.StatusOK, decision)
 }
 
 func (r *Relay) handleCancel(w http.ResponseWriter, req *http.Request) {
@@ -771,7 +827,11 @@ func (r *Relay) handleReserve(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, err)
 		return
 	}
-	nodes, _ := r.store.ListNodes()
+	nodes, err := r.routingNodes()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	routingRequirements, requiredSessionNode := r.withSessionAffinity(input.Requirements, record.Subject)
 	candidates := RankWithEstimate(nodes, routingRequirements, r.store.EstimateVRAM(input.Requirements))
 	node, found := firstSessionCandidate(candidates, requiredSessionNode)
@@ -807,7 +867,7 @@ func (r *Relay) handleReserve(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, errors.New("relay is stopping"))
 		return
 	}
-	err := r.store.CreateReservationAdmitted(assignment, secret, record.Subject, r.cfg.MaxQueuedJobs, ownerLimit)
+	err = r.store.CreateReservationAdmitted(assignment, secret, record.Subject, r.cfg.MaxQueuedJobs, ownerLimit)
 	r.endAdmission()
 	if err != nil {
 		status := http.StatusInternalServerError
@@ -1000,22 +1060,10 @@ func (r *Relay) dispatch() {
 		return
 	}
 	r.recordQueueScan(nextOffset, total)
-	nodes, err := r.store.ListNodes()
+	nodes, err := r.routingNodes()
 	if err != nil {
 		return
 	}
-	r.mu.RLock()
-	for index := range nodes {
-		worker := r.workers[nodes[index].ID]
-		if worker == nil {
-			continue
-		}
-		running, capacity := worker.load()
-		nodes[index].Connected = true
-		nodes[index].Capabilities.Running = running
-		nodes[index].Capabilities.MaxConcurrent = capacity
-	}
-	r.mu.RUnlock()
 	for _, queued := range jobs {
 		if busy, busyErr := r.store.BrowserSessionBusy(queued.OwnerSubject, queued.Requirements, queued.ID); busyErr != nil || busy {
 			continue
@@ -1034,7 +1082,8 @@ func (r *Relay) dispatch() {
 			routingRequirements, requiredSessionNode = r.withSessionAffinity(queued.Requirements, queued.OwnerSubject)
 		}
 		estimatedVRAM := r.store.EstimateVRAM(queued.Requirements)
-		candidates := RankWithEstimate(nodes, routingRequirements, estimatedVRAM)
+		candidates, decision := rankWithDecision(nodes, routingRequirements, estimatedVRAM, now)
+		applyRoutingNodeConstraints(&decision, requiredSessionNode, queued.AssignedNode)
 		for _, candidate := range candidates {
 			if requiredSessionNode != "" && candidate.Node.ID != requiredSessionNode {
 				continue
@@ -1046,6 +1095,7 @@ func (r *Relay) dispatch() {
 			worker := r.workers[candidate.Node.ID]
 			r.mu.RUnlock()
 			if worker == nil {
+				rejectRoutingCandidate(&decision, candidate.Node.ID, "worker_not_connected")
 				continue
 			}
 			browserTabID := queued.Requirements.BrowserTabID
@@ -1067,14 +1117,18 @@ func (r *Relay) dispatch() {
 			}
 			if !worker.reserve(queued.ID) {
 				r.endAdmission()
+				rejectRoutingCandidate(&decision, candidate.Node.ID, "worker_at_capacity")
 				continue
 			}
 			var job Job
 			var assignErr error
+			decision.SelectedNodeID = candidate.Node.ID
+			decision.SelectedNodeName = candidate.Node.Name
+			boundRoutingDecision(&decision)
 			if strings.EqualFold(queued.Requirements.Provider, "browser") {
-				job, assignErr = r.store.AssignBrowserJob(queued.ID, candidate.Node.ID, browserTabID, browserSessionRecovery)
+				job, assignErr = r.store.AssignBrowserJobWithDecision(queued.ID, candidate.Node.ID, browserTabID, browserSessionRecovery, decision)
 			} else {
-				job, assignErr = r.store.AssignJob(queued.ID, candidate.Node.ID)
+				job, assignErr = r.store.AssignJobWithDecision(queued.ID, candidate.Node.ID, decision)
 			}
 			if assignErr != nil {
 				worker.release(queued.ID)
@@ -1407,6 +1461,73 @@ func (r *Relay) withSessionAffinity(requirements Requirements, owner string) (Re
 		}
 	}
 	return requirements, requiredNode
+}
+
+func (r *Relay) routingNodes() ([]Node, error) {
+	nodes, err := r.store.ListNodes()
+	if err != nil {
+		return nil, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for index := range nodes {
+		worker := r.workers[nodes[index].ID]
+		if worker == nil {
+			nodes[index].Connected = false
+			continue
+		}
+		running, capacity := worker.load()
+		nodes[index].Connected = true
+		nodes[index].Capabilities.Running = running
+		nodes[index].Capabilities.MaxConcurrent = capacity
+	}
+	return nodes, nil
+}
+
+func applyRoutingNodeConstraints(decision *RoutingDecision, requiredSessionNode, assignedNode string) {
+	if decision == nil {
+		return
+	}
+	decision.SelectedNodeID = ""
+	decision.SelectedNodeName = ""
+	for index := range decision.Candidates {
+		candidate := &decision.Candidates[index]
+		if !candidate.Eligible {
+			continue
+		}
+		if requiredSessionNode != "" && candidate.NodeID != requiredSessionNode {
+			candidate.Eligible = false
+			candidate.RejectionReasons = appendUniqueReason(candidate.RejectionReasons, "session_affinity_node_mismatch")
+		}
+		if assignedNode != "" && candidate.NodeID != assignedNode {
+			candidate.Eligible = false
+			candidate.RejectionReasons = appendUniqueReason(candidate.RejectionReasons, "sealed_assignment_node_mismatch")
+		}
+	}
+	sortRoutingCandidateDecisions(decision.Candidates)
+	for _, candidate := range decision.Candidates {
+		if candidate.Eligible {
+			decision.SelectedNodeID = candidate.NodeID
+			decision.SelectedNodeName = candidate.NodeName
+			break
+		}
+	}
+}
+
+func rejectRoutingCandidate(decision *RoutingDecision, nodeID, reason string) {
+	if decision == nil {
+		return
+	}
+	for index := range decision.Candidates {
+		candidate := &decision.Candidates[index]
+		if candidate.NodeID != nodeID {
+			continue
+		}
+		candidate.Eligible = false
+		candidate.RejectionReasons = appendUniqueReason(candidate.RejectionReasons, reason)
+		break
+	}
+	applyRoutingNodeConstraints(decision, "", "")
 }
 
 func firstSessionCandidate(candidates []Candidate, requiredNode string) (Node, bool) {

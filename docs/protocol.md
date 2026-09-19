@@ -176,12 +176,22 @@ Cluster endpoints use separate admin, observer, producer, and node bearer creden
 | `GET` | `/v1/cluster/nodes` | Admin, observer, producer | Read node capabilities and load |
 | `POST` | `/v1/cluster/jobs` | Admin, producer | Queue a normal or sealed job |
 | `GET` | `/v1/cluster/jobs/{id}` | Scoped role | Read one allowed job |
+| `GET` | `/v1/cluster/jobs/{id}/route` | Scoped role | Read the bounded decision persisted for an assigned job |
 | `DELETE` | `/v1/cluster/jobs/{id}` | Admin, producer | Cancel one allowed job |
 | `POST` | `/v1/cluster/assign` | Admin, producer | Reserve an E2EE worker key |
+| `POST` | `/v1/cluster/routes/explain` | Admin, producer | Preview current placement without submitting a job |
 | `GET` | `/v1/cluster/workers/connect` | Node | Upgrade to the worker WebSocket |
 | `POST` | `/v1/cluster/pipelines/{name}/run` | Admin, producer | Start a declared pipeline |
 
 Detailed terminal records and opaque session placements are subject to relay retention. By default a startup and five-minute periodic sweep keeps only terminal jobs from the last 30 days (at most 500), events from the last 30 days (at most 5,000), terminal pipeline runs from the last 30 days (at most 200), and pseudonymous session placements from the last 30 days (at most 5,000). Age and count are both upper bounds. Active or unrecognized lifecycle states are never swept. Once detail is pruned, its job or pipeline-run endpoint returns not found and its prompt, result, sealed envelopes, and per-record ownership metadata are no longer available; an expired/excess placement loses its cached node/tab affinity but may still be rediscovered from live opaque browser evidence. Aggregate lifetime counts remain available from `/v1/cluster/overview`. Configure the guarded limits with `cluster.relay.retention_days`, `max_terminal_jobs`, `max_events`, `max_terminal_pipeline_runs`, `max_session_placements`, and `retention_sweep_seconds`.
+
+The route-preview endpoint accepts the same `tenant_id` and `requirements`
+shape as `/v1/cluster/assign`. Producer group scopes and relay requirement
+validation run before any candidate is disclosed. It returns HTTP 200 even
+when no candidate is eligible; an empty `selected_node_id` and per-candidate
+reason codes explain that state. It does not reserve capacity, acquire a
+browser-session lock, create a job, or select an E2EE public key. Durable route
+evidence becomes available only after assignment and is pruned with its job.
 
 A cluster job contains routing metadata and one local ContextBridge job as its payload:
 

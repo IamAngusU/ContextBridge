@@ -12,6 +12,55 @@ type Candidate struct {
 	Score float64 `json:"score"`
 }
 
+// RoutingScoreComponents records the additive, bounded inputs used for one
+// eligible node. Values are already weighted, so their sum is Score. Keeping
+// this separate from raw hardware telemetry makes route explanations useful
+// without turning them into another unrestricted node-status response.
+type RoutingScoreComponents struct {
+	ActiveLoad       float64 `json:"active_load,omitempty"`
+	QueueDepth       float64 `json:"queue_depth,omitempty"`
+	MemoryPressure   float64 `json:"memory_pressure,omitempty"`
+	CPUPressure      float64 `json:"cpu_pressure,omitempty"`
+	GPUPressure      float64 `json:"gpu_pressure,omitempty"`
+	VRAMHeadroom     float64 `json:"vram_headroom,omitempty"`
+	BrowserPressure  float64 `json:"browser_pressure,omitempty"`
+	LoadedModel      float64 `json:"loaded_model,omitempty"`
+	EstimatedVRAMFit float64 `json:"estimated_vram_fit,omitempty"`
+	PreferredNode    float64 `json:"preferred_node,omitempty"`
+}
+
+// RoutingCandidateDecision is deliberately smaller than Node. It contains the
+// evidence needed to audit a placement decision without copying a worker's
+// complete hardware or browser-session inventory into every job.
+type RoutingCandidateDecision struct {
+	NodeID           string                 `json:"node_id"`
+	NodeName         string                 `json:"node_name,omitempty"`
+	Eligible         bool                   `json:"eligible"`
+	RejectionReasons []string               `json:"rejection_reasons,omitempty"`
+	Score            float64                `json:"score,omitempty"`
+	ScoreComponents  RoutingScoreComponents `json:"score_components,omitempty"`
+	EvidenceAgeMS    int64                  `json:"evidence_age_ms"`
+}
+
+// RoutingDecision is a point-in-time explanation. The relay adds ID, JobID,
+// and CreatedAt when it persists an actual assignment; previews use the same
+// schema but are explicitly marked Preview.
+type RoutingDecision struct {
+	ID                  string                     `json:"id,omitempty"`
+	JobID               string                     `json:"job_id,omitempty"`
+	Preview             bool                       `json:"preview,omitempty"`
+	Requirements        Requirements               `json:"requirements"`
+	EstimatedVRAMBytes  uint64                     `json:"estimated_vram_bytes,omitempty"`
+	Candidates          []RoutingCandidateDecision `json:"candidates"`
+	CandidateCount      int                        `json:"candidate_count"`
+	CandidatesTruncated int                        `json:"candidates_truncated,omitempty"`
+	SelectedNodeID      string                     `json:"selected_node_id,omitempty"`
+	SelectedNodeName    string                     `json:"selected_node_name,omitempty"`
+	CreatedAt           time.Time                  `json:"created_at,omitempty"`
+}
+
+const MaximumRoutingDecisionCandidates = 128
+
 // NodeFreshnessWindow is the hard scheduler boundary for worker telemetry.
 // Readiness tools must use the same value so they cannot report capacity that
 // the scheduler itself would reject.
@@ -25,18 +74,53 @@ func Rank(nodes []Node, requirements Requirements) []Candidate {
 // hard GPU requirement. This keeps CPU-only (zero-GPU) workers eligible unless
 // the producer explicitly sets min_free_vram_bytes.
 func RankWithEstimate(nodes []Node, requirements Requirements, estimatedVRAM uint64) []Candidate {
+	candidates, _ := rankWithDecision(nodes, requirements, estimatedVRAM, time.Now().UTC())
+	return candidates
+}
+
+// ExplainRouting returns the same ranking used by RankWithEstimate together
+// with stable reason codes and score components for every bounded candidate.
+func ExplainRouting(nodes []Node, requirements Requirements, estimatedVRAM uint64) RoutingDecision {
+	_, decision := rankWithDecision(nodes, requirements, estimatedVRAM, time.Now().UTC())
+	boundRoutingDecision(&decision)
+	return decision
+}
+
+func rankWithDecision(nodes []Node, requirements Requirements, estimatedVRAM uint64, now time.Time) ([]Candidate, RoutingDecision) {
 	candidates := make([]Candidate, 0, len(nodes))
+	decisions := make([]RoutingCandidateDecision, 0, min(len(nodes), MaximumRoutingDecisionCandidates))
 	for _, node := range nodes {
-		if !node.Connected || time.Since(node.LastSeen) > NodeFreshnessWindow || !matchesNode(node, requirements) {
-			continue
+		age := now.Sub(node.LastSeen)
+		if age < 0 {
+			age = 0
+		}
+		candidateDecision := RoutingCandidateDecision{NodeID: node.ID, NodeName: node.Name, EvidenceAgeMS: age.Milliseconds()}
+		reasons := make([]string, 0, 2)
+		if !node.Connected {
+			reasons = append(reasons, "worker_not_connected")
+		}
+		if age > NodeFreshnessWindow {
+			reasons = append(reasons, "worker_telemetry_stale")
+		}
+		if !matchesNode(node, requirements) {
+			reasons = append(reasons, routingConstraintReasons(node, requirements)...)
+			if len(reasons) == 0 {
+				reasons = append(reasons, "requirements_not_satisfied")
+			}
 		}
 		capacity := node.Capabilities.MaxConcurrent
 		if capacity <= 0 {
 			capacity = 1
 		}
 		if node.Capabilities.Running >= capacity {
+			reasons = appendUniqueReason(reasons, "worker_at_capacity")
+		}
+		if len(reasons) > 0 {
+			candidateDecision.RejectionReasons = reasons
+			decisions = append(decisions, candidateDecision)
 			continue
 		}
+		candidateDecision.Eligible = true
 		busy := float64(node.Capabilities.Running) / float64(capacity)
 		queue := float64(node.Capabilities.QueueDepth) / float64(capacity)
 		memoryPressure := boundedMemoryPressure(node.Capabilities.MemoryFree, node.Capabilities.MemoryTotal)
@@ -47,33 +131,42 @@ func RankWithEstimate(nodes []Node, requirements Requirements, estimatedVRAM uin
 		vramHeadroom := bestVRAMHeadroom(node, placementVRAM)
 		gpuPressure := bestGPUUtilization(node, placementVRAM)
 		cpuPressure := boundedUtilization(node.Capabilities.CPUUtilization)
-		score := busy*60 + queue*20 + memoryPressure*10 + cpuPressure*10 + gpuPressure*15 - vramHeadroom*12
+		components := RoutingScoreComponents{
+			ActiveLoad: busy * 60, QueueDepth: queue * 20, MemoryPressure: memoryPressure * 10,
+			CPUPressure: cpuPressure * 10, GPUPressure: gpuPressure * 15, VRAMHeadroom: -vramHeadroom * 12,
+		}
 		if strings.EqualFold(requirements.Provider, "browser") && node.Capabilities.BrowserTabs > 0 {
-			score += float64(node.Capabilities.BrowserBusy) / float64(node.Capabilities.BrowserTabs) * 40
+			components.BrowserPressure = float64(node.Capabilities.BrowserBusy) / float64(node.Capabilities.BrowserTabs) * 40
 		}
 		if isAutomaticOllamaRequest(requirements) && hasLoadedAutomaticModel(node.Capabilities.Models, requirements) {
 			// Loading a cold model is valid, but an already loaded compatible
 			// model avoids a cold start when otherwise similar workers compete.
-			score -= 6
+			components.LoadedModel = -6
 		}
 		if requirements.MinFreeVRAM == 0 && estimatedVRAM > 0 {
 			if hasVRAM(node, estimatedVRAM) {
-				score -= 10
+				components.EstimatedVRAMFit = -10
 			} else {
 				// CPU fallback remains valid but loses to a GPU with enough measured
 				// headroom when the other load signals are similar.
-				score += 8
+				components.EstimatedVRAMFit = 8
 			}
 		}
 		for index, preferred := range requirements.PreferredNodes {
 			if preferred == node.ID || preferred == node.Name {
 				// The first preference is strongest. Relay-injected session
 				// affinity therefore wins ties without becoming a hard lock.
-				score -= math.Max(10, 30-float64(index)*3)
+				components.PreferredNode = -math.Max(10, 30-float64(index)*3)
 				break
 			}
 		}
+		score := components.ActiveLoad + components.QueueDepth + components.MemoryPressure + components.CPUPressure +
+			components.GPUPressure + components.VRAMHeadroom + components.BrowserPressure + components.LoadedModel +
+			components.EstimatedVRAMFit + components.PreferredNode
 		candidates = append(candidates, Candidate{Node: node, Score: score})
+		candidateDecision.Score = score
+		candidateDecision.ScoreComponents = components
+		decisions = append(decisions, candidateDecision)
 	}
 	sort.Slice(candidates, func(i, j int) bool {
 		if math.Abs(candidates[i].Score-candidates[j].Score) > 0.0001 {
@@ -81,7 +174,119 @@ func RankWithEstimate(nodes []Node, requirements Requirements, estimatedVRAM uin
 		}
 		return candidates[i].Node.ID < candidates[j].Node.ID
 	})
-	return candidates
+	sortRoutingCandidateDecisions(decisions)
+	decision := RoutingDecision{
+		Requirements: requirements, EstimatedVRAMBytes: estimatedVRAM, CandidateCount: len(decisions),
+		Candidates: decisions, CreatedAt: now,
+	}
+	if len(candidates) > 0 {
+		decision.SelectedNodeID = candidates[0].Node.ID
+		decision.SelectedNodeName = candidates[0].Node.Name
+	}
+	return candidates, decision
+}
+
+func boundRoutingDecision(decision *RoutingDecision) {
+	if decision == nil {
+		return
+	}
+	if decision.CandidateCount < len(decision.Candidates) {
+		decision.CandidateCount = len(decision.Candidates)
+	}
+	if len(decision.Candidates) > MaximumRoutingDecisionCandidates {
+		decision.Candidates = decision.Candidates[:MaximumRoutingDecisionCandidates]
+	}
+	decision.CandidatesTruncated = decision.CandidateCount - len(decision.Candidates)
+}
+
+func sortRoutingCandidateDecisions(candidates []RoutingCandidateDecision) {
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].Eligible != candidates[j].Eligible {
+			return candidates[i].Eligible
+		}
+		if candidates[i].Eligible && math.Abs(candidates[i].Score-candidates[j].Score) > 0.0001 {
+			return candidates[i].Score < candidates[j].Score
+		}
+		return candidates[i].NodeID < candidates[j].NodeID
+	})
+}
+
+func appendUniqueReason(reasons []string, reason string) []string {
+	for _, existing := range reasons {
+		if existing == reason {
+			return reasons
+		}
+	}
+	return append(reasons, reason)
+}
+
+func routingConstraintReasons(node Node, requirements Requirements) []string {
+	capability := node.Capabilities
+	reasons := []string{}
+	explicitModel := strings.TrimSpace(requirements.Model) != "" && !strings.EqualFold(strings.TrimSpace(requirements.Model), "auto")
+	explicitReasoning := strings.TrimSpace(requirements.Reasoning) != ""
+	if requirements.Group != "" && !containsFold(capability.Groups, requirements.Group) {
+		reasons = append(reasons, "group_scope_unavailable")
+	}
+	for _, tag := range requirements.RequiredTags {
+		if !containsFold(capability.Tags, tag) {
+			reasons = appendUniqueReason(reasons, "required_tag_unavailable")
+		}
+	}
+	if requirements.Provider != "" && !containsFold(capability.Providers, requirements.Provider) {
+		reasons = append(reasons, "provider_not_available")
+	}
+	if requirements.BrowserProfile != "" && !strings.EqualFold(requirements.Provider, "browser") {
+		reasons = append(reasons, "browser_profile_requires_browser")
+	}
+	if strings.EqualFold(requirements.Provider, "browser") && len(capability.BrowserSessions) > 0 &&
+		(requirements.BrowserProfile != "" || explicitModel || explicitReasoning || requirements.BrowserTabID > 0) {
+		if _, ok := selectReadyBrowserSession(capability.BrowserSessions, requirements); !ok {
+			reasons = append(reasons, "browser_session_not_ready")
+		}
+	} else if requirements.BrowserProfile != "" || requirements.BrowserTabID > 0 {
+		reasons = append(reasons, "browser_session_evidence_unavailable")
+	}
+	if strings.EqualFold(requirements.Provider, "browser") && ((capability.BrowserTabs > 0 && capability.BrowserBusy >= capability.BrowserTabs) ||
+		(capability.AutomaticTasks != nil && capability.BrowserTabs <= 0)) {
+		reasons = append(reasons, "browser_slots_busy")
+	}
+	if explicitModel {
+		if !selectedModelSupports(capability.Models, requirements) {
+			reasons = append(reasons, "model_not_available")
+		}
+	} else if requirements.Task != "" {
+		automaticTasksAreAuthoritative := strings.TrimSpace(requirements.Provider) != "" && (capability.AutomaticTasks != nil || isAutomaticOllamaRequest(requirements))
+		modelsAreAuthoritative := hasProviderModelInventory(capability.Models, requirements.Provider)
+		if automaticTasksAreAuthoritative && !providerTaskSupported(capability.AutomaticTasks, requirements.Provider, requirements.Task) {
+			reasons = append(reasons, "task_not_verified")
+		}
+		if isAutomaticOllamaRequest(requirements) && !modelSupports(capability.Models, requirements) {
+			reasons = appendUniqueReason(reasons, "model_not_available")
+		}
+		if modelsAreAuthoritative && !modelSupports(capability.Models, requirements) {
+			reasons = appendUniqueReason(reasons, "task_not_verified")
+		}
+		if !modelsAreAuthoritative && (requirements.Vision || requirements.Embedding) && !modelSupports(capability.Models, requirements) {
+			reasons = append(reasons, "capability_not_available")
+		}
+		if !automaticTasksAreAuthoritative && !modelsAreAuthoritative && !requirements.Vision && !requirements.Embedding &&
+			!containsFold(capability.Tasks, requirements.Task) && !modelSupports(capability.Models, requirements) {
+			reasons = appendUniqueReason(reasons, "task_not_verified")
+		}
+	} else if requirements.Vision || requirements.Embedding {
+		if isAutomaticOllamaRequest(requirements) {
+			if !modelSupports(capability.Models, requirements) {
+				reasons = append(reasons, "capability_not_available")
+			}
+		} else if !modelFeature(capability.Models, requirements.Model, requirements.Provider, requirements.Vision, requirements.Embedding) {
+			reasons = append(reasons, "capability_not_available")
+		}
+	}
+	if requirements.MinFreeVRAM > 0 && !hasVRAM(node, requirements.MinFreeVRAM) {
+		reasons = append(reasons, "insufficient_vram")
+	}
+	return reasons
 }
 
 func hasVRAM(node Node, required uint64) bool {

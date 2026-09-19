@@ -66,7 +66,7 @@ create a route, credential, permission, or recursive delegation on its own.
 
 ## Routing and operations
 
-### Adaptive routing, circuit breakers, and route explain — planned direction
+### Adaptive routing and circuit breakers — planned direction
 
 Build on the scheduler's current node load, free RAM/VRAM, loaded-model state,
 browser slots, groups, and tags. Candidate rolling observations include success
@@ -78,9 +78,11 @@ cost estimates. Policies could express preferences such as `prefer_loaded`,
 A circuit breaker may exclude a repeatedly failing route **before assignment**.
 It must never turn an ambiguous post-submit browser or model failure into a
 transparent retry; the existing at-most-once execution boundary still wins.
-`contextbridge route explain` should report the bounded evidence used for a
-choice and why other candidates were ineligible, without exposing another
-producer's prompt, result, or sensitive hardware detail.
+The shipped route-explanation baseline already reports bounded deterministic
+evidence, stable rejection reasons, and weighted score components. This future
+direction may add rolling observations only after their provenance, sample
+size, decay, and failure classification are trustworthy; it must preserve the
+same content-minimizing decision record and first run in shadow mode.
 
 ### Privacy-default OpenTelemetry and policy — planned direction
 
@@ -145,6 +147,37 @@ external provider never accepted a request. Any step with an ambiguous
 post-submit outcome remains non-replayable until an operator makes an explicit
 decision. A general visual agent-builder or unrestricted graph language is not
 required for this direction.
+
+### Optional intent planner producer — exploratory
+
+An intent planner may eventually translate a high-level request into a
+versioned, bounded run specification, but it would live **above** the relay as
+an ordinary untrusted producer. A deterministic validator would enforce task,
+provider, egress, cost, step, parallelism, runtime, and artifact limits before
+ContextBridge accepts any generated plan. The core must remain fully useful
+without an LLM planner, and a plan may never create credentials, widen policy,
+disable E2EE, register arbitrary tools, or infer that an ambiguous post-submit
+failure is safe to retry.
+
+The useful contract is: AI may propose work; ContextBridge authorizes,
+schedules, attributes, and verifies it. Replanning can act only on explicit
+failure classes such as `safe_to_reassign`; unknown completion continues to
+require an operator decision.
+
+### Large-document reference application — exploratory
+
+A separate reference application may demonstrate one durable run over hundreds
+of PDFs using artifact references, bounded dynamic work units, a shared queue,
+typed evidence, verification steps, and final synthesis. It should not divide
+work by raw document count or push every document into every model context.
+Faster compatible workers naturally claim more units, while provenance-rich
+claims and contradiction candidates remain tenant- and run-scoped.
+
+PDF parsing, chunking, fact schemas, semantic normalization, contradiction
+rules, and report structure belong to that application—not the relay or
+scheduler. Model-produced annotations remain candidates with provenance,
+version, review state, and optional expiry; they never become global policy or
+silent prompt instructions for later jobs.
 
 ### Opt-in multi-agent conversations — exploratory
 

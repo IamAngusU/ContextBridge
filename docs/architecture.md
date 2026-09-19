@@ -19,6 +19,15 @@ cancellation, and session affinity when producers share that pool.
 
 Workers initiate an outbound WebSocket connection to the relay. This avoids inbound ports on private computers. Each heartbeat contains current CPU, RAM generation/speed, GPU utilization/temperature/free VRAM, ready models, task, group, tag, concurrency, queue, and browser-tab slot information. The scheduler filters incompatible nodes first, then ranks compatible nodes by active load, GPU pressure, and available memory.
 
+The same deterministic scheduler produces a bounded routing decision. A
+non-executing preview reports eligible candidates, stable rejection reasons,
+and additive weighted score components. When a queued job is assigned, that
+point-in-time decision is written atomically with the assignment and remains
+available for the lifetime of the retained job. The record excludes prompts,
+results, full browser-session inventories, and complete hardware snapshots.
+It is evidence for why a route was chosen, not a promise that a later preview
+will see identical capacity.
+
 The relay stores tokens as SHA256 hashes, jobs and bounded history in BoltDB, and queue order in a dedicated priority index. A worker error, disconnect, or execution timeout is an ambiguous state because the provider may already have accepted the request. ContextBridge therefore fails that execution closed instead of transparently retrying it; the producer must submit a new job explicitly. A sealed job is additionally tied to the public key chosen during reservation and cannot move to another node without the producer encrypting a new submission.
 
 One BoltDB relay is a single durable coordination process, not an active-active database cluster. A future HA adapter can implement the same store contract with Postgres and a message broker.
