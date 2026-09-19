@@ -2,6 +2,23 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.79 - 2026-09-19
+
+### Added
+
+- sealed, checksum-verified, or otherwise immutable portable resources can now
+  be advertised by bounded JSON sidecars under `.contextbridge-resources` at
+  the mounted volume root
+- sidecars resolve a `root_relative_path` on their own volume, preserving the
+  stable pack ID across drive-letter and mount-path changes without placing a
+  file inside the resource tree
+
+### Security
+
+- sidecar targets must name one direct child of the scanned root, exist as a
+  real directory, and not be symlinks; manifests remain strict, bounded,
+  passive, loopback-only metadata and never gain autorun authority
+
 ## 0.5.78 - 2026-09-19
 
 ### Fixed

@@ -47,7 +47,7 @@ ChatGPT and Gemini are detected automatically from stable DOM and accessibility 
 - **Bounded model pipelines:** chain extraction, embeddings, retrieval, vision, and generation with fixed steps and explicit loop limits.
 - **Explicit scope:** only the chosen page origin and local service are requested.
 - **Local models:** route text and images to Ollama without adding another hosted service.
-- **Hot-plug resource packs:** recognize an optional local model kit or toolbox by a stable manifest ID rather than a changing drive letter, without recursively scanning it or executing inserted media ([portable-pack contract](docs/portable-resource-packs.md)).
+- **Hot-plug resource packs:** recognize an optional local model kit or toolbox by a stable manifest ID rather than a changing drive letter, without recursively scanning it or executing inserted media; sealed/checksummed trees can use a volume-root sidecar and remain untouched ([portable-pack contract](docs/portable-resource-packs.md)).
 - **OpenAI-compatible boundary:** let ordinary clients call route-backed `models` and `chat/completions`, or route explicitly to a reviewed compatible provider, with mandatory local authentication and fail-closed remote egress ([surface and limits](docs/openai-compatible-api.md)).
 - **Managed runtimes:** install an official `llama.cpp` release, verify its SHA256, and supervise it on localhost.
 - **Hardware awareness:** inspect RAM, VRAM, CUDA, ROCm, Metal, loaded models, and CPU fallback from CLI or dashboard.
@@ -529,7 +529,7 @@ Releases do not depend on GitHub Actions. From PowerShell, build every supported
 platform bundle, both extension archives, and `SHA256SUMS` locally:
 
 ```powershell
-.\scripts\build-release.ps1 -Version v0.5.78
+.\scripts\build-release.ps1 -Version v0.5.79
 ```
 
 Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md), use a focused issue for behavior changes, and include tests for routing or protocol work.
