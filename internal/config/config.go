@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"github.com/IamAngusU/ContextBridge/internal/cluster"
@@ -77,6 +78,8 @@ type Engine struct {
 	URL            string   `yaml:"url,omitempty" json:"url,omitempty"`
 	Model          string   `yaml:"model,omitempty" json:"model,omitempty"`
 	APIKey         string   `yaml:"api_key,omitempty" json:"-"`
+	APIKeyFile     string   `yaml:"api_key_file,omitempty" json:"-"`
+	ResolvedAPIKey string   `yaml:"-" json:"-"`
 	Remote         bool     `yaml:"remote,omitempty" json:"remote,omitempty"`
 	Capabilities   []string `yaml:"capabilities,omitempty" json:"capabilities,omitempty"`
 	ResourcePack   string   `yaml:"resource_pack,omitempty" json:"resource_pack,omitempty"`
@@ -208,10 +211,65 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("parse config: %w", err)
 	}
 	applyDefaults(&cfg, filepath.Dir(path))
+	if err := resolveEngineSecretFiles(&cfg, filepath.Dir(path)); err != nil {
+		return Config{}, err
+	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+const maximumProviderSecretBytes int64 = 16 << 10
+
+// EffectiveAPIKey returns an already resolved file secret when present, or the
+// explicitly configured inline/environment-expanded value otherwise. The
+// resolved value is deliberately excluded from YAML and JSON serialization so
+// loading and later saving a config can never copy a file secret into it.
+func (e Engine) EffectiveAPIKey() string {
+	if e.ResolvedAPIKey != "" {
+		return e.ResolvedAPIKey
+	}
+	return e.APIKey
+}
+
+func resolveEngineSecretFiles(cfg *Config, configDirectory string) error {
+	for name, engine := range cfg.Engines {
+		if strings.TrimSpace(engine.APIKey) != "" && strings.TrimSpace(engine.APIKeyFile) != "" {
+			return fmt.Errorf("engine %s must set only one of api_key or api_key_file", name)
+		}
+		if strings.TrimSpace(engine.APIKeyFile) == "" {
+			continue
+		}
+		secretPath := filepath.Clean(engine.APIKeyFile)
+		if !filepath.IsAbs(secretPath) {
+			secretPath = filepath.Join(configDirectory, secretPath)
+		}
+		info, err := os.Lstat(secretPath)
+		if err != nil {
+			return fmt.Errorf("engine %s api_key_file: %w", name, err)
+		}
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("engine %s api_key_file must be a regular non-symlink file", name)
+		}
+		if info.Size() <= 0 || info.Size() > maximumProviderSecretBytes {
+			return fmt.Errorf("engine %s api_key_file must contain 1 to %d bytes", name, maximumProviderSecretBytes)
+		}
+		if runtime.GOOS != "windows" && info.Mode().Perm()&0077 != 0 {
+			return fmt.Errorf("engine %s api_key_file permissions must deny group and other access", name)
+		}
+		raw, err := os.ReadFile(secretPath)
+		if err != nil {
+			return fmt.Errorf("engine %s api_key_file: %w", name, err)
+		}
+		secret := strings.TrimSpace(string(raw))
+		if secret == "" || strings.ContainsAny(secret, "\x00\r\n") {
+			return fmt.Errorf("engine %s api_key_file must contain exactly one non-empty secret line", name)
+		}
+		engine.ResolvedAPIKey = secret
+		cfg.Engines[name] = engine
+	}
+	return nil
 }
 
 func Save(path string, cfg Config) error {
@@ -312,6 +370,9 @@ func (c Config) Validate() error {
 			}
 		}
 		if engine.Type == "openai_compatible" {
+			if strings.TrimSpace(engine.APIKey) != "" && strings.TrimSpace(engine.APIKeyFile) != "" {
+				return fmt.Errorf("engine %s must set only one of api_key or api_key_file", name)
+			}
 			if engine.Model == "" {
 				return fmt.Errorf("engine %s requires an explicit model", name)
 			}
@@ -326,7 +387,8 @@ func (c Config) Validate() error {
 				if remote && !engine.Remote {
 					return fmt.Errorf("engine %s must set remote: true before prompts may leave this device", name)
 				}
-				if remote && (strings.TrimSpace(engine.APIKey) == "" || strings.Contains(engine.APIKey, "${")) {
+				secret := strings.TrimSpace(engine.EffectiveAPIKey())
+				if remote && (secret == "" || strings.Contains(secret, "${")) {
 					return fmt.Errorf("engine %s requires a resolved api_key for remote access", name)
 				}
 			}

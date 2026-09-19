@@ -78,7 +78,7 @@ engines:
     type: openai_compatible
     url: https://your-reviewed-provider.example/v1
     model: your-exact-model-id
-    api_key: ${REMOTE_AI_API_KEY}
+    api_key_file: ./secrets/remote-ai.key
     remote: true
     capabilities: [text]
     timeout_seconds: 120
@@ -89,6 +89,15 @@ routes:
     fallback: []
     timeout_seconds: 120
 ```
+
+`api_key_file` is resolved relative to `config.yml` unless it is absolute. It
+must be a regular, non-symlinked file of at most 16 KiB containing exactly one
+non-empty secret line. On Unix, group/other permissions are rejected. On
+Windows, protect the file with an ACL granting only the account that runs
+ContextBridge. `api_key` and `api_key_file` are mutually exclusive. A resolved
+file secret is held in memory for provider requests but is excluded from YAML
+and public JSON serialization, so a later config save cannot copy it into
+`config.yml`.
 
 Loopback HTTP endpoints are allowed without `remote: true`; non-loopback HTTP
 is rejected. Provider keys are omitted from public config JSON/status. The
@@ -121,4 +130,3 @@ Offline Arsenal -> authenticated ContextBridge route -> hot-plug ModelKit -> Oll
 On 2026-09-19 that local chain returned the exact marker
 `ARSENAL-CONTEXTBRIDGE-MODELKIT-OK`. This is a dated integration observation,
 not a universal latency or compatibility promise.
-

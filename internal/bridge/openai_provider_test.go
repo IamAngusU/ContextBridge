@@ -45,7 +45,7 @@ func TestOpenAICompatibleProviderUsesAuthAndTrustedModel(t *testing.T) {
 	defer provider.Close()
 	cfg := config.Config{
 		Routes:  map[string]config.Route{"default": {Provider: "remote", Model: "trusted-model"}},
-		Engines: map[string]config.Engine{"remote": {Type: "openai_compatible", URL: provider.URL + "/v1", Model: "trusted-model", APIKey: "provider-secret", Capabilities: []string{"text"}, TimeoutSeconds: 5}},
+		Engines: map[string]config.Engine{"remote": {Type: "openai_compatible", URL: provider.URL + "/v1", Model: "trusted-model", APIKeyFile: "secret.key", ResolvedAPIKey: "provider-secret", Capabilities: []string{"text"}, TimeoutSeconds: 5}},
 	}
 	output := NewProcessor(cfg, nil).Process(context.Background(), Job{Prompt: "reply exactly", Text: "untrusted", Output: OutputSpec{Mode: "text"}})
 	if output.Error != "" || output.Text != "REMOTE-OK" || output.Provider != "remote" || output.Model != "trusted-model" || output.TotalTokens != 5 {

@@ -2,7 +2,9 @@ package config
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -58,5 +60,174 @@ func TestOpenAICompatibleSecretIsNotInPublicConfigJSON(t *testing.T) {
 	}
 	if strings.Contains(string(raw), "secret-provider-key") {
 		t.Fatal("provider API key leaked through the public config JSON shape")
+	}
+}
+
+func TestOpenAICompatibleSecretFileResolvesWithoutPersistingSecret(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "config.yml")
+	if err := Default(path); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secretDirectory := filepath.Join(directory, "secrets")
+	if err := os.MkdirAll(secretDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	secretPath := filepath.Join(secretDirectory, "deepseek.key")
+	const secret = "file-only-provider-secret"
+	if err := os.WriteFile(secretPath, []byte(secret+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Routes["deepseek"] = Route{Provider: "deepseek", Task: "generation"}
+	cfg.Engines["deepseek"] = Engine{
+		Type: "openai_compatible", URL: "https://api.example.test/v1", Model: "deepseek-v4.1",
+		APIKeyFile: filepath.Join("secrets", "deepseek.key"), Remote: true, Capabilities: []string{"text"},
+	}
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := loaded.Engines["deepseek"]
+	if engine.EffectiveAPIKey() != secret || engine.ResolvedAPIKey != secret {
+		t.Fatal("file-backed provider secret was not resolved")
+	}
+	public, err := json.Marshal(loaded)
+	if err != nil || strings.Contains(string(public), secret) || strings.Contains(string(public), secretPath) {
+		t.Fatal("provider secret or secret path leaked through public JSON")
+	}
+	secondPath := filepath.Join(directory, "saved.yml")
+	if err := Save(secondPath, loaded); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := os.ReadFile(secondPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(saved), secret) || !strings.Contains(string(saved), "api_key_file: secrets") {
+		t.Fatalf("save copied a file secret or lost its reference: %s", saved)
+	}
+}
+
+func TestOpenAICompatibleSecretFileFailsClosed(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "config.yml")
+	if err := Default(path); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Routes["deepseek"] = Route{Provider: "deepseek", Task: "generation"}
+	cfg.Engines["deepseek"] = Engine{
+		Type: "openai_compatible", URL: "https://api.example.test/v1", Model: "deepseek-v4.1",
+		APIKeyFile: "missing.key", Remote: true, Capabilities: []string{"text"},
+	}
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "api_key_file") {
+		t.Fatalf("missing provider secret file was accepted: %v", err)
+	}
+	secretPath := filepath.Join(directory, "missing.key")
+	if err := os.WriteFile(secretPath, []byte("first\nsecond\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "exactly one") {
+		t.Fatalf("multi-line provider secret was accepted: %v", err)
+	}
+}
+
+func TestOpenAICompatibleSecretFileRejectsAmbiguousAndOversizedSources(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "config.yml")
+	if err := Default(path); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secretPath := filepath.Join(directory, "deepseek.key")
+	if err := os.WriteFile(secretPath, []byte("file-secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Routes["deepseek"] = Route{Provider: "deepseek", Task: "generation"}
+	cfg.Engines["deepseek"] = Engine{
+		Type: "openai_compatible", URL: "https://api.example.test/v1", Model: "deepseek-v4.1",
+		APIKey: "inline-secret", APIKeyFile: "deepseek.key", Remote: true, Capabilities: []string{"text"},
+	}
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "only one") {
+		t.Fatalf("ambiguous inline and file-backed secrets were accepted: %v", err)
+	}
+
+	engine := cfg.Engines["deepseek"]
+	engine.APIKey = ""
+	cfg.Engines["deepseek"] = engine
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secretPath, make([]byte, maximumProviderSecretBytes+1), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "1 to") {
+		t.Fatalf("oversized provider secret was accepted: %v", err)
+	}
+}
+
+func TestOpenAICompatibleSecretFileRejectsSymlinkAndLooseUnixPermissions(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "config.yml")
+	if err := Default(path); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetPath := filepath.Join(directory, "target.key")
+	if err := os.WriteFile(targetPath, []byte("target-secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(directory, "linked.key")
+	if err := os.Symlink(targetPath, linkPath); err != nil {
+		t.Skipf("symlink creation is unavailable on this host: %v", err)
+	}
+	cfg.Routes["deepseek"] = Route{Provider: "deepseek", Task: "generation"}
+	cfg.Engines["deepseek"] = Engine{
+		Type: "openai_compatible", URL: "https://api.example.test/v1", Model: "deepseek-v4.1",
+		APIKeyFile: "linked.key", Remote: true, Capabilities: []string{"text"},
+	}
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "non-symlink") {
+		t.Fatalf("symlinked provider secret was accepted: %v", err)
+	}
+
+	if runtime.GOOS == "windows" {
+		return
+	}
+	engine := cfg.Engines["deepseek"]
+	engine.APIKeyFile = "target.key"
+	cfg.Engines["deepseek"] = engine
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(targetPath, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "permissions") {
+		t.Fatalf("world-readable provider secret was accepted: %v", err)
 	}
 }

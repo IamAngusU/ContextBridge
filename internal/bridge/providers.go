@@ -299,7 +299,7 @@ func (p *Processor) openAICompatibleEmbedding(ctx context.Context, job Job, engi
 }
 
 func applyOpenAIEngineAuth(request *http.Request, engine config.Engine) {
-	if key := strings.TrimSpace(engine.APIKey); key != "" {
+	if key := strings.TrimSpace(engine.EffectiveAPIKey()); key != "" {
 		request.Header.Set("Authorization", "Bearer "+key)
 	}
 }
