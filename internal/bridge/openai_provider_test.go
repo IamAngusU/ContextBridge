@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -53,6 +54,90 @@ func TestOpenAICompatibleProviderUsesAuthAndTrustedModel(t *testing.T) {
 	}
 	if receivedModel != "trusted-model" || !strings.Contains(receivedPrompt, "Trusted task instructions:\nreply exactly") || !strings.Contains(receivedPrompt, "<submitted_content>\nuntrusted") {
 		t.Fatalf("provider request lost trust/model boundaries: model=%q prompt=%q", receivedModel, receivedPrompt)
+	}
+}
+
+func TestOpenAICompatibleProviderGuardsBalanceAndReportsUpperBoundCost(t *testing.T) {
+	balanceCalls, completionCalls := 0, 0
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer provider-secret" {
+			http.Error(w, "missing auth", http.StatusUnauthorized)
+			return
+		}
+		switch request.URL.Path {
+		case "/user/balance":
+			balanceCalls++
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"is_available":  true,
+				"balance_infos": []map[string]string{{"currency": "USD", "total_balance": "9.76"}},
+			})
+		case "/v1/chat/completions":
+			completionCalls++
+			var payload struct {
+				MaxTokens       int    `json:"max_tokens"`
+				ReasoningEffort string `json:"reasoning_effort"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload.MaxTokens != 64 || payload.ReasoningEffort != "low" {
+				t.Fatalf("bounded provider settings were not sent: %#v", payload)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"choices": []map[string]interface{}{{"message": map[string]string{"content": "BUDGET-OK"}}},
+				"usage": map[string]int{
+					"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110,
+					"prompt_cache_hit_tokens": 40, "prompt_cache_miss_tokens": 60,
+				},
+			})
+		default:
+			http.NotFound(w, request)
+		}
+	}))
+	defer provider.Close()
+	cfg := config.Config{
+		Routes: map[string]config.Route{"default": {Provider: "deepseek"}},
+		Engines: map[string]config.Engine{"deepseek": {
+			Type: "openai_compatible", URL: provider.URL + "/v1", Model: "deepseek-flash", ResolvedAPIKey: "provider-secret", Capabilities: []string{"text"}, TimeoutSeconds: 5,
+			MaxOutputTokens: 64, ReasoningEffort: "low", BalancePath: "/user/balance", MinimumBalanceUSD: 5,
+			Costing: config.EngineCosting{Mode: "upper_bound", Source: "official peak table", InputPerMillionUSD: 0.30, CachedInputPerMillionUSD: 0.006, OutputPerMillionUSD: 1.20},
+		}},
+	}
+	output := NewProcessor(cfg, nil).Process(context.Background(), Job{Prompt: "reply exactly", Output: OutputSpec{Mode: "text"}})
+	if output.Error != "" || output.Text != "BUDGET-OK" || balanceCalls != 1 || completionCalls != 1 {
+		t.Fatalf("guarded provider request failed: output=%#v balance=%d completion=%d", output, balanceCalls, completionCalls)
+	}
+	want := 60.0/1_000_000*0.30 + 40.0/1_000_000*0.006 + 10.0/1_000_000*1.20
+	if output.CostStatus != "upper_bound" || output.CostSource != "official peak table" || math.Abs(output.EstimatedCostUSD-want) > 1e-12 || output.ReservedCostUSD <= output.EstimatedCostUSD {
+		t.Fatalf("cost evidence is not explicit and conservative: %#v want=%g", output, want)
+	}
+}
+
+func TestOpenAICompatibleProviderStopsBeforeSpendingBelowBalanceFloor(t *testing.T) {
+	completionCalls := 0
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/user/balance" {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"is_available":  true,
+				"balance_infos": []map[string]string{{"currency": "USD", "total_balance": "5.00001"}},
+			})
+			return
+		}
+		completionCalls++
+		http.Error(w, "must not spend", http.StatusInternalServerError)
+	}))
+	defer provider.Close()
+	cfg := config.Config{
+		Routes: map[string]config.Route{"default": {Provider: "deepseek"}},
+		Engines: map[string]config.Engine{"deepseek": {
+			Type: "openai_compatible", URL: provider.URL + "/v1", Model: "deepseek-flash", ResolvedAPIKey: "provider-secret", Capabilities: []string{"text"}, TimeoutSeconds: 5,
+			MaxOutputTokens: 64, BalancePath: "/user/balance", MinimumBalanceUSD: 5,
+			Costing: config.EngineCosting{Mode: "upper_bound", Source: "ceiling", InputPerMillionUSD: 0.30, OutputPerMillionUSD: 1.20},
+		}},
+	}
+	output := NewProcessor(cfg, nil).Process(context.Background(), Job{Prompt: "do not spend", Output: OutputSpec{Mode: "text"}})
+	if output.Error != "providers_unavailable" || completionCalls != 0 {
+		t.Fatalf("balance floor did not stop before provider generation: output=%#v calls=%d", output, completionCalls)
 	}
 }
 

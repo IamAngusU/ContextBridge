@@ -1222,6 +1222,18 @@ func extractUsage(raw []byte) Usage {
 			usage.OutputTokens = maxU64(usage.OutputTokens, uint64(number))
 		case "total_tokens":
 			usage.TotalTokens = maxU64(usage.TotalTokens, uint64(number))
+		case "reserved_cost_usd":
+			usage.ReservedCostUSD = maxFloat64(usage.ReservedCostUSD, number)
+		case "estimated_cost_usd":
+			usage.EstimatedCostUSD = maxFloat64(usage.EstimatedCostUSD, number)
+		}
+	})
+	walkStrings(value, func(key, text string) {
+		switch strings.ToLower(key) {
+		case "cost_status":
+			usage.CostStatus = strings.ToLower(strings.TrimSpace(text))
+		case "cost_source":
+			usage.CostSource = truncateUTF8Bytes(strings.TrimSpace(text), 200)
 		}
 	})
 	if usage.TotalTokens == 0 {
@@ -1262,7 +1274,30 @@ func walkNumbers(value interface{}, visit func(string, float64)) {
 	}
 }
 
+func walkStrings(value interface{}, visit func(string, string)) {
+	switch current := value.(type) {
+	case map[string]interface{}:
+		for key, child := range current {
+			if text, ok := child.(string); ok {
+				visit(key, text)
+			}
+			walkStrings(child, visit)
+		}
+	case []interface{}:
+		for _, child := range current {
+			walkStrings(child, visit)
+		}
+	}
+}
+
 func maxU64(a, b uint64) uint64 {
+	if b > a {
+		return b
+	}
+	return a
+}
+
+func maxFloat64(a, b float64) float64 {
 	if b > a {
 		return b
 	}

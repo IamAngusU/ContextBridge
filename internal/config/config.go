@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/url"
 	"os"
@@ -74,24 +75,40 @@ type Route struct {
 }
 
 type Engine struct {
-	Type           string   `yaml:"type" json:"type"`
-	URL            string   `yaml:"url,omitempty" json:"url,omitempty"`
-	Model          string   `yaml:"model,omitempty" json:"model,omitempty"`
-	APIKey         string   `yaml:"api_key,omitempty" json:"-"`
-	APIKeyFile     string   `yaml:"api_key_file,omitempty" json:"-"`
-	ResolvedAPIKey string   `yaml:"-" json:"-"`
-	Remote         bool     `yaml:"remote,omitempty" json:"remote,omitempty"`
-	Capabilities   []string `yaml:"capabilities,omitempty" json:"capabilities,omitempty"`
-	ResourcePack   string   `yaml:"resource_pack,omitempty" json:"resource_pack,omitempty"`
-	Endpoint       string   `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`
-	Executable     string   `yaml:"executable,omitempty" json:"executable,omitempty"`
-	Listen         string   `yaml:"listen,omitempty" json:"listen,omitempty"`
-	AutoStart      bool     `yaml:"auto_start,omitempty" json:"auto_start,omitempty"`
-	GPU            string   `yaml:"gpu,omitempty" json:"gpu,omitempty"`
-	Mode           string   `yaml:"mode,omitempty" json:"mode,omitempty"`
-	Pooling        string   `yaml:"pooling,omitempty" json:"pooling,omitempty"`
-	TimeoutSeconds int      `yaml:"timeout_seconds,omitempty" json:"timeout_seconds,omitempty"`
-	Args           []string `yaml:"args,omitempty" json:"args,omitempty"`
+	Type              string        `yaml:"type" json:"type"`
+	URL               string        `yaml:"url,omitempty" json:"url,omitempty"`
+	Model             string        `yaml:"model,omitempty" json:"model,omitempty"`
+	APIKey            string        `yaml:"api_key,omitempty" json:"-"`
+	APIKeyFile        string        `yaml:"api_key_file,omitempty" json:"-"`
+	ResolvedAPIKey    string        `yaml:"-" json:"-"`
+	Remote            bool          `yaml:"remote,omitempty" json:"remote,omitempty"`
+	Capabilities      []string      `yaml:"capabilities,omitempty" json:"capabilities,omitempty"`
+	ResourcePack      string        `yaml:"resource_pack,omitempty" json:"resource_pack,omitempty"`
+	Endpoint          string        `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`
+	Executable        string        `yaml:"executable,omitempty" json:"executable,omitempty"`
+	Listen            string        `yaml:"listen,omitempty" json:"listen,omitempty"`
+	AutoStart         bool          `yaml:"auto_start,omitempty" json:"auto_start,omitempty"`
+	GPU               string        `yaml:"gpu,omitempty" json:"gpu,omitempty"`
+	Mode              string        `yaml:"mode,omitempty" json:"mode,omitempty"`
+	Pooling           string        `yaml:"pooling,omitempty" json:"pooling,omitempty"`
+	TimeoutSeconds    int           `yaml:"timeout_seconds,omitempty" json:"timeout_seconds,omitempty"`
+	MaxOutputTokens   int           `yaml:"max_output_tokens,omitempty" json:"max_output_tokens,omitempty"`
+	ReasoningEffort   string        `yaml:"reasoning_effort,omitempty" json:"reasoning_effort,omitempty"`
+	BalancePath       string        `yaml:"balance_path,omitempty" json:"balance_path,omitempty"`
+	MinimumBalanceUSD float64       `yaml:"minimum_balance_usd,omitempty" json:"minimum_balance_usd,omitempty"`
+	Costing           EngineCosting `yaml:"costing,omitempty" json:"costing,omitempty"`
+	Args              []string      `yaml:"args,omitempty" json:"args,omitempty"`
+}
+
+// EngineCosting describes an operator-reviewed cost ceiling. It is not an
+// invoice: provider-reported token counts are multiplied by these configured
+// rates and remain explicitly labelled as an upper-bound estimate.
+type EngineCosting struct {
+	Mode                     string  `yaml:"mode,omitempty" json:"mode,omitempty"`
+	Source                   string  `yaml:"source,omitempty" json:"source,omitempty"`
+	InputPerMillionUSD       float64 `yaml:"input_per_million_usd,omitempty" json:"input_per_million_usd,omitempty"`
+	CachedInputPerMillionUSD float64 `yaml:"cached_input_per_million_usd,omitempty" json:"cached_input_per_million_usd,omitempty"`
+	OutputPerMillionUSD      float64 `yaml:"output_per_million_usd,omitempty" json:"output_per_million_usd,omitempty"`
 }
 
 type Model struct {
@@ -395,6 +412,31 @@ func (c Config) Validate() error {
 			if len(engine.Capabilities) == 0 {
 				return fmt.Errorf("engine %s requires explicit capabilities", name)
 			}
+			if engine.MaxOutputTokens < 0 || engine.MaxOutputTokens > 1_000_000 {
+				return fmt.Errorf("engine %s max_output_tokens must be between 1 and 1000000 when set", name)
+			}
+			if engine.ReasoningEffort != "" {
+				switch strings.ToLower(strings.TrimSpace(engine.ReasoningEffort)) {
+				case "none", "low", "high", "max":
+				default:
+					return fmt.Errorf("engine %s reasoning_effort must be none, low, high, or max", name)
+				}
+			}
+			if engine.BalancePath != "" {
+				parsed, err := url.Parse(engine.BalancePath)
+				if err != nil || !strings.HasPrefix(engine.BalancePath, "/") || strings.HasPrefix(engine.BalancePath, "//") || parsed.IsAbs() || parsed.Host != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+					return fmt.Errorf("engine %s balance_path must be an absolute path on the configured provider origin", name)
+				}
+			}
+			if math.IsNaN(engine.MinimumBalanceUSD) || math.IsInf(engine.MinimumBalanceUSD, 0) || engine.MinimumBalanceUSD < 0 || engine.MinimumBalanceUSD > 1_000_000_000 {
+				return fmt.Errorf("engine %s minimum_balance_usd is invalid", name)
+			}
+			if err := validateEngineCosting(name, engine.Costing); err != nil {
+				return err
+			}
+			if engine.MinimumBalanceUSD > 0 && (engine.BalancePath == "" || engine.MaxOutputTokens == 0 || engine.Costing.Mode != "upper_bound") {
+				return fmt.Errorf("engine %s minimum_balance_usd requires balance_path, max_output_tokens, and upper_bound costing", name)
+			}
 		}
 		for _, capability := range engine.Capabilities {
 			switch strings.ToLower(strings.TrimSpace(capability)) {
@@ -478,6 +520,18 @@ func (c Config) Validate() error {
 	}
 	if c.Cluster.Worker.Enabled && !strings.HasPrefix(c.Cluster.Worker.RelayURL, "https://") && !strings.HasPrefix(c.Cluster.Worker.RelayURL, "http://127.0.0.1:") && !strings.HasPrefix(c.Cluster.Worker.RelayURL, "http://localhost:") {
 		return errors.New("cluster.worker.relay_url must use HTTPS or localhost")
+	}
+	pricingRates := []float64{c.Cluster.Pricing.ComputePerHourUSD, c.Cluster.Pricing.InputPerMillionUSD, c.Cluster.Pricing.OutputPerMillionUSD, c.Cluster.Pricing.EquivalentInputUSD, c.Cluster.Pricing.EquivalentOutputUSD}
+	for _, rate := range pricingRates {
+		if math.IsNaN(rate) || math.IsInf(rate, 0) || rate < 0 || rate > 1_000_000 {
+			return errors.New("cluster.pricing rates must be finite non-negative USD values")
+		}
+	}
+	if c.Cluster.Pricing.Mode != "" && c.Cluster.Pricing.Mode != "estimated" {
+		return errors.New("cluster.pricing.mode must be estimated when set")
+	}
+	if c.Cluster.Pricing.Mode == "estimated" && strings.TrimSpace(c.Cluster.Pricing.Source) == "" {
+		return errors.New("cluster.pricing.source is required for estimated costs")
 	}
 	for name, pipeline := range c.Cluster.Pipelines {
 		if !safeNamePattern.MatchString(name) || len(pipeline.Steps) == 0 || len(pipeline.Steps) > c.Cluster.Policies.MaxSteps {
@@ -713,6 +767,12 @@ func applyDefaults(cfg *Config, base string) {
 	if cfg.Cluster.Policies.MaxRuntime <= 0 {
 		cfg.Cluster.Policies.MaxRuntime = 1800
 	}
+	if cfg.Cluster.Pricing.Mode == "" && (cfg.Cluster.Pricing.ComputePerHourUSD > 0 || cfg.Cluster.Pricing.InputPerMillionUSD > 0 || cfg.Cluster.Pricing.OutputPerMillionUSD > 0) {
+		cfg.Cluster.Pricing.Mode = "estimated"
+		if strings.TrimSpace(cfg.Cluster.Pricing.Source) == "" {
+			cfg.Cluster.Pricing.Source = "legacy_relay_config"
+		}
+	}
 	if cfg.Cluster.Pipelines == nil {
 		cfg.Cluster.Pipelines = map[string]cluster.Pipeline{}
 	}
@@ -726,6 +786,34 @@ var sha256Pattern = regexp.MustCompile(`^[A-Fa-f0-9]{64}$`)
 var reservedRuntimeFlags = map[string]bool{
 	"--host": true, "--port": true, "--model": true, "-m": true, "--mmproj": true,
 	"--n-gpu-layers": true, "-ngl": true, "--embedding": true, "--pooling": true,
+}
+
+func validateEngineCosting(name string, costing EngineCosting) error {
+	rates := []float64{costing.InputPerMillionUSD, costing.CachedInputPerMillionUSD, costing.OutputPerMillionUSD}
+	for _, rate := range rates {
+		if math.IsNaN(rate) || math.IsInf(rate, 0) || rate < 0 || rate > 1_000_000 {
+			return fmt.Errorf("engine %s costing rates must be finite non-negative USD values", name)
+		}
+	}
+	switch costing.Mode {
+	case "":
+		if costing.Source != "" || costing.InputPerMillionUSD != 0 || costing.CachedInputPerMillionUSD != 0 || costing.OutputPerMillionUSD != 0 {
+			return fmt.Errorf("engine %s costing rates require mode: upper_bound", name)
+		}
+	case "upper_bound":
+		if strings.TrimSpace(costing.Source) == "" || len(costing.Source) > 200 {
+			return fmt.Errorf("engine %s upper_bound costing requires a short source", name)
+		}
+		if costing.InputPerMillionUSD == 0 || costing.OutputPerMillionUSD == 0 {
+			return fmt.Errorf("engine %s upper_bound costing requires positive input and output rates", name)
+		}
+		if costing.CachedInputPerMillionUSD > costing.InputPerMillionUSD {
+			return fmt.Errorf("engine %s cached input rate cannot exceed its input ceiling", name)
+		}
+	default:
+		return fmt.Errorf("engine %s costing mode must be upper_bound when set", name)
+	}
+	return nil
 }
 
 // validateProviderURL returns true only for non-loopback HTTPS endpoints.

@@ -426,6 +426,8 @@ func mergeStoredNodeState(node *Node, existing Node) {
 	node.JobsFailed = existing.JobsFailed
 	node.ComputeMS = existing.ComputeMS
 	node.CostUSD = existing.CostUSD
+	node.CostKnownJobs = existing.CostKnownJobs
+	node.CostUnknownJobs = existing.CostUnknownJobs
 	if node.PublicKey == "" {
 		node.PublicKey = existing.PublicKey
 	}
@@ -1535,6 +1537,8 @@ func (s *Store) CompleteJob(id, nodeID string, attempt int, result json.RawMessa
 				}
 				node.ComputeMS += usage.ComputeMS
 				node.CostUSD += usage.EstimatedCostUSD
+				node.CostKnownJobs = saturatingUint64Add(node.CostKnownJobs, usage.CostKnownJobs)
+				node.CostUnknownJobs = saturatingUint64Add(node.CostUnknownJobs, usage.CostUnknownJobs)
 				_ = putJSON(tx.Bucket(bucketNodes), node.ID, node)
 			}
 		}
@@ -2022,6 +2026,12 @@ func (s *Store) Overview() (Overview, error) {
 		}
 		overview.Usage.ComputeMS += node.ComputeMS
 		overview.Usage.EstimatedCostUSD += node.CostUSD
+		overview.Usage.CostKnownJobs = saturatingUint64Add(overview.Usage.CostKnownJobs, node.CostKnownJobs)
+		overview.Usage.CostUnknownJobs = saturatingUint64Add(overview.Usage.CostUnknownJobs, node.CostUnknownJobs)
+		accounted := saturatingUint64Add(node.CostKnownJobs, node.CostUnknownJobs)
+		if node.JobsTotal > accounted {
+			overview.Usage.CostUnknownJobs = saturatingUint64Add(overview.Usage.CostUnknownJobs, node.JobsTotal-accounted)
+		}
 	}
 	err = s.db.View(func(tx *bolt.Tx) error {
 		totals, err := readHistoricalJobTotals(tx.Bucket(bucketHistoricalTotals))
@@ -2043,6 +2053,7 @@ func (s *Store) Overview() (Overview, error) {
 			return nil
 		})
 	})
+	overview.Usage.CostStatus = aggregateCostStatus(overview.Usage.CostKnownJobs, overview.Usage.CostUnknownJobs, overview.Usage.CostStatus, "")
 	return overview, err
 }
 

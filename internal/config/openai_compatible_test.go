@@ -231,3 +231,32 @@ func TestOpenAICompatibleSecretFileRejectsSymlinkAndLooseUnixPermissions(t *test
 		t.Fatalf("world-readable provider secret was accepted: %v", err)
 	}
 }
+
+func TestOpenAICompatibleBalanceFloorRequiresBoundedReviewedCosting(t *testing.T) {
+	cfg := validOpenAICompatibleConfig(t)
+	engine := cfg.Engines["deepseek"]
+	engine.BalancePath = "/user/balance"
+	engine.MinimumBalanceUSD = 5
+	engine.MaxOutputTokens = 1024
+	engine.ReasoningEffort = "low"
+	engine.Costing = EngineCosting{
+		Mode: "upper_bound", Source: "official peak pricing", InputPerMillionUSD: 0.30,
+		CachedInputPerMillionUSD: 0.006, OutputPerMillionUSD: 1.20,
+	}
+	cfg.Engines["deepseek"] = engine
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid guarded remote engine was rejected: %v", err)
+	}
+
+	engine.BalancePath = "https://attacker.example/balance"
+	cfg.Engines["deepseek"] = engine
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "balance_path") {
+		t.Fatalf("cross-origin balance URL was accepted: %v", err)
+	}
+	engine.BalancePath = "/user/balance"
+	engine.Costing.Mode = ""
+	cfg.Engines["deepseek"] = engine
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "costing") {
+		t.Fatalf("unguarded balance floor was accepted: %v", err)
+	}
+}

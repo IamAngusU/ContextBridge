@@ -1683,8 +1683,18 @@ func clusterStatusCommand(args []string) error {
 			fmt.Printf("      Models  [%s]\n", strings.Join(names, " · "))
 		}
 	}
-	fmt.Printf("Jobs  [%d completed]  [%d failed]  [%.2f compute hours]\n", overview.JobsByState[cluster.JobCompleted], overview.JobsByState[cluster.JobFailed], float64(overview.Usage.ComputeMS)/3600000)
+	fmt.Printf("Jobs  [%d completed]  [%d failed]  [%.2f compute hours]  %s\n", overview.JobsByState[cluster.JobCompleted], overview.JobsByState[cluster.JobFailed], float64(overview.Usage.ComputeMS)/3600000, formatClusterCost(overview.Usage))
 	return nil
+}
+
+func formatClusterCost(usage cluster.Usage) string {
+	if usage.CostKnownJobs == 0 {
+		return fmt.Sprintf("[cost unknown · %d jobs]", usage.CostUnknownJobs)
+	}
+	if usage.CostUnknownJobs > 0 {
+		return fmt.Sprintf("[tracked cost estimate $%.6f · %d known / %d unknown jobs]", usage.EstimatedCostUSD, usage.CostKnownJobs, usage.CostUnknownJobs)
+	}
+	return fmt.Sprintf("[tracked cost estimate $%.6f · %d jobs]", usage.EstimatedCostUSD, usage.CostKnownJobs)
 }
 
 func formatUTCOffset(seconds int) string {

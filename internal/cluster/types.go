@@ -45,6 +45,12 @@ const (
 	JobCompleted = "completed"
 	JobFailed    = "failed"
 	JobCancelled = "cancelled"
+
+	CostUnknown    = "unknown"
+	CostEstimated  = "estimated"
+	CostUpperBound = "upper_bound"
+	CostActual     = "actual"
+	CostPartial    = "partial"
 )
 
 type Requirements struct {
@@ -157,19 +163,21 @@ type Capabilities struct {
 }
 
 type Node struct {
-	ID            string       `json:"id"`
-	Name          string       `json:"name"`
-	PublicKey     string       `json:"public_key,omitempty"`
-	Capabilities  Capabilities `json:"capabilities"`
-	State         string       `json:"state"`
-	Connected     bool         `json:"connected"`
-	LastSeen      time.Time    `json:"last_seen"`
-	ClockOffsetMS int64        `json:"clock_offset_ms,omitempty"`
-	ConnectedAt   time.Time    `json:"connected_at,omitempty"`
-	JobsTotal     uint64       `json:"jobs_total"`
-	JobsFailed    uint64       `json:"jobs_failed"`
-	ComputeMS     uint64       `json:"compute_ms"`
-	CostUSD       float64      `json:"cost_usd"`
+	ID              string       `json:"id"`
+	Name            string       `json:"name"`
+	PublicKey       string       `json:"public_key,omitempty"`
+	Capabilities    Capabilities `json:"capabilities"`
+	State           string       `json:"state"`
+	Connected       bool         `json:"connected"`
+	LastSeen        time.Time    `json:"last_seen"`
+	ClockOffsetMS   int64        `json:"clock_offset_ms,omitempty"`
+	ConnectedAt     time.Time    `json:"connected_at,omitempty"`
+	JobsTotal       uint64       `json:"jobs_total"`
+	JobsFailed      uint64       `json:"jobs_failed"`
+	ComputeMS       uint64       `json:"compute_ms"`
+	CostUSD         float64      `json:"cost_usd"`
+	CostKnownJobs   uint64       `json:"cost_known_jobs,omitempty"`
+	CostUnknownJobs uint64       `json:"cost_unknown_jobs,omitempty"`
 }
 
 type Usage struct {
@@ -178,9 +186,14 @@ type Usage struct {
 	TotalTokens       uint64  `json:"total_tokens,omitempty"`
 	ComputeMS         uint64  `json:"compute_ms,omitempty"`
 	QueueMS           uint64  `json:"queue_ms,omitempty"`
+	CostStatus        string  `json:"cost_status"`
+	CostSource        string  `json:"cost_source,omitempty"`
+	ReservedCostUSD   float64 `json:"reserved_cost_usd,omitempty"`
 	EstimatedCostUSD  float64 `json:"estimated_cost_usd,omitempty"`
 	EquivalentCostUSD float64 `json:"equivalent_cloud_cost_usd,omitempty"`
 	SavedCostUSD      float64 `json:"saved_cost_usd,omitempty"`
+	CostKnownJobs     uint64  `json:"cost_known_jobs,omitempty"`
+	CostUnknownJobs   uint64  `json:"cost_unknown_jobs,omitempty"`
 	// Peak resource values are attributable measurements reported by the
 	// execution engine. Node-wide hardware snapshots must not populate them or
 	// set ResourceScope to "job".
@@ -357,6 +370,8 @@ type WireMessage struct {
 }
 
 type Pricing struct {
+	Mode                string  `json:"mode,omitempty" yaml:"mode,omitempty"`
+	Source              string  `json:"source,omitempty" yaml:"source,omitempty"`
 	ComputePerHourUSD   float64 `json:"compute_per_hour_usd" yaml:"compute_per_hour_usd"`
 	InputPerMillionUSD  float64 `json:"input_per_million_usd" yaml:"input_per_million_usd"`
 	OutputPerMillionUSD float64 `json:"output_per_million_usd" yaml:"output_per_million_usd"`

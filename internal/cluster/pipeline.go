@@ -355,9 +355,18 @@ func mergeUsage(target *Usage, value Usage) {
 	target.TotalTokens += value.TotalTokens
 	target.ComputeMS += value.ComputeMS
 	target.QueueMS += value.QueueMS
+	target.ReservedCostUSD += value.ReservedCostUSD
 	target.EstimatedCostUSD += value.EstimatedCostUSD
 	target.EquivalentCostUSD += value.EquivalentCostUSD
 	target.SavedCostUSD += value.SavedCostUSD
+	target.CostKnownJobs += value.CostKnownJobs
+	target.CostUnknownJobs += value.CostUnknownJobs
+	target.CostStatus = aggregateCostStatus(target.CostKnownJobs, target.CostUnknownJobs, target.CostStatus, value.CostStatus)
+	if target.CostSource == "" {
+		target.CostSource = value.CostSource
+	} else if value.CostSource != "" && target.CostSource != value.CostSource {
+		target.CostSource = "multiple"
+	}
 	if value.ResourceScope == "job" {
 		target.ResourceScope = "job"
 		if value.PeakVRAMBytes > target.PeakVRAMBytes {
@@ -370,4 +379,20 @@ func mergeUsage(target *Usage, value Usage) {
 			target.PeakGPUUtilization = value.PeakGPUUtilization
 		}
 	}
+}
+
+func aggregateCostStatus(known, unknown uint64, current, next string) string {
+	if known > 0 && unknown > 0 {
+		return CostPartial
+	}
+	if unknown > 0 {
+		return CostUnknown
+	}
+	if current == "" {
+		return next
+	}
+	if next == "" || current == next {
+		return current
+	}
+	return CostPartial
 }

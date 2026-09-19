@@ -110,6 +110,10 @@ type Output struct {
 	InputTokens       uint64              `json:"input_tokens,omitempty"`
 	OutputTokens      uint64              `json:"output_tokens,omitempty"`
 	TotalTokens       uint64              `json:"total_tokens,omitempty"`
+	CostStatus        string              `json:"cost_status,omitempty"`
+	CostSource        string              `json:"cost_source,omitempty"`
+	ReservedCostUSD   float64             `json:"reserved_cost_usd,omitempty"`
+	EstimatedCostUSD  float64             `json:"estimated_cost_usd,omitempty"`
 	Artifacts         []Artifact          `json:"artifacts,omitempty"`
 	// ContextBridgeBrowserTabID is internal execution metadata reported by the
 	// browser extension. It records the concrete tab that actually executed a
