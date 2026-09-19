@@ -2,6 +2,23 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.77 - 2026-09-19
+
+### Fixed
+
+- a foreground-recovered ChatGPT turn can now finish after its already proven
+  response remains unchanged, idle, and composer-ready for 30 seconds even
+  when the current provider UI exposes no Copy or completion control
+- Linux CLI updates no longer claim that an unmanaged service will restart;
+  the result now distinguishes a completed managed restart, the Windows
+  helper handoff, and the required Linux `--managed-service` or manual restart
+
+### Security
+
+- the control-free ChatGPT completion path is available only to a response
+  carried from the exact ownership-checked foreground recovery; an unrelated
+  baseline or an unproven resumed page cannot opt into it
+
 ## 0.5.76 - 2026-09-19
 
 ### Fixed

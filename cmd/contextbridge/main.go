@@ -508,15 +508,16 @@ func localHealthURL(address string) string {
 func printUpdateResult(value interface{}) {
 	raw, _ := json.Marshal(value)
 	var result struct {
-		Status  updater.Status `json:"status"`
-		Applied bool           `json:"applied"`
+		Status          updater.Status `json:"status"`
+		Applied         bool           `json:"applied"`
+		RestartRequired bool           `json:"restart_required"`
 	}
 	if json.Unmarshal(raw, &result) == nil && result.Status.Repository != "" {
 		fmt.Printf("Current: %s\n", result.Status.CurrentVersion)
 		fmt.Printf("Available: %s\n", emptyLabel(result.Status.AvailableVersion, "not checked"))
 		fmt.Printf("Automatic updates: %s\n", onOffLabel(result.Status.Enabled))
 		if result.Applied {
-			fmt.Println("The verified update was installed. The managed service will restart with the new version.")
+			fmt.Println(updateAppliedMessage(result.RestartRequired, runtime.GOOS))
 		}
 		return
 	}
@@ -526,6 +527,16 @@ func printUpdateResult(value interface{}) {
 		fmt.Printf("Available: %s\n", emptyLabel(status.AvailableVersion, "not checked"))
 		fmt.Printf("Automatic updates: %s\n", onOffLabel(status.Enabled))
 	}
+}
+
+func updateAppliedMessage(restartRequired bool, goos string) string {
+	if !restartRequired {
+		return "The verified update was installed and the managed service is running the new version."
+	}
+	if goos == "windows" {
+		return "The verified update was installed. The Windows update helper will restart the managed process."
+	}
+	return "The verified update was installed. Restart the running ContextBridge process or service to activate it, or pass --managed-service on Linux."
 }
 
 func emptyLabel(value, fallback string) string {

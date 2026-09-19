@@ -49,3 +49,15 @@ func TestManagedServiceNameIsConstrained(t *testing.T) {
 		}
 	}
 }
+
+func TestUpdateAppliedMessageDistinguishesActivationState(t *testing.T) {
+	if message := updateAppliedMessage(true, "linux"); !strings.Contains(message, "--managed-service") {
+		t.Fatalf("Linux restart guidance missing managed-service flag: %q", message)
+	}
+	if message := updateAppliedMessage(true, "windows"); !strings.Contains(message, "Windows update helper") {
+		t.Fatalf("Windows restart handoff was not explained: %q", message)
+	}
+	if message := updateAppliedMessage(false, "linux"); !strings.Contains(message, "running the new version") {
+		t.Fatalf("completed managed restart was not reported as active: %q", message)
+	}
+}
