@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/IamAngusU/ContextBridge/internal/config"
 )
 
 func validAgentPlanForTest(t *testing.T) agentPlan {
@@ -17,6 +19,9 @@ func validAgentPlanForTest(t *testing.T) agentPlan {
 		Goal:    "Compare two short answers.",
 		Summary: "Draft locally, then review in Gemini.",
 		Policy:  policy,
+		Binding: agentExecutionBinding{
+			ConfigSHA256: "sha256:" + strings.Repeat("a", 64), RelayURL: "https://relay.example.test",
+		},
 		Evidence: agentPlannerEvidence{
 			Provider: "deepseek", JobID: "job-planner", NodeID: "node-one", CostStatus: "upper_bound",
 		},
@@ -90,6 +95,45 @@ func TestAgentPlanDigestCoversPolicyAndNormalizesWhitespace(t *testing.T) {
 	changed, _, err := encodeAgentPlan(decoded)
 	if err != nil || changed == digest {
 		t.Fatalf("policy change did not alter approval digest: %s / %s / %v", digest, changed, err)
+	}
+}
+
+func TestAgentPlanDigestCoversExecutionBinding(t *testing.T) {
+	plan := validAgentPlanForTest(t)
+	digest, _, err := encodeAgentPlan(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.Binding.RelayURL = "https://other-relay.example.test"
+	changed, _, err := encodeAgentPlan(plan)
+	if err != nil || changed == digest {
+		t.Fatalf("execution binding change did not alter approval digest: %s / %s / %v", digest, changed, err)
+	}
+	plan = validAgentPlanForTest(t)
+	plan.Binding.ConfigSHA256 = "sha256:not-a-digest"
+	if err := validateAgentPlan(plan); err == nil || !strings.Contains(err.Error(), "config digest") {
+		t.Fatalf("invalid config binding was accepted: %v", err)
+	}
+}
+
+func TestAgentExecutionBindingChangesWithRouteAndRelay(t *testing.T) {
+	cfg := config.Config{
+		Routes:  map[string]config.Route{"default": {Provider: "ollama", Model: "qwen3:8b"}},
+		Cluster: config.Cluster{Relay: config.ClusterRelay{PublicURL: "https://relay.example.test"}},
+	}
+	first, err := agentBindingForConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Routes["default"] = config.Route{Provider: "deepseek", Model: "deepseek-chat"}
+	routeChanged, err := agentBindingForConfig(cfg)
+	if err != nil || routeChanged.ConfigSHA256 == first.ConfigSHA256 {
+		t.Fatalf("route change did not alter config binding: %#v / %#v / %v", first, routeChanged, err)
+	}
+	cfg.Cluster.Relay.PublicURL = "https://other-relay.example.test/"
+	relayChanged, err := agentBindingForConfig(cfg)
+	if err != nil || relayChanged.RelayURL != "https://other-relay.example.test" {
+		t.Fatalf("relay binding was not normalized: %#v / %v", relayChanged, err)
 	}
 }
 

@@ -158,7 +158,40 @@ func TestDiscoveryDoesNotRecurseOrAcceptDuplicateIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	packs, err := Discover(Settings{Enabled: true, ScanRoots: []string{root}, MaxPacks: 8})
-	if err != nil || len(packs) != 1 || packs[0].ID != "portable.duplicate" || packs[0].Warning == "" {
+	if err != nil || len(packs) != 2 {
 		t.Fatalf("duplicate or recursion boundary failed: %#v, %v", packs, err)
+	}
+	for _, pack := range packs {
+		if pack.ID != "portable.duplicate" || !pack.Quarantined || pack.Warning != "duplicate pack ID quarantined (2 manifests)" {
+			t.Fatalf("duplicate identity was not quarantined symmetrically: %#v", packs)
+		}
+	}
+	if _, ok := Resolve(packs, "portable.duplicate", "anything", "service"); ok {
+		t.Fatal("a quarantined duplicate identity remained routable")
+	}
+}
+
+func TestDuplicateDiagnosticsCannotCrowdOutValidPack(t *testing.T) {
+	root := t.TempDir()
+	fixtures := map[string]string{
+		"00-duplicate": `{"schema_version":1,"id":"portable.duplicate","name":"Duplicate"}`,
+		"01-duplicate": `{"schema_version":1,"id":"PORTABLE.DUPLICATE","name":"Duplicate"}`,
+		"99-valid":     `{"schema_version":1,"id":"portable.valid","name":"Valid","endpoints":[{"id":"api","type":"service","url":"http://127.0.0.1:4310"}]}`,
+	}
+	for directory, manifest := range fixtures {
+		path := filepath.Join(root, directory)
+		if err := os.MkdirAll(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, MarkerName), []byte(manifest), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	packs, err := Discover(Settings{Enabled: true, ScanRoots: []string{root}, MaxPacks: 1})
+	if err != nil || len(packs) != 1 || packs[0].ID != "portable.valid" || packs[0].Quarantined {
+		t.Fatalf("duplicate diagnostics crowded out a valid pack: %#v, %v", packs, err)
+	}
+	if _, ok := Resolve(packs, "portable.valid", "api", "service"); !ok {
+		t.Fatal("the bounded valid pack was not routable")
 	}
 }

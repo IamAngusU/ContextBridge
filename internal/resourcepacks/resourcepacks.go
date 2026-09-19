@@ -50,9 +50,10 @@ type Endpoint struct {
 
 type Pack struct {
 	Manifest
-	Path       string `json:"path"`
-	MarkerPath string `json:"marker_path"`
-	Warning    string `json:"warning,omitempty"`
+	Path        string `json:"path"`
+	MarkerPath  string `json:"marker_path"`
+	Quarantined bool   `json:"quarantined,omitempty"`
+	Warning     string `json:"warning,omitempty"`
 }
 
 // Discover inspects only an exact marker at each selected root and its direct
@@ -73,7 +74,6 @@ func Discover(settings Settings) ([]Pack, error) {
 	}
 	sort.Slice(roots, func(i, j int) bool { return strings.ToLower(roots[i]) < strings.ToLower(roots[j]) })
 	seenPaths := map[string]bool{}
-	seenIDs := map[string]int{}
 	packs := make([]Pack, 0)
 	for _, root := range roots {
 		root = strings.TrimSpace(root)
@@ -117,17 +117,7 @@ func Discover(settings Settings) ([]Pack, error) {
 			if !ok {
 				continue
 			}
-			if previous, duplicate := seenIDs[strings.ToLower(pack.ID)]; duplicate {
-				if packs[previous].Warning == "" {
-					packs[previous].Warning = "duplicate pack ID ignored"
-				}
-				continue
-			}
-			seenIDs[strings.ToLower(pack.ID)] = len(packs)
 			packs = append(packs, pack)
-			if len(packs) >= settings.MaxPacks {
-				return packs, nil
-			}
 		}
 		// A sealed or checksum-verified resource tree must not be modified merely
 		// to advertise it. Such volumes can keep bounded sidecar manifests at the
@@ -153,24 +143,41 @@ func Discover(settings Settings) ([]Pack, error) {
 			if !ok {
 				continue
 			}
-			if previous, duplicate := seenIDs[strings.ToLower(pack.ID)]; duplicate {
-				if packs[previous].Warning == "" {
-					packs[previous].Warning = "duplicate pack ID ignored"
-				}
-				continue
-			}
-			seenIDs[strings.ToLower(pack.ID)] = len(packs)
 			packs = append(packs, pack)
-			if len(packs) >= settings.MaxPacks {
-				return packs, nil
-			}
 		}
+	}
+	// A removable volume is untrusted input. Treat identity collisions as an
+	// ambiguity, never as ordering authority: every manifest claiming the same
+	// case-insensitive ID is visible for diagnostics but ineligible for routing.
+	// Discovery remains bounded by the configured roots, 512 direct children
+	// per root, 512 sidecars per root, and MaxPacks returned diagnostics.
+	identityCounts := make(map[string]int, len(packs))
+	for _, pack := range packs {
+		identityCounts[strings.ToLower(pack.ID)]++
+	}
+	for index := range packs {
+		count := identityCounts[strings.ToLower(packs[index].ID)]
+		if count > 1 {
+			packs[index].Quarantined = true
+			packs[index].Warning = fmt.Sprintf("duplicate pack ID quarantined (%d manifests)", count)
+		}
+	}
+	// Keep unambiguous resources ahead of diagnostics so a volume filled with
+	// colliding manifests cannot crowd a valid pack out of the bounded result.
+	sort.SliceStable(packs, func(i, j int) bool {
+		return !packs[i].Quarantined && packs[j].Quarantined
+	})
+	if len(packs) > settings.MaxPacks {
+		packs = packs[:settings.MaxPacks]
 	}
 	return packs, nil
 }
 
 func Resolve(packs []Pack, packID, endpointID, engineType string) (Endpoint, bool) {
 	for _, pack := range packs {
+		if pack.Quarantined {
+			continue
+		}
 		if !strings.EqualFold(pack.ID, strings.TrimSpace(packID)) {
 			continue
 		}

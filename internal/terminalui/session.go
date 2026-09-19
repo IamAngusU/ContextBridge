@@ -1493,6 +1493,9 @@ func (s *Session) renderPanelLocked() {
 			if pack.Version != "" {
 				name += " " + pack.Version
 			}
+			if pack.Quarantined {
+				name += " · quarantined"
+			}
 			detail := fmt.Sprintf("%s · %s · %d Endpunkt(e)", pack.ID, empty(pack.Kind, "resource-pack"), len(pack.Endpoints))
 			rows = append(rows, "  | "+ansiOrange+"◆"+ansiReset+"  "+line(name+" · "+detail))
 		}

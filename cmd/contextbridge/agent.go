@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	agentPlanVersion          = 1
+	agentPlanVersion          = 2
 	agentMaximumSteps         = 6
 	agentMaximumGoalBytes     = 32 << 10
 	agentMaximumSummaryBytes  = 2 << 10
@@ -40,12 +40,21 @@ var agentStepIDPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,39}$`)
 // proposes only summary/steps; the CLI binds the goal and policy after parsing
 // so model output can never widen its own providers, runtime, or step limit.
 type agentPlan struct {
-	Version  int                  `json:"version"`
-	Goal     string               `json:"goal"`
-	Summary  string               `json:"summary"`
-	Policy   agentPolicy          `json:"policy"`
-	Evidence agentPlannerEvidence `json:"planner_evidence"`
-	Steps    []agentStep          `json:"steps"`
+	Version  int                   `json:"version"`
+	Goal     string                `json:"goal"`
+	Summary  string                `json:"summary"`
+	Policy   agentPolicy           `json:"policy"`
+	Binding  agentExecutionBinding `json:"execution_binding"`
+	Evidence agentPlannerEvidence  `json:"planner_evidence"`
+	Steps    []agentStep           `json:"steps"`
+}
+
+// agentExecutionBinding makes the approval specific to the effective local
+// configuration and relay selected during planning. The digest contains the
+// validated, environment-expanded config but never exposes its secret values.
+type agentExecutionBinding struct {
+	ConfigSHA256 string `json:"config_sha256"`
+	RelayURL     string `json:"relay_url"`
 }
 
 type agentPolicy struct {
@@ -153,6 +162,10 @@ func clusterAgentPlanCommand(args []string) error {
 	if err != nil {
 		return err
 	}
+	binding, err := agentBindingForConfig(cfg)
+	if err != nil {
+		return err
+	}
 	*token = clusterClientToken(cfg, *token)
 	if *token == "" {
 		return errors.New("a producer token is required; pass --token, set CONTEXTBRIDGE_CLUSTER_TOKEN, or configure cluster.client_token")
@@ -199,6 +212,7 @@ func clusterAgentPlanCommand(args []string) error {
 	}
 	plan := agentPlan{
 		Version: agentPlanVersion, Goal: strings.TrimSpace(*goal), Summary: proposal.Summary, Policy: policy, Steps: proposal.Steps,
+		Binding:  binding,
 		Evidence: agentPlannerEvidence{Provider: planner, Profile: profile, Model: submission.Output.Model, JobID: job.ID, NodeID: job.AssignedNode, CostStatus: agentCostStatus(job.Usage), CostSource: job.Usage.CostSource},
 	}
 	if err := validateAgentPlan(plan); err != nil {
@@ -261,6 +275,13 @@ func clusterAgentRunCommand(args []string) error {
 	cfg, err := config.Load(*path)
 	if err != nil {
 		return err
+	}
+	currentBinding, err := agentBindingForConfig(cfg)
+	if err != nil {
+		return err
+	}
+	if currentBinding != plan.Binding {
+		return fmt.Errorf("agent execution binding changed after approval: planned %s at %s, current %s at %s; create and review a new plan", plan.Binding.ConfigSHA256, plan.Binding.RelayURL, currentBinding.ConfigSHA256, currentBinding.RelayURL)
 	}
 	*token = clusterClientToken(cfg, *token)
 	if *token == "" {
@@ -449,6 +470,15 @@ func validateAgentPlan(plan agentPlan) error {
 	if err := validateAgentText("summary", plan.Summary, agentMaximumSummaryBytes); err != nil {
 		return err
 	}
+	if !strings.HasPrefix(plan.Binding.ConfigSHA256, "sha256:") || len(plan.Binding.ConfigSHA256) != len("sha256:")+sha256.Size*2 {
+		return errors.New("agent execution binding has an invalid config digest")
+	}
+	if _, err := hex.DecodeString(strings.TrimPrefix(plan.Binding.ConfigSHA256, "sha256:")); err != nil {
+		return errors.New("agent execution binding has an invalid config digest")
+	}
+	if strings.TrimSpace(plan.Binding.RelayURL) == "" || len(plan.Binding.RelayURL) > 2048 || strings.TrimRight(plan.Binding.RelayURL, "/") != plan.Binding.RelayURL {
+		return errors.New("agent execution binding has an invalid relay URL")
+	}
 	if !agentStepIDPattern.MatchString(plan.Evidence.Provider) || strings.TrimSpace(plan.Evidence.JobID) == "" || len(plan.Evidence.JobID) > 128 || len(plan.Evidence.NodeID) > 128 || len(plan.Evidence.Model) > 200 || len(plan.Evidence.CostSource) > 200 {
 		return errors.New("agent planner evidence is missing or invalid")
 	}
@@ -516,6 +546,22 @@ func encodeAgentPlan(plan agentPlan) (string, []byte, error) {
 	digest := "sha256:" + hex.EncodeToString(digestBytes[:])
 	pretty, err := json.MarshalIndent(plan, "", "  ")
 	return digest, pretty, err
+}
+
+func agentBindingForConfig(cfg config.Config) (agentExecutionBinding, error) {
+	// Config's JSON contract excludes provider keys and cluster tokens. Hashing
+	// the effective struct still binds routes, endpoints, models, pricing,
+	// browser profiles, portable resources, and cluster policy after defaults
+	// and environment expansion have been applied.
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		return agentExecutionBinding{}, fmt.Errorf("encode agent execution binding: %w", err)
+	}
+	digest := sha256.Sum256(raw)
+	return agentExecutionBinding{
+		ConfigSHA256: "sha256:" + hex.EncodeToString(digest[:]),
+		RelayURL:     strings.TrimRight(clusterBaseURL(cfg), "/"),
+	}, nil
 }
 
 func writeNewAgentPlan(path string, raw []byte) error {
@@ -600,6 +646,7 @@ func printAgentPlan(plan agentPlan, digest string) {
 		fmt.Fprintf(os.Stderr, "  %d. %s · %s · %s\n     %s\n", index+1, step.ID, provider, input, step.Instruction)
 	}
 	fmt.Fprintf(os.Stderr, "  limits · %d steps · %ds/step · %ds total · text only · no shell/tools/files\n", plan.Policy.MaxSteps, plan.Policy.StepTimeoutSeconds, plan.Policy.MaxRuntimeSeconds)
+	fmt.Fprintf(os.Stderr, "  binding · %s · %s\n", plan.Binding.ConfigSHA256, plan.Binding.RelayURL)
 }
 
 func agentBrowserMetadata(enabled bool) map[string]interface{} {
