@@ -135,7 +135,9 @@ function renderUpdates(updates) {
   $('update-state').textContent = updates.enabled ? `Enabled, ${updates.channel || 'stable'} channel` : 'Disabled on this device';
   const checked = meaningfulTimestamp(updates.last_checked) ? ` Last checked ${relativeTime(updates.last_checked)}.` : '';
   const available = updates.update_available ? ` Version ${updates.available_version} is ready.` : '';
-  $('update-detail').textContent = `Current ${versionLabel(updates.current_version)}.${available}${checked}`;
+  const pending = updates.pending_version ? ` Activation of ${versionLabel(updates.pending_version)} is pending.` : '';
+  const failed = updates.last_error ? ` Last attempt failed: ${updates.last_error}` : '';
+  $('update-detail').textContent = `Current ${versionLabel(updates.current_version)}.${pending}${available}${failed}${checked}`;
 }
 
 async function updateAutomaticUpdates() {

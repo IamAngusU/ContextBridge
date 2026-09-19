@@ -2,6 +2,16 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.82 - 2026-09-19
+
+### Fixed
+
+- update status now keeps the running executable authoritative and reports an
+  asynchronous Windows or restart-required Unix replacement as pending instead
+  of claiming the target version is already installed
+- a healthy process running the exact version named by an older asynchronous
+  failure marker now supersedes that stale failure without hiding newer failures
+
 ## 0.5.81 - 2026-09-19
 
 ### Added

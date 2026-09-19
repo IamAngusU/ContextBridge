@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/IamAngusU/ContextBridge/internal/config"
+	"github.com/IamAngusU/ContextBridge/internal/updater"
 )
 
 func TestScheduledUpdaterRequiresIdleService(t *testing.T) {
@@ -51,13 +52,28 @@ func TestManagedServiceNameIsConstrained(t *testing.T) {
 }
 
 func TestUpdateAppliedMessageDistinguishesActivationState(t *testing.T) {
-	if message := updateAppliedMessage(true, "linux"); !strings.Contains(message, "--managed-service") {
+	if message := updateAppliedMessage(true, "linux", "v0.5.82"); !strings.Contains(message, "--managed-service") || !strings.Contains(message, "not reported as installed") {
 		t.Fatalf("Linux restart guidance missing managed-service flag: %q", message)
 	}
-	if message := updateAppliedMessage(true, "windows"); !strings.Contains(message, "Windows update helper") {
+	if message := updateAppliedMessage(true, "windows", "v0.5.82"); !strings.Contains(message, "Windows update helper") || !strings.Contains(message, "staged") {
 		t.Fatalf("Windows restart handoff was not explained: %q", message)
 	}
-	if message := updateAppliedMessage(false, "linux"); !strings.Contains(message, "running the new version") {
+	if message := updateAppliedMessage(false, "linux", "v0.5.82"); !strings.Contains(message, "running it") {
 		t.Fatalf("completed managed restart was not reported as active: %q", message)
+	}
+}
+
+func TestMarkUpdateActiveUsesVerifiedTarget(t *testing.T) {
+	result := updater.Result{
+		TargetVersion: "v0.5.82",
+		Status: updater.Status{
+			CurrentVersion:  "v0.5.81",
+			PendingVersion:  "v0.5.82",
+			UpdateAvailable: true,
+		},
+	}
+	markUpdateActive(&result)
+	if result.Status.CurrentVersion != "v0.5.82" || result.Status.LastInstalled != "v0.5.82" || result.Status.PendingVersion != "" || result.Status.UpdateAvailable {
+		t.Fatalf("verified target was not marked active: %+v", result)
 	}
 }

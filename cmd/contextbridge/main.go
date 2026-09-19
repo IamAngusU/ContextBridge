@@ -333,7 +333,7 @@ func startUpdater(ctx context.Context, manager *updater.Manager, logger *log.Log
 		if !result.Applied {
 			return
 		}
-		logger.Printf("updated to %s; restarting the managed service", result.Status.CurrentVersion)
+		logger.Printf("staged %s; restarting the managed service", result.TargetVersion)
 		if err := updater.RestartCurrentProcess(); err != nil {
 			logger.Printf("restart handoff: %v", err)
 		}
@@ -394,16 +394,22 @@ func updateCommand(args []string) error {
 	case "apply":
 		result, applyErr := manager.Apply(ctx, *force)
 		if applyErr == nil && result.Applied && *managedService != "" {
-			applyErr = finishManagedUpdate(ctx, manager, *managedService, result.Status.CurrentVersion)
+			applyErr = finishManagedUpdate(ctx, manager, *managedService, result.TargetVersion)
 			result.RestartRequired = applyErr != nil
+			if applyErr == nil {
+				markUpdateActive(&result)
+			}
 		}
 		value, err = result, applyErr
 	case "auto":
 		manager.SetIdleCheck(func(ctx context.Context) bool { return installedServiceIdle(ctx, cfg, *relayOnly) })
 		result, autoErr := manager.Auto(ctx)
 		if autoErr == nil && result.Applied && *managedService != "" {
-			autoErr = finishManagedUpdate(ctx, manager, *managedService, result.Status.CurrentVersion)
+			autoErr = finishManagedUpdate(ctx, manager, *managedService, result.TargetVersion)
 			result.RestartRequired = autoErr != nil
+			if autoErr == nil {
+				markUpdateActive(&result)
+			}
 		}
 		value, err = result, autoErr
 	case "enable", "disable":
@@ -511,13 +517,14 @@ func printUpdateResult(value interface{}) {
 		Status          updater.Status `json:"status"`
 		Applied         bool           `json:"applied"`
 		RestartRequired bool           `json:"restart_required"`
+		TargetVersion   string         `json:"target_version"`
 	}
 	if json.Unmarshal(raw, &result) == nil && result.Status.Repository != "" {
 		fmt.Printf("Current: %s\n", result.Status.CurrentVersion)
 		fmt.Printf("Available: %s\n", emptyLabel(result.Status.AvailableVersion, "not checked"))
 		fmt.Printf("Automatic updates: %s\n", onOffLabel(result.Status.Enabled))
 		if result.Applied {
-			fmt.Println(updateAppliedMessage(result.RestartRequired, runtime.GOOS))
+			fmt.Println(updateAppliedMessage(result.RestartRequired, runtime.GOOS, result.TargetVersion))
 		}
 		return
 	}
@@ -529,14 +536,27 @@ func printUpdateResult(value interface{}) {
 	}
 }
 
-func updateAppliedMessage(restartRequired bool, goos string) string {
+func updateAppliedMessage(restartRequired bool, goos, target string) string {
+	if strings.TrimSpace(target) == "" {
+		target = "The verified release"
+	}
 	if !restartRequired {
-		return "The verified update was installed and the managed service is running the new version."
+		return target + " is installed and the managed service is running it."
 	}
 	if goos == "windows" {
-		return "The verified update was installed. The Windows update helper will restart the managed process."
+		return target + " is staged. The Windows update helper is attempting activation; it is not reported as installed until the new executable actually runs."
 	}
-	return "The verified update was installed. Restart the running ContextBridge process or service to activate it, or pass --managed-service on Linux."
+	return target + " is staged. Restart the running ContextBridge process or service to activate it, or pass --managed-service on Linux; it is not reported as installed before activation."
+}
+
+func markUpdateActive(result *updater.Result) {
+	if result == nil || strings.TrimSpace(result.TargetVersion) == "" {
+		return
+	}
+	result.Status.CurrentVersion = result.TargetVersion
+	result.Status.LastInstalled = result.TargetVersion
+	result.Status.PendingVersion = ""
+	result.Status.UpdateAvailable = false
 }
 
 func emptyLabel(value, fallback string) string {
