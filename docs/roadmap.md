@@ -32,17 +32,15 @@ calls, and streaming errors. A shared OpenAPI or JSON Schema may later generate
 small TypeScript, Python, and Go clients; generated SDKs are exploratory, not a
 current deliverable.
 
-### Idempotent submission and small application clients — planned direction
+### Small application clients — planned direction
 
-Define a producer-scoped submission key so a client that loses the HTTP reply
-can determine whether its job was durably accepted without creating a second
-provider request. Reusing a key with the same canonical request would return
-the original job reference; reusing it with different content would be an
-explicit conflict. Retention, deletion, E2EE request digests, and ambiguous
-provider execution must remain separate concerns—this is submission
-deduplication, not a claim of universal exactly-once side effects.
+Producer-scoped idempotent cluster admission is now part of the native
+protocol: an exact retry returns the retained job, changed content conflicts,
+and the binding is durable and retention-aware. It remains submission
+deduplication—not a claim of universal exactly-once provider side effects.
+See the [protocol](protocol.md) for the shipped contract.
 
-After that contract is stable, a deliberately small PHP client is a useful
+A deliberately small PHP client is a useful
 first adoption target for shared hosting: submit, read status/result, verify and
 save an artifact, and cancel a still-queued job. Safe reads may retry with
 bounded backoff; mutating calls may not invent silent retries. Broader generated

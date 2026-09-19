@@ -85,7 +85,7 @@ $script:ContextBridgeOptions = @{
     'pair' = @('--config','--relay','--identity','--name')
     'worker' = @('--config','--relay','--identity','--name','--slots','--providers','--models','--tasks','--groups','--no-updates','--topmost')
     'cluster status' = @('--config','--json')
-    'cluster submit' = @('--config','--file','--token','--wait','--e2ee','--stream','--artifacts')
+    'cluster submit' = @('--config','--file','--token','--wait','--e2ee','--stream','--artifacts','--idempotency-key')
     'cluster chat' = @('--config','--token','--provider','--group','--model','--profile','--reasoning','--e2ee','--session','--prompt','--artifacts','--min-artifacts','--image','--min-images','--music','--attach-image','--new-chat','--new-chat-per-job','--foreground-new-chat')
     'cluster selftest' = @('--config','--providers','--local-model','--run','--dry-run','--image','--artifacts','--keep-artifacts','--timeout','--job-timeout','--poll')
     'cluster route' = @('explain','--config','--file','--job','--token','--json')
@@ -110,7 +110,7 @@ $script:ContextBridgeTakesValue = @(
     '--config','--file','--job','--artifacts','--attach-image','--identity','--job-dir','--token-file',
     '--slots','--tab','--relay','--name','--providers','--models','--tasks','--groups',
     '--token','--provider','--group','--model','--profile','--reasoning','--session','--prompt',
-    '--min-artifacts','--min-images','--local-model','--timeout','--job-timeout','--poll',
+    '--min-artifacts','--min-images','--local-model','--timeout','--job-timeout','--poll','--idempotency-key',
     '--mode','--relay-url','--public-url','--listen','--role','--subject','--approve','--deny',
     '--managed-service','--samples','--warmup','--database-jobs','--idle-duration','--binary','--extension-root'
 )
@@ -208,7 +208,7 @@ _contextbridge_complete() {
       "cluster selftest") candidates="--config --providers --local-model --run --dry-run --image --artifacts --keep-artifacts --timeout --job-timeout --poll" ;;
       "cluster route") candidates="--config --file --job --token --json" ;;
       "route explain") candidates="--config --file --job --token --json" ;;
-      "cluster submit") candidates="--config --file --token --wait --e2ee --stream --artifacts" ;;
+      "cluster submit") candidates="--config --file --token --wait --e2ee --stream --artifacts --idempotency-key" ;;
       "cluster status") candidates="--config --json" ;;
       "cluster configure") candidates="--config --mode --relay-url --public-url --name --listen" ;;
       "cluster dashboard") candidates="--config --no-open" ;;
@@ -340,7 +340,7 @@ case "$words[2]" in
     fi
     case "$words[3]" in
       status) _arguments "${config[@]}" '--json[Print machine-readable JSON]' ;;
-      submit) _arguments "${config[@]}" '--file[Cluster job JSON]:job file:_files' '--token[Producer token]:token:' '--wait[Wait for a final result]' '--e2ee[Encrypt payload]' '--stream[Stream browser text]' '--artifacts[Artifact output directory]:directory:_directories' ;;
+      submit) _arguments "${config[@]}" '--file[Cluster job JSON]:job file:_files' '--token[Producer token]:token:' '--wait[Wait for a final result]' '--e2ee[Encrypt payload]' '--stream[Stream browser text]' '--artifacts[Artifact output directory]:directory:_directories' '--idempotency-key[Deduplicate an exact retry]:key:' ;;
       chat) _arguments "${config[@]}" '--token[Producer token]:token:' '--provider[Generation provider]:provider:(browser ollama nuextract jina)' '--group[Worker group]:group:' '--model[Specific model]:model:' '--profile[Browser profile]:profile:(chatgpt gemini)' '--reasoning[Reasoning level]:level:(instant medium high xhigh pro max)' '--e2ee[Encrypt prompts and results]' '--session[Stable conversation ID]:session:' '--prompt[Send one turn and exit]:prompt:' '--artifacts[Artifact directory or auto/off]:directory:_directories' '--min-artifacts[Required verified files]:count:' '--image[Require a returned image]' '--min-images[Required verified images]:count:' '--music[Require verified music output]' '--attach-image[Attach a local image]:image file:_files' '--new-chat[Open a fresh chat for the session]' '--new-chat-per-job[Open a fresh chat for every turn]' '--foreground-new-chat[Show a newly opened chat]' ;;
       selftest) _arguments "${config[@]}" '--providers[Checks to run]:providers:' '--local-model[Specific local model]:model:' '--run[Run live checks]' '--dry-run[Readiness checks only]' '--image[Also verify one image]' '--artifacts[Artifact directory]:directory:_directories' '--keep-artifacts[Keep temporary artifacts]' '--timeout[Capacity wait timeout]:duration:' '--job-timeout[Per-job timeout]:duration:' '--poll[Polling interval]:duration:' ;;
       route)

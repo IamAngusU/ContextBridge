@@ -245,6 +245,74 @@ func TestTokenIdentityRejectsSharedEmptyProducerAndDisplayControls(t *testing.T)
 	}
 }
 
+func TestIdempotentJobAdmissionIsDurableProducerScopedAndConflictSafe(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cluster.db")
+	store, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := SubmitRequest{OwnerSubject: "producer-a", Requirements: Requirements{Task: "generation"}, Payload: json.RawMessage(`{"prompt":"once"}`)}
+	hash := strings.Repeat("a", 64)
+	first, replayed, err := store.CreateJobAdmittedIdempotent(request, 10, 10, "invoice-42", hash)
+	if err != nil || replayed {
+		t.Fatalf("first admission = replayed %v, err %v", replayed, err)
+	}
+	second, replayed, err := store.CreateJobAdmittedIdempotent(request, 1, 1, "invoice-42", hash)
+	if err != nil || !replayed || second.ID != first.ID {
+		t.Fatalf("exact retry = %#v, replayed %v, err %v", second, replayed, err)
+	}
+	if _, _, err := store.CreateJobAdmittedIdempotent(request, 10, 10, "invoice-42", strings.Repeat("b", 64)); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("changed request reused a key: %v", err)
+	}
+	request.OwnerSubject = "producer-b"
+	other, replayed, err := store.CreateJobAdmittedIdempotent(request, 10, 10, "invoice-42", strings.Repeat("b", 64))
+	if err != nil || replayed || other.ID == first.ID {
+		t.Fatalf("another producer did not receive an independent key scope: %#v replayed=%v err=%v", other, replayed, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	request.OwnerSubject = "producer-a"
+	afterRestart, replayed, err := store.CreateJobAdmittedIdempotent(request, 1, 1, "invoice-42", hash)
+	if err != nil || !replayed || afterRestart.ID != first.ID {
+		t.Fatalf("restart lost idempotency binding: %#v replayed=%v err=%v", afterRestart, replayed, err)
+	}
+	queued, err := store.QueuedJobs(10)
+	if err != nil || len(queued) != 2 {
+		t.Fatalf("retries created duplicate queue entries: %d, %v", len(queued), err)
+	}
+}
+
+func TestIdempotentReservationConsumptionReplaysAfterOneTimeSecretIsConsumed(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "cluster.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	assignment := Assignment{
+		ID: "assignment-idempotent", JobID: "job-idempotent", NodeID: "node-a", OwnerSubject: "producer-a", Attempt: 1,
+		ExpiresAt: time.Now().UTC().Add(time.Minute), Requirements: Requirements{Task: "generation"},
+	}
+	if err := store.CreateReservationAdmitted(assignment, "one-time-secret", "producer-a", 10, 10); err != nil {
+		t.Fatal(err)
+	}
+	envelope := &SealedEnvelope{Algorithm: sealedAlgorithm, Ciphertext: "opaque"}
+	hash := strings.Repeat("c", 64)
+	first, replayed, err := store.ConsumeReservationAdmittedIdempotent(assignment.ID, "one-time-secret", envelope, "test", "", "producer-a", 0, 1, 10, 10, "sealed-42", hash)
+	if err != nil || replayed {
+		t.Fatalf("first sealed admission = replayed %v, err %v", replayed, err)
+	}
+	second, replayed, err := store.ConsumeReservationAdmittedIdempotent(assignment.ID, "one-time-secret", envelope, "test", "", "producer-a", 0, 1, 1, 1, "sealed-42", hash)
+	if err != nil || !replayed || second.ID != first.ID {
+		t.Fatalf("sealed retry did not resolve consumed reservation: %#v replayed=%v err=%v", second, replayed, err)
+	}
+}
+
 func TestEstimateVRAMIgnoresLegacyNodeWideMeasurements(t *testing.T) {
 	store, err := OpenStore(filepath.Join(t.TempDir(), "cluster.db"))
 	if err != nil {

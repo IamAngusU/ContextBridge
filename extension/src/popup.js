@@ -338,7 +338,11 @@ $('pair').addEventListener('click', async () => {
   setStatus('connecting', 'Connecting to the local service…');
   try {
     await api.storage.local.set({ connectionError: '', lastError: '' });
-    let tabs = await Promise.all(selectedTabIDs().map((tabId) => withPopupDeadline(api.tabs.get(tabId), 2000)));
+    const reconciled = await api.runtime.sendMessage({ type: 'reconcile-tabs' });
+    if (!reconciled?.ok) throw new Error(reconciled?.error || 'Could not check saved AI tabs');
+    attachedTabIDs = [...new Set((reconciled.tabIds || []).map(Number).filter(Boolean))];
+    let tabs = Array.isArray(reconciled.tabs) ? reconciled.tabs : [];
+    const removedClosedTabs = Number(reconciled.removed?.length || 0);
     let attachCurrentID = 0;
     if (!selectedTabIDs().length) {
       const current = await currentPageTab();
@@ -358,7 +362,8 @@ $('pair').addEventListener('click', async () => {
     const result = await api.runtime.sendMessage({ type: 'start' });
     if (!result?.ok) throw new Error(result?.error || 'Connection could not start');
     renderRunning(true);
-    setStatus('live', `Connected · ${tabs.length} tab${tabs.length === 1 ? '' : 's'} registered · scanning page controls in background`);
+    const repaired = removedClosedTabs ? ` · removed ${removedClosedTabs} closed tab${removedClosedTabs === 1 ? '' : 's'}` : '';
+    setStatus('live', `Connected · ${tabs.length} tab${tabs.length === 1 ? '' : 's'} registered${repaired} · scanning page controls in background`);
     await refreshUpdatePreference();
   } catch (error) {
     const message = error.message || String(error);

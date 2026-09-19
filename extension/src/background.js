@@ -124,6 +124,15 @@ async function handleMessage(message, sender) {
         await sendHeartbeat(busyTabs.size ? 'working' : 'waiting');
       }
       return { ok: true };
+    case 'reconcile-tabs': {
+      const result = await reconcileConfiguredTabs();
+      return {
+        ok: true,
+        tabIds: result.tabs.map((tab) => Number(tab.id)),
+        tabs: result.tabs.map((tab) => ({ id: Number(tab.id), url: tab.url || '', title: tab.title || '' })),
+        removed: result.removed
+      };
+    }
     case 'check-tab-freshness':
       return { ok: true, fresh: await checkFreshTab(Number(message.tabId)) };
     case 'release-session-tab':
@@ -166,17 +175,19 @@ async function startPairingOnce() {
   const recoveryTask = beginBrowserLeaseRecovery();
   const pendingGeneration = lifecycleGeneration;
   try {
-    const cfg = await settings();
+    let cfg = await settings();
     if (!cfg.token) throw new Error('Enter the pairing token once in Advanced settings');
-    const tabIds = configuredTabIDs(cfg);
-    if (!tabIds.length) throw new Error('Select at least one AI tab first');
+    const reconciled = await reconcileConfiguredTabs({ reportProgress: true });
+    const tabs = reconciled.tabs;
+    if (!tabs.length) throw new Error('All attached AI tabs were closed. Attach an open ChatGPT or Gemini tab first.');
+    cfg = await settings();
     connectionStartedAt = Date.now();
-    await reportConnectionProgress('Checking selected tabs', 0, tabIds.length);
-    for (let index = 0; index < tabIds.length; index += 1) {
-      const tab = await withDeadline(api.tabs.get(tabIds[index]), 2000);
+    await reportConnectionProgress('Checking selected tabs', 0, tabs.length);
+    for (let index = 0; index < tabs.length; index += 1) {
+      const tab = tabs[index];
       if (!tab?.url || !/^https?:/i.test(tab.url)) throw new Error('One selected tab is not a supported web page');
       if (cfg.useVisualProfile && !profileForTab(cfg, tab)) throw new Error(`Detect or customize ${tab.title || 'the selected page'} before starting the bridge`);
-      await reportConnectionProgress('Checking selected tabs', index + 1, tabIds.length);
+      await reportConnectionProgress('Checking selected tabs', index + 1, tabs.length);
     }
     await reportConnectionProgress('Contacting local service', 0, 1);
     const ready = await testBridge();
@@ -393,7 +404,7 @@ async function discoverFreshTabs() {
   } catch (_) {}
 }
 
-async function detachClosedTab(tabId) {
+async function detachClosedTab(tabId, notify = true) {
   const cfg = await settings();
   const autoAttachBlockedTabIds = cfg.autoAttachBlockedTabIds.filter((id) => id !== tabId);
   const tabCapabilities = { ...cfg.tabCapabilities };
@@ -425,7 +436,32 @@ async function detachClosedTab(tabId) {
   }
   const tabIds = configuredTabIDs(cfg).filter((id) => id !== tabId);
   await api.storage.local.set({ tabId: tabIds[0] || 0, tabIds, tabCapabilities, tabCapabilityScans, tabFailures, tabEditModes, autoAttachBlockedTabIds });
-  if (cfg.running) await sendHeartbeat('waiting');
+  if (notify && cfg.running) await sendHeartbeat('waiting');
+}
+
+function isMissingBrowserTabError(error) {
+  return /(?:no tab with id|invalid tab id|tab (?:was )?(?:closed|not found)|closed tab)/i.test(String(error?.message || error || ''));
+}
+
+async function reconcileConfiguredTabs(options = {}) {
+  const cfg = await settings();
+  const tabIds = configuredTabIDs(cfg);
+  const tabs = [];
+  const removed = [];
+  if (options.reportProgress) await reportConnectionProgress('Checking saved tabs', 0, tabIds.length);
+  for (const [index, tabId] of tabIds.entries()) {
+    try {
+      tabs.push(await withDeadline(api.tabs.get(tabId), 2000));
+    } catch (error) {
+      if (!isMissingBrowserTabError(error)) {
+        throw new Error(`Could not inspect attached tab ${tabId}; try again without reloading the AI page`);
+      }
+      removed.push(tabId);
+    }
+    if (options.reportProgress) await reportConnectionProgress('Checking saved tabs', index + 1, tabIds.length);
+  }
+  for (const tabId of removed) await detachClosedTab(tabId, false);
+  return { tabs, removed };
 }
 
 async function testBridge() {
@@ -4732,18 +4768,28 @@ async function sendHeartbeatOnce(state, connecting = false, generation = lifecyc
   const tabIds = configuredTabIDs(cfg);
   if (connecting) await reportConnectionProgress('Registering selected tabs', 0, tabIds.length);
   const attachedTabs = [];
+  const closedTabIds = [];
+  let tabLookupFailed = false;
   for (const [index, tabId] of tabIds.entries()) {
     try {
       const tab = await withDeadline(api.tabs.get(tabId), 2000);
       attachedTabs.push(tab);
-    } catch (_) {}
+    } catch (error) {
+      if (isMissingBrowserTabError(error)) closedTabIds.push(tabId);
+      else tabLookupFailed = true;
+    }
     if (connecting) await reportConnectionProgress('Registering selected tabs', index + 1, tabIds.length);
   }
-  if (connecting && attachedTabs.length !== tabIds.length) return false;
+  // A tab can close after the explicit Connect reconciliation but before this
+  // heartbeat. Closed tabs are stale configuration, not a reason to reject
+  // every healthy tab in the pool. Unknown lookup failures remain fail-closed.
+  for (const tabId of closedTabIds) await detachClosedTab(tabId, false);
+  if (connecting && tabLookupFailed) return false;
+  if (connecting && tabIds.length > 0 && attachedTabs.length === 0) return false;
   const sessionKeys = browserSessionKeysForTabs(cfg, attachedTabs);
   const freshChatAccess = {};
   for (const profile of new Set(attachedTabs.map((tab) => routingProfileName(cfg, tab)).filter((name) => ['chatgpt', 'gemini'].includes(name)))) {
-    freshChatAccess[profile] = await canCreateFreshChat(profile, tabIds.length);
+    freshChatAccess[profile] = await canCreateFreshChat(profile, attachedTabs.length);
   }
   for (const tab of attachedTabs) {
     try {
@@ -4802,7 +4848,7 @@ async function sendHeartbeatOnce(state, connecting = false, generation = lifecyc
       finishedTabCleanup = closeFinishedOwnedTabs().catch(() => {}).finally(() => { finishedTabCleanup = null; });
     }
     if (response.ok && !connecting && state !== 'paused') {
-      for (const tabId of tabIds) scheduleTabDiagnostics(tabId);
+      for (const attachedTab of attachedTabs) scheduleTabDiagnostics(Number(attachedTab.id));
     }
     return response.ok;
   } catch (_) {

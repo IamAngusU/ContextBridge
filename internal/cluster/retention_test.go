@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -196,6 +197,42 @@ func TestRetentionBoundsSessionPlacementsByAgeAndCount(t *testing.T) {
 	again, err := store.PruneRetention(now, policy)
 	if err != nil || again.SessionPlacements != 0 {
 		t.Fatalf("session placement sweep was not idempotent: %#v %v", again, err)
+	}
+}
+
+func TestRetentionReleasesIdempotencyKeyWithPrunedJob(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	request := SubmitRequest{OwnerSubject: "producer-a", Requirements: Requirements{Task: "generation"}, Payload: json.RawMessage(`{"prompt":"first"}`)}
+	first, replayed, err := store.CreateJobAdmittedIdempotent(request, 10, 10, "retained-key", strings.Repeat("a", 64))
+	if err != nil || replayed {
+		t.Fatalf("create idempotent job: replayed=%v err=%v", replayed, err)
+	}
+	old := time.Now().UTC().Add(-48 * time.Hour)
+	if err := store.db.Update(func(tx *bolt.Tx) error {
+		var job Job
+		if err := getJSON(tx.Bucket(bucketJobs), first.ID, &job); err != nil {
+			return err
+		}
+		job.Status = JobCompleted
+		job.UpdatedAt = old
+		job.FinishedAt = old
+		return putJSON(tx.Bucket(bucketJobs), job.ID, job)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PruneRetention(time.Now().UTC(), RetentionPolicy{
+		MaxAge: 24 * time.Hour, MaxTerminalJobs: 10, MaxEvents: 10, MaxTerminalPipelineRuns: 10, MaxSessionPlacements: 10,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	request.Payload = json.RawMessage(`{"prompt":"after retention"}`)
+	second, replayed, err := store.CreateJobAdmittedIdempotent(request, 10, 10, "retained-key", strings.Repeat("b", 64))
+	if err != nil || replayed || second.ID == first.ID {
+		t.Fatalf("pruned key was not reusable: %#v replayed=%v err=%v", second, replayed, err)
 	}
 }
 

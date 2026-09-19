@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -691,6 +692,11 @@ func (r *Relay) handleSubmit(w http.ResponseWriter, req *http.Request) {
 		writeError(w, status, err)
 		return
 	}
+	idempotencyKey, err := requestIdempotencyKey(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 	record, _ := tokenRecord(req.Context())
 	if err := scopeRequirements(&input.Requirements, record); err != nil {
 		writeError(w, http.StatusForbidden, err)
@@ -719,16 +725,34 @@ func (r *Relay) handleSubmit(w http.ResponseWriter, req *http.Request) {
 		input.MaxAttempts = r.cfg.MaxAttempts
 	}
 	input.OwnerSubject = record.Subject
+	requestHash := ""
+	if idempotencyKey != "" {
+		encoded, encodeErr := json.Marshal(input)
+		if encodeErr != nil {
+			writeError(w, http.StatusBadRequest, encodeErr)
+			return
+		}
+		digest := sha256.Sum256(encoded)
+		requestHash = fmt.Sprintf("%x", digest[:])
+	}
 	if !r.beginAdmission() {
 		writeError(w, http.StatusServiceUnavailable, errors.New("relay is stopping"))
 		return
 	}
 	var job Job
-	var err error
+	var replayed bool
 	if input.AssignmentID != "" {
-		job, err = r.store.ConsumeReservationAdmitted(input.AssignmentID, input.AssignmentSecret, input.Sealed, input.Source, input.TenantID, input.OwnerSubject, input.Priority, input.MaxAttempts, r.cfg.MaxQueuedJobs, r.ownerQueueLimit())
+		if idempotencyKey != "" {
+			job, replayed, err = r.store.ConsumeReservationAdmittedIdempotent(input.AssignmentID, input.AssignmentSecret, input.Sealed, input.Source, input.TenantID, input.OwnerSubject, input.Priority, input.MaxAttempts, r.cfg.MaxQueuedJobs, r.ownerQueueLimit(), idempotencyKey, requestHash)
+		} else {
+			job, err = r.store.ConsumeReservationAdmitted(input.AssignmentID, input.AssignmentSecret, input.Sealed, input.Source, input.TenantID, input.OwnerSubject, input.Priority, input.MaxAttempts, r.cfg.MaxQueuedJobs, r.ownerQueueLimit())
+		}
 	} else {
-		job, err = r.store.CreateJobAdmitted(input, r.cfg.MaxQueuedJobs, r.ownerQueueLimit())
+		if idempotencyKey != "" {
+			job, replayed, err = r.store.CreateJobAdmittedIdempotent(input, r.cfg.MaxQueuedJobs, r.ownerQueueLimit(), idempotencyKey, requestHash)
+		} else {
+			job, err = r.store.CreateJobAdmitted(input, r.cfg.MaxQueuedJobs, r.ownerQueueLimit())
+		}
 	}
 	r.endAdmission()
 	if err != nil {
@@ -739,13 +763,36 @@ func (r *Relay) handleSubmit(w http.ResponseWriter, req *http.Request) {
 			status = http.StatusTooManyRequests
 		} else if errors.Is(err, ErrReservationOwnerMismatch) {
 			status = http.StatusForbidden
+		} else if errors.Is(err, ErrIdempotencyConflict) {
+			status = http.StatusConflict
+		} else if errors.Is(err, os.ErrExist) {
+			status = http.StatusConflict
 		}
 		writeError(w, status, err)
+		return
+	}
+	if replayed {
+		w.Header().Set("Idempotency-Replayed", "true")
+		writeJSON(w, http.StatusOK, jobResponse(job, req.URL.Query().Get("compact") == "1"))
 		return
 	}
 	_ = r.store.AddEvent(Event{Kind: "job.queued", Message: "Job queued", JobID: job.ID})
 	r.signalDispatch()
 	writeJSON(w, http.StatusAccepted, jobResponse(job, req.URL.Query().Get("compact") == "1"))
+}
+
+func requestIdempotencyKey(req *http.Request) (string, error) {
+	values := req.Header.Values("Idempotency-Key")
+	if len(values) == 0 {
+		return "", nil
+	}
+	if len(values) != 1 {
+		return "", errors.New("exactly one Idempotency-Key header is allowed")
+	}
+	if err := ValidateIdempotencyKey(values[0]); err != nil {
+		return "", err
+	}
+	return values[0], nil
 }
 
 type payloadLimitError struct {

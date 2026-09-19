@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -513,6 +514,87 @@ func TestRelayMaintenanceCadenceAvoidsIdleWriteTransactions(t *testing.T) {
 	}
 	if !relay.maintenanceDue(now.Add(5 * time.Second)) {
 		t.Fatal("maintenance did not become due at its cadence")
+	}
+}
+
+func TestRelayIdempotencyPreventsDuplicateAdmissionAndScopesKeysByProducer(t *testing.T) {
+	relay, err := NewRelay(RelayConfig{
+		Database: filepath.Join(t.TempDir(), "relay.db"), AdminToken: "admin_token_long_enough_for_idempotency",
+		AllowedTasks: []string{"generation"}, MaxQueuedJobs: 20,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+	producerA, _, err := relay.store.CreateToken("producer", "producer-a", nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	producerB, _, err := relay.store.CreateToken("producer", "producer-b", nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	submit := func(token, key, prompt string, duplicateHeader bool) (*httptest.ResponseRecorder, Job) {
+		t.Helper()
+		input := SubmitRequest{Requirements: Requirements{Task: "generation"}, Payload: json.RawMessage(`{"prompt":` + fmt.Sprintf("%q", prompt) + `}`)}
+		raw, marshalErr := json.Marshal(input)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		request := httptest.NewRequest(http.MethodPost, "/v1/cluster/jobs?compact=1", bytes.NewReader(raw))
+		request.Header.Set("Authorization", "Bearer "+token)
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Add("Idempotency-Key", key)
+		if duplicateHeader {
+			request.Header.Add("Idempotency-Key", key)
+		}
+		response := httptest.NewRecorder()
+		relay.Handler().ServeHTTP(response, request)
+		var job Job
+		if response.Code >= 200 && response.Code < 300 {
+			if decodeErr := json.Unmarshal(response.Body.Bytes(), &job); decodeErr != nil {
+				t.Fatal(decodeErr)
+			}
+		}
+		return response, job
+	}
+
+	firstResponse, first := submit(producerA, "checkout-42", "run once", false)
+	if firstResponse.Code != http.StatusAccepted || first.ID == "" {
+		t.Fatalf("first admission returned %d: %s", firstResponse.Code, firstResponse.Body.String())
+	}
+	replayResponse, replay := submit(producerA, "checkout-42", "run once", false)
+	if replayResponse.Code != http.StatusOK || replayResponse.Header().Get("Idempotency-Replayed") != "true" || replay.ID != first.ID {
+		t.Fatalf("retry returned %d, header %q, job %#v", replayResponse.Code, replayResponse.Header().Get("Idempotency-Replayed"), replay)
+	}
+	conflict, _ := submit(producerA, "checkout-42", "different work", false)
+	if conflict.Code != http.StatusConflict {
+		t.Fatalf("changed request returned %d: %s", conflict.Code, conflict.Body.String())
+	}
+	otherResponse, other := submit(producerB, "checkout-42", "different work", false)
+	if otherResponse.Code != http.StatusAccepted || other.ID == first.ID {
+		t.Fatalf("producer-scoped key returned %d, job %#v", otherResponse.Code, other)
+	}
+	invalid, _ := submit(producerA, "contains space", "invalid", false)
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("invalid key returned %d: %s", invalid.Code, invalid.Body.String())
+	}
+	multiple, _ := submit(producerA, "twice", "invalid", true)
+	if multiple.Code != http.StatusBadRequest {
+		t.Fatalf("multiple key headers returned %d: %s", multiple.Code, multiple.Body.String())
+	}
+	events, err := relay.store.ListEvents(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queuedEvents := 0
+	for _, event := range events {
+		if event.Kind == "job.queued" {
+			queuedEvents++
+		}
+	}
+	if queuedEvents != 2 {
+		t.Fatalf("replay emitted a duplicate queue event: %d", queuedEvents)
 	}
 }
 

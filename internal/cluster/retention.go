@@ -381,6 +381,17 @@ func deleteJobIndexes(tx *bolt.Tx, job Job) error {
 	if err := deleteJobOwnerIndex(tx.Bucket(bucketJobOwnerIndex), job); err != nil {
 		return err
 	}
+	if reverse := tx.Bucket(bucketJobIdempotencyByJob); reverse != nil {
+		if raw := reverse.Get([]byte(job.ID)); raw != nil {
+			indexKey := append([]byte(nil), raw...)
+			if err := tx.Bucket(bucketJobIdempotency).Delete(indexKey); err != nil {
+				return err
+			}
+			if err := reverse.Delete([]byte(job.ID)); err != nil {
+				return err
+			}
+		}
+	}
 	return deleteQueueEntry(tx.Bucket(bucketQueue), job.ID)
 }
 
