@@ -1534,7 +1534,28 @@ async function inspectLatestOwnedTurn(expectedPrompt, provider, requireResponseA
       if (await matchesExpected(part?.textContent)) { promptContent = part; break; }
     }
   }
-  const text = normalize(promptContent?.textContent);
+  // Gemini's current user-query wrapper repeats part of the prompt in a
+  // visually-hidden accessibility heading (for example "You said …") before
+  // the real .query-text-line. Hashing the wrapper therefore cannot match the
+  // exact text that ContextBridge placed in the composer. Prefer only Gemini's
+  // rendered prompt lines and keep the wrapper as a backwards-compatible
+  // fallback for older page shapes and the deterministic test DOM.
+  let text = '';
+  if (provider === 'gemini' && content?.querySelectorAll) {
+    let lines = null;
+    try { lines = content.querySelectorAll('.query-text-line'); } catch (_) {}
+    if (lines?.length) {
+      const rendered = [];
+      for (let index = 0; index < Math.min(lines.length, 128); index += 1) {
+        const line = lines.item ? lines.item(index) : lines[index];
+        const value = normalize(line?.textContent);
+        if (value) rendered.push(value);
+      }
+      const joined = normalize(rendered.join(' '));
+      if (joined) text = joined;
+    }
+  }
+  if (!text) text = normalize(promptContent?.textContent);
   if (!id || !text || !await matchesExpected(text)) return null;
   if (requireResponseAfter) {
     let responseAfter = false;
@@ -1628,7 +1649,22 @@ async function inspectRecoveryState(selectors, provider, expected) {
       if (await considerPromptText(part?.textContent)) break;
     }
   }
-  if (!ownedTurnMatches && turnID) await considerPromptText(content?.textContent);
+  let foundRenderedGeminiPrompt = false;
+  if (!ownedTurnMatches && turnID && provider === 'gemini' && content?.querySelectorAll) {
+    let lines = null;
+    try { lines = content.querySelectorAll('.query-text-line'); } catch (_) {}
+    if (lines?.length) {
+      foundRenderedGeminiPrompt = true;
+      const rendered = [];
+      for (let index = 0; index < Math.min(lines.length, 128); index += 1) {
+        const line = lines.item ? lines.item(index) : lines[index];
+        const text = normalize(line?.textContent);
+        if (text) rendered.push(text);
+      }
+      await considerPromptText(rendered.join(' '));
+    }
+  }
+  if (!ownedTurnMatches && turnID && !foundRenderedGeminiPrompt) await considerPromptText(content?.textContent);
   let response = null;
   let responseCount = 0;
   for (const selector of selectors?.response || []) {
@@ -4232,7 +4268,21 @@ function automate(job, profile, jobDeadline, editTarget = null, expectedConversa
         if (!resumeOnly && turns.length !== beforeUserTurns + 1) return null;
         const turn = turns.length ? (turns.item ? turns.item(turns.length - 1) : turns[turns.length - 1]) : null;
         const content = turn?.querySelector?.('[id^="user-query-content-"]') || turn;
-        const text = String(content?.textContent || '').normalize('NFKC').replace(/\s+/g, ' ').trim();
+        let renderedText = '';
+        if (content?.querySelectorAll) {
+          let lines = null;
+          try { lines = content.querySelectorAll('.query-text-line'); } catch (_) {}
+          if (lines?.length) {
+            const values = [];
+            for (let index = 0; index < Math.min(lines.length, 128); index += 1) {
+              const line = lines.item ? lines.item(index) : lines[index];
+              const value = String(line?.textContent || '').normalize('NFKC').replace(/\s+/g, ' ').trim();
+              if (value) values.push(value);
+            }
+            renderedText = values.join(' ');
+          }
+        }
+        const text = String(renderedText || content?.textContent || '').normalize('NFKC').replace(/\s+/g, ' ').trim();
         if (normalizedPrompt && text === normalizedPrompt) return turn;
         // Gemini currently renders image-only user turns without the prompt
         // text in DOM. Accept that shape only after this same automation has

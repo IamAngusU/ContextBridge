@@ -3608,6 +3608,35 @@ for (const proofDelay of [2500, Infinity]) {
 }
 
 {
+  const prompt = 'exact Gemini owned prompt across two lines';
+  const lines = [{ textContent: 'exact Gemini owned prompt' }, { textContent: 'across two lines' }];
+  const content = {
+    id: 'user-query-content-owned',
+    // Gemini repeats prompt text in a hidden "You said" heading. The wrapper
+    // must not be hashed as though that accessibility copy were user input.
+    textContent: `Du hast gesagt ${prompt.slice(0, 18)} ${prompt}`,
+    querySelectorAll: (selector) => selector === '.query-text-line' ? lines : []
+  };
+  const answer = { ...element('Owned Gemini answer'), after: true };
+  const turn = { querySelector: () => content,
+    compareDocumentPosition: (candidate) => candidate === answer ? 4 : 2 };
+  context.document = { querySelectorAll(selector) {
+    if (selector === 'user-query') return [turn];
+    if (selector === '#gemini-answer') return [answer];
+    return [];
+  } };
+  const nonce = 'f'.repeat(32);
+  const proof = { nonce, digest: await context.sha256Text(`${nonce}\u0000${prompt}`) };
+  assert.ok(await context.inspectLatestOwnedTurn('', 'gemini', true, { response: ['#gemini-answer'] }, proof),
+    'Gemini ownership must hash only the rendered prompt lines, not duplicated accessibility text');
+  const recovery = await context.inspectRecoveryState({ input: [], response: ['#gemini-answer'] }, 'gemini', { prompt });
+  assert.equal(recovery.owned_turn_matches, true, 'Gemini recovery must use the same exact rendered prompt lines');
+  lines[1].textContent = 'different text';
+  assert.equal(await context.inspectLatestOwnedTurn('', 'gemini', false, null, proof), null,
+    'decorated wrapper text must not rescue a mismatched visible Gemini prompt');
+}
+
+{
   const content = { textContent: 'bounded latest prompt' };
   const latestTurn = { getAttribute: () => 'latest', querySelector: () => content };
   const hugeNodeList = { length: 10001, item: (index) => index === 10000 ? latestTurn : null,
