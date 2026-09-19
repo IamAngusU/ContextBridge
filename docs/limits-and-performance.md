@@ -149,18 +149,18 @@ as filesystem/device writes; and job bytes vary with caller payloads, results,
 and transport framing. These remain explicit `unavailable_metrics` rather than
 silent omissions or fabricated zeros.
 
-### v0.5.70 release-binary snapshot
+### v0.5.80 release-binary snapshot
 
 The following tables are direct output observations from the published-shape
-v0.5.70 `windows/amd64` and `linux/amd64` binaries built from the same tree on
-2026-09-16. Both used the default 128 measured samples, eight warmups, 16 real
+v0.5.80 `windows/amd64` and `linux/amd64` binaries built from the same tree on
+2026-09-19. Both used the default 128 measured samples, eight warmups, 16 real
 operations per crypto/artifact sample, 1,000 cancelled jobs for database
 growth, and an intentional ten-second idle window (rather than the two-second
 default) for more useful OS process sampling. Windows was the 24-logical-CPU Intel Core
 i9-12900K workstation; Linux was the two-logical-CPU AMD EPYC 9354P VPS
 allocation. They are one dated host observation, not an SLA or a claim of
 linear scaling. The unrounded machine-readable reports are attached to the
-v0.5.70 GitHub release as `contextbridge_benchmark_windows_amd64.json` and
+v0.5.80 GitHub release as `contextbridge_benchmark_windows_amd64.json` and
 `contextbridge_benchmark_linux_amd64.json`; both identify the exact version,
 settings, binary and extension sizes, scopes, exclusions, and warnings.
 
@@ -168,49 +168,49 @@ settings, binary and extension sizes, scopes, exclusions, and warnings.
 
 | Operation | Concurrency | p50 | p95 | p99 | operations/s |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Durable relay submit/read/cancel | 1 | 2.129 ms | 3.076 ms | 3.987 ms | 452.0 |
-| Durable relay submit/read/cancel | 4 | 7.706 ms | 10.422 ms | 11.098 ms | 505.5 |
-| Durable relay submit/read/cancel | 16 | 32.960 ms | 44.649 ms | 44.910 ms | 459.4 |
-| Durable relay submit/read/cancel | 64 | 137.582 ms | 140.498 ms | 140.576 ms | 464.6 |
-| Small E2EE job + result | 1 | 0.103 ms | 0.183 ms | 0.190 ms | 8,630.1 |
-| Small E2EE job + result | 4 | 0.125 ms | 0.193 ms | 0.201 ms | 32,262.3 |
-| Small E2EE job + result | 16 | 0.202 ms | 0.601 ms | 0.770 ms | 48,621.3 |
-| Small E2EE job + result | 64 | 0.736 ms | 2.312 ms | 2.454 ms | 51,411.3 |
-| Verify one 64 KiB artifact | 1 | 0.067 ms | 0.118 ms | 0.151 ms | 13,939.6 |
-| Verify one 64 KiB artifact | 4 | 0.094 ms | 0.145 ms | 0.170 ms | 41,244.2 |
-| Verify one 64 KiB artifact | 16 | 0.137 ms | 0.311 ms | 0.550 ms | 90,280.3 |
-| Verify one 64 KiB artifact | 64 | 0.605 ms | 1.026 ms | 1.176 ms | 86,876.1 |
+| Durable relay submit/read/cancel | 1 | 2.041 ms | 3.596 ms | 4.097 ms | 463.8 |
+| Durable relay submit/read/cancel | 4 | 7.621 ms | 9.253 ms | 9.839 ms | 538.5 |
+| Durable relay submit/read/cancel | 16 | 30.363 ms | 32.962 ms | 33.407 ms | 520.8 |
+| Durable relay submit/read/cancel | 64 | 136.194 ms | 138.514 ms | 138.875 ms | 463.6 |
+| Small E2EE job + result | 1 | 0.108 ms | 0.169 ms | 0.193 ms | 8,702.7 |
+| Small E2EE job + result | 4 | 0.127 ms | 0.169 ms | 0.215 ms | 30,121.7 |
+| Small E2EE job + result | 16 | 0.201 ms | 0.585 ms | 0.698 ms | 52,003.3 |
+| Small E2EE job + result | 64 | 0.923 ms | 2.021 ms | 2.108 ms | 53,931.9 |
+| Verify one 64 KiB artifact | 1 | 0.065 ms | 0.114 ms | 0.136 ms | 13,899.0 |
+| Verify one 64 KiB artifact | 4 | 0.095 ms | 0.129 ms | 0.149 ms | 41,700.0 |
+| Verify one 64 KiB artifact | 16 | 0.201 ms | 0.339 ms | 0.382 ms | 71,782.3 |
+| Verify one 64 KiB artifact | 64 | 0.593 ms | 1.149 ms | 1.335 ms | 82,903.9 |
 
 #### Latency and throughput — Linux/amd64 VPS
 
 | Operation | Concurrency | p50 | p95 | p99 | operations/s |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Durable relay submit/read/cancel | 1 | 5.738 ms | 14.637 ms | 25.786 ms | 147.7 |
-| Durable relay submit/read/cancel | 4 | 18.889 ms | 33.457 ms | 40.845 ms | 191.8 |
-| Durable relay submit/read/cancel | 16 | 73.477 ms | 88.915 ms | 93.008 ms | 228.9 |
-| Durable relay submit/read/cancel | 64 | 312.185 ms | 347.491 ms | 350.377 ms | 188.1 |
-| Small E2EE job + result | 1 | 0.227 ms | 0.322 ms | 0.498 ms | 4,107.0 |
-| Small E2EE job + result | 4 | 0.243 ms | 0.892 ms | 1.494 ms | 8,317.7 |
-| Small E2EE job + result | 16 | 0.216 ms | 5.547 ms | 6.409 ms | 9,101.5 |
-| Small E2EE job + result | 64 | 0.231 ms | 6.567 ms | 8.328 ms | 8,726.7 |
-| Verify one 64 KiB artifact | 1 | 0.116 ms | 0.209 ms | 0.224 ms | 7,767.3 |
-| Verify one 64 KiB artifact | 4 | 0.255 ms | 0.622 ms | 0.774 ms | 12,407.9 |
-| Verify one 64 KiB artifact | 16 | 0.778 ms | 2.276 ms | 3.475 ms | 13,295.8 |
-| Verify one 64 KiB artifact | 64 | 3.012 ms | 8.994 ms | 9.537 ms | 12,783.6 |
+| Durable relay submit/read/cancel | 1 | 4.303 ms | 14.282 ms | 18.953 ms | 178.4 |
+| Durable relay submit/read/cancel | 4 | 16.180 ms | 25.881 ms | 35.126 ms | 234.3 |
+| Durable relay submit/read/cancel | 16 | 85.790 ms | 121.012 ms | 128.724 ms | 175.5 |
+| Durable relay submit/read/cancel | 64 | 550.576 ms | 638.155 ms | 643.871 ms | 110.7 |
+| Small E2EE job + result | 1 | 0.227 ms | 0.295 ms | 0.306 ms | 4,253.7 |
+| Small E2EE job + result | 4 | 0.258 ms | 1.228 ms | 1.586 ms | 7,415.5 |
+| Small E2EE job + result | 16 | 0.251 ms | 4.102 ms | 10.145 ms | 7,542.4 |
+| Small E2EE job + result | 64 | 0.247 ms | 4.889 ms | 8.399 ms | 7,856.1 |
+| Verify one 64 KiB artifact | 1 | 0.127 ms | 0.246 ms | 0.344 ms | 6,987.4 |
+| Verify one 64 KiB artifact | 4 | 0.265 ms | 0.596 ms | 0.746 ms | 12,755.8 |
+| Verify one 64 KiB artifact | 16 | 0.773 ms | 2.218 ms | 2.965 ms | 14,175.4 |
+| Verify one 64 KiB artifact | 64 | 2.389 ms | 7.016 ms | 8.036 ms | 13,318.6 |
 
 #### Resource footprint
 
 | Measurement | Windows/amd64 | Linux/amd64 VPS | Scope |
 | --- | ---: | ---: | --- |
-| Core binary | 9.9 MiB | 9.6 MiB | stripped release executable |
-| Chromium extension | 364.6 KiB | 364.6 KiB | regular packaged files |
-| Firefox extension | 364.8 KiB | 364.8 KiB | regular packaged files |
-| Benchmark process + idle relay CPU | 0.000% observed | 0.088% of one core | whole-process, ten-second warmed window; Windows was below counter resolution |
-| Benchmark process + idle relay resident memory | 13.5 MiB | 10.9 MiB | whole-process working set / current RSS |
-| Benchmark process + idle relay Go heap / reserved | 993.0 KiB / 11.3 MiB | 687.0 KiB / 6.6 MiB | same benchmark process |
+| Core binary | 10.2 MiB | 9.9 MiB | stripped release executable |
+| Chromium extension | 684.0 KiB | 684.0 KiB | regular packaged files |
+| Firefox extension | 684.2 KiB | 684.2 KiB | regular packaged files |
+| Benchmark process + idle relay CPU | 0.000% observed | 0.082% of one core | whole-process, ten-second warmed window; Windows was below counter resolution |
+| Benchmark process + idle relay resident memory | 13.9 MiB | 10.5 MiB | whole-process working set / current RSS |
+| Benchmark process + idle relay Go heap / reserved | 1.0 MiB / 11.1 MiB | 751.3 KiB / 6.6 MiB | same benchmark process |
 | Fresh Bolt growth / 1,000 jobs | 2.0 MiB | 2.0 MiB | small submitted then cancelled jobs |
 | Browser heartbeat | 544 B / interval; 6,528 B/min; 382.5 KiB/hour | same typed fixture | JSON payload, one idle tab |
-| Worker heartbeat | 688 B / interval; 8,256 B/min; 483.8 KiB/hour | same typed fixture | JSON payload, one GPU + one model |
+| Worker heartbeat | 704 B / interval; 8,448 B/min; 495.0 KiB/hour | same typed fixture | JSON payload, one GPU + one model |
 
 The benchmark deliberately reports `RAM per active inference job`, operating-
 system disk-write bytes per job, and complete wire bytes per job as
