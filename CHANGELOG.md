@@ -2,6 +2,53 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.80 - 2026-09-19
+
+### Added
+
+- remote OpenAI-compatible engines can load a one-line credential from a
+  guarded `api_key_file`, resolved relative to the main config when needed
+- reviewed provider costing supports a minimum-balance floor, bounded
+  per-request reservations, actual token evidence, and explicit
+  `actual`/`estimated`/`upper_bound`/`unknown` status instead of presenting an
+  unknown charge as zero
+- `cluster agent plan` lets a configured planner propose at most six
+  sequential text-only jobs; `cluster agent run` requires the exact plan
+  SHA-256 and executes only the locally validated provider/profile policy
+- a dependency-free PHP 8.1+ shared-hosting client submits idempotent producer
+  jobs, polls existing jobs with bounded safe-read retries, cancels once, and
+  verifies embedded artifact size and SHA-256 before exclusive file creation
+
+### Changed
+
+- explicit custom provider names now remain bound to their configured local
+  primary routes when a cluster job reaches a worker
+- cluster CLI and dashboard cost views display evidence class, known/unknown
+  job counts, actual compute time, and reservation basis without fabricating a
+  `$0` cost for unpriced work
+- the live demo uses the full-wrapper-tested `qwen2.5:latest` local route and
+  keeps `/root/contextbridge-demo` as its persistent visible artifact folder
+
+### Fixed
+
+- a remote compatible provider selected by exact name no longer falls through
+  to a different local route merely because it is not one of the built-in
+  provider labels
+- reviewed agent summaries preserve `cost unknown` for browser and local jobs
+  whose provider supplied no monetary evidence
+
+### Security
+
+- secret files must be regular, non-symlinked, bounded, one-line files; Unix
+  group/world permissions are rejected and secret values remain absent from
+  status/config output
+- provider balance checks reserve the reviewed worst-case request amount
+  inside the process before dispatch, so concurrent calls cannot each spend
+  the same remaining balance above the operator's floor
+- agent proposals cannot add shell commands, tools, files, artifacts, retries,
+  recursive agents, new credentials, or hidden replanning; prior model output
+  returns only as untrusted submitted data and truncation stops the chain
+
 ## 0.5.79 - 2026-09-19
 
 ### Added
