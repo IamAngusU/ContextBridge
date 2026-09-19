@@ -58,6 +58,7 @@ ChatGPT and Gemini are detected automatically from stable DOM and accessibility 
 - **Fail-safe moderation:** invalid, missing, or timed-out decisions become `review`, never silent approval.
 - **Flexible inputs:** HTTP, stdin, folders, SSH pipelines, database workers, and custom adapters use one protocol.
 - **Bounded MCP tools:** a local stdio server exposes status, one-shot job submission, and stored-result lookup without arbitrary shell access or silent retries ([MCP guide](docs/mcp.md)).
+- **Shared-hosting client:** a dependency-free PHP 8.1+ example submits producer-scoped jobs with idempotency, safely polls results, and verifies embedded artifacts without exposing the token to a browser or mobile binary ([PHP guide](docs/php-client.md)).
 - **Inspectable operation:** a local dashboard shows routes, hardware, providers, models, latency, flags, jobs, and decisions.
 - **Durable local schedules:** a resource-aware due queue runs one-time and recurring jobs with explicit route/model/reasoning choices, safe restart semantics, pause/resume, bounded history, and sequential follow-ups using prior answers or verified artifacts ([schedules guide](docs/schedules.md)).
 - **Portable deployment:** one executable for Windows, Linux, and macOS on AMD64 and ARM64.

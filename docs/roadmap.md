@@ -30,7 +30,7 @@ artifact-return conventions, and a shared OpenAPI/JSON Schema remain planned
 work. They will ship only where their failure and ownership semantics can be
 mapped without pretending the compatibility protocol is richer than it is.
 
-### Small application clients — planned direction
+### Small application clients — PHP baseline shipped, broader SDKs planned
 
 Producer-scoped idempotent cluster admission is now part of the native
 protocol: an exact retry returns the retained job, changed content conflicts,
@@ -38,11 +38,14 @@ and the binding is durable and retention-aware. It remains submission
 deduplication—not a claim of universal exactly-once provider side effects.
 See the [protocol](protocol.md) for the shipped contract.
 
-A deliberately small PHP client is a useful
-first adoption target for shared hosting: submit, read status/result, verify and
-save an artifact, and cancel a still-queued job. Safe reads may retry with
-bounded backoff; mutating calls may not invent silent retries. Broader generated
-SDKs remain exploratory until the native and compatibility schemas converge.
+A deliberately small, dependency-free PHP 8.1+ client now ships under
+[`examples/php`](../examples/php). It submits with a required idempotency key,
+reads and waits with bounded safe-read backoff, cancels once, and verifies and
+saves embedded artifacts without following URL references. It enforces HTTPS
+off loopback and is intended for a backend or shared-hosting process—never for
+shipping producer credentials to browser JavaScript or a mobile binary. See
+the [PHP guide](php-client.md). Broader generated SDKs remain exploratory until
+the native and compatibility schemas converge.
 
 ### Remote MCP gateway and MCP client — exploratory
 

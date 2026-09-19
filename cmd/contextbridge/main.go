@@ -1693,10 +1693,18 @@ func formatClusterCost(usage cluster.Usage) string {
 	if usage.CostKnownJobs == 0 {
 		return fmt.Sprintf("[cost unknown · %d jobs]", usage.CostUnknownJobs)
 	}
-	if usage.CostUnknownJobs > 0 {
-		return fmt.Sprintf("[tracked cost estimate $%.6f · %d known / %d unknown jobs]", usage.EstimatedCostUSD, usage.CostKnownJobs, usage.CostUnknownJobs)
+	status := strings.TrimSpace(strings.ReplaceAll(usage.CostStatus, "_", " "))
+	if status == "" || status == cluster.CostPartial {
+		status = "mixed evidence"
 	}
-	return fmt.Sprintf("[tracked cost estimate $%.6f · %d jobs]", usage.EstimatedCostUSD, usage.CostKnownJobs)
+	reservation := ""
+	if usage.ReservedCostUSD > 0 {
+		reservation = fmt.Sprintf(" · reservation basis $%.6f", usage.ReservedCostUSD)
+	}
+	if usage.CostUnknownJobs > 0 {
+		return fmt.Sprintf("[tracked cost $%.6f · %s · %d known / %d unknown jobs%s]", usage.EstimatedCostUSD, status, usage.CostKnownJobs, usage.CostUnknownJobs, reservation)
+	}
+	return fmt.Sprintf("[tracked cost $%.6f · %s · %d jobs%s]", usage.EstimatedCostUSD, status, usage.CostKnownJobs, reservation)
 }
 
 func formatUTCOffset(seconds int) string {
