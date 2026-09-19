@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -610,7 +611,12 @@ func postTest(t *testing.T, target, token string, input, output interface{}) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		t.Fatalf("POST %s returned %s", target, resp.Status)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		detail := strings.TrimSpace(string(body))
+		if detail == "" {
+			detail = "response body was empty"
+		}
+		t.Fatalf("POST %s returned %s: %s", target, resp.Status, detail)
 	}
 	if err := json.NewDecoder(resp.Body).Decode(output); err != nil {
 		t.Fatal(err)

@@ -2,6 +2,23 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.81 - 2026-09-19
+
+### Added
+
+- installers preserve foreign `contextbridge` and `cb` commands and, when
+  both names are occupied, accept an operator-chosen command name with matching
+  Bash, Zsh, and PowerShell completion
+- agent plan approvals now bind the reviewed plan to a SHA-256 fingerprint of
+  the effective execution configuration and the selected relay URL
+
+### Fixed
+
+- every portable resource manifest sharing a case-insensitive pack ID is now
+  quarantined instead of allowing filesystem discovery order to choose a winner
+- the PHP client now completes valid partial `fwrite` operations and still
+  fails closed when a stream cannot make forward progress
+
 ## 0.5.80 - 2026-09-19
 
 ### Added

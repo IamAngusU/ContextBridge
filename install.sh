@@ -9,11 +9,95 @@ cluster_mode="${CONTEXTBRIDGE_CLUSTER_MODE:-ask}"
 relay_url="${CONTEXTBRIDGE_RELAY_URL:-}"
 public_url="${CONTEXTBRIDGE_PUBLIC_URL:-}"
 worker_name="${CONTEXTBRIDGE_WORKER_NAME:-auto}"
+command_name="${CONTEXTBRIDGE_COMMAND:-}"
 completion_enabled=1
 if [ "${CONTEXTBRIDGE_NO_COMPLETION:-0}" = "1" ]; then completion_enabled=0; fi
 interactive=0
 if [ "${CONTEXTBRIDGE_NONINTERACTIVE:-0}" != "1" ] && [ -r /dev/tty ]; then
   interactive=1
+fi
+
+valid_command_name() {
+  case "$1" in
+    ""|[!A-Za-z]*|*[!A-Za-z0-9_-]*) return 1 ;;
+  esac
+  [ "${#1}" -le 32 ] && [ "$1" != "contextbridge" ] && [ "$1" != "cb" ]
+}
+
+managed_alias_path() {
+  candidate="$1"
+  [ -L "$candidate" ] && {
+    target="$(readlink "$candidate" 2>/dev/null || true)"
+    [ "$target" = "contextbridge" ] || [ "$target" = "$BIN_DIR/contextbridge" ] || [ "$target" = "$INSTALL_DIR/contextbridge" ]
+    return
+  }
+  [ -f "$candidate" ] && {
+    marker="$(sed -n '2p' "$candidate" 2>/dev/null || true)"
+    [ "$marker" = "# ContextBridge managed cb alias" ] || [ "$marker" = "# ContextBridge managed command alias" ]
+    return
+  }
+  return 1
+}
+
+canonical_path="$BIN_DIR/contextbridge"
+existing_contextbridge="$(command -v contextbridge 2>/dev/null || true)"
+existing_cb="$(command -v cb 2>/dev/null || true)"
+canonical_name_available=1
+if [ -n "$existing_contextbridge" ] && [ "$existing_contextbridge" != "$canonical_path" ]; then
+  canonical_name_available=0
+elif [ -e "$canonical_path" ] || [ -L "$canonical_path" ]; then
+  if ! { [ -f "$INSTALL_DIR/contextbridge" ] && cmp -s "$canonical_path" "$INSTALL_DIR/contextbridge"; }; then
+    canonical_name_available=0
+  fi
+fi
+cb_name_available=1
+if [ -n "$existing_cb" ] && [ "$existing_cb" != "$BIN_DIR/cb" ]; then
+  cb_name_available=0
+elif [ -e "$BIN_DIR/cb" ] || [ -L "$BIN_DIR/cb" ]; then
+  managed_alias_path "$BIN_DIR/cb" || cb_name_available=0
+fi
+
+if [ -n "$command_name" ] && ! valid_command_name "$command_name"; then
+  echo "CONTEXTBRIDGE_COMMAND must use 1-32 letters, numbers, underscores, or hyphens, start with a letter, and differ from contextbridge/cb." >&2
+  exit 1
+fi
+if [ -z "$command_name" ] && [ "$canonical_name_available" = "0" ] && [ "$cb_name_available" = "0" ]; then
+  if [ "$interactive" = "0" ]; then
+    echo "Both 'contextbridge' and 'cb' already belong to other programs. Set CONTEXTBRIDGE_COMMAND to a custom command name." >&2
+    exit 1
+  fi
+  attempts=0
+  while [ -z "$command_name" ] && [ "$attempts" -lt 3 ]; do
+    attempts=$((attempts + 1))
+    printf "Both 'contextbridge' and 'cb' are taken. Choose a command name for ContextBridge: " >/dev/tty
+    read -r candidate </dev/tty || candidate=""
+    if ! valid_command_name "$candidate"; then
+      printf 'Use 1-32 letters, numbers, underscores, or hyphens, starting with a letter.\n' >/dev/tty
+      continue
+    fi
+    existing_candidate="$(command -v "$candidate" 2>/dev/null || true)"
+    if [ -n "$existing_candidate" ] && [ "$existing_candidate" != "$BIN_DIR/$candidate" ]; then
+      printf "'%s' is already taken. Choose another name.\n" "$candidate" >/dev/tty
+      continue
+    fi
+    if { [ -e "$BIN_DIR/$candidate" ] || [ -L "$BIN_DIR/$candidate" ]; } && ! managed_alias_path "$BIN_DIR/$candidate"; then
+      printf "'%s' is already taken. Choose another name.\n" "$candidate" >/dev/tty
+      continue
+    fi
+    command_name="$candidate"
+  done
+  [ -n "$command_name" ] || { echo "No safe ContextBridge command name was selected." >&2; exit 1; }
+fi
+if [ -n "$command_name" ]; then
+  existing_custom="$(command -v "$command_name" 2>/dev/null || true)"
+  if [ -n "$existing_custom" ] && [ "$existing_custom" != "$BIN_DIR/$command_name" ]; then
+    echo "The requested command '$command_name' already belongs to another program at $existing_custom." >&2
+    exit 1
+  fi
+  if { [ -e "$BIN_DIR/$command_name" ] || [ -L "$BIN_DIR/$command_name" ]; } && ! managed_alias_path "$BIN_DIR/$command_name"; then
+    echo "Refusing to replace the user-owned command file $BIN_DIR/$command_name." >&2
+    exit 1
+  fi
 fi
 if [ "$cluster_mode" = "worker" ] && [ "$interactive" = "0" ] && [ -z "$relay_url" ]; then
   echo "A relay URL is required for worker mode. Set CONTEXTBRIDGE_RELAY_URL for an unattended install." >&2
@@ -79,51 +163,44 @@ fi
 echo "Download checksum verified."
 mkdir -p "$INSTALL_DIR" "$BIN_DIR"
 tar -xzf "$tmp/$asset" -C "$INSTALL_DIR"
-install -m 0755 "$INSTALL_DIR/contextbridge" "$BIN_DIR/contextbridge"
+chmod 0755 "$INSTALL_DIR/contextbridge"
+canonical_command_installed=0
+if [ "$canonical_name_available" = "1" ]; then
+  install -m 0755 "$INSTALL_DIR/contextbridge" "$BIN_DIR/contextbridge"
+  canonical_command_installed=1
+else
+  echo "Preserved the existing 'contextbridge' command; ContextBridge's binary remains at $INSTALL_DIR/contextbridge."
+fi
 
 # Keep one canonical executable and a path-stable launcher for the short name.
 # A copied binary could become stale after an update. Never replace an
 # unrelated `cb` command or a user-owned file.
 cb_path="$BIN_DIR/cb"
 cb_alias_installed=0
-if [ -L "$cb_path" ]; then
-  cb_target="$(readlink "$cb_path" 2>/dev/null || true)"
-  if [ "$cb_target" = "contextbridge" ] || [ "$cb_target" = "$BIN_DIR/contextbridge" ]; then
-    ln -sfn contextbridge "$cb_path"
-    cb_alias_installed=1
-  else
-    echo "Skipped the short 'cb' command because $cb_path points elsewhere."
-  fi
-elif [ -e "$cb_path" ]; then
-  if [ "$(sed -n '2p' "$cb_path" 2>/dev/null || true)" = "# ContextBridge managed cb alias" ]; then
-    printf '#!/bin/sh\n# ContextBridge managed cb alias\nexec "$(dirname -- "$0")/contextbridge" "$@"\n' > "$tmp/cb"
-    install -m 0755 "$tmp/cb" "$cb_path"
-    cb_alias_installed=1
-  else
-    echo "Skipped the short 'cb' command because $cb_path is not managed by ContextBridge."
-  fi
+if [ "$cb_name_available" = "1" ]; then
+  if [ -e "$cb_path" ] || [ -L "$cb_path" ]; then rm -f "$cb_path"; fi
+  ln -s "$INSTALL_DIR/contextbridge" "$cb_path"
+  cb_alias_installed=1
 else
-  existing_cb="$(command -v cb 2>/dev/null || true)"
-  if [ -n "$existing_cb" ] && [ "$existing_cb" != "$cb_path" ]; then
-    echo "Skipped the short 'cb' command because it already belongs to $existing_cb."
-  else
-    printf '#!/bin/sh\n# ContextBridge managed cb alias\nexec "$(dirname -- "$0")/contextbridge" "$@"\n' > "$tmp/cb"
-    install -m 0755 "$tmp/cb" "$cb_path"
-    cb_alias_installed=1
-  fi
+  echo "Skipped the short 'cb' command because it already belongs to ${existing_cb:-$cb_path}."
 fi
-if [ "$cb_alias_installed" = "1" ]; then
-  resolved_cb="$(command -v cb 2>/dev/null || true)"
-  if [ -n "$resolved_cb" ] && [ "$resolved_cb" != "$cb_path" ]; then
-    # An owned launcher can survive a later PATH reorder. Do not let its mere
-    # presence claim completion ownership for the different command that the
-    # user's shell would actually execute.
-    echo "The managed cb launcher remains at $cb_path, but the active cb command belongs to $resolved_cb."
-    cb_alias_installed=0
-  fi
+
+custom_command_installed=0
+if [ -n "$command_name" ]; then
+  custom_path="$BIN_DIR/$command_name"
+  if [ -e "$custom_path" ] || [ -L "$custom_path" ]; then rm -f "$custom_path"; fi
+  ln -s "$INSTALL_DIR/contextbridge" "$custom_path"
+  custom_command_installed=1
 fi
-if [ "$cb_alias_installed" = "1" ]; then
-  echo "Commands ready: contextbridge and cb"
+
+completion_commands=""
+if [ "$canonical_command_installed" = "1" ]; then completion_commands="contextbridge"; fi
+if [ "$cb_alias_installed" = "1" ]; then completion_commands="${completion_commands:+$completion_commands }cb"; fi
+if [ "$custom_command_installed" = "1" ]; then completion_commands="${completion_commands:+$completion_commands }$command_name"; fi
+preferred_command="${command_name:-contextbridge}"
+if [ -z "$command_name" ] && [ "$canonical_command_installed" != "1" ] && [ "$cb_alias_installed" = "1" ]; then preferred_command="cb"; fi
+if [ -n "$completion_commands" ]; then
+  echo "Commands ready: $completion_commands"
 fi
 
 install_shell_completion() {
@@ -132,45 +209,43 @@ install_shell_completion() {
   bash_completion_dir="${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions"
   mkdir -p "$bash_completion_dir" || return 1
   zsh_completion_dir="$HOME/.zfunc"
-  if [ "$cb_alias_installed" != "1" ]; then
-    # Ownership cleanup is independent from generating a new script. Do it
-    # first so a missing/older generator cannot leave our stale registration
-    # attached to a foreign command.
-    if [ -f "$bash_completion_dir/cb" ] && grep -Fqx '# ContextBridge managed completion' "$bash_completion_dir/cb"; then
-      rm -f "$bash_completion_dir/cb" || return 1
+  # Ownership cleanup is independent from generating a new script. A command
+  # no longer owned by ContextBridge must not retain our completion handler.
+  for old_command in contextbridge cb; do
+    case " $completion_commands " in *" $old_command "*) continue ;; esac
+    if [ -f "$bash_completion_dir/$old_command" ] && grep -Fqx '# ContextBridge managed completion' "$bash_completion_dir/$old_command"; then
+      rm -f "$bash_completion_dir/$old_command" || return 1
     fi
-    if [ -f "$zsh_completion_dir/_cb" ] && grep -Fqx '# ContextBridge managed completion' "$zsh_completion_dir/_cb"; then
-      rm -f "$zsh_completion_dir/_cb" || return 1
+    if [ -f "$zsh_completion_dir/_$old_command" ] && grep -Fqx '# ContextBridge managed completion' "$zsh_completion_dir/_$old_command"; then
+      rm -f "$zsh_completion_dir/_$old_command" || return 1
     fi
-  fi
-  "$BIN_DIR/contextbridge" completion bash > "$tmp/contextbridge-completion.bash" || return 1
-  if [ "$cb_alias_installed" != "1" ]; then
-    sed 's/^complete -o default -F _contextbridge_complete contextbridge cb$/complete -o default -F _contextbridge_complete contextbridge/' \
-      "$tmp/contextbridge-completion.bash" > "$tmp/contextbridge-completion-scoped.bash" || return 1
-    grep -Fqx 'complete -o default -F _contextbridge_complete contextbridge' "$tmp/contextbridge-completion-scoped.bash" || return 1
-    if grep -Fqx 'complete -o default -F _contextbridge_complete contextbridge cb' "$tmp/contextbridge-completion-scoped.bash"; then return 1; fi
-    mv "$tmp/contextbridge-completion-scoped.bash" "$tmp/contextbridge-completion.bash" || return 1
-  fi
-  install -m 0644 "$tmp/contextbridge-completion.bash" "$bash_completion_dir/contextbridge" || return 1
-  if [ "$cb_alias_installed" = "1" ]; then
-    install -m 0644 "$tmp/contextbridge-completion.bash" "$bash_completion_dir/cb" || return 1
-  fi
+  done
+  "$INSTALL_DIR/contextbridge" completion bash > "$tmp/contextbridge-completion.raw.bash" || return 1
+  sed "s/^complete -o default -F _contextbridge_complete contextbridge cb$/complete -o default -F _contextbridge_complete $completion_commands/" \
+    "$tmp/contextbridge-completion.raw.bash" > "$tmp/contextbridge-completion.body.bash" || return 1
+  grep -Fqx "complete -o default -F _contextbridge_complete $completion_commands" "$tmp/contextbridge-completion.body.bash" || return 1
+  {
+    printf '# ContextBridge managed completion\n'
+    cat "$tmp/contextbridge-completion.body.bash"
+  } > "$tmp/contextbridge-completion.bash" || return 1
+  for completion_command in $completion_commands; do
+    install -m 0644 "$tmp/contextbridge-completion.bash" "$bash_completion_dir/$completion_command" || return 1
+  done
 
   if command -v zsh >/dev/null 2>&1; then
     mkdir -p "$zsh_completion_dir" || return 1
-    "$BIN_DIR/contextbridge" completion zsh > "$tmp/_contextbridge" || return 1
-    if [ "$cb_alias_installed" != "1" ]; then
-      sed 's/^#compdef contextbridge cb$/#compdef contextbridge/' "$tmp/_contextbridge" > "$tmp/_contextbridge-scoped" || return 1
-      grep -Fqx '#compdef contextbridge' "$tmp/_contextbridge-scoped" || return 1
-      if grep -Fqx '#compdef contextbridge cb' "$tmp/_contextbridge-scoped"; then return 1; fi
-      mv "$tmp/_contextbridge-scoped" "$tmp/_contextbridge" || return 1
-    fi
-    install -m 0644 "$tmp/_contextbridge" "$zsh_completion_dir/_contextbridge" || return 1
-    zsh_completion_commands="contextbridge"
-    if [ "$cb_alias_installed" = "1" ]; then
-      install -m 0644 "$tmp/_contextbridge" "$zsh_completion_dir/_cb" || return 1
-      zsh_completion_commands="contextbridge cb"
-    fi
+    "$INSTALL_DIR/contextbridge" completion zsh > "$tmp/_contextbridge.raw" || return 1
+    sed "s/^#compdef contextbridge cb$/#compdef $completion_commands/" "$tmp/_contextbridge.raw" > "$tmp/_contextbridge.body" || return 1
+    grep -Fqx "#compdef $completion_commands" "$tmp/_contextbridge.body" || return 1
+    {
+      IFS= read -r first_line || return 1
+      printf '%s\n# ContextBridge managed completion\n' "$first_line"
+      cat
+    } < "$tmp/_contextbridge.body" > "$tmp/_contextbridge" || return 1
+    for completion_command in $completion_commands; do
+      install -m 0644 "$tmp/_contextbridge" "$zsh_completion_dir/_$completion_command" || return 1
+    done
+    zsh_completion_commands="$completion_commands"
     zsh_rc="${ZDOTDIR:-$HOME}/.zshrc"
     zsh_rc_target="$zsh_rc"
     zsh_link_depth=0
@@ -252,7 +327,7 @@ fi
 
 config="${CONTEXTBRIDGE_CONFIG:-$HOME/.config/contextbridge/config.yml}"
 if [ ! -f "$config" ]; then
-  "$BIN_DIR/contextbridge" init --config "$config"
+  "$INSTALL_DIR/contextbridge" init --config "$config"
 fi
 
 if [ "$cluster_mode" = "ask" ] && [ "$interactive" = "1" ]; then
@@ -281,16 +356,16 @@ if [ "$cluster_mode" = "worker" ] && [ -z "$relay_url" ]; then
   exit 1
 fi
 if [ -n "$relay_url" ]; then
-  "$BIN_DIR/contextbridge" cluster configure --config "$config" --mode "$cluster_mode" --relay-url "$relay_url" --name "$worker_name"
+  "$INSTALL_DIR/contextbridge" cluster configure --config "$config" --mode "$cluster_mode" --relay-url "$relay_url" --name "$worker_name"
 elif [ -n "$public_url" ]; then
-  "$BIN_DIR/contextbridge" cluster configure --config "$config" --mode "$cluster_mode" --listen auto --public-url "$public_url" --name "$worker_name"
+  "$INSTALL_DIR/contextbridge" cluster configure --config "$config" --mode "$cluster_mode" --listen auto --public-url "$public_url" --name "$worker_name"
 elif [ "$cluster_mode" = "relay" ] || [ "$cluster_mode" = "all" ]; then
-  "$BIN_DIR/contextbridge" cluster configure --config "$config" --mode "$cluster_mode" --listen auto --name "$worker_name"
+  "$INSTALL_DIR/contextbridge" cluster configure --config "$config" --mode "$cluster_mode" --listen auto --name "$worker_name"
 else
-  "$BIN_DIR/contextbridge" cluster configure --config "$config" --mode "$cluster_mode" --name "$worker_name"
+  "$INSTALL_DIR/contextbridge" cluster configure --config "$config" --mode "$cluster_mode" --name "$worker_name"
 fi
 if [ "$cluster_mode" = "worker" ] || [ "$cluster_mode" = "all" ]; then
-  "$BIN_DIR/contextbridge" pair --config "$config" --name "$worker_name"
+  "$INSTALL_DIR/contextbridge" pair --config "$config" --name "$worker_name"
 fi
 
 if [ "$provider" = "browser" ]; then
@@ -317,16 +392,16 @@ elif [ "$provider" = "managed" ]; then
     case "${model_choice:-1}" in 2) managed_model="nuextract" ;; 3) managed_model="both" ;; *) managed_model="jina" ;; esac
   fi
   echo "Installing the verified llama.cpp runtime..."
-  "$BIN_DIR/contextbridge" runtime install --config "$config" llama.cpp
+  "$INSTALL_DIR/contextbridge" runtime install --config "$config" llama.cpp
   if [ "$managed_model" = "jina" ] || [ "$managed_model" = "both" ]; then
     sed -i.bak '/^  jina:/,/^  [A-Za-z0-9_-]*:/{s/^    auto_start: false$/    auto_start: true/;}' "$config"
     rm -f "$config.bak"
-    "$BIN_DIR/contextbridge" pull --config "$config" jina-v4-retrieval
+    "$INSTALL_DIR/contextbridge" pull --config "$config" jina-v4-retrieval
   fi
   if [ "$managed_model" = "nuextract" ] || [ "$managed_model" = "both" ]; then
     sed -i.bak '/^  nuextract:/,/^  [A-Za-z0-9_-]*:/{s/^    auto_start: false$/    auto_start: true/;}' "$config"
     rm -f "$config.bak"
-    "$BIN_DIR/contextbridge" pull --config "$config" nuextract3
+    "$INSTALL_DIR/contextbridge" pull --config "$config" nuextract3
   fi
 fi
 
@@ -339,7 +414,7 @@ Description=ContextBridge local model and browser bridge
 After=network-online.target
 
 [Service]
-ExecStart="$BIN_DIR/contextbridge" run --config "$config"
+ExecStart="$INSTALL_DIR/contextbridge" run --config "$config"
 Restart=on-failure
 RestartSec=3
 
@@ -353,7 +428,7 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart="$BIN_DIR/contextbridge" update auto --config "$config"
+ExecStart="$INSTALL_DIR/contextbridge" update auto --config "$config"
 EOF
   cat > "$unit_dir/contextbridge-update.timer" <<EOF
 [Unit]
@@ -372,7 +447,7 @@ EOF
     echo "ContextBridge user service enabled."
   else
     echo "The user service could not be enabled in this session."
-    echo "Start ContextBridge with: $BIN_DIR/contextbridge run --config $config"
+    echo "Start ContextBridge with: $preferred_command run --config $config"
   fi
 elif [ "$os" = "darwin" ]; then
   agent_dir="$HOME/Library/LaunchAgents"
@@ -384,7 +459,7 @@ elif [ "$os" = "darwin" ]; then
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>de.angusu.contextbridge</string>
-  <key>ProgramArguments</key><array><string>$BIN_DIR/contextbridge</string><string>run</string><string>--config</string><string>$config</string></array>
+  <key>ProgramArguments</key><array><string>$INSTALL_DIR/contextbridge</string><string>run</string><string>--config</string><string>$config</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
   <key>StandardOutPath</key><string>$INSTALL_DIR/contextbridge.log</string>
@@ -396,7 +471,7 @@ EOF
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>de.angusu.contextbridge.update</string>
-  <key>ProgramArguments</key><array><string>$BIN_DIR/contextbridge</string><string>update</string><string>auto</string><string>--config</string><string>$config</string></array>
+  <key>ProgramArguments</key><array><string>$INSTALL_DIR/contextbridge</string><string>update</string><string>auto</string><string>--config</string><string>$config</string></array>
   <key>StartInterval</key><integer>86400</integer>
   <key>ProcessType</key><string>Background</string>
   <key>StandardOutPath</key><string>$INSTALL_DIR/contextbridge-update.log</string>
@@ -409,10 +484,10 @@ EOF
     launchctl bootstrap "gui/$(id -u)" "$update_agent" >/dev/null 2>&1 || true
     echo "ContextBridge launch agent enabled."
   else
-    echo "Start ContextBridge with: $BIN_DIR/contextbridge run --config $config"
+    echo "Start ContextBridge with: $preferred_command run --config $config"
   fi
 else
-  echo "Start ContextBridge with: $BIN_DIR/contextbridge run --config $config"
+  echo "Start ContextBridge with: $preferred_command run --config $config"
 fi
 
 echo "Config: $config"
@@ -426,7 +501,7 @@ esac
 if [ "${CONTEXTBRIDGE_NO_DASHBOARD:-0}" != "1" ]; then
   if [ "$os" = "darwin" ] || [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
     sleep 1
-    "$BIN_DIR/contextbridge" dashboard --config "$config" || true
+    "$INSTALL_DIR/contextbridge" dashboard --config "$config" || true
   else
     echo "Dashboard: http://127.0.0.1:32145"
   fi

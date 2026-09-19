@@ -111,7 +111,7 @@ HOME="$home" PATH="$fake_bin:$test_system_path" sh "$root/install.sh" > "$test_r
 
 test -x "$CONTEXTBRIDGE_BIN_DIR/contextbridge"
 test -x "$CONTEXTBRIDGE_BIN_DIR/cb"
-test "$(sed -n '2p' "$CONTEXTBRIDGE_BIN_DIR/cb")" = '# ContextBridge managed cb alias'
+test "$(readlink "$CONTEXTBRIDGE_BIN_DIR/cb")" = "$CONTEXTBRIDGE_HOME/contextbridge"
 "$CONTEXTBRIDGE_BIN_DIR/cb" version
 grep -F -- 'version' "$calls" >/dev/null
 grep -F -- '# fixture completion for bash' "$home/.local/share/bash-completion/completions/contextbridge" >/dev/null
@@ -122,7 +122,7 @@ grep -F -- "init --config $CONTEXTBRIDGE_CONFIG" "$calls" >/dev/null
 grep -F -- "cluster configure --config $CONTEXTBRIDGE_CONFIG --mode worker --relay-url https://relay.example.test/contextbridge --name headless-worker" "$calls" >/dev/null
 grep -F -- "pair --config $CONTEXTBRIDGE_CONFIG --name headless-worker" "$calls" >/dev/null
 grep -F -- '--user enable --now contextbridge.service contextbridge-update.timer' "$systemctl_calls" >/dev/null
-grep -F -- "ExecStart=\"$CONTEXTBRIDGE_BIN_DIR/contextbridge\" run --config \"$CONTEXTBRIDGE_CONFIG\"" "$home/.config/systemd/user/contextbridge.service" >/dev/null
+grep -F -- "ExecStart=\"$CONTEXTBRIDGE_HOME/contextbridge\" run --config \"$CONTEXTBRIDGE_CONFIG\"" "$home/.config/systemd/user/contextbridge.service" >/dev/null
 
 collision="$test_root/collision"
 mkdir -p "$collision/home/.local/share/bash-completion/completions" "$collision/home/.zfunc" "$collision/bin"
@@ -189,6 +189,52 @@ HOME="$collision/home" \
 test "$(cksum < "$collision/home/.local/share/bash-completion/completions/cb")" = "$collision_bash_completion_before"
 test "$(cksum < "$collision/home/.zfunc/_cb")" = "$collision_zsh_completion_before"
 
+# If both public names belong to other programs, unattended installation must
+# stop before downloading unless the operator supplies a safe custom name.
+both_taken="$test_root/both-names-taken"
+mkdir -p "$both_taken/home" "$both_taken/bin"
+printf '#!/bin/sh\nprintf foreign-contextbridge\n' > "$both_taken/bin/contextbridge"
+printf '#!/bin/sh\nprintf foreign-cb\n' > "$both_taken/bin/cb"
+chmod +x "$both_taken/bin/contextbridge" "$both_taken/bin/cb"
+contextbridge_before="$(cksum < "$both_taken/bin/contextbridge")"
+cb_before="$(cksum < "$both_taken/bin/cb")"
+if HOME="$both_taken/home" \
+  PATH="$both_taken/bin:$fake_bin:$test_system_path" \
+  CONTEXTBRIDGE_HOME="$both_taken/share" \
+  CONTEXTBRIDGE_BIN_DIR="$both_taken/bin" \
+  CONTEXTBRIDGE_CONFIG="$both_taken/config.yml" \
+  CONTEXTBRIDGE_PROVIDER="later" \
+  CONTEXTBRIDGE_CLUSTER_MODE="local" \
+  CONTEXTBRIDGE_NO_DASHBOARD="1" \
+  CONTEXTBRIDGE_NONINTERACTIVE="1" \
+  sh "$root/install.sh" > "$both_taken/no-name.out" 2> "$both_taken/no-name.err"; then
+  echo "installer accepted two foreign command names without a custom name" >&2
+  exit 1
+fi
+grep -F -- 'Set CONTEXTBRIDGE_COMMAND to a custom command name.' "$both_taken/no-name.err" >/dev/null
+test ! -e "$both_taken/share/contextbridge"
+
+HOME="$both_taken/home" \
+  PATH="$both_taken/bin:$fake_bin:$test_system_path" \
+  CONTEXTBRIDGE_HOME="$both_taken/share" \
+  CONTEXTBRIDGE_BIN_DIR="$both_taken/bin" \
+  CONTEXTBRIDGE_CONFIG="$both_taken/config.yml" \
+  CONTEXTBRIDGE_PROVIDER="later" \
+  CONTEXTBRIDGE_CLUSTER_MODE="local" \
+  CONTEXTBRIDGE_NO_DASHBOARD="1" \
+  CONTEXTBRIDGE_NONINTERACTIVE="1" \
+  CONTEXTBRIDGE_COMMAND="bridge-ai" \
+  sh "$root/install.sh" > "$both_taken/custom.out"
+test "$contextbridge_before" = "$(cksum < "$both_taken/bin/contextbridge")"
+test "$cb_before" = "$(cksum < "$both_taken/bin/cb")"
+test "$(readlink "$both_taken/bin/bridge-ai")" = "$both_taken/share/contextbridge"
+"$both_taken/bin/bridge-ai" version
+grep -Fqx -- 'complete -o default -F _contextbridge_complete bridge-ai' "$both_taken/home/.local/share/bash-completion/completions/bridge-ai"
+test ! -e "$both_taken/home/.local/share/bash-completion/completions/contextbridge"
+test ! -e "$both_taken/home/.local/share/bash-completion/completions/cb"
+grep -Fqx -- '#compdef bridge-ai' "$both_taken/home/.zfunc/_bridge-ai"
+grep -F -- 'compdef _contextbridge bridge-ai;' "$both_taken/home/.zshrc" >/dev/null
+
 shadowed="$test_root/shadowed-managed-alias"
 mkdir -p "$shadowed/home" "$shadowed/bin" "$shadowed/foreign"
 printf '#!/bin/sh\n# ContextBridge managed cb alias\nexec "$(dirname -- "$0")/contextbridge" "$@"\n' > "$shadowed/bin/cb"
@@ -204,7 +250,7 @@ HOME="$shadowed/home" \
   CONTEXTBRIDGE_NO_DASHBOARD="1" \
   CONTEXTBRIDGE_NONINTERACTIVE="1" \
   sh "$root/install.sh" > "$shadowed/out"
-grep -F -- 'active cb command belongs to' "$shadowed/out" >/dev/null
+grep -F -- "Skipped the short 'cb' command because it already belongs to $shadowed/foreign/cb." "$shadowed/out" >/dev/null
 grep -Fqx -- 'complete -o default -F _contextbridge_complete contextbridge' "$shadowed/home/.local/share/bash-completion/completions/contextbridge"
 test ! -e "$shadowed/home/.local/share/bash-completion/completions/cb"
 grep -Fqx -- '#compdef contextbridge' "$shadowed/home/.zfunc/_contextbridge"

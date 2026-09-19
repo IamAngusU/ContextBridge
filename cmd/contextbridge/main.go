@@ -1003,6 +1003,9 @@ func resourcesCommand(args []string) error {
 		if pack.Version != "" {
 			identity += " " + pack.Version
 		}
+		if pack.Quarantined {
+			identity += " · QUARANTINED"
+		}
 		fmt.Printf("%s  [%s]  %s\n", pack.ID, emptyLabel(pack.Kind, "resource-pack"), identity)
 		fmt.Printf("  Path: %s\n", pack.Path)
 		for _, endpoint := range pack.Endpoints {

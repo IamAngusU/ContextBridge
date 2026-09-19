@@ -192,10 +192,7 @@ final class ContextBridgeClient
             $name = self::safeFilename((string) ($artifact['name'] ?? 'artifact.bin'));
             [$path, $handle] = self::createExclusiveFile($root, $name);
             try {
-                $written = fwrite($handle, $data);
-                if ($written !== $size || !fflush($handle)) {
-                    throw new RuntimeException('Could not write the complete artifact.');
-                }
+                self::writeAll($handle, $data);
             } catch (\Throwable $error) {
                 fclose($handle);
                 @unlink($path);
@@ -372,6 +369,26 @@ final class ContextBridgeClient
             $name = 'artifact.bin';
         }
         return substr($name, 0, 180);
+    }
+
+    /** @param resource $handle */
+    private static function writeAll($handle, string $data): void
+    {
+        $length = strlen($data);
+        $offset = 0;
+        while ($offset < $length) {
+            // fwrite is allowed to accept fewer bytes than requested even on a
+            // healthy stream. Advance only by bytes the stream confirms and
+            // fail closed on a zero-progress or impossible write.
+            $written = fwrite($handle, substr($data, $offset));
+            if ($written === false || $written < 1 || $written > $length - $offset) {
+                throw new RuntimeException('Could not write the complete artifact.');
+            }
+            $offset += $written;
+        }
+        if (!fflush($handle)) {
+            throw new RuntimeException('Could not flush the complete artifact.');
+        }
     }
 
     /** @return array{0:string,1:resource} */

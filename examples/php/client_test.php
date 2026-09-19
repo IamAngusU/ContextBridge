@@ -13,6 +13,38 @@ function check(bool $condition, string $message): void
     }
 }
 
+final class ContextBridgePartialWriteStream
+{
+    public static string $bytes = '';
+
+    /** @var resource|null Populated by PHP's stream wrapper runtime. */
+    public $context;
+
+    public function stream_open(string $path, string $mode, int $options, ?string &$openedPath): bool
+    {
+        self::$bytes = '';
+        return true;
+    }
+
+    public function stream_write(string $data): int
+    {
+        $part = substr($data, 0, 3);
+        self::$bytes .= $part;
+        return strlen($part);
+    }
+
+    public function stream_flush(): bool
+    {
+        return true;
+    }
+
+    /** @return array<int,int> */
+    public function stream_stat(): array
+    {
+        return [];
+    }
+}
+
 $calls = [];
 $responses = [
     ['status' => 503, 'headers' => [], 'body' => '{"error":"busy"}'],
@@ -76,6 +108,15 @@ check(basename($saved['files'][0]['path']) === 'proof.txt', 'artifact path trave
 check(file_get_contents($saved['files'][0]['path']) === $data, 'saved artifact bytes changed');
 @unlink($saved['files'][0]['path']);
 @rmdir($dir);
+
+check(stream_wrapper_register('contextbridgepartial', ContextBridgePartialWriteStream::class), 'partial-write fixture could not be registered');
+$partial = fopen('contextbridgepartial://artifact', 'wb');
+check($partial !== false, 'partial-write fixture could not be opened');
+$writeAll = new ReflectionMethod(ContextBridgeClient::class, 'writeAll');
+$writeAll->invoke(null, $partial, 'partial-write-proof');
+fclose($partial);
+stream_wrapper_unregister('contextbridgepartial');
+check(ContextBridgePartialWriteStream::$bytes === 'partial-write-proof', 'partial artifact writes were not completed');
 
 try {
     new ContextBridgeClient('http://relay.example.test', 'cb_producer_test-token');
