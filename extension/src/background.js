@@ -983,7 +983,7 @@ async function processWork(cfg, work, claimedTabId) {
     } else {
       await rememberBrowserJobClaim(work, tabId, (await assertSessionTab(workSessionKey(work), tabId)).tab.url, initial, effectiveProfile.name);
     }
-    if (!observationOnly && binding?.autoCreated === true && effectiveProfile.name === 'chatgpt'
+    if (!observationOnly && binding && binding.legacy !== true && effectiveProfile.name === 'chatgpt'
         && !work.job.image_base64 && Number(work.job.output?.min_images || 0) === 0
         && Number(work.job.output?.min_artifacts || 0) === 0 && Number(work.job.output?.min_media || 0) === 0) {
       automationJob = { ...automationJob, metadata: { ...(automationJob.metadata || {}),
@@ -1024,21 +1024,46 @@ async function processWork(cfg, work, claimedTabId) {
       progressTimer = 0;
     }
     for (let attempt = 0; progressBusy && attempt < 200; attempt += 1) await delay(25);
+    if (!observationOnly && !editTarget && !answer?.ok && answer?.recoverable === true
+        && answer?.code === 'stalled_submission') {
+      // Some background provider tabs keep a synthetic Send click entirely in
+      // the composer. Retry at most once, and only after the exact locally
+      // recorded nonce+digest and the page's job marker prove the prompt is
+      // still ours, unchanged, unattached, idle, and in the same session tab.
+      const foregrounded = await foregroundOwnedUnsentDraft(cfg, work, tabId, effectiveProfile, leaseState);
+      if (foregrounded) {
+        progressSequence += 1;
+        await reportProgress(cfg, work.job.id, { sequence: progressSequence, text: '', phase: 'recovering',
+          detail: 'Activating the owned tab and retrying its still-unsent prompt once', busy: true });
+        const retryTab = await assertRecoveryTab(workSessionKey(work), tabId);
+        const retried = await api.scripting.executeScript({ target: { tabId }, func: automate,
+          args: [automationJob, effectiveProfile, work.deadline, null, retryTab.url,
+            { jobId: work.job.id, generation: leaseGeneration }] });
+        answer = retried?.[0]?.result;
+      }
+      if (!foregrounded || (!answer?.ok && answer?.code === 'stalled_submission')) {
+        answer = { ok: false,
+          error: 'The provider retained the exact ContextBridge prompt after one ownership-checked foreground retry; it was not sent again',
+          code: 'browser_submit_unavailable', recoverable: false };
+      }
+    }
     if (shouldForegroundStalledTab(binding, effectiveProfile, answer)) {
-      // An automatically created background tab can be throttled by the
-      // browser. Foreground it only after proving this is our submitted turn,
-      // then observe without sending again. Keep the tab visible if it wakes.
+      // A background tab can be throttled by the browser. Foreground it only
+      // after proving this is our submitted turn, then observe without sending
+      // again. Keep the tab visible if it wakes.
       try {
         await assertRecoveryTab(workSessionKey(work), tabId);
         const proof = await waitForExactOwnedTurnProof(workSessionKey(work), tabId, effectiveProfile, work.job.prompt,
           Math.min(15000, Math.max(0, (Date.parse(work.deadline || '') || Date.now() + 15000) - Date.now() - 5000)));
         const remaining = (Date.parse(work.deadline || '') || Date.now() + 45000) - Date.now() - 5000;
-        if (proof && remaining >= 10000 && !(await api.tabs.get(tabId)).active) {
+        if (proof && remaining >= 4000) {
+          const stalledTab = await api.tabs.get(tabId);
           progressSequence += 1;
           await reportProgress(cfg, work.job.id, { sequence: progressSequence, text: '', phase: 'recovering',
-            detail: 'Foregrounding a stalled, ContextBridge-created tab without resending', busy: true });
+            detail: stalledTab.active ? 'Re-observing the exact stalled ContextBridge tab without resending'
+              : 'Foregrounding the exact stalled ContextBridge tab without resending', busy: true });
 	          await requireActiveBrowserLease(cfg, leaseState);
-	          await api.tabs.update(tabId, { active: true });
+	          if (!stalledTab.active) await api.tabs.update(tabId, { active: true });
 	          const resumeJob = { ...work.job, metadata: { ...(work.job.metadata || {}), contextbridge_resume_only: true,
 	            contextbridge_foreground_recovery: true, contextbridge_baseline_text: String(answer?.text || baselineText) } };
 	          const observationTab = await assertRecoveryTab(workSessionKey(work), tabId);
@@ -1206,7 +1231,10 @@ async function processWork(cfg, work, claimedTabId) {
 }
 
 function shouldForegroundStalledTab(binding, profile, answer) {
-  return binding?.autoCreated === true && profile?.name === 'chatgpt' && !answer?.ok
+  // A current, explicitly attached session is owned just as strictly as an
+  // auto-created one. The caller still proves the exact submitted turn before
+  // foregrounding; legacy bindings never gain this recovery permission.
+  return Boolean(binding) && binding.legacy !== true && profile?.name === 'chatgpt' && !answer?.ok
     && answer?.recoverable === true && ['stalled_response', 'missing_response_after_generation'].includes(answer.code);
 }
 
@@ -2664,6 +2692,38 @@ async function markOwnedDraft(tabId, tab, job) {
   });
 }
 
+async function foregroundOwnedUnsentDraft(cfg, work, tabId, profile, lease) {
+  const latest = await settings();
+  const owned = latest.ownedDrafts?.[tabId];
+  const binding = latest.sessionBindings?.[workSessionKey(work)];
+  if (!owned || owned.jobId !== String(work?.job?.id || '') || !owned.nonce || !owned.digest
+      || !binding || binding.legacy === true || Number(binding.tabId) !== Number(tabId)) return false;
+  const tab = await api.tabs.get(tabId).catch(() => null);
+  if (!tab?.url || binding.url !== tab.url || owned.origin !== new URL(tab.url).origin) return false;
+  const inspected = await api.scripting.executeScript({ target: { tabId }, func: inspectOwnedDraft,
+    args: [profile.selectors || {}, profile.name, owned.nonce] });
+  const draft = inspected?.[0]?.result;
+  if (!draft || draft.unavailable || draft.empty || draft.provider_busy || draft.has_attachments
+      || draft.focused || draft.owner_job !== owned.jobId || draft.digest !== owned.digest) return false;
+  await requireActiveBrowserLease(cfg, lease);
+  const current = await api.tabs.get(tabId).catch(() => null);
+  if (!current?.url || current.url !== tab.url) return false;
+  if (!current.active) await api.tabs.update(tabId, { active: true });
+  await delay(500);
+  const after = await settings();
+  const afterBinding = after.sessionBindings?.[workSessionKey(work)];
+  const afterTab = await api.tabs.get(tabId).catch(() => null);
+  if (!afterTab?.url || afterTab.url !== tab.url || Number(afterBinding?.tabId) !== Number(tabId)
+      || afterBinding?.url !== tab.url || afterBinding?.legacy === true) return false;
+  const confirmed = await api.scripting.executeScript({ target: { tabId }, func: inspectOwnedDraft,
+    args: [profile.selectors || {}, profile.name, owned.nonce] });
+  const confirmedDraft = confirmed?.[0]?.result;
+  if (!confirmedDraft || confirmedDraft.unavailable || confirmedDraft.empty || confirmedDraft.provider_busy
+      || confirmedDraft.has_attachments || confirmedDraft.owner_job !== owned.jobId
+      || confirmedDraft.digest !== owned.digest) return false;
+  return true;
+}
+
 async function removeOwnedDraft(tabId) {
   await serializeSessionWrite(async () => {
     const latest = await settings();
@@ -4107,10 +4167,37 @@ function automate(job, profile, jobDeadline, editTarget = null, expectedConversa
 	            if (profile.name === 'gemini') throw new Error('Send button is not visible after filling the prompt');
 	            await authorizeAction('send');
 	            input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
-            input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
+              input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
+              clickedSendForThisPrompt = true;
+            }
+            let submissionObserved = false;
+            const submissionProbeAttempts = uploadedAttachmentProof ? 20 : 8;
+            for (let attempt = 0; attempt < submissionProbeAttempts; attempt += 1) {
+              await wait(250);
+              if (activeExpectedConversationURL && location.href !== activeExpectedConversationURL) {
+                await authorizeAction('observe');
+              } else {
+                requireExpectedConversation();
+              }
+              const currentUserTurns = document.querySelectorAll(profile.name === 'gemini' ? 'user-query' : '[data-turn="user"]').length;
+              const liveInput = first(selectors.input);
+              const liveText = normalized(editorText(liveInput));
+              const currentResponses = responseTail(selectors.response).count;
+              if (currentUserTurns > beforeUserTurns || currentResponses > beforeSnapshot.count
+                  || !liveInput || liveText !== expected) {
+                submissionObserved = true;
+                break;
+              }
+            }
+            if (!submissionObserved) {
+              const mayRetry = !job.image_base64 && !job.metadata?.contextbridge_input_file && !uploadedAttachmentProof;
+              resolve({ ok: false,
+                error: `${profile.name} retained the exact ContextBridge prompt after Send`,
+                code: mayRetry ? 'stalled_submission' : 'browser_submit_unavailable', recoverable: mayRetry });
+              return;
+            }
           }
         }
-      }
 
 		const suppliedDeadline = Date.parse(jobDeadline || '');
 		const defaultWait = job.output?.artifacts ? 300000 : 180000;
@@ -4131,6 +4218,10 @@ function automate(job, profile, jobDeadline, editTarget = null, expectedConversa
       const submittedAt = Date.now();
       const needsGeminiImageProof = profile.name === 'gemini' && Boolean(job.image_base64);
       const normalizedPrompt = String(job.prompt || '').normalize('NFKC').replace(/\s+/g, ' ').trim();
+      const plainTextJob = String(job.output?.mode || '').toLowerCase() === 'text'
+        && !Number(job.output?.min_artifacts || 0) && !Number(job.output?.min_images || 0) && !Number(job.output?.min_media || 0)
+        && !job.metadata?.contextbridge_image_tool && !job.metadata?.contextbridge_music_tool;
+      let lastChangedResponse = false;
       const submittedGeminiTurn = () => {
         const turns = document.querySelectorAll('user-query');
         if (!resumeOnly && turns.length !== beforeUserTurns + 1) return null;
@@ -4202,6 +4293,7 @@ function automate(job, profile, jobDeadline, editTarget = null, expectedConversa
 		const changedResponse = responseSnapshot.count > previousResponseCount
 			|| (baselineTextDigest ? latestDigest !== baselineTextDigest : latest !== previousText)
 			|| Boolean(previousIdentity && latestIdentity && latestIdentity !== previousIdentity);
+        lastChangedResponse = changedResponse;
         const fallbackNotice = latestElement?.closest?.('.conversation-container')?.querySelector?.('peak-hour-fallback-disclaimer');
         if (profile.name === 'gemini' && geminiModeFamily(selectedModel || job.model) === 'pro' && changedResponse && isVisible(fallbackNotice)) {
           resolve({ ok: false, error: 'Gemini used another model during peak demand; requested Pro output was not accepted', code: 'browser_model_unavailable', retryable: true });
@@ -4241,13 +4333,18 @@ function automate(job, profile, jobDeadline, editTarget = null, expectedConversa
 			return;
 		}
 		const providerFailure = providerError(latestElement, changedResponse, beforeUserTurns);
-        if (providerFailure && (!busy || providerFailure.blocking)) {
+		if (providerFailure && (!busy || providerFailure.blocking)) {
 			resolve({ ok: false, error: providerFailure.message, code: providerFailure.code, retryable: providerFailure.retryable });
 			return;
 		}
-		const plainTextJob = String(job.output?.mode || '').toLowerCase() === 'text'
-			&& !Number(job.output?.min_artifacts || 0) && !Number(job.output?.min_images || 0) && !Number(job.output?.min_media || 0)
-			&& !job.metadata?.contextbridge_image_tool && !job.metadata?.contextbridge_music_tool;
+		if (profile.name === 'chatgpt' && plainTextJob && !resumeOnly && !editTarget
+			&& job.metadata?.contextbridge_wake_hidden_text === true && document.visibilityState !== 'visible'
+			&& changedResponse && stableText && stableSince > 0 && Date.now() - stableSince >= 30000) {
+			resolve({ ok: false, text: stableText,
+				error: 'ChatGPT stopped advancing text in a hidden owned tab; waking it to continue rendering',
+				code: 'stalled_response', recoverable: job.metadata?.contextbridge_auto_reload !== false });
+			return;
+		}
 		const staleStop = state.busyReasons.includes('stop_button')
 			&& state.busyReasons.every((reason) => reason === 'stop_button' || reason === 'aria_busy');
 		// Background ChatGPT tabs can keep Stop mounted long after plain text is
@@ -4349,6 +4446,12 @@ function automate(job, profile, jobDeadline, editTarget = null, expectedConversa
 		    submitted_prompt_verified: needsGeminiImageProof && Boolean(submittedGeminiTurn()) });
           return;
         }
+      }
+      if (profile.name === 'chatgpt' && plainTextJob && stableText && lastChangedResponse) {
+        resolve({ ok: false, text: stableText,
+          error: 'ChatGPT produced stable text in a hidden tab but did not expose final completion evidence before the deadline',
+          code: 'stalled_response', recoverable: job.metadata?.contextbridge_auto_reload !== false, percent: lastPercent });
+        return;
       }
       resolve({ ok: false, error: 'Timed out while waiting for a stable response', code: 'browser_timeout', recoverable: false, percent: lastPercent });
       return;
