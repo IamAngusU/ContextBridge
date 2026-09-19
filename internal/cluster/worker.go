@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -515,10 +516,23 @@ func (w *Worker) execute(ctx context.Context, job Job, emitProgress func(JobProg
 	if err != nil {
 		return nil, nil, Usage{}, nil, err
 	}
+	localRoute := ""
+	if provider := strings.TrimSpace(requirements.Provider); provider != "" && !strings.EqualFold(provider, "browser") {
+		localRoute, err = w.resolveLocalPrimaryRoute(ctx, requirements)
+		if err != nil {
+			return nil, nil, Usage{}, nil, err
+		}
+	}
 	localJobID := localExecutionID(job)
 	payload, err = prepareLocalPayload(payload, requirements, localJobID, job.OwnerSubject, job.TenantID)
 	if err != nil {
 		return nil, nil, Usage{}, nil, err
+	}
+	if localRoute != "" {
+		payload, err = bindLocalRoute(payload, localRoute)
+		if err != nil {
+			return nil, nil, Usage{}, nil, err
+		}
 	}
 	progressCtx, stopProgress := context.WithCancel(ctx)
 	var progressWG sync.WaitGroup
@@ -581,6 +595,75 @@ func (w *Worker) execute(ctx context.Context, job Job, emitProgress func(JobProg
 		return nil, sealed, usage, execution, sealErr
 	}
 	return json.RawMessage(raw), nil, usage, execution, nil
+}
+
+func (w *Worker) resolveLocalPrimaryRoute(parent context.Context, requirements Requirements) (string, error) {
+	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(w.cfg.LocalURL, "/")+"/v1/status", nil)
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("Authorization", "Bearer "+w.cfg.LocalToken)
+	response, err := w.client.Do(request)
+	if err != nil {
+		return "", fmt.Errorf("resolve local route: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 1024))
+		return "", fmt.Errorf("resolve local route: status returned %s: %s", response.Status, truncate(string(body), 300))
+	}
+	var status struct {
+		Routes map[string]struct {
+			Task     string `json:"task"`
+			Model    string `json:"model"`
+			Provider string `json:"provider"`
+		} `json:"routes"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(&status); err != nil {
+		return "", fmt.Errorf("resolve local route: %w", err)
+	}
+	provider := strings.TrimSpace(requirements.Provider)
+	task := strings.TrimSpace(requirements.Task)
+	if task == "" {
+		task = "generation"
+	}
+	model := strings.TrimSpace(requirements.Model)
+	candidates := make([]string, 0)
+	for name, route := range status.Routes {
+		routeTask := strings.TrimSpace(route.Task)
+		if routeTask == "" {
+			routeTask = "generation"
+		}
+		if !strings.EqualFold(strings.TrimSpace(route.Provider), provider) || !strings.EqualFold(routeTask, task) {
+			continue
+		}
+		if routeModel := strings.TrimSpace(route.Model); model != "" && routeModel != "" && !strings.EqualFold(routeModel, model) {
+			continue
+		}
+		candidates = append(candidates, name)
+	}
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("provider_not_bound_to_local_route: provider %s has no primary %s route", provider, task)
+	}
+	sort.Strings(candidates)
+	for _, candidate := range candidates {
+		if strings.EqualFold(candidate, provider) {
+			return candidate, nil
+		}
+	}
+	return candidates[0], nil
+}
+
+func bindLocalRoute(payload []byte, route string) ([]byte, error) {
+	var job map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &job); err != nil || job == nil {
+		return nil, errors.New("cluster job payload must be a JSON object")
+	}
+	rawRoute, _ := json.Marshal(route)
+	job["route"] = rawRoute
+	return json.Marshal(job)
 }
 
 func extractLocalExecutionMetadata(raw []byte) *ExecutionMetadata {
