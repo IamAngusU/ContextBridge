@@ -17,7 +17,7 @@ var completionSubcommands = map[string][]string{
 	"browser":    {"inspect"},
 	"runtime":    {"install"},
 	"mcp":        {"serve"},
-	"cluster":    {"status", "submit", "chat", "selftest", "route", "login", "token", "pairing", "configure", "dashboard", "pipeline"},
+	"cluster":    {"status", "submit", "chat", "agent", "selftest", "route", "login", "token", "pairing", "configure", "dashboard", "pipeline"},
 	"route":      {"explain"},
 	"update":     {"status", "check", "apply", "enable", "disable", "auto"},
 	"completion": {"powershell", "bash", "zsh"},
@@ -55,7 +55,7 @@ $script:ContextBridgeSubcommands = @{
     browser = @('inspect')
     runtime = @('install')
     mcp = @('serve')
-    cluster = @('status','submit','chat','selftest','route','login','token','pairing','configure','dashboard','pipeline')
+    cluster = @('status','submit','chat','agent','selftest','route','login','token','pairing','configure','dashboard','pipeline')
     route = @('explain')
     update = @('status','check','apply','enable','disable','auto')
     completion = @('powershell','bash','zsh')
@@ -88,6 +88,7 @@ $script:ContextBridgeOptions = @{
     'cluster status' = @('--config','--json')
     'cluster submit' = @('--config','--file','--token','--wait','--e2ee','--stream','--artifacts','--idempotency-key')
     'cluster chat' = @('--config','--token','--provider','--group','--model','--profile','--reasoning','--e2ee','--session','--prompt','--artifacts','--min-artifacts','--image','--min-images','--music','--attach-image','--new-chat','--new-chat-per-job','--foreground-new-chat')
+    'cluster agent' = @('plan','run','--config','--token','--goal','--goal-file','--planner-provider','--planner-profile','--planner-model','--allow-providers','--allow-browser-profiles','--max-steps','--step-timeout','--max-runtime','--planner-timeout','--out','--plan','--approve')
     'cluster selftest' = @('--config','--providers','--local-model','--run','--dry-run','--image','--artifacts','--keep-artifacts','--timeout','--job-timeout','--poll')
     'cluster route' = @('explain','--config','--file','--job','--token','--json')
     'route explain' = @('--config','--file','--job','--token','--json')
@@ -113,7 +114,9 @@ $script:ContextBridgeTakesValue = @(
     '--token','--provider','--group','--model','--profile','--reasoning','--session','--prompt',
     '--min-artifacts','--min-images','--local-model','--timeout','--job-timeout','--poll','--idempotency-key',
     '--mode','--relay-url','--public-url','--listen','--role','--subject','--approve','--deny',
-    '--managed-service','--samples','--warmup','--database-jobs','--idle-duration','--binary','--extension-root'
+    '--managed-service','--samples','--warmup','--database-jobs','--idle-duration','--binary','--extension-root',
+    '--goal','--goal-file','--planner-provider','--planner-profile','--planner-model','--allow-providers',
+    '--allow-browser-profiles','--max-steps','--step-timeout','--max-runtime','--planner-timeout','--out','--plan','--approve'
 )
 Register-ArgumentCompleter -Native -CommandName contextbridge, cb -ScriptBlock {
     param($wordToComplete, $commandAst, $cursorPosition)
@@ -206,6 +209,7 @@ _contextbridge_complete() {
     candidates=""
     case "$option_key" in
       "cluster chat") candidates="--config --token --provider --group --model --profile --reasoning --e2ee --session --prompt --artifacts --min-artifacts --image --min-images --music --attach-image --new-chat --new-chat-per-job --foreground-new-chat" ;;
+      "cluster agent") candidates="plan run --config --token --goal --goal-file --planner-provider --planner-profile --planner-model --allow-providers --allow-browser-profiles --max-steps --step-timeout --max-runtime --planner-timeout --out --plan --approve" ;;
       "cluster selftest") candidates="--config --providers --local-model --run --dry-run --image --artifacts --keep-artifacts --timeout --job-timeout --poll" ;;
       "cluster route") candidates="--config --file --job --token --json" ;;
       "route explain") candidates="--config --file --job --token --json" ;;
@@ -238,6 +242,8 @@ _contextbridge_complete() {
     esac
   elif [[ "$option_key" == "cluster route" && "$COMP_CWORD" -eq 3 ]]; then
     candidates="explain"
+  elif [[ "$option_key" == "cluster agent" && "$COMP_CWORD" -eq 3 ]]; then
+    candidates="plan run"
   elif [ "$COMP_CWORD" -eq 1 ]; then
     candidates="init serve run stop console submit schedule result review health dashboard status browser doctor hardware models resources pull runtime mcp benchmark relay pair worker cluster route selftest update completion version help"
   elif [ "$COMP_CWORD" -eq 2 ]; then
@@ -246,7 +252,7 @@ _contextbridge_complete() {
       browser) candidates="inspect" ;;
       runtime) candidates="install" ;;
       mcp) candidates="serve" ;;
-      cluster) candidates="status submit chat selftest route login token pairing configure dashboard pipeline" ;;
+      cluster) candidates="status submit chat agent selftest route login token pairing configure dashboard pipeline" ;;
       route) candidates="explain" ;;
       update) candidates="status check apply enable disable auto" ;;
       completion) candidates="powershell bash zsh" ;;
@@ -337,13 +343,24 @@ case "$words[2]" in
     ;;
   cluster)
     if (( CURRENT == 3 )); then
-      _values 'cluster action' status submit chat selftest route login token pairing configure dashboard pipeline
+      _values 'cluster action' status submit chat agent selftest route login token pairing configure dashboard pipeline
       return
     fi
     case "$words[3]" in
       status) _arguments "${config[@]}" '--json[Print machine-readable JSON]' ;;
       submit) _arguments "${config[@]}" '--file[Cluster job JSON]:job file:_files' '--token[Producer token]:token:' '--wait[Wait for a final result]' '--e2ee[Encrypt payload]' '--stream[Stream browser text]' '--artifacts[Artifact output directory]:directory:_directories' '--idempotency-key[Deduplicate an exact retry]:key:' ;;
       chat) _arguments "${config[@]}" '--token[Producer token]:token:' '--provider[Generation provider]:provider:(browser ollama nuextract jina)' '--group[Worker group]:group:' '--model[Specific model]:model:' '--profile[Browser profile]:profile:(chatgpt gemini)' '--reasoning[Reasoning level]:level:(instant medium high xhigh pro max)' '--e2ee[Encrypt prompts and results]' '--session[Stable conversation ID]:session:' '--prompt[Send one turn and exit]:prompt:' '--artifacts[Artifact directory or auto/off]:directory:_directories' '--min-artifacts[Required verified files]:count:' '--image[Require a returned image]' '--min-images[Required verified images]:count:' '--music[Require verified music output]' '--attach-image[Attach a local image]:image file:_files' '--new-chat[Open a fresh chat for the session]' '--new-chat-per-job[Open a fresh chat for every turn]' '--foreground-new-chat[Show a newly opened chat]' ;;
+      agent)
+        if (( CURRENT == 4 )); then
+          _values 'agent action' plan run
+          return
+        fi
+        case "$words[4]" in
+          plan) _arguments "${config[@]}" '--token[Producer token]:token:' '--goal[High-level goal]:goal:' '--goal-file[Goal text file]:goal file:_files' '--planner-provider[Planner provider]:provider:' '--planner-profile[Planner browser profile]:profile:(chatgpt gemini)' '--planner-model[Exact planner model]:model:' '--allow-providers[Approved step providers]:providers:' '--allow-browser-profiles[Approved browser profiles]:profiles:' '--max-steps[Maximum plan steps]:count:' '--step-timeout[Per-step seconds]:seconds:' '--max-runtime[Total seconds]:seconds:' '--planner-timeout[Planner seconds]:seconds:' '--out[New plan file]:plan file:_files' ;;
+          run) _arguments "${config[@]}" '--token[Producer token]:token:' '--plan[Reviewed plan file]:plan file:_files' '--approve[Exact plan SHA-256]:digest:' ;;
+          *) _arguments '*:argument:' ;;
+        esac
+        ;;
       selftest) _arguments "${config[@]}" '--providers[Checks to run]:providers:' '--local-model[Specific local model]:model:' '--run[Run live checks]' '--dry-run[Readiness checks only]' '--image[Also verify one image]' '--artifacts[Artifact directory]:directory:_directories' '--keep-artifacts[Keep temporary artifacts]' '--timeout[Capacity wait timeout]:duration:' '--job-timeout[Per-job timeout]:duration:' '--poll[Polling interval]:duration:' ;;
       route)
         if (( CURRENT == 4 )); then

@@ -157,7 +157,7 @@ Usage:
   contextbridge pair [--config path] [--relay URL] [--identity path] [--name NAME]
   contextbridge worker [--config path] [--relay URL] [--identity path] [--name NAME] [--slots N] [--providers LIST] [--models LIST] [--tasks LIST] [--topmost]
   contextbridge selftest [options]
-	  contextbridge cluster status|submit|chat|selftest|route|login|token|pairing [options]
+	  contextbridge cluster status|submit|chat|agent|selftest|route|login|token|pairing [options]
 	  contextbridge route explain (--file job.json | --job JOB_ID) [--json]
   contextbridge update status|check|apply|enable|disable|auto [options]
   contextbridge completion powershell|bash|zsh
@@ -1346,7 +1346,7 @@ func freeLocalAddress() (string, error) {
 
 func clusterCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: contextbridge cluster status|submit|chat|selftest|route|login|token|pairing")
+		return errors.New("usage: contextbridge cluster status|submit|chat|agent|selftest|route|login|token|pairing")
 	}
 	switch args[0] {
 	case "status":
@@ -1355,6 +1355,8 @@ func clusterCommand(args []string) error {
 		return clusterSubmitCommand(args[1:])
 	case "chat":
 		return clusterChatCommand(args[1:])
+	case "agent":
+		return clusterAgentCommand(args[1:])
 	case "selftest":
 		return clusterSelftestCommand(args[1:])
 	case "route":
@@ -1683,8 +1685,26 @@ func clusterStatusCommand(args []string) error {
 			fmt.Printf("      Models  [%s]\n", strings.Join(names, " · "))
 		}
 	}
-	fmt.Printf("Jobs  [%d completed]  [%d failed]  [%.2f compute hours]\n", overview.JobsByState[cluster.JobCompleted], overview.JobsByState[cluster.JobFailed], float64(overview.Usage.ComputeMS)/3600000)
+	fmt.Printf("Jobs  [%d completed]  [%d failed]  [%.2f compute hours]  %s\n", overview.JobsByState[cluster.JobCompleted], overview.JobsByState[cluster.JobFailed], float64(overview.Usage.ComputeMS)/3600000, formatClusterCost(overview.Usage))
 	return nil
+}
+
+func formatClusterCost(usage cluster.Usage) string {
+	if usage.CostKnownJobs == 0 {
+		return fmt.Sprintf("[cost unknown · %d jobs]", usage.CostUnknownJobs)
+	}
+	status := strings.TrimSpace(strings.ReplaceAll(usage.CostStatus, "_", " "))
+	if status == "" || status == cluster.CostPartial {
+		status = "mixed evidence"
+	}
+	reservation := ""
+	if usage.ReservedCostUSD > 0 {
+		reservation = fmt.Sprintf(" · reservation basis $%.6f", usage.ReservedCostUSD)
+	}
+	if usage.CostUnknownJobs > 0 {
+		return fmt.Sprintf("[tracked cost $%.6f · %s · %d known / %d unknown jobs%s]", usage.EstimatedCostUSD, status, usage.CostKnownJobs, usage.CostUnknownJobs, reservation)
+	}
+	return fmt.Sprintf("[tracked cost $%.6f · %s · %d jobs%s]", usage.EstimatedCostUSD, status, usage.CostKnownJobs, reservation)
 }
 
 func formatUTCOffset(seconds int) string {

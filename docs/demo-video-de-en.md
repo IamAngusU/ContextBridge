@@ -1,13 +1,13 @@
 # ContextBridge: short video script (DE / EN)
 
-This is the **edited roughly 3-minute video**, not a claim that all provider jobs finish within fixed seconds. It requires **ContextBridge 0.5.66 or newer** on the VPS and worker, plus a compatible 0.5.66-or-newer extension. Keep the terminal's real elapsed times visible; cut waiting footage honestly. The full [technical runbook](demo-de-en.md) retains identity research, relativity, safety notes, and troubleshooting. The story starts with **a local Ollama model controlled from the VPS**, then moves a real image from ChatGPT to Gemini, with an optional local-vision step when enough worker resources are free.
+This is the **edited roughly 3-minute video**, not a claim that all provider jobs finish within fixed seconds. It requires **ContextBridge 0.5.80 or newer** on the VPS and worker, plus a compatible 0.5.80-or-newer extension. Keep the terminal's real elapsed times visible; cut waiting footage honestly. The full [technical runbook](demo-de-en.md) retains identity research, relativity, safety notes, and troubleshooting. The story starts with **a local Ollama model controlled from the VPS**, then moves a real image from ChatGPT to Gemini, with an optional local-vision step when enough worker resources are free.
 
 The Windows commands intentionally show the recording PC's custom `C:\ContextBridge\config.yml`. The installer default is `%LOCALAPPDATA%\ContextBridge\config.yml`; default installations can omit `--config` or substitute that path. The visible VPS directory remains exactly `/root/contextbridge-demo`; these commands do not clear it.
 
 ## Before recording
 
 - Verify the PC service, VPS relay, and Opera extension are connected and compatible. Leave enough capacity: **at most eight attached tabs before attaching the three fresh demo pages**. Those three pages plus three new-chat jobs then stay below the 16-tab safety limit. Close or detach only finished test chats, never personal or active ones.
-- Start Ollama on the Windows PC if it is offline. Check `contextbridge models` locally: this recorded setup uses `qwen2.5:1.5b` for the reliable text step. The optional local-vision step uses `qwen2.5vl:7b`; include it only if that model is installed and enough RAM/VRAM is free, otherwise skip Shot 5. These names are **demo prerequisites for the steps that use them**, not universal bundled models. A model need not remain loaded in VRAM between jobs. `models` reports advertised/inferred capabilities, parameter count and quantization where available—not an intelligence score or proof that every image will be read correctly.
+- Start Ollama on the Windows PC if it is offline. Check `contextbridge models` locally: this recorded setup uses `qwen2.5:latest` for the reliable text step. The smaller 1.5B candidate was transport-stable but copied only 3/12 exact markers in the wrapped stress check, so it is deliberately not the demo default. The optional local-vision step uses `qwen2.5vl:7b`; include it only if that model is installed and enough RAM/VRAM is free, otherwise skip Shot 5. These names are **demo prerequisites for the steps that use them**, not universal bundled models. A model need not remain loaded in VRAM between jobs. `models` reports provider-verified capability evidence where available, parameter count and quantization—not an intelligence score or proof that every image will be read correctly.
 - Use a fresh ChatGPT page and two fresh Gemini pages for the on-camera attach sequence. Keep the browser visible for image creation and upload. Do **not** include Gemini music: the latest test did not return verified media bytes.
 - Use one VPS shell throughout the recording; shell variables below must persist. Before recording, prepare both the PC dashboard at `http://127.0.0.1:32145` and the relay cluster dashboard in browser tabs, and authenticate privately. Never show or read out either token. Check that Schedules/Recent activity load locally and that Queue/Jobs load on the relay, then switch back to the console.
 - If ChatGPT or Gemini shows a rate-limit dialog, wait for it to clear before recording. Never dismiss a provider error and imply that the job succeeded.
@@ -32,7 +32,7 @@ only the second command. In a second CMD, run:
 contextbridge models --config "C:\ContextBridge\config.yml"
 ```
 
-Point to `qwen2.5:1.5b` (text) and, when you include the optional vision segment, `qwen2.5vl:7b` (text+vision). Show the console status line. In Opera, show **Attach this page** on the fresh ChatGPT and Gemini pages, then click **Connect** once and wait for **Connected**.
+Point to `qwen2.5:latest` (text) and, when you include the optional vision segment, `qwen2.5vl:7b` (text+vision). Show the console status line. In Opera, show **Attach this page** on the fresh ChatGPT and Gemini pages, then click **Connect** once and wait for **Connected**.
 
 **DE:** „Mein Windows-PC ist der Worker. Für den sicheren Basistest nutze ich ein kleines lokales Textmodell; bei freien Ressourcen zeige ich zusätzlich ein eigenes Vision-Modell. ChatGPT- und Gemini-Seiten wähle ich bewusst einzeln aus.“
 
@@ -47,7 +47,7 @@ contextbridge version
 contextbridge cluster status --config /var/lib/contextbridge/config.yml
 cb selftest --config /var/lib/contextbridge/config.yml
 contextbridge cluster status --config /var/lib/contextbridge/config.yml --json |
-  python3 -c 'import json,sys; d=json.load(sys.stdin); wanted={"qwen2.5:1.5b","qwen2.5vl:7b"}; rows=[(n,m) for n in d.get("nodes",[]) for m in n.get("capabilities",{}).get("models",[]) if m.get("provider")=="ollama" and m.get("name") in wanted]; [print("{}: {} [{}]".format(n.get("name","node"),m.get("name","unknown"),"+".join(m.get("tasks",[])))) for n,m in rows]'
+  python3 -c 'import json,sys; d=json.load(sys.stdin); wanted={"qwen2.5:latest","qwen2.5vl:7b"}; rows=[(n,m) for n in d.get("nodes",[]) for m in n.get("capabilities",{}).get("models",[]) if m.get("provider")=="ollama" and m.get("name") in wanted]; [print("{}: {} [{}]".format(n.get("name","node"),m.get("name","unknown"),"+".join(m.get("tasks",[])))) for n,m in rows]'
 DEMO_DIR=/root/contextbridge-demo
 mkdir -p "$DEMO_DIR"
 DEMO_ID=$(date +%Y%m%d-%H%M%S)
@@ -59,7 +59,7 @@ waits until local generation plus one idle attached ChatGPT and Gemini page are
 genuinely schedulable; its safe default sends no prompt. Mention the actual
 displayed slot count rather than assuming four. Because the compact status can
 shorten a long model list, the JSON command reliably prints the two demo models
-from the complete node inventory; stop if required `qwen2.5:1.5b` is absent.
+from the complete node inventory; stop if required `qwen2.5:latest` is absent.
 The optional vision model may be absent when Shot 5 is skipped. None of these
 commands ranks model quality.
 
@@ -70,10 +70,10 @@ commands ranks model quality.
 ## Shot 3 — VPS controls a local Ollama text model
 
 ```bash
-contextbridge cluster chat --config /var/lib/contextbridge/config.yml --provider ollama --model qwen2.5:1.5b --session "demo-$DEMO_ID-local-text" --artifacts off --prompt 'Antworte exakt mit CB-LOCAL-OK und keinen weiteren Zeichen.'
+contextbridge cluster chat --config /var/lib/contextbridge/config.yml --provider ollama --model qwen2.5:latest --session "demo-$DEMO_ID-local-text" --artifacts off --prompt 'Antworte exakt mit CB-LOCAL-OK und keinen weiteren Zeichen.'
 ```
 
-Wait for `CB-LOCAL-OK` and `↳ verwendet: ollama · qwen2.5:1.5b`. The marker alone is not the proof of execution; the **provider/model/node metadata** in the VPS terminal is. This exact live rehearsal finished in **6.4 s**, but keep the actual time on camera. Do not confuse the Windows GPU with hosted ChatGPT/Gemini inference.
+Wait for `CB-LOCAL-OK` and `↳ verwendet: ollama · qwen2.5:latest`. The marker alone is not the proof of execution; the **provider/model/node metadata** in the VPS terminal is. The final live rehearsal finished in **2.3 s**, but keep the actual time on camera. Do not confuse the Windows GPU with hosted ChatGPT/Gemini inference.
 
 **DE:** „Der Befehl kommt vom VPS, aber die Rechnung läuft auf meinem Windows-PC. ContextBridge zeigt mir den tatsächlich verwendeten Anbieter, das Modell und den Worker.“
 
@@ -89,7 +89,7 @@ cat > "$QUEUE_JOB" <<JSON
   "requirements": {
     "task": "generation",
     "provider": "ollama",
-    "model": "qwen2.5:1.5b",
+    "model": "qwen2.5:latest",
     "session_id": "demo-$DEMO_ID-queue"
   },
   "payload": {

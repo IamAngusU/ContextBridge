@@ -8,8 +8,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/IamAngusU/ContextBridge/internal/config"
@@ -17,12 +20,14 @@ import (
 )
 
 type Processor struct {
-	cfg   config.Config
-	store *Store
+	cfg             config.Config
+	store           *Store
+	providerBudget  sync.Mutex
+	reservedCostUSD map[string]float64
 }
 
 func NewProcessor(cfg config.Config, store *Store) *Processor {
-	return &Processor{cfg: cfg, store: store}
+	return &Processor{cfg: cfg, store: store, reservedCostUSD: map[string]float64{}}
 }
 
 func (p *Processor) Process(ctx context.Context, job Job) Output {
@@ -75,6 +80,9 @@ func (p *Processor) Process(ctx context.Context, job Job) Output {
 			}
 		}
 		if err == nil {
+			if output.CostStatus == "" {
+				output.CostStatus = "unknown"
+			}
 			return output
 		}
 		lastProviderError = strings.TrimSpace(err.Error())
@@ -194,15 +202,35 @@ func (p *Processor) openAICompatible(parent context.Context, job Job, route conf
 	if outputMode(job.Output) == "embedding" {
 		return p.openAICompatibleEmbedding(ctx, job, engine, provider, model, started)
 	}
-	content := []map[string]interface{}{{"type": "text", "text": trustedPrompt(job)}}
+	trusted := trustedPrompt(job)
+	content := []map[string]interface{}{{"type": "text", "text": trusted}}
 	if job.ImageBase64 != "" {
 		if !containsFolded(engine.Capabilities, "vision") {
 			return Output{}, errors.New("openai-compatible engine is not configured for vision")
 		}
 		content = append(content, map[string]interface{}{"type": "image_url", "image_url": map[string]string{"url": "data:" + job.ImageMediaType + ";base64," + job.ImageBase64}})
 	}
+	reservedCost, reservationErr := providerCostReservation(engine, trusted, job.ImageBase64 != "")
+	if reservationErr != nil {
+		return Output{}, reservationErr
+	}
+	releaseBudget := func() {}
+	if engine.MinimumBalanceUSD > 0 {
+		var reserveErr error
+		releaseBudget, reserveErr = p.reserveProviderBudget(ctx, engine, reservedCost)
+		if reserveErr != nil {
+			return Output{}, reserveErr
+		}
+		defer releaseBudget()
+	}
 	payload := map[string]interface{}{
 		"model": model, "messages": []map[string]interface{}{{"role": "user", "content": content}}, "stream": false,
+	}
+	if engine.MaxOutputTokens > 0 {
+		payload["max_tokens"] = engine.MaxOutputTokens
+	}
+	if effort := strings.ToLower(strings.TrimSpace(engine.ReasoningEffort)); effort != "" {
+		payload["reasoning_effort"] = effort
 	}
 	if outputMode(job.Output) != "text" {
 		payload["response_format"] = map[string]string{"type": "json_object"}
@@ -230,9 +258,11 @@ func (p *Processor) openAICompatible(parent context.Context, job Job, route conf
 			} `json:"message"`
 		} `json:"choices"`
 		Usage struct {
-			PromptTokens     uint64 `json:"prompt_tokens"`
-			CompletionTokens uint64 `json:"completion_tokens"`
-			TotalTokens      uint64 `json:"total_tokens"`
+			PromptTokens          uint64 `json:"prompt_tokens"`
+			CompletionTokens      uint64 `json:"completion_tokens"`
+			TotalTokens           uint64 `json:"total_tokens"`
+			PromptCacheHitTokens  uint64 `json:"prompt_cache_hit_tokens"`
+			PromptCacheMissTokens uint64 `json:"prompt_cache_miss_tokens"`
 		} `json:"usage"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 8<<20)).Decode(&answer); err != nil {
@@ -247,6 +277,8 @@ func (p *Processor) openAICompatible(parent context.Context, job Job, route conf
 	}
 	output := NormalizeOutput([]byte(text), job.Output, provider, model, time.Since(started))
 	output.InputTokens, output.OutputTokens, output.TotalTokens = answer.Usage.PromptTokens, answer.Usage.CompletionTokens, answer.Usage.TotalTokens
+	output.ReservedCostUSD = reservedCost
+	applyProviderCost(&output, engine, answer.Usage.PromptTokens, answer.Usage.PromptCacheHitTokens, answer.Usage.PromptCacheMissTokens, answer.Usage.CompletionTokens)
 	if output.Error != "" {
 		return Output{}, errors.New(output.Error)
 	}
@@ -299,9 +331,122 @@ func (p *Processor) openAICompatibleEmbedding(ctx context.Context, job Job, engi
 }
 
 func applyOpenAIEngineAuth(request *http.Request, engine config.Engine) {
-	if key := strings.TrimSpace(engine.APIKey); key != "" {
+	if key := strings.TrimSpace(engine.EffectiveAPIKey()); key != "" {
 		request.Header.Set("Authorization", "Bearer "+key)
 	}
+}
+
+func providerCostReservation(engine config.Engine, prompt string, hasImage bool) (float64, error) {
+	if engine.Costing.Mode != "upper_bound" || engine.MaxOutputTokens <= 0 {
+		return 0, nil
+	}
+	if hasImage && engine.MinimumBalanceUSD > 0 {
+		return 0, errors.New("provider balance floor cannot safely reserve an unpriced image input")
+	}
+	// UTF-8 bytes are a conservative ceiling for ordinary text-token counts:
+	// each token consumes at least one byte. Cache discounts are deliberately
+	// ignored when reserving so concurrent work cannot spend below the floor.
+	inputCeiling := float64(len([]byte(prompt))) / 1_000_000 * engine.Costing.InputPerMillionUSD
+	outputCeiling := float64(engine.MaxOutputTokens) / 1_000_000 * engine.Costing.OutputPerMillionUSD
+	return inputCeiling + outputCeiling, nil
+}
+
+func (p *Processor) reserveProviderBudget(ctx context.Context, engine config.Engine, reservation float64) (func(), error) {
+	balance, key, err := providerBalanceUSD(ctx, engine)
+	if err != nil {
+		return nil, fmt.Errorf("provider balance guard: %w", err)
+	}
+	p.providerBudget.Lock()
+	alreadyReserved := p.reservedCostUSD[key]
+	if balance-alreadyReserved-reservation < engine.MinimumBalanceUSD {
+		p.providerBudget.Unlock()
+		return nil, fmt.Errorf("provider balance guard: USD balance %.2f cannot preserve configured %.2f floor after %.6f reservation", balance, engine.MinimumBalanceUSD, reservation)
+	}
+	p.reservedCostUSD[key] = alreadyReserved + reservation
+	p.providerBudget.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			p.providerBudget.Lock()
+			remaining := p.reservedCostUSD[key] - reservation
+			if remaining > 0 {
+				p.reservedCostUSD[key] = remaining
+			} else {
+				delete(p.reservedCostUSD, key)
+			}
+			p.providerBudget.Unlock()
+		})
+	}, nil
+}
+
+func providerBalanceUSD(ctx context.Context, engine config.Engine) (float64, string, error) {
+	base, err := url.Parse(strings.TrimSpace(engine.URL))
+	if err != nil || base.Scheme == "" || base.Host == "" || base.User != nil {
+		return 0, "", errors.New("configured provider URL is invalid")
+	}
+	if engine.BalancePath == "" || !strings.HasPrefix(engine.BalancePath, "/") || strings.HasPrefix(engine.BalancePath, "//") {
+		return 0, "", errors.New("configured balance path is invalid")
+	}
+	balanceURL := (&url.URL{Scheme: base.Scheme, Host: base.Host, Path: engine.BalancePath}).String()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, balanceURL, nil)
+	if err != nil {
+		return 0, "", err
+	}
+	applyOpenAIEngineAuth(request, engine)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return 0, "", err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 1024))
+		return 0, "", fmt.Errorf("provider returned %s: %s", response.Status, strings.TrimSpace(string(body)))
+	}
+	var answer struct {
+		Available bool `json:"is_available"`
+		Balances  []struct {
+			Currency string `json:"currency"`
+			Total    string `json:"total_balance"`
+		} `json:"balance_infos"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&answer); err != nil {
+		return 0, "", fmt.Errorf("decode balance: %w", err)
+	}
+	if !answer.Available {
+		return 0, "", errors.New("provider reports that the balance is unavailable")
+	}
+	for _, item := range answer.Balances {
+		if !strings.EqualFold(strings.TrimSpace(item.Currency), "USD") {
+			continue
+		}
+		balance, err := strconv.ParseFloat(strings.TrimSpace(item.Total), 64)
+		if err != nil || balance < 0 {
+			return 0, "", errors.New("provider returned an invalid USD balance")
+		}
+		return balance, base.Scheme + "://" + base.Host, nil
+	}
+	return 0, "", errors.New("provider returned no USD balance")
+}
+
+func applyProviderCost(output *Output, engine config.Engine, input, cacheHit, cacheMiss, generated uint64) {
+	if engine.Costing.Mode != "upper_bound" {
+		output.CostStatus = "unknown"
+		return
+	}
+	if cacheHit > input {
+		cacheHit = input
+	}
+	if cacheMiss > input-cacheHit {
+		cacheMiss = input - cacheHit
+	}
+	cacheMiss += input - cacheHit - cacheMiss
+	cachedRate := engine.Costing.CachedInputPerMillionUSD
+	if cachedRate == 0 {
+		cachedRate = engine.Costing.InputPerMillionUSD
+	}
+	output.EstimatedCostUSD = float64(cacheMiss)/1_000_000*engine.Costing.InputPerMillionUSD + float64(cacheHit)/1_000_000*cachedRate + float64(generated)/1_000_000*engine.Costing.OutputPerMillionUSD
+	output.CostStatus = "upper_bound"
+	output.CostSource = engine.Costing.Source
 }
 
 func openAIMessageText(raw json.RawMessage) string {

@@ -45,6 +45,7 @@ ChatGPT and Gemini are detected automatically from stable DOM and accessibility 
 - **Explainable placement:** preview a route without submitting work, or inspect the bounded decision persisted with an assigned job, including stable rejection reasons and additive score components.
 - **Optional E2EE jobs:** a producer can seal a payload for the selected worker with X25519 and AES-256-GCM so the relay cannot read the payload or result.
 - **Bounded model pipelines:** chain extraction, embeddings, retrieval, vision, and generation with fixed steps and explicit loop limits.
+- **Reviewed intent plans:** an optional model may propose a tiny text-only workflow, but strict local allowlists, route previews, a readable plan, and a separate SHA-256 approval stand between model output and execution ([contract and limits](docs/bounded-agent.md)).
 - **Explicit scope:** only the chosen page origin and local service are requested.
 - **Local models:** route text and images to Ollama without adding another hosted service.
 - **Hot-plug resource packs:** recognize an optional local model kit or toolbox by a stable manifest ID rather than a changing drive letter, without recursively scanning it or executing inserted media; sealed/checksummed trees can use a volume-root sidecar and remain untouched ([portable-pack contract](docs/portable-resource-packs.md)).
@@ -57,6 +58,7 @@ ChatGPT and Gemini are detected automatically from stable DOM and accessibility 
 - **Fail-safe moderation:** invalid, missing, or timed-out decisions become `review`, never silent approval.
 - **Flexible inputs:** HTTP, stdin, folders, SSH pipelines, database workers, and custom adapters use one protocol.
 - **Bounded MCP tools:** a local stdio server exposes status, one-shot job submission, and stored-result lookup without arbitrary shell access or silent retries ([MCP guide](docs/mcp.md)).
+- **Shared-hosting client:** a dependency-free PHP 8.1+ example submits producer-scoped jobs with idempotency, safely polls results, and verifies embedded artifacts without exposing the token to a browser or mobile binary ([PHP guide](docs/php-client.md)).
 - **Inspectable operation:** a local dashboard shows routes, hardware, providers, models, latency, flags, jobs, and decisions.
 - **Durable local schedules:** a resource-aware due queue runs one-time and recurring jobs with explicit route/model/reasoning choices, safe restart semantics, pause/resume, bounded history, and sequential follow-ups using prior answers or verified artifacts ([schedules guide](docs/schedules.md)).
 - **Portable deployment:** one executable for Windows, Linux, and macOS on AMD64 and ARM64.
@@ -529,7 +531,7 @@ Releases do not depend on GitHub Actions. From PowerShell, build every supported
 platform bundle, both extension archives, and `SHA256SUMS` locally:
 
 ```powershell
-.\scripts\build-release.ps1 -Version v0.5.79
+.\scripts\build-release.ps1 -Version v0.5.80
 ```
 
 Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md), use a focused issue for behavior changes, and include tests for routing or protocol work.

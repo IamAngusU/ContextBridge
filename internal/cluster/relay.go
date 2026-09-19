@@ -1739,7 +1739,37 @@ func priceUsage(usage Usage, pricing Pricing) Usage {
 	if usage.TotalTokens == 0 {
 		usage.TotalTokens = usage.InputTokens + usage.OutputTokens
 	}
-	usage.EstimatedCostUSD = float64(usage.ComputeMS)/3600000*pricing.ComputePerHourUSD + float64(usage.InputTokens)/1000000*pricing.InputPerMillionUSD + float64(usage.OutputTokens)/1000000*pricing.OutputPerMillionUSD
+	if usage.EstimatedCostUSD < 0 || usage.EstimatedCostUSD > 1_000_000_000 || usage.ReservedCostUSD < 0 || usage.ReservedCostUSD > 1_000_000_000 {
+		usage.CostStatus = CostUnknown
+		usage.CostSource = ""
+		usage.EstimatedCostUSD = 0
+		usage.ReservedCostUSD = 0
+	}
+	usage.CostKnownJobs, usage.CostUnknownJobs = 0, 0
+	switch usage.CostStatus {
+	case CostEstimated, CostUpperBound, CostActual:
+		if usage.CostSource == "" {
+			usage.CostSource = "worker_reported"
+		}
+		usage.CostKnownJobs = 1
+	default:
+		configured := pricing.Mode != "" || pricing.ComputePerHourUSD > 0 || pricing.InputPerMillionUSD > 0 || pricing.OutputPerMillionUSD > 0
+		if configured {
+			usage.EstimatedCostUSD = float64(usage.ComputeMS)/3600000*pricing.ComputePerHourUSD + float64(usage.InputTokens)/1000000*pricing.InputPerMillionUSD + float64(usage.OutputTokens)/1000000*pricing.OutputPerMillionUSD
+			usage.CostStatus = CostEstimated
+			usage.CostSource = strings.TrimSpace(pricing.Source)
+			if usage.CostSource == "" {
+				usage.CostSource = "relay_config"
+			}
+			usage.CostKnownJobs = 1
+		} else {
+			usage.CostStatus = CostUnknown
+			usage.CostSource = ""
+			usage.ReservedCostUSD = 0
+			usage.EstimatedCostUSD = 0
+			usage.CostUnknownJobs = 1
+		}
+	}
 	usage.EquivalentCostUSD = float64(usage.InputTokens)/1000000*pricing.EquivalentInputUSD + float64(usage.OutputTokens)/1000000*pricing.EquivalentOutputUSD
 	usage.SavedCostUSD = usage.EquivalentCostUSD - usage.EstimatedCostUSD
 	if usage.SavedCostUSD < 0 {
