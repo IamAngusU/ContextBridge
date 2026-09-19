@@ -27,8 +27,19 @@ $commandsFunctionAst = @($ast.FindAll({
 }, $true))
 Assert-True ($commandsFunctionAst.Count -eq 1) 'Expected exactly one completion-command helper in install.ps1.'
 Invoke-Expression $commandsFunctionAst[0].Extent.Text
-Assert-True ((Get-ContextBridgeCompletionCommands -AliasInstalled $true) -eq 'contextbridge and cb') 'Installed cb alias was omitted from the completion success label.'
-Assert-True ((Get-ContextBridgeCompletionCommands -AliasInstalled $false) -eq 'contextbridge') 'Skipped cb alias was falsely claimed by the completion success label.'
+Assert-True ((Get-ContextBridgeCompletionCommands -Commands @('contextbridge', 'cb')) -eq 'contextbridge and cb') 'Installed cb alias was omitted from the completion success label.'
+Assert-True ((Get-ContextBridgeCompletionCommands -Commands @('contextbridge')) -eq 'contextbridge') 'Single-command completion label changed.'
+Assert-True ((Get-ContextBridgeCompletionCommands -Commands @('contextbridge', 'cb', 'bridge-ai')) -eq 'contextbridge, cb and bridge-ai') 'Custom command was omitted from the completion success label.'
+$nameFunctionAst = @($ast.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'Test-ContextBridgeCommandName'
+}, $true))
+Assert-True ($nameFunctionAst.Count -eq 1) 'Expected exactly one custom command-name validator in install.ps1.'
+Invoke-Expression $nameFunctionAst[0].Extent.Text
+Assert-True (Test-ContextBridgeCommandName 'bridge-ai') 'A safe custom command name was rejected.'
+Assert-True (-not (Test-ContextBridgeCommandName '../cb')) 'A path-like custom command name was accepted.'
+Assert-True (-not (Test-ContextBridgeCommandName '9bridge')) 'A custom command starting with a digit was accepted.'
 $pathFunctionAst = @($ast.FindAll({
     param($node)
     $node -is [Management.Automation.Language.FunctionDefinitionAst] -and

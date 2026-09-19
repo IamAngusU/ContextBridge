@@ -5,6 +5,7 @@ param(
     [ValidateSet("jina", "nuextract", "both")][string]$ManagedModel = "jina",
     [string]$RelayUrl = "",
     [string]$NodeName = "auto",
+    [string]$CommandName = "",
     [switch]$NoAutostart,
     [switch]$NoStart,
     [switch]$NoDashboard,
@@ -20,9 +21,27 @@ function Good($Text) { Write-Host $Text -ForegroundColor Green }
 function Muted($Text) { Write-Host $Text -ForegroundColor DarkGray }
 
 function Get-ContextBridgeCompletionCommands {
-    param([bool]$AliasInstalled)
-    if ($AliasInstalled) { return 'contextbridge and cb' }
-    return 'contextbridge'
+    param([Parameter(Mandatory = $true)][string[]]$Commands)
+    if ($Commands.Count -eq 0) { return '' }
+    if ($Commands.Count -eq 1) { return $Commands[0] }
+    return (($Commands[0..($Commands.Count - 2)] -join ', ') + ' and ' + $Commands[-1])
+}
+
+function Test-ContextBridgeCommandName {
+    param([string]$Name)
+    return $Name -match '^[A-Za-z][A-Za-z0-9_-]{0,31}$'
+}
+
+function Test-ContextBridgeInstallCommand {
+    param($CommandInfo)
+    if (-not $CommandInfo -or -not $CommandInfo.Path -or ([IO.Path]::GetFileName([string]$CommandInfo.Path) -ine 'contextbridge.exe')) { return $false }
+    try {
+        $directory = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath([string]$CommandInfo.Path))
+        return (Test-Path -LiteralPath (Join-Path $directory 'config.yml') -PathType Leaf) -and
+            (Test-Path -LiteralPath (Join-Path $directory 'extension\chromium\manifest.json') -PathType Leaf)
+    } catch {
+        return $false
+    }
 }
 
 function Test-ContextBridgeCommandPath {
@@ -85,6 +104,49 @@ function Update-ContextBridgeCompletionProfile {
 
 Info "ContextBridge installer"
 Muted "A local bridge for Ollama and explicitly paired browser tabs."
+
+$existingCanonicalCommand = Get-Command contextbridge -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $PSBoundParameters.ContainsKey('InstallDir') -and (Test-ContextBridgeInstallCommand $existingCanonicalCommand)) {
+    $InstallDir = Split-Path -Parent $existingCanonicalCommand.Path
+    Muted "Updating the existing ContextBridge installation at $InstallDir."
+}
+$expectedCanonicalCommand = Join-Path $InstallDir 'contextbridge.exe'
+$expectedCbCommand = Join-Path $InstallDir 'cb.cmd'
+$existingCbCommand = Get-Command cb -ErrorAction SilentlyContinue | Select-Object -First 1
+$canonicalNameAvailable = (-not $existingCanonicalCommand) -or (Test-ContextBridgeCommandPath -CommandInfo $existingCanonicalCommand -ExpectedPath $expectedCanonicalCommand)
+$cbNameAvailable = (-not $existingCbCommand) -or (Test-ContextBridgeCommandPath -CommandInfo $existingCbCommand -ExpectedPath $expectedCbCommand)
+
+if ($CommandName -and (($CommandName -ieq 'contextbridge') -or ($CommandName -ieq 'cb') -or -not (Test-ContextBridgeCommandName $CommandName))) {
+    throw '-CommandName must be a custom shell name with 1-32 letters, numbers, underscores, or hyphens, starting with a letter.'
+}
+if (-not $NoPath -and -not $CommandName -and -not $canonicalNameAvailable -and -not $cbNameAvailable) {
+    $canPrompt = [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
+    if (-not $canPrompt) {
+        throw "Both 'contextbridge' and 'cb' already belong to other programs. Re-run with -CommandName <your-name>."
+    }
+    for ($attempt = 0; $attempt -lt 3 -and -not $CommandName; $attempt++) {
+        $candidate = (Read-Host "Both 'contextbridge' and 'cb' are taken. Choose a command name for ContextBridge").Trim()
+        if (-not (Test-ContextBridgeCommandName $candidate) -or $candidate -ieq 'contextbridge' -or $candidate -ieq 'cb') {
+            Muted 'Use 1-32 letters, numbers, underscores, or hyphens, starting with a letter.'
+            continue
+        }
+        $candidatePath = Join-Path $InstallDir ($candidate + '.cmd')
+        $candidateCommand = Get-Command $candidate -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($candidateCommand -and -not (Test-ContextBridgeCommandPath -CommandInfo $candidateCommand -ExpectedPath $candidatePath)) {
+            Muted "'$candidate' is already taken. Choose another name."
+            continue
+        }
+        $CommandName = $candidate
+    }
+    if (-not $CommandName) { throw 'No safe ContextBridge command name was selected.' }
+}
+if ($CommandName) {
+    $expectedCustomCommand = Join-Path $InstallDir ($CommandName + '.cmd')
+    $existingCustomCommand = Get-Command $CommandName -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($existingCustomCommand -and -not (Test-ContextBridgeCommandPath -CommandInfo $existingCustomCommand -ExpectedPath $expectedCustomCommand)) {
+        throw "The requested command '$CommandName' already belongs to another program at $($existingCustomCommand.Source)."
+    }
+}
 
 if ($Provider -eq "ask") {
     Write-Host ""
@@ -174,6 +236,11 @@ if (-not $NoPath) {
     }
 }
 
+$canonicalCommandInstalled = $false
+if (-not $NoPath -and $canonicalNameAvailable) {
+    $canonicalCommandInstalled = Test-ContextBridgeCommandPath -CommandInfo (Get-Command contextbridge -ErrorAction SilentlyContinue | Select-Object -First 1) -ExpectedPath $exe
+}
+
 # `contextbridge` remains the canonical executable. The short `cb` launcher is
 # a tiny path-stable shim, so an in-place executable update cannot leave a stale
 # copied cb.exe behind. Never replace an unrelated command or user-owned file.
@@ -181,13 +248,17 @@ $cbAlias = Join-Path $InstallDir 'cb.cmd'
 $cbAliasMarker = ':: ContextBridge managed cb alias'
 $cbAliasInstalled = $false
 try {
-    $writeAlias = $true
+    $writeAlias = $cbNameAvailable
+    if (-not $writeAlias) {
+        Muted "Skipped the short 'cb' command because it already belongs to $($existingCbCommand.Source)."
+    }
     if (Test-Path -LiteralPath $cbAlias) {
-        $writeAlias = ([IO.File]::ReadAllText($cbAlias)).StartsWith($cbAliasMarker, [StringComparison]::Ordinal)
-        if (-not $writeAlias) {
+        $ownedAlias = ([IO.File]::ReadAllText($cbAlias)).StartsWith($cbAliasMarker, [StringComparison]::Ordinal)
+        $writeAlias = $writeAlias -and $ownedAlias
+        if (-not $ownedAlias) {
             Muted "Skipped the short 'cb' command because $cbAlias is not managed by ContextBridge."
         }
-    } else {
+    } elseif ($writeAlias) {
         $existingCb = Get-Command cb -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($existingCb) {
             $writeAlias = $false
@@ -199,11 +270,9 @@ try {
         [IO.File]::WriteAllText($cbAlias, $aliasText, [Text.Encoding]::ASCII)
         $resolvedCb = Get-Command cb -ErrorAction SilentlyContinue | Select-Object -First 1
         $cbAliasInstalled = Test-ContextBridgeCommandPath -CommandInfo $resolvedCb -ExpectedPath $cbAlias
-        if ($cbAliasInstalled) {
-            Good "Commands ready: contextbridge and cb"
-        } elseif ($resolvedCb) {
+        if (-not $cbAliasInstalled -and $resolvedCb) {
             Muted "The managed cb launcher remains at $cbAlias, but the active cb command belongs to $($resolvedCb.Source)."
-        } else {
+        } elseif (-not $cbAliasInstalled) {
             Muted "The managed cb launcher is at $cbAlias but is not on PATH; use contextbridge or its full path."
         }
     }
@@ -211,23 +280,51 @@ try {
     Muted "Could not create the optional 'cb' command; use contextbridge."
 }
 
-if (-not $NoCompletion) {
+$customCommandInstalled = $false
+if ($CommandName) {
+    $customAlias = Join-Path $InstallDir ($CommandName + '.cmd')
+    $customAliasMarker = ':: ContextBridge managed custom command'
+    if ((Test-Path -LiteralPath $customAlias) -and -not ([IO.File]::ReadAllText($customAlias)).StartsWith($customAliasMarker, [StringComparison]::Ordinal)) {
+        throw "Refusing to replace the user-owned command file $customAlias."
+    }
+    $customAliasText = "$customAliasMarker`r`n@echo off`r`n`"%~dp0contextbridge.exe`" %*`r`n"
+    [IO.File]::WriteAllText($customAlias, $customAliasText, [Text.Encoding]::ASCII)
+    $customCommandInstalled = Test-ContextBridgeCommandPath -CommandInfo (Get-Command $CommandName -ErrorAction SilentlyContinue | Select-Object -First 1) -ExpectedPath $customAlias
+    if (-not $customCommandInstalled) {
+        throw "The custom ContextBridge command '$CommandName' was created but is shadowed by another command."
+    }
+}
+
+$completionCommandNames = @()
+if ($canonicalCommandInstalled) { $completionCommandNames += 'contextbridge' }
+if ($cbAliasInstalled) { $completionCommandNames += 'cb' }
+if ($customCommandInstalled) { $completionCommandNames += $CommandName }
+$preferredCommand = if ($customCommandInstalled) { $CommandName } elseif ($cbAliasInstalled -and -not $canonicalCommandInstalled) { 'cb' } else { 'contextbridge' }
+if ($completionCommandNames.Count -gt 0) {
+    Good "Commands ready: $(Get-ContextBridgeCompletionCommands -Commands $completionCommandNames)"
+} else {
+    Muted "No unshadowed command name is on PATH; run $exe directly or reinstall with -CommandName <your-name>."
+}
+
+if (-not $NoCompletion -and $completionCommandNames.Count -gt 0) {
     try {
         $completionPath = Join-Path $InstallDir 'contextbridge-completion.ps1'
         $completionText = (& $exe completion powershell | Out-String)
         if ($LASTEXITCODE -ne 0 -or -not $completionText.Trim()) {
             throw 'The ContextBridge completion generator returned no script.'
         }
-        if (-not $cbAliasInstalled) {
-            $completionText = $completionText.Replace('-CommandName contextbridge, cb', '-CommandName contextbridge')
+        $generatedCommandList = '-CommandName contextbridge, cb'
+        if (-not $completionText.Contains($generatedCommandList)) {
+            throw 'The ContextBridge completion generator returned an unexpected command registration.'
         }
+        $completionText = $completionText.Replace($generatedCommandList, '-CommandName ' + ($completionCommandNames -join ', '))
         [IO.File]::WriteAllText($completionPath, $completionText, (New-Object Text.UTF8Encoding($false)))
 
         Update-ContextBridgeCompletionProfile -ProfilePath $PROFILE.CurrentUserAllHosts -CompletionPath $completionPath
-        $completionCommands = Get-ContextBridgeCompletionCommands -AliasInstalled $cbAliasInstalled
+        $completionCommands = Get-ContextBridgeCompletionCommands -Commands $completionCommandNames
         Good "PowerShell completion installed for $completionCommands (open a new shell)."
     } catch {
-        Muted "PowerShell completion could not be activated automatically. Run: contextbridge completion powershell"
+        Muted "PowerShell completion could not be activated automatically. Run: $preferredCommand completion powershell"
     }
 }
 if (-not (Test-Path $config)) {
@@ -329,7 +426,7 @@ try {
         Good 'Start menu: ContextBridge > Terminal / Dashboard'
     }
 } catch {
-    Muted 'Start menu shortcuts could not be created; use contextbridge console or contextbridge dashboard.'
+    Muted "Start menu shortcuts could not be created; use $preferredCommand console or $preferredCommand dashboard."
 }
 
 if (-not $NoStart) {
