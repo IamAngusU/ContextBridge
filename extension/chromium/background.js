@@ -1065,7 +1065,8 @@ async function processWork(cfg, work, claimedTabId) {
 	          await requireActiveBrowserLease(cfg, leaseState);
 	          if (!stalledTab.active) await api.tabs.update(tabId, { active: true });
 	          const resumeJob = { ...work.job, metadata: { ...(work.job.metadata || {}), contextbridge_resume_only: true,
-	            contextbridge_foreground_recovery: true, contextbridge_baseline_text: String(answer?.text || baselineText) } };
+	            contextbridge_foreground_recovery: true, contextbridge_foreground_held_response: Boolean(answer?.text),
+	            contextbridge_baseline_text: String(answer?.text || baselineText) } };
 	          const observationTab = await assertRecoveryTab(workSessionKey(work), tabId);
           const observed = await api.scripting.executeScript({ target: { tabId }, func: automate,
             args: [resumeJob, effectiveProfile, new Date(Date.now() + Math.min(60000, remaining)).toISOString(), null,
@@ -4221,6 +4222,10 @@ function automate(job, profile, jobDeadline, editTarget = null, expectedConversa
       const plainTextJob = String(job.output?.mode || '').toLowerCase() === 'text'
         && !Number(job.output?.min_artifacts || 0) && !Number(job.output?.min_images || 0) && !Number(job.output?.min_media || 0)
         && !job.metadata?.contextbridge_image_tool && !job.metadata?.contextbridge_music_tool;
+      const foregroundRecovery = profile.name === 'chatgpt' && plainTextJob
+        && job.metadata?.contextbridge_foreground_recovery === true;
+      const foregroundHeldResponse = foregroundRecovery
+        && job.metadata?.contextbridge_foreground_held_response === true;
       let lastChangedResponse = false;
       const submittedGeminiTurn = () => {
         const turns = document.querySelectorAll('user-query');
@@ -4292,7 +4297,8 @@ function automate(job, profile, jobDeadline, editTarget = null, expectedConversa
 		const latestDigest = baselineTextDigest ? await digestHex(new TextEncoder().encode(latest)) : '';
 		const changedResponse = responseSnapshot.count > previousResponseCount
 			|| (baselineTextDigest ? latestDigest !== baselineTextDigest : latest !== previousText)
-			|| Boolean(previousIdentity && latestIdentity && latestIdentity !== previousIdentity);
+			|| Boolean(previousIdentity && latestIdentity && latestIdentity !== previousIdentity)
+			|| Boolean(foregroundHeldResponse && latest && previousText && latest === previousText);
         lastChangedResponse = changedResponse;
         const fallbackNotice = latestElement?.closest?.('.conversation-container')?.querySelector?.('peak-hour-fallback-disclaimer');
         if (profile.name === 'gemini' && geminiModeFamily(selectedModel || job.model) === 'pro' && changedResponse && isVisible(fallbackNotice)) {
@@ -4402,10 +4408,9 @@ function automate(job, profile, jobDeadline, editTarget = null, expectedConversa
 			|| (state.inputReady && (sawBusy || profile.name === 'gemini'
 				|| job.metadata?.contextbridge_foreground_recovery === true));
 		const stableAge = Date.now() - stableSince;
-		const foregroundRecovery = profile.name === 'chatgpt' && plainTextJob
-			&& job.metadata?.contextbridge_foreground_recovery === true;
 		const foregroundRecoveryReady = foregroundRecovery && Boolean(previousText)
-			&& stableAge >= 15000 && (latest !== previousText || responseCompletionReady(latestElement));
+			&& ((stableAge >= 15000 && (latest !== previousText || responseCompletionReady(latestElement)))
+				|| (foregroundHeldResponse && stableAge >= 30000 && !busy && composerFinished));
 		const completionReady = profile.name !== 'chatgpt' || !plainTextJob
 			|| (foregroundRecovery ? foregroundRecoveryReady : responseCompletionReady(latestElement));
 		// ChatGPT can now mount Copy while a hidden auto-created tab exposes only
@@ -4428,7 +4433,7 @@ function automate(job, profile, jobDeadline, editTarget = null, expectedConversa
 		// turn to the existing foreground/reload recovery path instead of waiting
 		// until the whole job deadline.
 		if (profile.name === 'chatgpt' && plainTextJob && changedResponse && structured && !busy
-			&& composerFinished && !completionReady && stableAge >= 15000) {
+			&& composerFinished && !completionReady && !foregroundHeldResponse && stableAge >= 15000) {
 			resolve({ ok: false, text: latest,
 				error: 'ChatGPT text stabilized before its completion controls appeared; waking the owned tab to finish rendering',
 				code: 'stalled_response', recoverable: job.metadata?.contextbridge_auto_reload !== false });

@@ -2222,6 +2222,35 @@ for (const [renderedUserText, shouldPass] of [['', true], ['A different visible 
     'an owned foreground recovery may accept only text that advanced beyond the held partial baseline');
 }
 
+{
+  let now = Date.now();
+  class FastDate extends Date {
+    static now() { now += 5000; return now; }
+    static parse(value) { return Date.parse(value); }
+  }
+  const input = element();
+  const held = { ...element('BROWSER-CHATGPT-HELD-OK'), querySelectorAll: () => [] };
+  const document = { querySelectorAll(selector) {
+    if (selector === '#input') return [input];
+    if (selector === '#response') return [held];
+    return [];
+  } };
+  const isolated = vm.createContext({ document, window: {}, HTMLTextAreaElement: class {},
+    HTMLInputElement: class {}, InputEvent: class {}, Event: class {},
+    setTimeout: (callback) => callback(), clearTimeout() {}, Date: FastDate, Promise });
+  const injectedAutomate = vm.runInContext(`(${context.automate.toString()})`, isolated);
+  const result = await injectedAutomate(
+    { prompt: 'ignored', metadata: { contextbridge_resume_only: true, contextbridge_foreground_recovery: true,
+      contextbridge_foreground_held_response: true, contextbridge_baseline_text: 'BROWSER-CHATGPT-HELD-OK' },
+      output: { mode: 'text' } },
+    { name: 'chatgpt', selectors: { input: ['#input'], submit: ['#send'], response: ['#response'] } },
+    new Date(Date.now() + 3600000).toISOString()
+  );
+  assert.equal(result.ok, true, result.error);
+  assert.equal(result.text, 'BROWSER-CHATGPT-HELD-OK',
+    'a proven held response may finish after 30 seconds of foreground stability without provider completion controls');
+}
+
 for (const disabled of [true, false]) {
   let sent = false;
   let now = Date.now();
