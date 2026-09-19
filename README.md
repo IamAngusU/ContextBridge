@@ -47,6 +47,8 @@ ChatGPT and Gemini are detected automatically from stable DOM and accessibility 
 - **Bounded model pipelines:** chain extraction, embeddings, retrieval, vision, and generation with fixed steps and explicit loop limits.
 - **Explicit scope:** only the chosen page origin and local service are requested.
 - **Local models:** route text and images to Ollama without adding another hosted service.
+- **Hot-plug resource packs:** recognize an optional local model kit or toolbox by a stable manifest ID rather than a changing drive letter, without recursively scanning it or executing inserted media ([portable-pack contract](docs/portable-resource-packs.md)).
+- **OpenAI-compatible boundary:** let ordinary clients call route-backed `models` and `chat/completions`, or route explicitly to a reviewed compatible provider, with mandatory local authentication and fail-closed remote egress ([surface and limits](docs/openai-compatible-api.md)).
 - **Managed runtimes:** install an official `llama.cpp` release, verify its SHA256, and supervise it on localhost.
 - **Hardware awareness:** inspect RAM, VRAM, CUDA, ROCm, Metal, loaded models, and CPU fallback from CLI or dashboard.
 - **Extraction and embeddings:** use validated JSON extraction and native batch vector output through one protocol.
@@ -371,6 +373,30 @@ results are rejected, and remote MCP transport is not part of this adapter. See
 the [MCP setup, schemas, trust boundary, and explicit
 limits](docs/mcp.md).
 
+### OpenAI-compatible applications and agent clients
+
+Applications that support a custom OpenAI base URL can use:
+
+```text
+http://127.0.0.1:32145/openai/v1
+```
+
+The API key is the existing private `server.token`; models are route IDs such
+as `contextbridge:default`. The shipped alpha surface is deliberately smaller
+than the native job protocol: route-backed model listing, chat completions,
+one bounded data-URL image, text/JSON output, and final-result SSE. Tool calls
+belong on MCP. See [OpenAI compatibility](docs/openai-compatible-api.md) and
+[how this relates to Ollama Launch agent clients](docs/agent-clients.md).
+
+Portable resources can be inventoried without starting them:
+
+```bash
+contextbridge resources
+contextbridge resources --json
+```
+
+See the [hot-plug resource-pack format and security boundary](docs/portable-resource-packs.md).
+
 Cluster jobs wrap that local job in routing requirements. See [examples/cluster-job.json](examples/cluster-job.json).
 
 Choose an explicit output contract per job:
@@ -503,7 +529,7 @@ Releases do not depend on GitHub Actions. From PowerShell, build every supported
 platform bundle, both extension archives, and `SHA256SUMS` locally:
 
 ```powershell
-.\scripts\build-release.ps1 -Version v0.5.74
+.\scripts\build-release.ps1 -Version v0.5.75
 ```
 
 Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md), use a focused issue for behavior changes, and include tests for routing or protocol work.

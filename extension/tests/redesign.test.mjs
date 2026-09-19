@@ -33,7 +33,7 @@ assert.doesNotMatch(wizard, /demo token|cb_pair_demo/i);
 
 for (const browser of ['chromium', 'firefox']) {
   const manifest = JSON.parse(fs.readFileSync(new URL(`../manifests/${browser}.json`, import.meta.url), 'utf8'));
-  assert.equal(manifest.version, '0.5.74');
+  assert.equal(manifest.version, '0.5.75');
 }
 
 console.log('V10 popup and reduced setup wizard contracts verified');

@@ -189,8 +189,11 @@ func TestSelectOllamaModelNeverPromotesANameGuess(t *testing.T) {
 
 func TestAutomaticOllamaVisionJobUsesVerifiedModelAndCarriesImage(t *testing.T) {
 	var generated struct {
-		Model  string   `json:"model"`
-		Images []string `json:"images"`
+		Model   string   `json:"model"`
+		Images  []string `json:"images"`
+		Options struct {
+			NumCtx int `json:"num_ctx"`
+		} `json:"options"`
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
@@ -221,7 +224,7 @@ func TestAutomaticOllamaVisionJobUsesVerifiedModelAndCarriesImage(t *testing.T) 
 	if output.Error != "" || output.Text != "described" || output.Model != "opaque-vl" {
 		t.Fatalf("verified automatic vision job failed: %#v", output)
 	}
-	if generated.Model != "opaque-vl" || len(generated.Images) != 1 || generated.Images[0] != "dmVyaWZpZWQ=" {
+	if generated.Model != "opaque-vl" || len(generated.Images) != 1 || generated.Images[0] != "dmVyaWZpZWQ=" || generated.Options.NumCtx != 8192 {
 		t.Fatalf("selected model or verified image was not sent: %#v", generated)
 	}
 }

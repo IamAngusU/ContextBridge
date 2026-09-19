@@ -18,6 +18,7 @@ import (
 	"github.com/IamAngusU/ContextBridge/internal/config"
 	"github.com/IamAngusU/ContextBridge/internal/llamaruntime"
 	"github.com/IamAngusU/ContextBridge/internal/modelregistry"
+	"github.com/IamAngusU/ContextBridge/internal/resourcepacks"
 	"github.com/IamAngusU/ContextBridge/internal/systeminfo"
 )
 
@@ -25,11 +26,13 @@ type RuntimeStatus struct {
 	Hardware systeminfo.Snapshot     `json:"hardware"`
 	Engines  map[string]EngineStatus `json:"engines"`
 	Models   []modelregistry.Entry   `json:"models"`
+	Packs    []resourcepacks.Pack    `json:"resource_packs,omitempty"`
 }
 
 type EngineStatus struct {
 	Name      string         `json:"name"`
 	Type      string         `json:"type"`
+	Remote    bool           `json:"remote,omitempty"`
 	State     string         `json:"state"`
 	URL       string         `json:"url,omitempty"`
 	Model     string         `json:"model,omitempty"`
@@ -60,6 +63,7 @@ type RuntimeManager struct {
 	mu       sync.RWMutex
 	hardware systeminfo.Snapshot
 	engines  map[string]EngineStatus
+	packs    []resourcepacks.Pack
 }
 
 func NewRuntimeManager(cfg config.Config, logger *log.Logger) *RuntimeManager {
@@ -104,8 +108,9 @@ func (m *RuntimeManager) Snapshot(ctx context.Context) RuntimeStatus {
 	for name, status := range m.engines {
 		engines[name] = status
 	}
+	packs := append([]resourcepacks.Pack(nil), m.packs...)
 	m.mu.RUnlock()
-	return RuntimeStatus{Hardware: hardware, Engines: engines, Models: modelregistry.List(m.cfg)}
+	return RuntimeStatus{Hardware: hardware, Engines: engines, Models: modelregistry.List(m.cfg), Packs: packs}
 }
 
 func (m *RuntimeManager) refreshEngineLoop(ctx context.Context) {
@@ -123,6 +128,10 @@ func (m *RuntimeManager) refreshEngineLoop(ctx context.Context) {
 }
 
 func (m *RuntimeManager) refreshExternalEngines(parent context.Context) {
+	packs := discoverResourcePacks(m.cfg)
+	m.mu.Lock()
+	m.packs = append([]resourcepacks.Pack(nil), packs...)
+	m.mu.Unlock()
 	engines := m.cfg.Engines
 	if _, ok := engines["ollama"]; !ok {
 		engine, _ := m.cfg.Engine("ollama")
@@ -133,9 +142,19 @@ func (m *RuntimeManager) refreshExternalEngines(parent context.Context) {
 		engines["ollama"] = engine
 	}
 	for name, engine := range engines {
+		resolved, resolveErr := resolveResourceEngine(engine, packs)
+		if resolveErr != nil {
+			m.setEngine(EngineStatus{Name: name, Type: engine.Type, State: "unavailable", Model: engine.Model, Warning: resolveErr.Error(), UpdatedAt: time.Now().UTC()})
+			continue
+		}
+		engine = resolved
 		if engine.Type == "ollama" {
 			status := ollamaStatus(parent, name, engine)
 			m.setEngine(status)
+			continue
+		}
+		if engine.Type == "openai_compatible" {
+			m.setEngine(openAICompatibleStatus(parent, name, engine))
 			continue
 		}
 		if engine.Type == "llama_cpp" && !engine.AutoStart {
@@ -355,6 +374,59 @@ func healthy(parent context.Context, base string) bool {
 	}
 	resp.Body.Close()
 	return resp.StatusCode >= 200 && resp.StatusCode < 300
+}
+
+func openAICompatibleStatus(parent context.Context, name string, engine config.Engine) EngineStatus {
+	affinity := "loopback API"
+	if engine.Remote {
+		affinity = "remote API"
+	}
+	status := EngineStatus{Name: name, Type: engine.Type, Remote: engine.Remote, State: "offline", URL: engine.URL, Model: engine.Model, Affinity: affinity, UpdatedAt: time.Now().UTC()}
+	ctx, cancel := context.WithTimeout(parent, 1500*time.Millisecond)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(engine.URL, "/")+"/models", nil)
+	if err != nil {
+		status.Warning = "invalid provider endpoint"
+		return status
+	}
+	applyOpenAIEngineAuth(request, engine)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return status
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		status.Warning = "model inventory returned " + response.Status
+		return status
+	}
+	var payload struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 4<<20)).Decode(&payload); err != nil {
+		status.Warning = "model inventory was not valid JSON"
+		return status
+	}
+	status.State = "online"
+	available := false
+	for index, candidate := range payload.Data {
+		if index >= 512 {
+			break
+		}
+		if strings.EqualFold(strings.TrimSpace(candidate.ID), strings.TrimSpace(engine.Model)) {
+			available = true
+			break
+		}
+	}
+	status.Models = []RuntimeModel{{
+		Name: engine.Model, Available: available, Loaded: false,
+		Capabilities: append([]string(nil), engine.Capabilities...), CapabilitiesVerified: true, CapabilitySource: "operator_config",
+	}}
+	if !available {
+		status.Warning = "configured model is absent from /models"
+	}
+	return status
 }
 
 func ollamaStatus(parent context.Context, name string, engine config.Engine) EngineStatus {

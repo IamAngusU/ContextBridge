@@ -178,6 +178,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/settings/updates", s.auth(s.handleUpdateSettings))
 	mux.HandleFunc("/v1/browser/jobs/", s.auth(s.handleBrowserJobAction))
 	mux.HandleFunc("/v1/browser/profiles", s.auth(s.handleProfiles))
+	mux.HandleFunc("/openai/v1/models", s.auth(s.handleOpenAIModels))
+	mux.HandleFunc("/openai/v1/chat/completions", s.auth(s.handleOpenAIChat))
 	mux.Handle("/", dashboardHandler())
 	return s.cors(mux)
 }

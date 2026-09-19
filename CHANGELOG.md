@@ -2,6 +2,38 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.75 - 2026-09-19
+
+### Added
+
+- authenticated OpenAI-compatible `models` and `chat/completions` ingress maps
+  ordinary client model IDs onto existing ContextBridge routes, with bounded
+  messages, one data-URL image, text/JSON output, and final-result SSE
+- explicit `openai_compatible` engines support reviewed loopback services or
+  opt-in HTTPS providers with exact models and operator-declared capabilities
+- passive portable-resource packs identify optional runtimes and toolboxes by
+  stable IDs instead of drive letters; `contextbridge resources`, the console,
+  status response, and dashboard show what is physically present
+- shell completion covers the resource inventory command
+
+### Changed
+
+- a portable engine becomes unavailable when its pack is absent and is
+  resolved again during the normal five-second runtime refresh after hot-plug
+- documentation now separates model runtimes from Ollama Launch agent clients
+  and shows both OpenAI-compatible and MCP integration paths
+
+### Security
+
+- portable discovery is bounded to exact markers at roots/direct children,
+  rejects links, unknown schema fields, remote endpoints, and executable
+  directives, and never auto-runs inserted media
+- non-loopback compatible providers require HTTPS, `remote: true`, and a
+  resolved API key; secrets are omitted from public config/status JSON
+- compatibility clients cannot request remote image fetches or tool calls and
+  reuse the existing authenticated loopback service rather than opening a new
+  listener
+
 ## 0.5.74 - 2026-09-19
 
 ### Added

@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/IamAngusU/ContextBridge/internal/cluster"
+	"github.com/IamAngusU/ContextBridge/internal/resourcepacks"
 )
 
 func TestCompactDurationKeepsDaysAndHours(t *testing.T) {
@@ -459,6 +460,27 @@ func TestPanelClearsStaleSelectionsWhenServiceIsUnavailable(t *testing.T) {
 	live := strings.Split(frames[len(frames)-1], "+-- HISTORY")[0]
 	if strings.Contains(live, "Tab 77") || strings.Contains(live, "[Lokal · ollama]") || !strings.Contains(live, "Dienst offline") {
 		t.Fatalf("offline live panel retained stale selections: %s", live)
+	}
+}
+
+func TestPanelShowsDetectedPortableResourceWithoutClaimingItIsRunning(t *testing.T) {
+	var output bytes.Buffer
+	session := &Session{out: &output, interactive: true, style: "panel", widthFn: func() int { return 140 }, heightFn: func() int { return 42 },
+		browserSelections: map[int]browserSelection{}, localModels: map[string]localModelSelection{}, jobs: map[string]jobState{}}
+	session.Banner("v0.test", "console")
+	session.ObserveService(ServiceSnapshot{
+		Version:      "v0.test",
+		APIProviders: []string{"deepseek"},
+		APIModels:    []cluster.ModelCapability{{Provider: "deepseek", Name: "v4.1", Available: true}},
+		ResourcePacks: []resourcepacks.Pack{{Manifest: resourcepacks.Manifest{
+			ID: "example.modelkit", Name: "ModelKit", Kind: "model-runtime",
+			Endpoints: []resourcepacks.Endpoint{{ID: "ollama", Type: "ollama"}},
+		}}},
+	})
+	frames := strings.Split(output.String(), "\x1b[H\x1b[2J")
+	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(frames[len(frames)-1], "")
+	if !strings.Contains(plain, "[API · deepseek]") || !strings.Contains(plain, "v4.1 · per API verfügbar") || !strings.Contains(plain, "HOT-PLUG RESOURCES") || !strings.Contains(plain, "ModelKit · example.modelkit · model-runtime · 1 Endpunkt(e)") || strings.Contains(plain, "ModelKit · online") {
+		t.Fatalf("portable resource panel is missing or overclaims runtime state: %s", plain)
 	}
 }
 

@@ -2,6 +2,19 @@
 
 ContextBridge is local-first. Its default listener is `127.0.0.1`, its token is generated from 32 random bytes, saved files use owner-only permissions where the operating system supports them, and API responses are marked `no-store`.
 
+The optional OpenAI-compatible ingress uses that same authenticated loopback
+listener; it is not an unauthenticated second server. It rejects remote image
+fetches, tool calls, oversized history, and unknown route-backed model IDs. A
+configured OpenAI-compatible output engine cannot send prompts to a remote
+host unless the URL is HTTPS, `remote: true` is explicit, and its API key has
+resolved. Provider secrets are omitted from public config/status JSON.
+
+Portable-resource discovery reads only a strict, size-bounded marker at a
+volume root or direct child. It neither follows linked markers nor recursively
+indexes or executes removable media. Portable manifests may publish loopback
+HTTP endpoints only. Presence means “detected”, not “trusted to run”; runtime
+startup remains an explicit operator action.
+
 The optional MCP adapter is stdio-only and connects back to that authenticated
 loopback listener. It never prints the bearer token, exposes no arbitrary shell
 or MCP client, accepts only a closed metadata allowlist, rejects artifact jobs

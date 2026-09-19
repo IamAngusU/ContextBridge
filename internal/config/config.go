@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -21,6 +23,7 @@ type Config struct {
 	Storage         Storage                   `yaml:"storage"`
 	Runtime         Runtime                   `yaml:"runtime"`
 	Terminal        Terminal                  `yaml:"terminal"`
+	Portable        PortableResources         `yaml:"portable_resources" json:"portable_resources"`
 	Updates         updater.Settings          `yaml:"updates" json:"updates"`
 	Routes          map[string]Route          `yaml:"routes"`
 	Providers       Providers                 `yaml:"providers"`
@@ -51,6 +54,15 @@ type Terminal struct {
 	Style string `yaml:"style"`
 }
 
+// PortableResources enables bounded discovery of declarative resource-pack
+// manifests on local fixed/removable volumes. A manifest may publish local
+// endpoints, but it can never ask ContextBridge to execute a program.
+type PortableResources struct {
+	Enabled   *bool    `yaml:"enabled" json:"enabled"`
+	ScanRoots []string `yaml:"scan_roots,omitempty" json:"scan_roots,omitempty"`
+	MaxPacks  int      `yaml:"max_packs,omitempty" json:"max_packs,omitempty"`
+}
+
 type Route struct {
 	Provider       string   `yaml:"provider" json:"provider"`
 	Fallback       []string `yaml:"fallback" json:"fallback"`
@@ -64,6 +76,11 @@ type Engine struct {
 	Type           string   `yaml:"type" json:"type"`
 	URL            string   `yaml:"url,omitempty" json:"url,omitempty"`
 	Model          string   `yaml:"model,omitempty" json:"model,omitempty"`
+	APIKey         string   `yaml:"api_key,omitempty" json:"-"`
+	Remote         bool     `yaml:"remote,omitempty" json:"remote,omitempty"`
+	Capabilities   []string `yaml:"capabilities,omitempty" json:"capabilities,omitempty"`
+	ResourcePack   string   `yaml:"resource_pack,omitempty" json:"resource_pack,omitempty"`
+	Endpoint       string   `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`
 	Executable     string   `yaml:"executable,omitempty" json:"executable,omitempty"`
 	Listen         string   `yaml:"listen,omitempty" json:"listen,omitempty"`
 	AutoStart      bool     `yaml:"auto_start,omitempty" json:"auto_start,omitempty"`
@@ -219,6 +236,17 @@ func (c Config) Validate() error {
 	if c.Terminal.Style != "" && c.Terminal.Style != "classic" && c.Terminal.Style != "panel" {
 		return errors.New("terminal.style must be classic or panel")
 	}
+	if c.Portable.MaxPacks < 1 || c.Portable.MaxPacks > 128 {
+		return errors.New("portable_resources.max_packs must be between 1 and 128")
+	}
+	if len(c.Portable.ScanRoots) > 32 {
+		return errors.New("portable_resources.scan_roots accepts at most 32 paths")
+	}
+	for _, root := range c.Portable.ScanRoots {
+		if !filepath.IsAbs(root) {
+			return fmt.Errorf("portable resource scan root must be absolute: %s", root)
+		}
+	}
 	if c.Cluster.Worker.MaxConcurrent > cluster.MaximumWorkerConcurrency {
 		return fmt.Errorf("cluster.worker.max_concurrent must not exceed %d", cluster.MaximumWorkerConcurrency)
 	}
@@ -272,8 +300,46 @@ func (c Config) Validate() error {
 		if !safeNamePattern.MatchString(name) || strings.Contains(name, "..") {
 			return fmt.Errorf("invalid engine name %s", name)
 		}
-		if engine.Type != "ollama" && engine.Type != "llama_cpp" && engine.Type != "browser" {
+		if engine.Type != "ollama" && engine.Type != "llama_cpp" && engine.Type != "browser" && engine.Type != "openai_compatible" {
 			return fmt.Errorf("engine %s has unsupported type %s", name, engine.Type)
+		}
+		if engine.ResourcePack != "" {
+			if !safeNamePattern.MatchString(engine.ResourcePack) || strings.Contains(engine.ResourcePack, "..") {
+				return fmt.Errorf("engine %s resource_pack must be a stable safe identifier", name)
+			}
+			if engine.Endpoint == "" || !safeNamePattern.MatchString(engine.Endpoint) || strings.Contains(engine.Endpoint, "..") {
+				return fmt.Errorf("engine %s endpoint is required with resource_pack", name)
+			}
+		}
+		if engine.Type == "openai_compatible" {
+			if engine.Model == "" {
+				return fmt.Errorf("engine %s requires an explicit model", name)
+			}
+			if engine.URL == "" && engine.ResourcePack == "" {
+				return fmt.Errorf("engine %s requires url or resource_pack", name)
+			}
+			if engine.URL != "" {
+				remote, err := validateProviderURL(engine.URL)
+				if err != nil {
+					return fmt.Errorf("engine %s: %w", name, err)
+				}
+				if remote && !engine.Remote {
+					return fmt.Errorf("engine %s must set remote: true before prompts may leave this device", name)
+				}
+				if remote && (strings.TrimSpace(engine.APIKey) == "" || strings.Contains(engine.APIKey, "${")) {
+					return fmt.Errorf("engine %s requires a resolved api_key for remote access", name)
+				}
+			}
+			if len(engine.Capabilities) == 0 {
+				return fmt.Errorf("engine %s requires explicit capabilities", name)
+			}
+		}
+		for _, capability := range engine.Capabilities {
+			switch strings.ToLower(strings.TrimSpace(capability)) {
+			case "text", "vision", "embedding":
+			default:
+				return fmt.Errorf("engine %s has unsupported capability %s", name, capability)
+			}
 		}
 		if engine.GPU != "" && engine.GPU != "prefer" && engine.GPU != "require" && engine.GPU != "off" {
 			return fmt.Errorf("engine %s gpu must be prefer, require, or off", name)
@@ -444,6 +510,18 @@ func applyDefaults(cfg *Config, base string) {
 	if cfg.Terminal.Style == "" {
 		cfg.Terminal.Style = "panel"
 	}
+	if cfg.Portable.Enabled == nil {
+		enabled := true
+		cfg.Portable.Enabled = &enabled
+	}
+	if cfg.Portable.MaxPacks <= 0 {
+		cfg.Portable.MaxPacks = 32
+	}
+	for index, root := range cfg.Portable.ScanRoots {
+		if strings.TrimSpace(root) != "" && !filepath.IsAbs(root) {
+			cfg.Portable.ScanRoots[index] = filepath.Join(base, root)
+		}
+	}
 	if cfg.RAG.Backend == "" {
 		cfg.RAG.Backend = "local"
 	}
@@ -588,6 +666,26 @@ var reservedRuntimeFlags = map[string]bool{
 	"--n-gpu-layers": true, "-ngl": true, "--embedding": true, "--pooling": true,
 }
 
+// validateProviderURL returns true only for non-loopback HTTPS endpoints.
+// Remote endpoints must be acknowledged explicitly because they receive the
+// trusted task prompt and submitted content.
+func validateProviderURL(value string) (bool, error) {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return false, errors.New("url must be an absolute endpoint without credentials, query, or fragment")
+	}
+	host := parsed.Hostname()
+	ip := net.ParseIP(host)
+	loopback := strings.EqualFold(host, "localhost") || (ip != nil && ip.IsLoopback())
+	if loopback && parsed.Scheme == "http" {
+		return false, nil
+	}
+	if parsed.Scheme != "https" {
+		return false, errors.New("url must use HTTPS unless it is loopback HTTP")
+	}
+	return !loopback, nil
+}
+
 func expandEnvironment(value string) string {
 	return envPattern.ReplaceAllStringFunc(value, func(token string) string {
 		name := token[2 : len(token)-1]
@@ -622,6 +720,11 @@ runtime:
 
 terminal:
   style: panel # panel or classic; applies to interactive terminals only
+
+portable_resources:
+  enabled: true # bounded marker discovery only; never auto-runs removable-drive code
+  scan_roots: [] # empty = local fixed/removable volumes and common mount roots
+  max_packs: 32
 
 updates:
   enabled: null # off by default; enable from the dashboard, extension, or CLI
