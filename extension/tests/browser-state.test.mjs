@@ -306,9 +306,14 @@ assert.equal(context.shouldForegroundStalledTab({ autoCreated: true }, { name: '
 assert.equal(context.foregroundFreshChatForJob({ image_base64: 'iVBORw0KGgo=' }), true, 'fresh image-upload chats should wake their provider UI');
 assert.equal(context.foregroundFreshChatForJob({ prompt: 'text only' }), false, 'text-only chats should stay in the background');
 assert.equal(context.foregroundFreshChatForJob({ metadata: { contextbridge_foreground_new_chat: true } }), true, 'explicit foreground request should be honored');
-assert.equal(context.shouldForegroundStalledTab({ autoCreated: false }, { name: 'chatgpt' }, { ok: false, recoverable: true, code: 'stalled_response' }), false);
+assert.equal(context.shouldForegroundStalledTab({ autoCreated: false, legacy: false }, { name: 'chatgpt' }, { ok: false, recoverable: true, code: 'stalled_response' }), true);
+assert.equal(context.shouldForegroundStalledTab({ autoCreated: true, legacy: true }, { name: 'chatgpt' }, { ok: false, recoverable: true, code: 'stalled_response' }), false);
 assert.equal(context.shouldForegroundStalledTab({ autoCreated: true }, { name: 'gemini' }, { ok: false, recoverable: true, code: 'stalled_response' }), false);
 assert.equal(context.shouldForegroundStalledTab({ autoCreated: true }, { name: 'chatgpt' }, { ok: false, recoverable: false, code: 'browser_timeout' }), false);
+assert.match(source, /foregroundOwnedUnsentDraft[\s\S]{0,2200}draft\.owner_job !== owned\.jobId[\s\S]{0,250}draft\.digest !== owned\.digest/,
+  'an unsent prompt may wake only after page marker and nonce-bound digest ownership checks');
+assert.match(source, /answer\?\.code === 'stalled_submission'[\s\S]{0,2400}retrying its still-unsent prompt once/,
+  'a retained provider prompt must receive at most one explicit foreground retry');
 assert.equal(context.isNewAssistantTurn({ response_count: 2 }, { response_count: 2, text: 'Old music player clock changed', active_generation: true }), false);
 assert.equal(context.isNewAssistantTurn({ response_count: 2 }, { response_count: 3, text: 'Fresh answer', active_generation: true }), true);
 assert.equal(context.isNewAssistantTurn({ response_count: 2, response_identity: 'old' }, { response_count: 2, response_identity: 'new' }), true);
@@ -405,6 +410,58 @@ assert.equal(context.isEditAssistantTurn({ response_count: 9 }, { response_count
   assert.equal(input.value, '');
 }
 
+{
+  const previousSettings = context.settings;
+  const previousRequireLease = context.requireActiveBrowserLease;
+  const previousDelay = context.delay;
+  const previousGet = chrome.tabs.get;
+  const previousUpdate = chrome.tabs.update;
+  const previousExecute = chrome.scripting.executeScript;
+  const prompt = 'Owned prompt retained after Send';
+  const nonce = '11'.repeat(16);
+  const job = { id: 'owned-stalled-job', session_id: 'owned-stalled-session', prompt, metadata: {} };
+  const work = { job, profile: { name: 'gemini' } };
+  const sessionKey = context.workSessionKey(work);
+  const input = {
+    value: prompt, offsetWidth: 1, offsetHeight: 1, getClientRects: () => [1], contains: () => false,
+    getAttribute: (name) => name === 'data-contextbridge-owned-job' ? job.id : '',
+    closest: () => ({ querySelectorAll: () => [], querySelector: () => null })
+  };
+  context.document = { hasFocus: () => false, activeElement: null,
+    querySelectorAll: (selector) => selector === '#owned-input' ? [input] : [] };
+  const url = 'https://gemini.google.com/app/owned-stalled';
+  const state = {
+    ownedDrafts: { 73: { jobId: job.id, origin: 'https://gemini.google.com', nonce,
+      digest: await context.sha256Text(`${nonce}\u0000${prompt}`) } },
+    sessionBindings: { [sessionKey]: { tabId: 73, url, legacy: false } }
+  };
+  let active = false;
+  context.settings = async () => state;
+  context.requireActiveBrowserLease = async () => true;
+  context.delay = async () => {};
+  chrome.tabs.get = async () => ({ id: 73, url, active });
+  chrome.tabs.update = async () => { active = true; return { id: 73, url, active }; };
+  chrome.scripting.executeScript = async ({ func, args }) => [{ result: await func(...args) }];
+  try {
+    assert.equal(await context.foregroundOwnedUnsentDraft({}, work, 73,
+      { name: 'gemini', selectors: { input: ['#owned-input'] } }, {}), true);
+    assert.equal(active, true, 'the exact owned tab should be activated after both ownership checks');
+    state.ownedDrafts[73].digest = '00'.repeat(32);
+    active = false;
+    assert.equal(await context.foregroundOwnedUnsentDraft({}, work, 73,
+      { name: 'gemini', selectors: { input: ['#owned-input'] } }, {}), false,
+    'a mismatched digest must never activate or retry the tab');
+    assert.equal(active, false);
+  } finally {
+    context.settings = previousSettings;
+    context.requireActiveBrowserLease = previousRequireLease;
+    context.delay = previousDelay;
+    chrome.tabs.get = previousGet;
+    chrome.tabs.update = previousUpdate;
+    chrome.scripting.executeScript = previousExecute;
+  }
+}
+
 const element = (text = '', attributes = {}) => ({
   offsetWidth: 1,
   offsetHeight: 1,
@@ -417,6 +474,42 @@ const element = (text = '', attributes = {}) => ({
   classList: [],
   hasAttribute: () => false
 });
+
+{
+  let clicks = 0;
+  let now = Date.now();
+  class FastDate extends Date {
+    static now() { now += 250; return now; }
+    static parse(value) { return Date.parse(value); }
+  }
+  class TextArea {
+    constructor() { this.value = ''; this.offsetWidth = 1; this.offsetHeight = 1; this.owner = ''; }
+    getClientRects() { return [1]; }
+    focus() {}
+    dispatchEvent() {}
+    setAttribute(_name, value) { this.owner = value; }
+  }
+  const input = new TextArea();
+  const send = { ...element(), click() { clicks += 1; } };
+  const document = { querySelectorAll(selector) {
+    if (selector === '#input') return [input];
+    if (selector === '#send') return [send];
+    return [];
+  } };
+  const isolated = vm.createContext({ document, window: {}, HTMLTextAreaElement: TextArea,
+    HTMLInputElement: class {}, InputEvent: class {}, Event: class {},
+    setTimeout: (callback) => callback(), clearTimeout() {}, Date: FastDate, Promise });
+  const injectedAutomate = vm.runInContext(`(${context.automate.toString()})`, isolated);
+  const result = await injectedAutomate(
+    { id: 'retained-send', prompt: 'Stay exactly here', output: { mode: 'text' } },
+    { name: 'gemini', selectors: { input: ['#input'], submit: ['#send'], response: [] } },
+    new Date(Date.now() + 60000).toISOString()
+  );
+  assert.equal(clicks, 1, 'the provider control is clicked only once inside one automation attempt');
+  assert.equal(result.code, 'stalled_submission');
+  assert.equal(result.recoverable, true);
+  assert.equal(input.value, 'Stay exactly here');
+}
 
 {
   const markdown = element('CB43-LIVE-OK');

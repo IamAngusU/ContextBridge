@@ -2,6 +2,28 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.76 - 2026-09-19
+
+### Fixed
+
+- browser jobs now detect when a background provider retained the exact
+  ContextBridge prompt after Send, activate only that owned session tab, and
+  retry the still-unsent text prompt once instead of waiting for a timeout
+- hidden, explicitly attached ChatGPT sessions receive the same ownership-
+  checked wake-and-observe recovery as ContextBridge-created sessions; an
+  already active tab is re-observed without resending
+- stable ChatGPT text that reaches the deadline without final completion
+  controls enters guarded recovery instead of becoming an opaque timeout
+
+### Security
+
+- unsent-prompt recovery requires the current non-legacy session binding,
+  exact tab URL and origin, matching job marker, and nonce-bound prompt digest
+  before and after activation; busy, focused, changed, or attached composers
+  fail closed
+- uploads and carried files are never retried by the new submission recovery,
+  and every text prompt receives at most one foreground retry
+
 ## 0.5.75 - 2026-09-19
 
 ### Added
