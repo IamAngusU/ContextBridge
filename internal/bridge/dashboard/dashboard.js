@@ -225,6 +225,44 @@ function renderRuntime(runtime) {
     }
     list.append(row);
   }
+
+  const packs = Array.isArray(runtime.resource_packs) ? runtime.resource_packs : [];
+  $('resource-summary').textContent = packs.length ? `${packs.length} detected` : 'None present';
+  const resourceList = $('resource-list');
+  resourceList.textContent = '';
+  if (!packs.length) {
+    const empty = document.createElement('p');
+    empty.className = 'empty';
+    empty.textContent = 'Packs appear only while their marker is physically present.';
+    resourceList.append(empty);
+  }
+  for (const pack of packs.slice().sort((a, b) => String(a.id || '').localeCompare(String(b.id || '')))) {
+    const row = document.createElement('div');
+    row.className = 'resource-row';
+    const identity = document.createElement('div');
+    const title = document.createElement('strong');
+    title.textContent = pack.name || pack.id || 'Portable resource';
+    const id = document.createElement('code');
+    id.textContent = pack.id || 'unknown-id';
+    identity.append(title, id);
+    const kind = document.createElement('span');
+    kind.className = 'resource-kind';
+    kind.textContent = pack.kind || 'resource-pack';
+    const detail = document.createElement('div');
+    detail.className = 'resource-detail';
+    const endpoints = Array.isArray(pack.endpoints) ? pack.endpoints : [];
+    detail.textContent = endpoints.length
+      ? endpoints.map((endpoint) => `${endpoint.id} · ${endpoint.type}${endpoint.capabilities?.length ? ` · ${endpoint.capabilities.join('+')}` : ''}`).join('  /  ')
+      : 'Detected metadata only · no routable endpoint';
+    row.append(identity, kind, detail);
+    if (pack.warning) {
+      const warning = document.createElement('p');
+      warning.className = 'runtime-warning';
+      warning.textContent = pack.warning;
+      row.append(warning);
+    }
+    resourceList.append(row);
+  }
 }
 
 function formatUptime(seconds) {

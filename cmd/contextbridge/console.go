@@ -16,6 +16,7 @@ import (
 	"github.com/IamAngusU/ContextBridge/internal/bridge"
 	"github.com/IamAngusU/ContextBridge/internal/cluster"
 	"github.com/IamAngusU/ContextBridge/internal/config"
+	"github.com/IamAngusU/ContextBridge/internal/resourcepacks"
 	"github.com/IamAngusU/ContextBridge/internal/systeminfo"
 	"github.com/IamAngusU/ContextBridge/internal/terminalui"
 )
@@ -31,6 +32,7 @@ type consoleStatus struct {
 	Runtime    struct {
 		Hardware systeminfo.Snapshot            `json:"hardware"`
 		Engines  map[string]bridge.EngineStatus `json:"engines"`
+		Packs    []resourcepacks.Pack           `json:"resource_packs"`
 	} `json:"runtime"`
 	Metrics struct {
 		JobsTotal  uint64 `json:"jobs_total"`
@@ -124,6 +126,7 @@ func toServiceSnapshot(status consoleStatus) terminalui.ServiceSnapshot {
 		Version: status.Version, Queued: status.Queued, Completed: status.Completed, ActiveJobs: status.ActiveJobs,
 		BrowserConnected: status.Browser.Connected, ActiveTabs: status.Browser.ActiveTabs, BusyTabs: status.Browser.BusyTabs,
 		JobsTotal: status.Metrics.JobsTotal, JobsFailed: status.Metrics.JobsFailed,
+		ResourcePacks: append([]resourcepacks.Pack(nil), status.Runtime.Packs...),
 	}
 	for _, tab := range status.Browser.Tabs {
 		snapshot.Tabs = append(snapshot.Tabs, cluster.BrowserSessionCapability{
@@ -133,6 +136,15 @@ func toServiceSnapshot(status consoleStatus) terminalui.ServiceSnapshot {
 	}
 	for provider, engine := range status.Runtime.Engines {
 		if engine.State != "online" {
+			continue
+		}
+		if engine.Remote {
+			snapshot.APIProviders = append(snapshot.APIProviders, provider)
+			for _, model := range engine.Models {
+				snapshot.APIModels = append(snapshot.APIModels, cluster.ModelCapability{
+					Provider: provider, Name: model.Name, Available: model.Available,
+				})
+			}
 			continue
 		}
 		snapshot.LocalProviders = append(snapshot.LocalProviders, provider)

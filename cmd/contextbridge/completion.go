@@ -8,7 +8,7 @@ import (
 
 var completionRootCommands = []string{
 	"init", "serve", "run", "stop", "console", "submit", "schedule", "result", "review",
-	"health", "dashboard", "status", "browser", "doctor", "hardware", "models",
+	"health", "dashboard", "status", "browser", "doctor", "hardware", "models", "resources",
 	"pull", "runtime", "mcp", "benchmark", "relay", "pair", "worker", "cluster", "route", "selftest", "update", "completion", "version", "help",
 }
 
@@ -77,6 +77,7 @@ $script:ContextBridgeOptions = @{
     'doctor' = @('--config','--json')
     'hardware' = @('--json')
     'models' = @('--config','--json','--discover')
+    'resources' = @('--config','--json')
     'pull' = @('--config')
     'runtime install' = @('--config')
     'mcp serve' = @('--config')
@@ -229,7 +230,7 @@ _contextbridge_complete() {
       dashboard) candidates="--config --no-open" ;;
       pair) candidates="--config --relay --identity --name" ;;
       worker) candidates="--config --relay --identity --name --slots --providers --models --tasks --groups --no-updates --topmost" ;;
-      status|doctor) candidates="--config --json" ;;
+      status|doctor|resources) candidates="--config --json" ;;
       selftest) candidates="--config --providers --local-model --run --dry-run --image --artifacts --keep-artifacts --timeout --job-timeout --poll" ;;
       models) candidates="--config --json --discover" ;;
       hardware) candidates="--json" ;;
@@ -238,7 +239,7 @@ _contextbridge_complete() {
   elif [[ "$option_key" == "cluster route" && "$COMP_CWORD" -eq 3 ]]; then
     candidates="explain"
   elif [ "$COMP_CWORD" -eq 1 ]; then
-    candidates="init serve run stop console submit schedule result review health dashboard status browser doctor hardware models pull runtime mcp benchmark relay pair worker cluster route selftest update completion version help"
+    candidates="init serve run stop console submit schedule result review health dashboard status browser doctor hardware models resources pull runtime mcp benchmark relay pair worker cluster route selftest update completion version help"
   elif [ "$COMP_CWORD" -eq 2 ]; then
     case "$command" in
       schedule) candidates="add list show pause resume run delete" ;;
@@ -281,6 +282,7 @@ root=(
     'doctor:Check setup and connectivity'
     'hardware:Show detected hardware'
     'models:Show model inventory'
+    'resources:Show detected portable resource packs'
     'pull:Download a managed model'
     'runtime:Manage local runtimes'
     'mcp:Expose bounded local tools over MCP stdio'
@@ -387,7 +389,7 @@ case "$words[2]" in
   result) _arguments "${config[@]}" '1:job ID:' ;;
   review) _arguments "${config[@]}" '--job-dir[InkWall job directory]:directory:_directories' ;;
   dashboard) _arguments "${config[@]}" '--no-open[Print URL without opening a browser]' ;;
-  status|doctor) _arguments "${config[@]}" '--json[Print machine-readable JSON]' ;;
+  status|doctor|resources) _arguments "${config[@]}" '--json[Print machine-readable JSON]' ;;
   hardware) _arguments '--json[Print machine-readable JSON]' ;;
   models) _arguments "${config[@]}" '--json[Print machine-readable JSON]' '--discover[Discover local model runtimes and files]' ;;
   pair) _arguments "${config[@]}" '--relay[Public relay URL]:URL:' '--identity[Identity file]:identity file:_files' '--name[Node name]:name:' ;;

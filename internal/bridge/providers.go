@@ -54,11 +54,20 @@ func (p *Processor) Process(ctx context.Context, job Job) Output {
 		if !exists {
 			err = fmt.Errorf("unsupported provider %s", provider)
 		} else {
+			if engine.ResourcePack != "" {
+				engine, err = resolveResourceEngine(engine, discoverResourcePacks(p.cfg))
+				if err != nil {
+					lastProviderError = strings.TrimSpace(err.Error())
+					continue
+				}
+			}
 			switch engine.Type {
 			case "ollama":
-				output, err = p.ollama(ctx, job, route, engine)
+				output, err = p.ollama(ctx, job, route, engine, provider)
 			case "llama_cpp":
 				output, err = p.llamaCPP(ctx, job, route, engine)
+			case "openai_compatible":
+				output, err = p.openAICompatible(ctx, job, route, engine, provider)
 			case "browser":
 				output, err = p.browser(ctx, job, route)
 			default:
@@ -81,7 +90,7 @@ func (p *Processor) Process(ctx context.Context, job Job) Output {
 	return OutputError(outputMode(job.Output), "contextbridge", "fallback", failure, 0)
 }
 
-func (p *Processor) ollama(parent context.Context, job Job, route config.Route, engine config.Engine) (Output, error) {
+func (p *Processor) ollama(parent context.Context, job Job, route config.Route, engine config.Engine, provider string) (Output, error) {
 	started := time.Now()
 	timeout := time.Duration(engine.TimeoutSeconds) * time.Second
 	ctx, cancel := context.WithTimeout(parent, timeout)
@@ -113,6 +122,13 @@ func (p *Processor) ollama(parent context.Context, job Job, route config.Route, 
 		"prompt": prompt,
 		"stream": false,
 	}
+	// Vision encoders commonly consume almost all of Ollama's 4096-token
+	// default before ContextBridge's trust wrapper is counted. Give image jobs
+	// enough room for that fixed safety boundary without changing ordinary text
+	// memory use or silently truncating either the prompt or the image.
+	if needsImage {
+		payload["options"] = map[string]int{"num_ctx": 8192}
+	}
 	if outputMode(job.Output) != "text" {
 		payload["format"] = "json"
 	}
@@ -131,8 +147,8 @@ func (p *Processor) ollama(parent context.Context, job Job, route config.Route, 
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		return Output{}, fmt.Errorf("ollama returned %s", resp.Status)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return Output{}, fmt.Errorf("ollama returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
 	var answer struct {
 		Response        string `json:"response"`
@@ -145,13 +161,168 @@ func (p *Processor) ollama(parent context.Context, job Job, route config.Route, 
 	if strings.TrimSpace(answer.Response) == "" {
 		return Output{}, errors.New("ollama returned an empty response")
 	}
-	output := NormalizeOutput([]byte(answer.Response), job.Output, "ollama", model, time.Since(started))
+	output := NormalizeOutput([]byte(answer.Response), job.Output, provider, model, time.Since(started))
 	output.InputTokens, output.OutputTokens = answer.PromptEvalCount, answer.EvalCount
 	output.TotalTokens = output.InputTokens + output.OutputTokens
 	if output.Error != "" {
 		return Output{}, errors.New(output.Error)
 	}
 	return output, nil
+}
+
+func (p *Processor) openAICompatible(parent context.Context, job Job, route config.Route, engine config.Engine, provider string) (Output, error) {
+	started := time.Now()
+	timeout := time.Duration(engine.TimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 120 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	model := strings.TrimSpace(engine.Model)
+	if model == "" {
+		return Output{}, errors.New("openai-compatible provider has no configured model")
+	}
+	// A compatible endpoint is an explicit egress boundary. Do not let an
+	// incoming job silently select a different vendor model than the operator
+	// reviewed in the engine configuration.
+	if requested := strings.TrimSpace(route.Model); requested != "" && !strings.EqualFold(requested, model) {
+		return Output{}, fmt.Errorf("openai-compatible route model %q does not match configured model %q", requested, model)
+	}
+	if requested := strings.TrimSpace(job.Model); requested != "" && !strings.EqualFold(requested, model) {
+		return Output{}, fmt.Errorf("openai-compatible job model %q does not match configured model %q", requested, model)
+	}
+	if outputMode(job.Output) == "embedding" {
+		return p.openAICompatibleEmbedding(ctx, job, engine, provider, model, started)
+	}
+	content := []map[string]interface{}{{"type": "text", "text": trustedPrompt(job)}}
+	if job.ImageBase64 != "" {
+		if !containsFolded(engine.Capabilities, "vision") {
+			return Output{}, errors.New("openai-compatible engine is not configured for vision")
+		}
+		content = append(content, map[string]interface{}{"type": "image_url", "image_url": map[string]string{"url": "data:" + job.ImageMediaType + ";base64," + job.ImageBase64}})
+	}
+	payload := map[string]interface{}{
+		"model": model, "messages": []map[string]interface{}{{"role": "user", "content": content}}, "stream": false,
+	}
+	if outputMode(job.Output) != "text" {
+		payload["response_format"] = map[string]string{"type": "json_object"}
+	}
+	raw, _ := json.Marshal(payload)
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(engine.URL, "/")+"/chat/completions", bytes.NewReader(raw))
+	if err != nil {
+		return Output{}, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	applyOpenAIEngineAuth(request, engine)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return Output{}, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		return Output{}, fmt.Errorf("openai-compatible provider returned %s: %s", response.Status, strings.TrimSpace(string(body)))
+	}
+	var answer struct {
+		Choices []struct {
+			Message struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+		Usage struct {
+			PromptTokens     uint64 `json:"prompt_tokens"`
+			CompletionTokens uint64 `json:"completion_tokens"`
+			TotalTokens      uint64 `json:"total_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 8<<20)).Decode(&answer); err != nil {
+		return Output{}, err
+	}
+	if len(answer.Choices) == 0 {
+		return Output{}, errors.New("openai-compatible provider returned no choices")
+	}
+	text := openAIMessageText(answer.Choices[0].Message.Content)
+	if strings.TrimSpace(text) == "" {
+		return Output{}, errors.New("openai-compatible provider returned empty content")
+	}
+	output := NormalizeOutput([]byte(text), job.Output, provider, model, time.Since(started))
+	output.InputTokens, output.OutputTokens, output.TotalTokens = answer.Usage.PromptTokens, answer.Usage.CompletionTokens, answer.Usage.TotalTokens
+	if output.Error != "" {
+		return Output{}, errors.New(output.Error)
+	}
+	return output, nil
+}
+
+func (p *Processor) openAICompatibleEmbedding(ctx context.Context, job Job, engine config.Engine, provider, model string, started time.Time) (Output, error) {
+	inputs := embeddingInputs(job)
+	if len(inputs) == 0 {
+		return Output{}, errors.New("embedding task requires text or texts")
+	}
+	if !containsFolded(engine.Capabilities, "embedding") {
+		return Output{}, errors.New("openai-compatible engine is not configured for embeddings")
+	}
+	payload, _ := json.Marshal(map[string]interface{}{"model": model, "input": inputs})
+	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(engine.URL, "/")+"/embeddings", bytes.NewReader(payload))
+	request.Header.Set("Content-Type", "application/json")
+	applyOpenAIEngineAuth(request, engine)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return Output{}, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		return Output{}, fmt.Errorf("openai-compatible embeddings returned %s: %s", response.Status, strings.TrimSpace(string(body)))
+	}
+	var answer struct {
+		Data []struct {
+			Embedding []float32 `json:"embedding"`
+			Index     int       `json:"index"`
+		} `json:"data"`
+		Usage struct {
+			PromptTokens uint64 `json:"prompt_tokens"`
+			TotalTokens  uint64 `json:"total_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 64<<20)).Decode(&answer); err != nil {
+		return Output{}, err
+	}
+	embeddings := make([][]float32, len(answer.Data))
+	for _, item := range answer.Data {
+		if item.Index >= 0 && item.Index < len(embeddings) {
+			embeddings[item.Index] = item.Embedding
+		}
+	}
+	output, err := embeddingOutput(embeddings, job.TenantID, provider, model, time.Since(started))
+	output.InputTokens, output.TotalTokens = answer.Usage.PromptTokens, answer.Usage.TotalTokens
+	return output, err
+}
+
+func applyOpenAIEngineAuth(request *http.Request, engine config.Engine) {
+	if key := strings.TrimSpace(engine.APIKey); key != "" {
+		request.Header.Set("Authorization", "Bearer "+key)
+	}
+}
+
+func openAIMessageText(raw json.RawMessage) string {
+	var plain string
+	if json.Unmarshal(raw, &plain) == nil {
+		return plain
+	}
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &parts) != nil {
+		return ""
+	}
+	var textParts []string
+	for _, part := range parts {
+		if strings.EqualFold(part.Type, "text") || strings.EqualFold(part.Type, "output_text") {
+			textParts = append(textParts, part.Text)
+		}
+	}
+	return strings.Join(textParts, "")
 }
 
 func selectOllamaModel(ctx context.Context, base, task, mode string, needsImage bool) (string, error) {
@@ -279,6 +450,10 @@ func containsAllFolded(values, required []string) bool {
 		}
 	}
 	return true
+}
+
+func containsFolded(values []string, wanted string) bool {
+	return containsAllFolded(values, []string{wanted})
 }
 
 func (p *Processor) ollamaEmbedding(ctx context.Context, job Job, engine config.Engine, model string, started time.Time) (Output, error) {

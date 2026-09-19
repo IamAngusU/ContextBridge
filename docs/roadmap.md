@@ -16,21 +16,19 @@ Status words used here:
 
 ## Compatibility and adoption
 
-### OpenAI-compatible ingress — planned direction
+### OpenAI-compatible ingress — shipped alpha, broader surface remains planned
 
-Expose a deliberately bounded compatibility layer for common clients, with
-`/v1/models`, `/v1/chat/completions`, `/v1/embeddings`, and, after its semantics
-are mapped safely, `/v1/responses`. Streaming candidates should use SSE and
-translate into ordinary authenticated ContextBridge jobs. The native job
-protocol remains the authoritative, more expressive interface for routing,
-E2EE, artifacts, and failure states.
+The authenticated, bounded `models` and `chat/completions` subset ships in
+0.5.75 under `/openai/v1`. It translates requests into ordinary ContextBridge
+jobs and offers non-streaming output plus final-result SSE. See the exact
+[surface and limits](openai-compatible-api.md). Native jobs remain the
+authoritative, more expressive interface for routing, E2EE, artifacts, and
+failure states.
 
-Compatibility must not silently erase ContextBridge semantics. Before this can
-ship it needs explicit mappings for authentication, producer ownership,
-cancellation, output limits, provider-side unknown completion, artifacts, tool
-calls, and streaming errors. A shared OpenAPI or JSON Schema may later generate
-small TypeScript, Python, and Go clients; generated SDKs are exploratory, not a
-current deliverable.
+`/embeddings`, `/responses`, provider-token streaming, tool calls, cancellation,
+artifact-return conventions, and a shared OpenAPI/JSON Schema remain planned
+work. They will ship only where their failure and ownership semantics can be
+mapped without pretending the compatibility protocol is richer than it is.
 
 ### Small application clients — planned direction
 

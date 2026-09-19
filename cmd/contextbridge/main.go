@@ -30,6 +30,7 @@ import (
 	"github.com/IamAngusU/ContextBridge/internal/config"
 	"github.com/IamAngusU/ContextBridge/internal/llamaruntime"
 	"github.com/IamAngusU/ContextBridge/internal/modelregistry"
+	"github.com/IamAngusU/ContextBridge/internal/resourcepacks"
 	"github.com/IamAngusU/ContextBridge/internal/systeminfo"
 	"github.com/IamAngusU/ContextBridge/internal/terminalui"
 	"github.com/IamAngusU/ContextBridge/internal/updater"
@@ -77,6 +78,8 @@ func main() {
 		err = hardwareCommand(os.Args[2:])
 	case "models":
 		err = modelsCommand(os.Args[2:])
+	case "resources":
+		err = resourcesCommand(os.Args[2:])
 	case "pull":
 		err = pullCommand(os.Args[2:])
 	case "runtime":
@@ -145,6 +148,7 @@ Usage:
   contextbridge doctor [--config path] [--json]
   contextbridge hardware [--json]
   contextbridge models [--config path] [--json]
+  contextbridge resources [--config path] [--json]
   contextbridge pull [--config path] MODEL
   contextbridge runtime install [--config path] llama.cpp
   contextbridge mcp serve [--config path]
@@ -813,6 +817,23 @@ func statusCommand(args []string) error {
 			fmt.Printf("  Model cache: %d available, %d loaded\n", len(engine.Models), loaded)
 		}
 	}
+	for _, pack := range status.Runtime.Packs {
+		identity := pack.Name
+		if pack.Version != "" {
+			identity += " " + pack.Version
+		}
+		fmt.Printf("Resource pack %s: %s (%s)\n", pack.ID, identity, pack.Path)
+		for _, endpoint := range pack.Endpoints {
+			detail := endpoint.Type
+			if endpoint.Model != "" {
+				detail += " · " + endpoint.Model
+			}
+			if len(endpoint.Capabilities) > 0 {
+				detail += " · " + strings.Join(endpoint.Capabilities, "+")
+			}
+			fmt.Printf("  Endpoint %s: %s\n", endpoint.ID, detail)
+		}
+	}
 	for _, gpu := range status.Runtime.Hardware.GPUs {
 		fmt.Printf("GPU: %s, %s, %s free of %s, %d%%, %d°C\n", gpu.Name, gpu.Backend, formatBytes(gpu.MemoryFree), formatBytes(gpu.MemoryTotal), gpu.Utilization, gpu.Temperature)
 	}
@@ -931,6 +952,61 @@ func modelsCommand(args []string) error {
 			state = formatBytes(uint64(model.Size))
 		}
 		fmt.Printf("%-24s %-14s %s\n", model.Name, state, model.Repository+"/"+model.File)
+	}
+	return nil
+}
+
+func resourcesCommand(args []string) error {
+	flags := flag.NewFlagSet("resources", flag.ContinueOnError)
+	path := flags.String("config", defaultConfigPath(), "config path")
+	asJSON := flags.Bool("json", false, "print machine-readable JSON")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	enabled := cfg.Portable.Enabled != nil && *cfg.Portable.Enabled
+	packs, err := resourcepacks.Discover(resourcepacks.Settings{
+		Enabled:   enabled,
+		ScanRoots: append([]string(nil), cfg.Portable.ScanRoots...),
+		MaxPacks:  cfg.Portable.MaxPacks,
+	})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(packs)
+	}
+	if !enabled {
+		fmt.Println("Portable resource discovery is disabled in the config.")
+		return nil
+	}
+	if len(packs) == 0 {
+		fmt.Printf("No portable resource packs found. Add %s to a selected volume root or direct child directory.\n", resourcepacks.MarkerName)
+		return nil
+	}
+	for _, pack := range packs {
+		identity := pack.Name
+		if pack.Version != "" {
+			identity += " " + pack.Version
+		}
+		fmt.Printf("%s  [%s]  %s\n", pack.ID, emptyLabel(pack.Kind, "resource-pack"), identity)
+		fmt.Printf("  Path: %s\n", pack.Path)
+		for _, endpoint := range pack.Endpoints {
+			detail := endpoint.Type
+			if endpoint.Model != "" {
+				detail += " · " + endpoint.Model
+			}
+			if len(endpoint.Capabilities) > 0 {
+				detail += " · " + strings.Join(endpoint.Capabilities, "+")
+			}
+			fmt.Printf("  %s: %s at %s\n", endpoint.ID, detail, endpoint.URL)
+		}
+		if pack.Warning != "" {
+			fmt.Printf("  Warning: %s\n", pack.Warning)
+		}
 	}
 	return nil
 }

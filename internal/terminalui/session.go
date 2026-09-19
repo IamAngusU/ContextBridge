@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/IamAngusU/ContextBridge/internal/cluster"
+	"github.com/IamAngusU/ContextBridge/internal/resourcepacks"
 )
 
 const (
@@ -81,6 +82,9 @@ type ServiceSnapshot struct {
 	Tabs             []cluster.BrowserSessionCapability
 	LocalModels      []cluster.ModelCapability
 	LocalProviders   []string
+	APIModels        []cluster.ModelCapability
+	APIProviders     []string
+	ResourcePacks    []resourcepacks.Pack
 	JobsTotal        uint64
 	JobsFailed       uint64
 	GPU              string
@@ -1461,6 +1465,38 @@ func (s *Session) renderPanelLocked() {
 			}
 		}
 	}
+	for _, provider := range s.observed.APIProviders {
+		rows = gap(rows)
+		rows = append(rows, panelSection("[API · "+provider+"]", width))
+		models := make([]cluster.ModelCapability, 0)
+		for _, model := range s.observed.APIModels {
+			if strings.EqualFold(model.Provider, provider) {
+				models = append(models, model)
+			}
+		}
+		if len(models) == 0 {
+			rows = append(rows, "  | "+ansiDim+"◇  erreichbar · Modellstatus unbekannt"+ansiReset)
+			continue
+		}
+		sort.Slice(models, func(i, j int) bool { return strings.ToLower(models[i].Name) < strings.ToLower(models[j].Name) })
+		for _, model := range models {
+			rows = append(rows, "  | "+ansiPurple+"◇"+ansiReset+"  "+line(model.Name+" · per API verfügbar"))
+		}
+	}
+	if s.observing && len(s.observed.ResourcePacks) > 0 {
+		rows = gap(rows)
+		rows = append(rows, panelSection("HOT-PLUG RESOURCES", width))
+		packs := append([]resourcepacks.Pack(nil), s.observed.ResourcePacks...)
+		sort.Slice(packs, func(i, j int) bool { return strings.ToLower(packs[i].ID) < strings.ToLower(packs[j].ID) })
+		for _, pack := range packs {
+			name := pack.Name
+			if pack.Version != "" {
+				name += " " + pack.Version
+			}
+			detail := fmt.Sprintf("%s · %s · %d Endpunkt(e)", pack.ID, empty(pack.Kind, "resource-pack"), len(pack.Endpoints))
+			rows = append(rows, "  | "+ansiOrange+"◆"+ansiReset+"  "+line(name+" · "+detail))
+		}
+	}
 	rows = gap(rows)
 	status := "  | " + colorPanelStatus(line(s.panelStatusLocked()), s)
 	statusDetails := []string{}
@@ -1471,8 +1507,8 @@ func (s *Session) renderPanelLocked() {
 	if s.observing {
 		if s.observedOnline {
 			observedCapabilities := cluster.Capabilities{
-				Providers: append([]string(nil), s.observed.LocalProviders...),
-				Models:    append([]cluster.ModelCapability(nil), s.observed.LocalModels...),
+				Providers: append(append([]string(nil), s.observed.LocalProviders...), s.observed.APIProviders...),
+				Models:    append(append([]cluster.ModelCapability(nil), s.observed.LocalModels...), s.observed.APIModels...),
 			}
 			if s.observed.BrowserConnected {
 				observedCapabilities.BrowserSessions = append([]cluster.BrowserSessionCapability(nil), s.observed.Tabs...)

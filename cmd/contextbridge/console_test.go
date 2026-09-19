@@ -23,7 +23,7 @@ func TestFetchConsoleStatusUsesReadOnlyAuthenticatedRequest(t *testing.T) {
 			t.Errorf("unexpected console request: %s %s %q", r.Method, r.URL.Path, r.Header.Get("Authorization"))
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"version":"v0.test","queued":2,"completed":3,"active_jobs":1,"browser":{"connected":true,"active_tabs":1,"tabs":[{"id":7,"profile":"chatgpt","state":"working","current_model":"GPT-5.6 Sol"}]},"metrics":{"jobs_total":4,"jobs_failed":1},"runtime":{"hardware":{"gpus":[{"name":"RTX","utilization_percent":12}]},"engines":{"ollama":{"state":"online","models":[{"name":"qwen3:8b","loaded":true}]},"stopped":{"state":"stopped","models":[{"name":"not-ready","loaded":true}]}}}}`))
+		_, _ = w.Write([]byte(`{"version":"v0.test","queued":2,"completed":3,"active_jobs":1,"browser":{"connected":true,"active_tabs":1,"tabs":[{"id":7,"profile":"chatgpt","state":"working","current_model":"GPT-5.6 Sol"}]},"metrics":{"jobs_total":4,"jobs_failed":1},"runtime":{"hardware":{"gpus":[{"name":"RTX","utilization_percent":12}]},"engines":{"ollama":{"state":"online","models":[{"name":"qwen3:8b","loaded":true}]},"remote":{"state":"online","type":"openai_compatible","remote":true,"models":[{"name":"api-model","available":true}]},"stopped":{"state":"stopped","models":[{"name":"not-ready","loaded":true}]}},"resource_packs":[{"schema_version":1,"id":"example.modelkit","name":"ModelKit","path":"X:\\\\ModelKit"}]}}`))
 	}))
 	defer server.Close()
 	cfg := config.Config{Server: config.Server{Listen: strings.TrimPrefix(server.URL, "http://"), Token: "test-secret"}}
@@ -33,7 +33,7 @@ func TestFetchConsoleStatusUsesReadOnlyAuthenticatedRequest(t *testing.T) {
 	}
 	snapshot := toServiceSnapshot(status)
 	if snapshot.Version != "v0.test" || snapshot.Queued != 2 || snapshot.ActiveJobs != 1 || !snapshot.BrowserConnected || snapshot.Tabs[0].CurrentModel != "GPT-5.6 Sol" || snapshot.Tabs[0].State != "working" || snapshot.GPU != "RTX" ||
-		len(snapshot.LocalProviders) != 1 || snapshot.LocalProviders[0] != "ollama" || len(snapshot.LocalModels) != 1 || snapshot.LocalModels[0].Name != "qwen3:8b" || !snapshot.LocalModels[0].Loaded {
+		len(snapshot.LocalProviders) != 1 || snapshot.LocalProviders[0] != "ollama" || len(snapshot.LocalModels) != 1 || snapshot.LocalModels[0].Name != "qwen3:8b" || !snapshot.LocalModels[0].Loaded || len(snapshot.APIProviders) != 1 || snapshot.APIProviders[0] != "remote" || len(snapshot.APIModels) != 1 || snapshot.APIModels[0].Name != "api-model" || len(snapshot.ResourcePacks) != 1 || snapshot.ResourcePacks[0].ID != "example.modelkit" {
 		t.Fatalf("console snapshot lost status data: %#v", snapshot)
 	}
 	engine := status.Runtime.Engines["ollama"]

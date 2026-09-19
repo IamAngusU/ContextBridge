@@ -15,6 +15,11 @@ runtime:
 terminal:
   style: panel # panel or classic; applies to interactive terminals only
 
+portable_resources:
+  enabled: true # marker discovery only; never auto-runs removable-drive code
+  scan_roots: [] # empty = local fixed/removable volumes and common mount roots
+  max_packs: 32
+
 updates:
   enabled: null # off by default; enable from the dashboard, extension, or CLI
   channel: stable
@@ -63,6 +68,24 @@ providers:
     lease_seconds: 90
 
 engines:
+  # Optional remote OpenAI-compatible provider. Prompts cannot leave the PC
+  # unless remote:true is explicit and the environment secret resolves.
+  # deepseek:
+  #   type: openai_compatible
+  #   url: https://your-reviewed-endpoint.example/v1
+  #   model: your-exact-model-id
+  #   api_key: ${DEEPSEEK_API_KEY}
+  #   remote: true
+  #   capabilities: [text]
+  #   timeout_seconds: 120
+  # Optional hot-plug endpoint. It remains unavailable while the stable pack
+  # ID is absent, independent of whichever drive letter or mount path it gets.
+  # modelkit:
+  #   type: ollama
+  #   model: qwen2.5:1.5b
+  #   resource_pack: example.modelkit
+  #   endpoint: ollama
+  #   timeout_seconds: 90
   nuextract:
     type: llama_cpp
     model: nuextract3
