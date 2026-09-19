@@ -14,7 +14,10 @@ import (
 	"strings"
 )
 
-const MarkerName = ".contextbridge-pack.json"
+const (
+	MarkerName       = ".contextbridge-pack.json"
+	SidecarDirectory = ".contextbridge-resources"
+)
 
 const maximumManifestBytes int64 = 64 << 10
 
@@ -27,12 +30,13 @@ type Settings struct {
 }
 
 type Manifest struct {
-	SchemaVersion int        `json:"schema_version"`
-	ID            string     `json:"id"`
-	Name          string     `json:"name"`
-	Version       string     `json:"version,omitempty"`
-	Kind          string     `json:"kind,omitempty"`
-	Endpoints     []Endpoint `json:"endpoints,omitempty"`
+	SchemaVersion    int        `json:"schema_version"`
+	ID               string     `json:"id"`
+	Name             string     `json:"name"`
+	Version          string     `json:"version,omitempty"`
+	Kind             string     `json:"kind,omitempty"`
+	RootRelativePath string     `json:"root_relative_path,omitempty"`
+	Endpoints        []Endpoint `json:"endpoints,omitempty"`
 }
 
 type Endpoint struct {
@@ -125,6 +129,42 @@ func Discover(settings Settings) ([]Pack, error) {
 				return packs, nil
 			}
 		}
+		// A sealed or checksum-verified resource tree must not be modified merely
+		// to advertise it. Such volumes can keep bounded sidecar manifests at the
+		// volume root and point to the pack with a relative path. Sidecars remain
+		// passive metadata: they cannot name commands or non-loopback endpoints.
+		sidecarRoot := filepath.Join(absolute, SidecarDirectory)
+		sidecarInfo, sidecarErr := os.Lstat(sidecarRoot)
+		if sidecarErr != nil || !sidecarInfo.IsDir() || sidecarInfo.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		sidecars, sidecarReadErr := os.ReadDir(sidecarRoot)
+		if sidecarReadErr != nil {
+			continue
+		}
+		for index, entry := range sidecars {
+			if index >= 512 {
+				break
+			}
+			if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !strings.EqualFold(filepath.Ext(entry.Name()), ".json") {
+				continue
+			}
+			pack, ok := readSidecarPack(absolute, filepath.Join(sidecarRoot, entry.Name()))
+			if !ok {
+				continue
+			}
+			if previous, duplicate := seenIDs[strings.ToLower(pack.ID)]; duplicate {
+				if packs[previous].Warning == "" {
+					packs[previous].Warning = "duplicate pack ID ignored"
+				}
+				continue
+			}
+			seenIDs[strings.ToLower(pack.ID)] = len(packs)
+			packs = append(packs, pack)
+			if len(packs) >= settings.MaxPacks {
+				return packs, nil
+			}
+		}
 	}
 	return packs, nil
 }
@@ -145,26 +185,55 @@ func Resolve(packs []Pack, packID, endpointID, engineType string) (Endpoint, boo
 
 func readPack(directory string) (Pack, bool) {
 	marker := filepath.Join(directory, MarkerName)
+	manifest, ok := readManifest(marker)
+	if !ok || manifest.RootRelativePath != "" {
+		return Pack{}, false
+	}
+	return Pack{Manifest: manifest, Path: directory, MarkerPath: marker}, true
+}
+
+func readSidecarPack(root, marker string) (Pack, bool) {
+	manifest, ok := readManifest(marker)
+	if !ok || strings.TrimSpace(manifest.RootRelativePath) == "" || filepath.IsAbs(manifest.RootRelativePath) {
+		return Pack{}, false
+	}
+	clean := filepath.Clean(manifest.RootRelativePath)
+	if clean == "." || clean == ".." || filepath.Base(clean) != clean || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+		return Pack{}, false
+	}
+	target := filepath.Join(root, clean)
+	relative, err := filepath.Rel(root, target)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
+		return Pack{}, false
+	}
+	info, err := os.Lstat(target)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return Pack{}, false
+	}
+	return Pack{Manifest: manifest, Path: target, MarkerPath: marker}, true
+}
+
+func readManifest(marker string) (Manifest, bool) {
 	info, err := os.Lstat(marker)
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() <= 0 || info.Size() > maximumManifestBytes {
-		return Pack{}, false
+		return Manifest{}, false
 	}
 	file, err := os.Open(marker)
 	if err != nil {
-		return Pack{}, false
+		return Manifest{}, false
 	}
 	defer file.Close()
 	decoder := json.NewDecoder(io.LimitReader(file, maximumManifestBytes+1))
 	decoder.DisallowUnknownFields()
 	var manifest Manifest
 	if decoder.Decode(&manifest) != nil || decoder.Decode(&struct{}{}) != io.EOF || validateManifest(manifest) != nil {
-		return Pack{}, false
+		return Manifest{}, false
 	}
-	return Pack{Manifest: manifest, Path: directory, MarkerPath: marker}, true
+	return manifest, true
 }
 
 func validateManifest(manifest Manifest) error {
-	if manifest.SchemaVersion != 1 || !safeID.MatchString(manifest.ID) || strings.TrimSpace(manifest.Name) == "" || len(manifest.Name) > 120 || len(manifest.Version) > 60 || len(manifest.Kind) > 60 || len(manifest.Endpoints) > 16 {
+	if manifest.SchemaVersion != 1 || !safeID.MatchString(manifest.ID) || strings.TrimSpace(manifest.Name) == "" || len(manifest.Name) > 120 || len(manifest.Version) > 60 || len(manifest.Kind) > 60 || len(manifest.RootRelativePath) > 240 || len(manifest.Endpoints) > 16 {
 		return errors.New("invalid resource-pack identity")
 	}
 	seen := map[string]bool{}

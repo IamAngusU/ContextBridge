@@ -995,7 +995,7 @@ func resourcesCommand(args []string) error {
 		return nil
 	}
 	if len(packs) == 0 {
-		fmt.Printf("No portable resource packs found. Add %s to a selected volume root or direct child directory.\n", resourcepacks.MarkerName)
+		fmt.Printf("No portable resource packs found. Add %s to a selected root/direct child, or a JSON sidecar under %s at the volume root.\n", resourcepacks.MarkerName, resourcepacks.SidecarDirectory)
 		return nil
 	}
 	for _, pack := range packs {

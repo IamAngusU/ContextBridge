@@ -81,6 +81,63 @@ func TestHotPlugAbsenceAndChangedMountPath(t *testing.T) {
 	}
 }
 
+func TestSidecarDiscoversSealedTreeWithoutModifyingIt(t *testing.T) {
+	root := t.TempDir()
+	sealed := filepath.Join(root, "sealed-arsenal")
+	if err := os.MkdirAll(sealed, 0700); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(sealed, "integrity-sentinel.txt")
+	if err := os.WriteFile(sentinel, []byte("unchanged"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	sidecars := filepath.Join(root, SidecarDirectory)
+	if err := os.MkdirAll(sidecars, 0700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"schema_version":1,"id":"example.sealed","name":"Sealed","root_relative_path":"sealed-arsenal","endpoints":[{"id":"api","type":"service","url":"http://127.0.0.1:4310"}]}`
+	marker := filepath.Join(sidecars, "sealed.json")
+	if err := os.WriteFile(marker, []byte(manifest), 0600); err != nil {
+		t.Fatal(err)
+	}
+	packs, err := Discover(Settings{Enabled: true, ScanRoots: []string{root}, MaxPacks: 8})
+	if err != nil || len(packs) != 1 || packs[0].ID != "example.sealed" || packs[0].Path != sealed || packs[0].MarkerPath != marker {
+		t.Fatalf("sidecar discovery failed: %#v, %v", packs, err)
+	}
+	if _, err := os.Stat(filepath.Join(sealed, MarkerName)); !os.IsNotExist(err) {
+		t.Fatalf("discovery modified the sealed resource tree: %v", err)
+	}
+	if value, err := os.ReadFile(sentinel); err != nil || string(value) != "unchanged" {
+		t.Fatalf("sealed contents changed: %q, %v", value, err)
+	}
+}
+
+func TestSidecarRejectsEscapesSymlinksAndMissingTargets(t *testing.T) {
+	root := t.TempDir()
+	sidecars := filepath.Join(root, SidecarDirectory)
+	if err := os.MkdirAll(sidecars, 0700); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name, target string) {
+		t.Helper()
+		value := `{"schema_version":1,"id":"example.` + name + `","name":"Invalid","root_relative_path":"` + target + `"}`
+		if err := os.WriteFile(filepath.Join(sidecars, name+".json"), []byte(value), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("escape", "../outside")
+	write("nested", filepath.Join("inside", "nested"))
+	write("missing", "not-present")
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, "linked")); err == nil {
+		write("symlink", "linked")
+	}
+	packs, err := Discover(Settings{Enabled: true, ScanRoots: []string{root}, MaxPacks: 8})
+	if err != nil || len(packs) != 0 {
+		t.Fatalf("unsafe sidecar target escaped discovery: %#v, %v", packs, err)
+	}
+}
+
 func TestDiscoveryDoesNotRecurseOrAcceptDuplicateIdentity(t *testing.T) {
 	root := t.TempDir()
 	manifest := []byte(`{"schema_version":1,"id":"portable.duplicate","name":"Portable"}`)
