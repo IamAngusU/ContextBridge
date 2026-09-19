@@ -198,6 +198,37 @@ func TestHealthyUpgradeSupersedesOlderRollbackMarker(t *testing.T) {
 	}
 }
 
+func TestRunningVersionOverridesUnconfirmedInstallState(t *testing.T) {
+	manager, err := New(Settings{}, t.TempDir(), "v0.5.81")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.saveState(State{LastInstalled: "v0.5.82", LastAvailable: "v0.5.82", PendingVersion: "v0.5.82"}); err != nil {
+		t.Fatal(err)
+	}
+	status := manager.LocalStatus()
+	if status.CurrentVersion != "v0.5.81" || status.LastInstalled != "v0.5.81" || status.PendingVersion != "v0.5.82" || !status.UpdateAvailable {
+		t.Fatalf("staged helper was mistaken for an installed update: %+v", status)
+	}
+}
+
+func TestRunningTargetSupersedesSameVersionFailureMarker(t *testing.T) {
+	manager, err := New(Settings{}, t.TempDir(), "v0.5.82")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.saveState(State{LastAvailable: "v0.5.82", PendingVersion: "v0.5.82", LastError: "manual helper failed"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manager.failurePath(), []byte(`{"version":"v0.5.82","error":"manual helper failed"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	status := manager.LocalStatus()
+	if status.LastInstalled != "v0.5.82" || status.PendingVersion != "" || status.BlockedVersion != "" || status.LastError != "" || status.UpdateAvailable {
+		t.Fatalf("running target did not supersede stale asynchronous failure: %+v", status)
+	}
+}
+
 func TestAutomaticRetryUsesBoundedBackoff(t *testing.T) {
 	state := State{}
 	for attempt := 0; attempt < 12; attempt++ {

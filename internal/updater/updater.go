@@ -70,6 +70,7 @@ type State struct {
 	LastChecked     time.Time `json:"last_checked,omitempty"`
 	LastAvailable   string    `json:"last_available,omitempty"`
 	LastInstalled   string    `json:"last_installed,omitempty"`
+	PendingVersion  string    `json:"pending_version,omitempty"`
 	LastError       string    `json:"last_error,omitempty"`
 	BlockedVersion  string    `json:"blocked_version,omitempty"`
 	RetryAfter      time.Time `json:"retry_after,omitempty"`
@@ -86,6 +87,7 @@ type Status struct {
 	UpdateAvailable  bool      `json:"update_available"`
 	LastChecked      time.Time `json:"last_checked,omitempty"`
 	LastInstalled    string    `json:"last_installed,omitempty"`
+	PendingVersion   string    `json:"pending_version,omitempty"`
 	LastError        string    `json:"last_error,omitempty"`
 	BlockedVersion   string    `json:"blocked_version,omitempty"`
 	RetryAfter       time.Time `json:"retry_after,omitempty"`
@@ -96,6 +98,7 @@ type Result struct {
 	Status          Status `json:"status"`
 	Applied         bool   `json:"applied"`
 	RestartRequired bool   `json:"restart_required"`
+	TargetVersion   string `json:"target_version,omitempty"`
 }
 
 type Release struct {
@@ -347,7 +350,12 @@ func (m *Manager) applyLocked(ctx context.Context, state State, force, automatic
 		_ = m.saveState(state)
 		return Result{Status: m.status(state)}, err
 	}
-	state.LastInstalled = release.TagName
+	// Replacement can be asynchronous on Windows, and a Unix service still
+	// needs to restart and pass its health check. Keep the version reported by
+	// this running process authoritative until the new executable actually
+	// starts. Otherwise a blocked helper can make an old binary claim that the
+	// update is already installed.
+	state.PendingVersion = release.TagName
 	state.BlockedVersion = ""
 	state.LastError = ""
 	state.RetryAfter = time.Time{}
@@ -357,9 +365,7 @@ func (m *Manager) applyLocked(ctx context.Context, state State, force, automatic
 		return Result{}, err
 	}
 	status := m.status(state)
-	status.CurrentVersion = release.TagName
-	status.UpdateAvailable = false
-	return Result{Status: status, Applied: true, RestartRequired: restart}, nil
+	return Result{Status: status, Applied: true, RestartRequired: restart, TargetVersion: release.TagName}, nil
 }
 
 func (m *Manager) Run(ctx context.Context, notify func(Result, error)) {
@@ -444,7 +450,7 @@ func (m *Manager) status(state State) Status {
 		Enabled: enabled, Channel: m.settings.Channel, Repository: m.settings.Repository,
 		CurrentVersion: m.currentVersion, AvailableVersion: state.LastAvailable,
 		UpdateAvailable: managedVersion(m.currentVersion) && newerVersion(m.currentVersion, state.LastAvailable),
-		LastChecked:     state.LastChecked, LastInstalled: state.LastInstalled, LastError: state.LastError, BlockedVersion: state.BlockedVersion, RetryAfter: state.RetryAfter,
+		LastChecked:     state.LastChecked, LastInstalled: state.LastInstalled, PendingVersion: state.PendingVersion, LastError: state.LastError, BlockedVersion: state.BlockedVersion, RetryAfter: state.RetryAfter,
 		ManagedBuild: managedVersion(m.currentVersion),
 	}
 }
@@ -788,25 +794,39 @@ func (m *Manager) loadState() (State, error) {
 			return State{}, fmt.Errorf("parse update state: %w", err)
 		}
 	}
+	// The version of the process reading this state is the authoritative
+	// installed version. A prior process may only have staged a helper.
+	if managedVersion(m.currentVersion) {
+		state.LastInstalled = m.currentVersion
+		if state.PendingVersion == m.currentVersion || newerVersion(state.PendingVersion, m.currentVersion) {
+			state.PendingVersion = ""
+		}
+	}
 	if failed, readErr := os.ReadFile(m.failurePath()); readErr == nil {
 		var marker struct {
 			Version string `json:"version"`
 			Error   string `json:"error"`
 		}
 		if json.Unmarshal(failed, &marker) == nil && marker.Version != "" {
-			if newerVersion(marker.Version, m.currentVersion) {
+			if marker.Version == m.currentVersion || newerVersion(marker.Version, m.currentVersion) {
 				// A later healthy release supersedes an older rollback marker.
+				// Equality also proves that the previously targeted executable is
+				// now running; the asynchronous failure marker is stale.
 				// Keep the marker on disk for diagnosis, but do not show its
 				// failure as the current installation's status.
 				state.BlockedVersion = ""
 				if state.LastError == marker.Error {
 					state.LastError = ""
 				}
-				state.LastInstalled = m.currentVersion
+				if state.PendingVersion == marker.Version {
+					state.PendingVersion = ""
+				}
 			} else {
 				state.BlockedVersion = marker.Version
 				state.LastError = marker.Error
-				state.LastInstalled = m.currentVersion
+				if state.PendingVersion == marker.Version {
+					state.PendingVersion = ""
+				}
 			}
 		}
 	}
