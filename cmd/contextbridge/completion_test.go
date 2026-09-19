@@ -16,8 +16,8 @@ func TestCompletionScriptsCoverBothAliasesAndNestedCommands(t *testing.T) {
 		want   []string
 	}{
 		{"powershell", powershellCompletionScript(), []string{"-CommandName contextbridge, cb", "'serve'", "'stop' = @('--config','--force')", "'mcp serve' = @('--config')", "'benchmark' = @('--json','--samples'", "'selftest'", "'selftest' = @('--config','--providers'", "'cluster status' = @('--config','--json')", "'route explain' = @('--config','--file','--job','--token','--json')", "--attach-image", "--reasoning"}},
-		{"bash", bashCompletionScript(), []string{"# ContextBridge managed completion", "contextbridge cb", "init serve run stop", "stop) candidates=\"--config --force\"", "\"mcp serve\") candidates=\"--config\"", "cluster) candidates=\"status submit chat selftest route", "\"cluster status\") candidates=\"--config --json\"", "\"route explain\") candidates=\"--config --file --job --token --json\"", "--attach-image", "--reasoning"}},
-		{"zsh", zshCompletionScript(), []string{"#compdef contextbridge cb", "# ContextBridge managed completion", "serve:Run only the local bridge service", "mcp:Expose bounded local tools over MCP stdio", "benchmark:Measure bridge-only overhead and resource footprint", "stop:Safely stop the local ContextBridge process", "cluster:Use a remote pool", "route:Explain a preview or durable cluster route", "status submit chat selftest route", "completion)", "--attach-image[", "--job-timeout[", "--managed-service[", "--discover["}},
+		{"bash", bashCompletionScript(), []string{"# ContextBridge managed completion", "contextbridge cb", "init serve run stop", "stop) candidates=\"--config --force\"", "\"mcp serve\") candidates=\"--config\"", "cluster) candidates=\"status submit chat agent selftest route", "\"cluster agent\") candidates=\"plan run", "\"cluster status\") candidates=\"--config --json\"", "\"route explain\") candidates=\"--config --file --job --token --json\"", "--attach-image", "--reasoning"}},
+		{"zsh", zshCompletionScript(), []string{"#compdef contextbridge cb", "# ContextBridge managed completion", "serve:Run only the local bridge service", "mcp:Expose bounded local tools over MCP stdio", "benchmark:Measure bridge-only overhead and resource footprint", "stop:Safely stop the local ContextBridge process", "cluster:Use a remote pool", "route:Explain a preview or durable cluster route", "status submit chat agent selftest route", "_values 'agent action' plan run", "completion)", "--attach-image[", "--job-timeout[", "--managed-service[", "--discover["}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -57,6 +57,8 @@ func TestPowerShellTabExpansionTracksTrailingSpaceAndOptionPosition(t *testing.T
 		{"short selftest shortcut", "cb selftest ", []string{"--providers", "--run", "--timeout"}, []string{"status", "chat"}},
 		{"short selftest partial flag", "cb selftest --r", []string{"--run"}, []string{"--providers", "status", "chat"}},
 		{"nested partial action", "contextbridge cluster se", []string{"selftest"}, []string{"status", "submit"}},
+		{"agent action", "contextbridge cluster agent ", []string{"plan", "run"}, []string{"status", "submit"}},
+		{"agent options", "contextbridge cluster agent plan ", []string{"--goal", "--allow-providers", "--out"}, []string{"status", "submit"}},
 		{"route shortcut action", "contextbridge route ", []string{"explain"}, []string{"status", "submit"}},
 		{"route shortcut flags", "contextbridge route explain ", []string{"--file", "--job", "--json"}, []string{"status", "submit"}},
 		{"nested route action", "contextbridge cluster route ", []string{"explain", "--file", "--job"}, []string{"status", "submit"}},

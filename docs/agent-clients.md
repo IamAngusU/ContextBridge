@@ -23,8 +23,14 @@ agent should deliberately inspect ContextBridge status, submit one bounded
 job, or read a stored text result. Neither boundary grants arbitrary shell
 execution through ContextBridge.
 
+ContextBridge also ships an optional **reviewed bounded planner producer** for
+small multi-provider text workflows. It is not the same thing as installing an
+external agent harness: the model can only propose a strict plan, ContextBridge
+adds the operator's provider/profile policy locally, and a separate exact
+SHA-256 approval is required before the plan can run. See
+[reviewed bounded agent plans](bounded-agent.md).
+
 Support still depends on the specific client version. A product name in an
 Ollama catalog is not proof that it supports a custom base URL, model alias,
 MCP, streaming shape, images, or ContextBridge's route semantics. Confirm that
 client's current documentation before presenting it as compatible.
-

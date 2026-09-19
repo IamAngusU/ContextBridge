@@ -157,7 +157,7 @@ Usage:
   contextbridge pair [--config path] [--relay URL] [--identity path] [--name NAME]
   contextbridge worker [--config path] [--relay URL] [--identity path] [--name NAME] [--slots N] [--providers LIST] [--models LIST] [--tasks LIST] [--topmost]
   contextbridge selftest [options]
-	  contextbridge cluster status|submit|chat|selftest|route|login|token|pairing [options]
+	  contextbridge cluster status|submit|chat|agent|selftest|route|login|token|pairing [options]
 	  contextbridge route explain (--file job.json | --job JOB_ID) [--json]
   contextbridge update status|check|apply|enable|disable|auto [options]
   contextbridge completion powershell|bash|zsh
@@ -1346,7 +1346,7 @@ func freeLocalAddress() (string, error) {
 
 func clusterCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: contextbridge cluster status|submit|chat|selftest|route|login|token|pairing")
+		return errors.New("usage: contextbridge cluster status|submit|chat|agent|selftest|route|login|token|pairing")
 	}
 	switch args[0] {
 	case "status":
@@ -1355,6 +1355,8 @@ func clusterCommand(args []string) error {
 		return clusterSubmitCommand(args[1:])
 	case "chat":
 		return clusterChatCommand(args[1:])
+	case "agent":
+		return clusterAgentCommand(args[1:])
 	case "selftest":
 		return clusterSelftestCommand(args[1:])
 	case "route":

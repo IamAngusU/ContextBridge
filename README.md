@@ -45,6 +45,7 @@ ChatGPT and Gemini are detected automatically from stable DOM and accessibility 
 - **Explainable placement:** preview a route without submitting work, or inspect the bounded decision persisted with an assigned job, including stable rejection reasons and additive score components.
 - **Optional E2EE jobs:** a producer can seal a payload for the selected worker with X25519 and AES-256-GCM so the relay cannot read the payload or result.
 - **Bounded model pipelines:** chain extraction, embeddings, retrieval, vision, and generation with fixed steps and explicit loop limits.
+- **Reviewed intent plans:** an optional model may propose a tiny text-only workflow, but strict local allowlists, route previews, a readable plan, and a separate SHA-256 approval stand between model output and execution ([contract and limits](docs/bounded-agent.md)).
 - **Explicit scope:** only the chosen page origin and local service are requested.
 - **Local models:** route text and images to Ollama without adding another hosted service.
 - **Hot-plug resource packs:** recognize an optional local model kit or toolbox by a stable manifest ID rather than a changing drive letter, without recursively scanning it or executing inserted media; sealed/checksummed trees can use a volume-root sidecar and remain untouched ([portable-pack contract](docs/portable-resource-packs.md)).

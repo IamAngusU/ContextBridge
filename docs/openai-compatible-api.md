@@ -108,6 +108,58 @@ ContextBridge does not send a paid API request merely because an engine exists
 in config. A request reaches it only when a job selects a route containing that
 engine.
 
+### Guard a paid compatible provider
+
+For providers with a same-origin balance endpoint and reviewed token prices,
+an engine can refuse work before generation when the remaining balance would
+cross an operator-set floor. This DeepSeek example uses a local key file and
+the documented peak prices reviewed on 2026-09-19:
+
+```yaml
+engines:
+  deepseek:
+    type: openai_compatible
+    url: https://api.deepseek.com
+    model: deepseek-flash
+    api_key_file: ./secrets/deepseek.key
+    remote: true
+    capabilities: [text]
+    max_output_tokens: 1024
+    reasoning_effort: low
+    balance_path: /user/balance
+    minimum_balance_usd: 5
+    costing:
+      mode: upper_bound
+      source: "DeepSeek peak pricing reviewed 2026-09-19"
+      input_per_million_usd: 0.30
+      cached_input_per_million_usd: 0.006
+      output_per_million_usd: 1.20
+```
+
+Before submitting, ContextBridge reads the provider balance, reserves a
+conservative upper bound for every concurrent request in the worker process,
+and checks `balance - reservations >= minimum_balance_usd`. The reservation
+uses UTF-8 input bytes as a deliberately conservative token ceiling, the
+configured maximum output, peak non-cached input pricing, and peak output
+pricing. It does not assume a prompt-cache discount. Image input is rejected
+under a balance floor until its cost can be bounded safely.
+
+This is a spend guard, not an invoice or a cross-account ledger. Independent
+worker processes using the same provider account do not share in-memory
+reservations, provider balances may update asynchronously, and taxes or other
+provider charges may differ. Use one controlled provider gateway or a larger
+floor when several processes share a key. The completed job records the
+reviewed source, reservation, token usage when returned, and a conservative
+cost status. Missing monetary evidence remains `unknown`; ContextBridge never
+turns it into `$0`.
+
+The `balance_path` must be a path on the already configured provider origin;
+queries, fragments, protocol-relative URLs, and another host are rejected.
+DeepSeek's official references are the [balance
+endpoint](https://api-docs.deepseek.com/api/get-user-balance/), [pricing
+table](https://api-docs.deepseek.com/quick_start/pricing/), and [chat
+completion fields](https://api-docs.deepseek.com/api/create-chat-completion/).
+
 ## Offline Arsenal example
 
 Offline Arsenal already speaks the OpenAI Chat Completions protocol. Point it
