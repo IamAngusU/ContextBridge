@@ -2,7 +2,7 @@
 
 For a short recording, use the separate [2–3 minute video script](demo-video-de-en.md). This document is the complete technical runbook, including optional research and fact-check segments.
 
-This script requires **ContextBridge 0.5.66 or newer** on the VPS and worker, plus a compatible 0.5.66-or-newer browser extension. Run the Linux commands in **one Bash VPS shell** so `DEMO_DIR`, `DEMO_ID`, and `IMAGE_FILE` remain available. It uses the managed Windows service, local Ollama models, an Opera extension, and a VPS relay. `--new-chat` gives each browser demo segment its own ContextBridge-owned chat. Do not attach a personal conversation for this demo. The short video begins with local Ollama text, then shows ChatGPT creating a real file, optionally lets local Ollama vision read it when enough resources are free, and gives the same file to Gemini.
+This script requires **ContextBridge 0.5.80 or newer** on the VPS and worker, plus a compatible 0.5.80-or-newer browser extension. Run the Linux commands in **one Bash VPS shell** so `DEMO_DIR`, `DEMO_ID`, and `IMAGE_FILE` remain available. It uses the managed Windows service, local Ollama models, an Opera extension, and a VPS relay. `--new-chat` gives each browser demo segment its own ContextBridge-owned chat. Do not attach a personal conversation for this demo. The short video begins with local Ollama text, then shows ChatGPT creating a real file, optionally lets local Ollama vision read it when enough resources are free, and gives the same file to Gemini.
 
 The Windows commands intentionally use this recording machine's **custom** config path, `C:\ContextBridge\config.yml`. A default Windows installer uses `%LOCALAPPDATA%\ContextBridge\config.yml`; on that installation either omit `--config` or replace the demonstrated path with the default. The VPS demo directory stays exactly `/root/contextbridge-demo` and is never cleared by this runbook.
 
@@ -20,7 +20,7 @@ This opens the live view of the already managed service; it does **not** start a
 contextbridge models --config "C:\ContextBridge\config.yml"
 ```
 
-For the reliable local text command below, `qwen2.5:1.5b` must be present. The optional local-vision step uses `qwen2.5vl:7b` and should run only when the worker has enough free RAM/VRAM; otherwise skip that step and continue with Gemini OCR. Those models belong to this demo PC; they are **not** bundled with every ContextBridge installation. `models` shows Ollama-advertised modalities, parameters, quantization and loaded state where available, with model-name inference only as a compatibility fallback for older runtimes. It does not measure intelligence or guarantee OCR accuracy. Type `exit` and Enter to close only the console view; the service and jobs continue.
+For the reliable local text command below, `qwen2.5:latest` must be present. The smaller 1.5B candidate is intentionally not used: it returned all stress-test responses but copied only 3/12 exact markers through the full wrapper. The optional local-vision step uses `qwen2.5vl:7b` and should run only when the worker has enough free RAM/VRAM; otherwise skip that step and continue with Gemini OCR. Those models belong to this demo PC; they are **not** bundled with every ContextBridge installation. `models` shows Ollama capability evidence, parameters, quantization and loaded state where available; unverified name inference never silently upgrades a model into an automatic vision route. It does not measure intelligence or guarantee OCR accuracy. Type `exit` and Enter to close only the console view; the service and jobs continue.
 
 **DE:** „ContextBridge läuft als lokaler Dienst. Für den sicheren Basistest nutze ich ein kleines lokales Textmodell. Wenn genug Ressourcen frei sind, zeige ich zusätzlich ein eigenes Vision-Modell. Das Terminal kann ich später schließen, ohne Jobs zu stoppen.“
 
@@ -43,7 +43,7 @@ contextbridge version
 contextbridge cluster status --config /var/lib/contextbridge/config.yml
 cb selftest --config /var/lib/contextbridge/config.yml
 contextbridge cluster status --config /var/lib/contextbridge/config.yml --json |
-  python3 -c 'import json,sys; d=json.load(sys.stdin); wanted={"qwen2.5:1.5b","qwen2.5vl:7b"}; rows=[(n,m) for n in d.get("nodes",[]) for m in n.get("capabilities",{}).get("models",[]) if m.get("provider")=="ollama" and m.get("name") in wanted]; [print("{}: {} [{}]".format(n.get("name","node"),m.get("name","unknown"),"+".join(m.get("tasks",[])))) for n,m in rows]'
+  python3 -c 'import json,sys; d=json.load(sys.stdin); wanted={"qwen2.5:latest","qwen2.5vl:7b"}; rows=[(n,m) for n in d.get("nodes",[]) for m in n.get("capabilities",{}).get("models",[]) if m.get("provider")=="ollama" and m.get("name") in wanted]; [print("{}: {} [{}]".format(n.get("name","node"),m.get("name","unknown"),"+".join(m.get("tasks",[])))) for n,m in rows]'
 DEMO_DIR=/root/contextbridge-demo
 mkdir -p "$DEMO_DIR"
 DEMO_ID=$(date +%Y%m%d-%H%M%S)
@@ -55,7 +55,7 @@ generation model, an idle attached ChatGPT page, an idle attached Gemini page,
 and a free worker slot. It reports what is missing and sends **no AI prompt**
 unless `--run` is added; do not add it for this preflight. The compact status
 view may shorten a long model list, so the JSON command prints the two demo
-models explicitly; no output for the required `qwen2.5:1.5b` means stop and fix
+models explicitly; no output for the required `qwen2.5:latest` means stop and fix
 the worker before recording. The optional `qwen2.5vl:7b` line may be absent
 when you skip local vision. Neither view ranks model quality. The VPS saves
 returned artifacts in the printed `$DEMO_DIR`, **not** in the Windows inbox.
@@ -68,10 +68,10 @@ The models and browser run on the PC; the CLI and saved results run on the VPS.
 ## 4. Control a local text model from the VPS
 
 ```bash
-contextbridge cluster chat --config /var/lib/contextbridge/config.yml --provider ollama --model qwen2.5:1.5b --session "demo-$DEMO_ID-local-text" --artifacts off --prompt 'Antworte exakt mit CB-LOCAL-OK und keinen weiteren Zeichen.'
+contextbridge cluster chat --config /var/lib/contextbridge/config.yml --provider ollama --model qwen2.5:latest --session "demo-$DEMO_ID-local-text" --artifacts off --prompt 'Antworte exakt mit CB-LOCAL-OK und keinen weiteren Zeichen.'
 ```
 
-Check the VPS output for `CB-LOCAL-OK`, `↳ verwendet: ollama · qwen2.5:1.5b`, and the worker node ID. **Those route facts, not the model's prose, prove where the job ran.** This exact live rehearsal returned in 6.4 seconds; do not promise the same latency to viewers.
+Check the VPS output for `CB-LOCAL-OK`, `↳ verwendet: ollama · qwen2.5:latest`, and the worker node ID. **Those route facts, not the model's prose, prove where the job ran.** The final live rehearsal returned in 2.3 seconds; do not promise the same latency to viewers.
 
 **DE:** „Ich gebe den Auftrag auf dem VPS ein; mein Windows-PC rechnet ihn mit dem lokalen Modell. Im Ergebnis stehen der tatsächlich verwendete Anbieter und das Modell.“
 
@@ -89,7 +89,7 @@ cat > "$QUEUE_JOB" <<JSON
   "requirements": {
     "task": "generation",
     "provider": "ollama",
-    "model": "qwen2.5:1.5b",
+    "model": "qwen2.5:latest",
     "session_id": "demo-$DEMO_ID-queue"
   },
   "payload": {

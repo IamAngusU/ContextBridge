@@ -218,6 +218,34 @@ system disk-write bytes per job, and complete wire bytes per job as
 Bolt file allocation with device writes, or pretending every caller sends the
 same payload would produce attractive but false numbers.
 
+### v0.5.80 development end-to-end pool snapshot
+
+The following is a separate live routing observation from 2026-09-19. Unlike
+the bridge-only tables above, it includes the VPS HTTPS relay, a remote Windows
+worker, a hot-plug ModelKit Ollama endpoint, model loading, and inference. It is
+therefore useful product evidence but not a ContextBridge overhead benchmark or
+an SLA.
+
+| Flow | Result | Observed completion time |
+| --- | --- | --- |
+| VPS → relay → Windows worker → ModelKit `qwen2.5:latest`, eight concurrent exact-marker jobs | 8/8 completed with the exact requested marker | 2.3–18.2 s, including queue/model work |
+| Offline toolbox → local OpenAI-compatible ingress → ContextBridge → ModelKit `qwen2.5:latest`, twelve jobs at concurrency four | 12/12 completed with the exact requested marker | warm responses about 0.69–0.73 s; first cold group 5.7–6.2 s |
+| PHP 8.1 shared-hosting client → public HTTPS relay → Windows worker → ModelKit | completed with `PHP-POOL-OK` | 0.298 s provider latency on the warm live run |
+
+The exact-marker checks prove routing, transport, provider selection, and full
+result return for a deliberately narrow task; they do not establish general
+model quality. A smaller 1.5B model returned all twelve responses but copied
+only 3/12 markers exactly, which is why transport success and answer quality
+are reported separately. A second candidate was rejected after 0/12 compliant
+wrapped responses. `qwen2.5:latest` became the measured local default only
+after the full wrapper path passed 12/12.
+
+Portable discovery was also repeated 100 times with 100/100 stable pack IDs.
+The two marker SHA-256 values were unchanged afterwards, and the toolbox's own
+read-only release verifier matched all 847 golden entries with no issue. This
+tests passive discovery; it does not claim that unplugging a mounted drive is
+safe while another application is actively using it.
+
 ### Dated development snapshot
 
 The benchmarks below measure ContextBridge code only. No Ollama model,
