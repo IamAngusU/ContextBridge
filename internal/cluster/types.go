@@ -233,6 +233,10 @@ type Job struct {
 	Attempt       int             `json:"attempt"`
 	MaxAttempts   int             `json:"max_attempts"`
 	AssignedNode  string          `json:"assigned_node,omitempty"`
+	// RoutingDecision is the bounded, point-in-time evidence used for the
+	// durable assignment. It intentionally excludes full node telemetry and is
+	// absent until a queued job is actually placed.
+	RoutingDecision *RoutingDecision `json:"routing_decision,omitempty"`
 	// ExecutedBrowserTabID records the concrete browser tab used by the worker.
 	// It can differ from Requirements.BrowserTabID when the extension created a
 	// fresh chat for the first turn of a session.

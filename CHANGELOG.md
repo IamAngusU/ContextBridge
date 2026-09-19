@@ -2,6 +2,28 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.73 - 2026-09-19
+
+### Added
+
+- `contextbridge route explain --file job.json` previews the deterministic
+  cluster placement without submitting a job or reserving capacity
+- `contextbridge route explain --job JOB_ID` reads the bounded routing decision
+  stored atomically with an actual assignment; `cluster route explain` is the
+  identical long form
+- routing evidence includes stable ineligibility reason codes, additive
+  weighted score components, evidence age, the selected node, and explicit
+  truncation when a pool exceeds the bounded candidate record
+
+### Security
+
+- route previews enforce producer group scope and normal requirement validation
+  before disclosing candidates
+- decision records omit prompts, results, URLs, full browser-session evidence,
+  and complete hardware snapshots, and disappear with normal job retention
+- previews remain observations rather than reservations; ambiguous post-submit
+  work is still never retried merely because a later route looks healthier
+
 ## 0.5.72 - 2026-09-18
 
 ### Added

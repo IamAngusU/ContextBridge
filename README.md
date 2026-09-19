@@ -41,6 +41,7 @@ ChatGPT and Gemini are detected automatically from stable DOM and accessibility 
 - **1:1, N:1, 1:N, and N:N compute:** connect one app to one worker, let scoped producers share a worker, distribute one queue across many workers, or share a capability-aware node pool between producers.
 - **Outbound worker connections:** workers join through WebSockets without router port forwarding or fixed public worker ports.
 - **Durable scheduling:** priority queue, bounded history, fail-closed recovery from ambiguous worker loss, groups, tags, task requirements, and VRAM-aware placement survive relay restarts.
+- **Explainable placement:** preview a route without submitting work, or inspect the bounded decision persisted with an assigned job, including stable rejection reasons and additive score components.
 - **Optional E2EE jobs:** a producer can seal a payload for the selected worker with X25519 and AES-256-GCM so the relay cannot read the payload or result.
 - **Bounded model pipelines:** chain extraction, embeddings, retrieval, vision, and generation with fixed steps and explicit loop limits.
 - **Explicit scope:** only the chosen page origin and local service are requested.
@@ -220,9 +221,19 @@ contextbridge cluster submit --file examples/cluster-job.json --token cb_produce
 contextbridge cluster submit --file examples/cluster-job.json --token cb_producer_TOKEN --e2ee
 contextbridge cluster chat --token cb_producer_TOKEN
 contextbridge cluster chat --token cb_producer_TOKEN --e2ee
+contextbridge route explain --file examples/cluster-job.json --token cb_producer_TOKEN
 ```
 
 Set requirements such as `task`, `provider`, `group`, `model`, `vision`, `embedding`, tags, or minimum free VRAM. Use `provider: browser` to require a live, taught web-chat tab, or `provider: ollama` to require a local Ollama engine. The scheduler chooses a compatible online node using live concurrency, queue, RAM, and VRAM data. Measured VRAM demand is a preference, not a hidden requirement, so CPU-only workers remain useful unless `min_free_vram_bytes` is explicitly set. If a worker disappears after assignment, normal TLS and E2EE jobs both fail closed because execution may already have reached the provider; an operator can inspect the job and explicitly resubmit it. E2EE resubmission also reserves a new worker key.
+
+`contextbridge route explain --file job.json` evaluates the live pool without
+creating a job. After assignment, `contextbridge route explain --job JOB_ID`
+reads the decision that was atomically stored with that job. Lower scores are
+preferred; ineligible candidates carry stable reason codes such as
+`provider_not_available`, `worker_at_capacity`, or
+`browser_session_not_ready`. Use `--json` for automation. A preview is a
+point-in-time observation, not a capacity reservation. See
+[routing decisions](docs/routing-decisions.md).
 
 Use the same non-secret `requirements.session_id` for follow-up turns. The relay prefers that producer's most recently used compatible worker. A later job can choose another compatible node when the preferred node is already known offline **before assignment**; an assigned or running job is never failed over and re-executed after ambiguous worker loss. The selected ChatGPT or Gemini tab supplies the actual conversation history. The browser extension reserves one conversation for one internal producer-and-session key; a different key never sends into that chat. By default, a new session needs an unassigned attached tab. Choose **Open a new chat tab automatically** in the extension to create a fresh chat per session, or set `metadata.contextbridge_new_chat: true` on an individual browser job. In manual mode, navigate an attached tab to a new empty chat and click **Use this page for a new session**; returning to the exact saved URL resumes an earlier session. Closing a tab parks its known conversation until reopened and attached. Old tabs whose pre-0.5.20 session histories may have mixed are quarantined until the user opens a new empty chat and explicitly releases them. These are conversation-routing boundaries, not separate browser accounts or a substitute for the provider's own privacy controls. `contextbridge cluster chat` manages the ID automatically and provides a streaming `you ›` / `ai ›` terminal session. A producer token may be passed with `--token`, stored safely from a credential file with `contextbridge cluster login --token-file producer.json`, or supplied through `CONTEXTBRIDGE_CLUSTER_TOKEN`.
 
@@ -484,7 +495,7 @@ Releases do not depend on GitHub Actions. From PowerShell, build every supported
 platform bundle, both extension archives, and `SHA256SUMS` locally:
 
 ```powershell
-.\scripts\build-release.ps1 -Version v0.5.72
+.\scripts\build-release.ps1 -Version v0.5.73
 ```
 
 Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md), use a focused issue for behavior changes, and include tests for routing or protocol work.

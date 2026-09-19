@@ -1147,7 +1147,11 @@ func (s *Store) AssignJob(id, nodeID string, selectedBrowserTab ...int) (Job, er
 	if len(selectedBrowserTab) == 1 {
 		selection = &browserAssignment{TabID: selectedBrowserTab[0]}
 	}
-	return s.assignJob(id, nodeID, selection)
+	return s.assignJob(id, nodeID, selection, nil)
+}
+
+func (s *Store) AssignJobWithDecision(id, nodeID string, decision RoutingDecision) (Job, error) {
+	return s.assignJob(id, nodeID, nil, &decision)
 }
 
 type browserAssignment struct {
@@ -1156,10 +1160,14 @@ type browserAssignment struct {
 }
 
 func (s *Store) AssignBrowserJob(id, nodeID string, tabID int, sessionRecovery bool) (Job, error) {
-	return s.assignJob(id, nodeID, &browserAssignment{TabID: tabID, SessionRecovery: sessionRecovery})
+	return s.assignJob(id, nodeID, &browserAssignment{TabID: tabID, SessionRecovery: sessionRecovery}, nil)
 }
 
-func (s *Store) assignJob(id, nodeID string, browser *browserAssignment) (Job, error) {
+func (s *Store) AssignBrowserJobWithDecision(id, nodeID string, tabID int, sessionRecovery bool, decision RoutingDecision) (Job, error) {
+	return s.assignJob(id, nodeID, &browserAssignment{TabID: tabID, SessionRecovery: sessionRecovery}, &decision)
+}
+
+func (s *Store) assignJob(id, nodeID string, browser *browserAssignment, decision *RoutingDecision) (Job, error) {
 	var job Job
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		if err := getJSON(tx.Bucket(bucketJobs), id, &job); err != nil {
@@ -1196,6 +1204,33 @@ func (s *Store) assignJob(id, nodeID string, browser *browserAssignment) (Job, e
 		job.Progress = nil
 		job.AssignedAt = time.Now().UTC()
 		job.UpdatedAt = job.AssignedAt
+		if decision != nil {
+			if decision.SelectedNodeID != "" && decision.SelectedNodeID != nodeID {
+				return errors.New("routing decision selects another node")
+			}
+			selectedCandidateFound := false
+			for _, candidate := range decision.Candidates {
+				if candidate.NodeID == nodeID && candidate.Eligible {
+					selectedCandidateFound = true
+					break
+				}
+			}
+			if !selectedCandidateFound {
+				return errors.New("routing decision does not contain the selected eligible node")
+			}
+			decisionCopy := *decision
+			decisionCopy.Preview = false
+			decisionCopy.JobID = job.ID
+			decisionCopy.SelectedNodeID = nodeID
+			decisionCopy.Requirements = job.Requirements
+			if decisionCopy.ID == "" {
+				decisionCopy.ID = randomID("route")
+			}
+			if decisionCopy.CreatedAt.IsZero() {
+				decisionCopy.CreatedAt = job.AssignedAt
+			}
+			job.RoutingDecision = &decisionCopy
+		}
 		if err := putJSON(tx.Bucket(bucketJobs), id, job); err != nil {
 			return err
 		}

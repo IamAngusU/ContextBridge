@@ -76,6 +76,89 @@ func TestClusterSubmitUsesCompactResponsesForSubmitAndPoll(t *testing.T) {
 	}
 }
 
+func TestClusterRouteExplainSupportsPreviewAndDurableJobDecision(t *testing.T) {
+	var previewSeen atomic.Bool
+	var jobSeen atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/cluster/routes/explain":
+			var request cluster.AssignmentRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request.Requirements.Task != "generation" {
+				http.Error(w, "invalid request", http.StatusBadRequest)
+				return
+			}
+			previewSeen.Store(true)
+			_ = json.NewEncoder(w).Encode(cluster.RoutingDecision{
+				ID: "route_preview", Preview: true, Requirements: request.Requirements,
+				SelectedNodeID: "node-a", SelectedNodeName: "Node A",
+				Candidates: []cluster.RoutingCandidateDecision{{NodeID: "node-a", NodeName: "Node A", Eligible: true, Score: -6}},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/cluster/jobs/job-a/route":
+			jobSeen.Store(true)
+			_ = json.NewEncoder(w).Encode(cluster.RoutingDecision{
+				ID: "route-a", JobID: "job-a", Requirements: cluster.Requirements{Task: "generation"},
+				SelectedNodeID: "node-a", SelectedNodeName: "Node A",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	temporary := t.TempDir()
+	configPath := filepath.Join(temporary, "config.yml")
+	if err := config.Default(configPath); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Cluster.Relay.PublicURL = ""
+	cfg.Cluster.Worker.RelayURL = server.URL
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	jobPath := filepath.Join(temporary, "job.json")
+	if err := os.WriteFile(jobPath, []byte(`{"requirements":{"task":"generation"},"payload":{"prompt":"hello"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := os.CreateTemp(temporary, "route-output-*.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStdout := os.Stdout
+	os.Stdout = stdout
+	defer func() {
+		os.Stdout = oldStdout
+		_ = stdout.Close()
+	}()
+
+	if err := clusterRouteCommand([]string{"explain", "--config", configPath, "--file", jobPath, "--token", "producer-token"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := clusterRouteCommand([]string{"explain", "--config", configPath, "--job", "job-a", "--token", "producer-token", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	if !previewSeen.Load() || !jobSeen.Load() {
+		t.Fatalf("route endpoints were not used: preview=%v job=%v", previewSeen.Load(), jobSeen.Load())
+	}
+	if err := stdout.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(stdout.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	for _, wanted := range []string{"Route preview · no job was submitted", "Selected  [Node A · node-a]", `"job_id":"job-a"`} {
+		if !strings.Contains(text, wanted) {
+			t.Fatalf("route output missing %q: %s", wanted, text)
+		}
+	}
+}
+
 func TestClusterSubmitMaterializesMaximumMultiArtifactCompactResult(t *testing.T) {
 	const artifactSize = 6 << 20
 	firstData := bytes.Repeat([]byte{0x31}, artifactSize)

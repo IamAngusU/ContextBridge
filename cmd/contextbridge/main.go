@@ -93,6 +93,8 @@ func main() {
 		err = workerCommand(os.Args[2:])
 	case "cluster":
 		err = clusterCommand(os.Args[2:])
+	case "route":
+		err = clusterRouteCommand(os.Args[2:])
 	case "selftest":
 		// Operator-friendly shortcut for the identical cluster command. It works
 		// on a worker PC, relay VPS, or any configured producer.
@@ -151,7 +153,8 @@ Usage:
   contextbridge pair [--config path] [--relay URL] [--identity path] [--name NAME]
   contextbridge worker [--config path] [--relay URL] [--identity path] [--name NAME] [--slots N] [--providers LIST] [--models LIST] [--tasks LIST] [--topmost]
   contextbridge selftest [options]
-  contextbridge cluster status|submit|chat|selftest|login|token|pairing [options]
+	  contextbridge cluster status|submit|chat|selftest|route|login|token|pairing [options]
+	  contextbridge route explain (--file job.json | --job JOB_ID) [--json]
   contextbridge update status|check|apply|enable|disable|auto [options]
   contextbridge completion powershell|bash|zsh
   contextbridge version`)
@@ -1256,7 +1259,7 @@ func freeLocalAddress() (string, error) {
 
 func clusterCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: contextbridge cluster status|submit|chat|selftest|login|token|pairing")
+		return errors.New("usage: contextbridge cluster status|submit|chat|selftest|route|login|token|pairing")
 	}
 	switch args[0] {
 	case "status":
@@ -1267,6 +1270,8 @@ func clusterCommand(args []string) error {
 		return clusterChatCommand(args[1:])
 	case "selftest":
 		return clusterSelftestCommand(args[1:])
+	case "route":
+		return clusterRouteCommand(args[1:])
 	case "login":
 		return clusterLoginCommand(args[1:])
 	case "token":
@@ -1282,6 +1287,112 @@ func clusterCommand(args []string) error {
 	default:
 		return fmt.Errorf("unknown cluster command %s", args[0])
 	}
+}
+
+func clusterRouteCommand(args []string) error {
+	if len(args) == 0 || args[0] != "explain" {
+		return errors.New("usage: contextbridge cluster route explain (--file job.json | --job JOB_ID) [--json]")
+	}
+	flags := flag.NewFlagSet("cluster route explain", flag.ContinueOnError)
+	path := flags.String("config", defaultConfigPath(), "config path")
+	file := flags.String("file", "", "cluster job JSON file for a non-executing preview")
+	jobID := flags.String("job", "", "assigned job ID with a durable routing decision")
+	token := flags.String("token", "", "producer token; defaults to local admin token")
+	asJSON := flags.Bool("json", false, "print machine-readable routing evidence")
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	if (*file == "") == (*jobID == "") {
+		return errors.New("exactly one of --file or --job is required")
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	if *token == "" {
+		*token = clusterClientToken(cfg, "")
+	}
+	var decision cluster.RoutingDecision
+	if *file != "" {
+		const maximumClusterSubmissionFileBytes = ((cluster.MaximumJobPayloadBytes+16)*4+2)/3 + (64 << 10)
+		raw, err := readRegularFileBounded(*file, maximumClusterSubmissionFileBytes)
+		if err != nil {
+			return fmt.Errorf("cluster job: %w", err)
+		}
+		var input cluster.SubmitRequest
+		if err := json.Unmarshal(raw, &input); err != nil {
+			return err
+		}
+		request := cluster.AssignmentRequest{TenantID: input.TenantID, Requirements: input.Requirements}
+		if err := clusterPOST(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/routes/explain", *token, request, &decision); err != nil {
+			return err
+		}
+	} else {
+		if err := clusterGET(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/jobs/"+url.PathEscape(*jobID)+"/route", *token, &decision); err != nil {
+			return err
+		}
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(decision)
+	}
+	printRoutingDecision(decision)
+	return nil
+}
+
+func printRoutingDecision(decision cluster.RoutingDecision) {
+	kind := "Route decision"
+	if decision.Preview {
+		kind = "Route preview · no job was submitted"
+	}
+	fmt.Println(kind)
+	if decision.SelectedNodeID == "" {
+		fmt.Println("Selected  [none · no current candidate satisfies every requirement]")
+	} else {
+		fmt.Printf("Selected  [%s · %s]\n", emptyLabel(decision.SelectedNodeName, "unnamed node"), decision.SelectedNodeID)
+	}
+	fmt.Printf("Needs  [task %s", decision.Requirements.Task)
+	if decision.Requirements.Provider != "" {
+		fmt.Printf(" · provider %s", decision.Requirements.Provider)
+	}
+	if decision.Requirements.Model != "" {
+		fmt.Printf(" · model %s", decision.Requirements.Model)
+	}
+	if decision.Requirements.Group != "" {
+		fmt.Printf(" · group %s", decision.Requirements.Group)
+	}
+	fmt.Println("]")
+	for _, candidate := range decision.Candidates {
+		if candidate.Eligible {
+			fmt.Printf("  ✓ %s  [score %.2f]  %s\n", emptyLabel(candidate.NodeName, candidate.NodeID), candidate.Score, routingScoreSummary(candidate.ScoreComponents))
+			continue
+		}
+		fmt.Printf("  × %s  [%s]\n", emptyLabel(candidate.NodeName, candidate.NodeID), strings.Join(candidate.RejectionReasons, " · "))
+	}
+	if decision.CandidatesTruncated > 0 {
+		fmt.Printf("  … %d additional candidates omitted\n", decision.CandidatesTruncated)
+	}
+}
+
+func routingScoreSummary(components cluster.RoutingScoreComponents) string {
+	parts := []string{}
+	values := []struct {
+		name  string
+		value float64
+	}{
+		{"load", components.ActiveLoad}, {"queue", components.QueueDepth}, {"memory", components.MemoryPressure},
+		{"cpu", components.CPUPressure}, {"gpu", components.GPUPressure}, {"vram", components.VRAMHeadroom},
+		{"browser", components.BrowserPressure}, {"loaded", components.LoadedModel}, {"fit", components.EstimatedVRAMFit},
+		{"preferred", components.PreferredNode},
+	}
+	for _, value := range values {
+		if value.value != 0 {
+			parts = append(parts, fmt.Sprintf("%s %+.2f", value.name, value.value))
+		}
+	}
+	if len(parts) == 0 {
+		return "neutral evidence"
+	}
+	return strings.Join(parts, " · ")
 }
 
 func clusterConfigureCommand(args []string) error {

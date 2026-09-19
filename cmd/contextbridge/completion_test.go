@@ -15,9 +15,9 @@ func TestCompletionScriptsCoverBothAliasesAndNestedCommands(t *testing.T) {
 		script string
 		want   []string
 	}{
-		{"powershell", powershellCompletionScript(), []string{"-CommandName contextbridge, cb", "'serve'", "'stop' = @('--config','--force')", "'mcp serve' = @('--config')", "'benchmark' = @('--json','--samples'", "'selftest'", "'selftest' = @('--config','--providers'", "'cluster status' = @('--config','--json')", "--attach-image", "--reasoning"}},
-		{"bash", bashCompletionScript(), []string{"# ContextBridge managed completion", "contextbridge cb", "init serve run stop", "stop) candidates=\"--config --force\"", "\"mcp serve\") candidates=\"--config\"", "cluster) candidates=\"status submit chat selftest", "\"cluster status\") candidates=\"--config --json\"", "--attach-image", "--reasoning"}},
-		{"zsh", zshCompletionScript(), []string{"#compdef contextbridge cb", "# ContextBridge managed completion", "serve:Run only the local bridge service", "mcp:Expose bounded local tools over MCP stdio", "benchmark:Measure bridge-only overhead and resource footprint", "stop:Safely stop the local ContextBridge process", "cluster:Use a remote pool", "status submit chat selftest", "completion)", "--attach-image[", "--job-timeout[", "--managed-service[", "--discover["}},
+		{"powershell", powershellCompletionScript(), []string{"-CommandName contextbridge, cb", "'serve'", "'stop' = @('--config','--force')", "'mcp serve' = @('--config')", "'benchmark' = @('--json','--samples'", "'selftest'", "'selftest' = @('--config','--providers'", "'cluster status' = @('--config','--json')", "'route explain' = @('--config','--file','--job','--token','--json')", "--attach-image", "--reasoning"}},
+		{"bash", bashCompletionScript(), []string{"# ContextBridge managed completion", "contextbridge cb", "init serve run stop", "stop) candidates=\"--config --force\"", "\"mcp serve\") candidates=\"--config\"", "cluster) candidates=\"status submit chat selftest route", "\"cluster status\") candidates=\"--config --json\"", "\"route explain\") candidates=\"--config --file --job --token --json\"", "--attach-image", "--reasoning"}},
+		{"zsh", zshCompletionScript(), []string{"#compdef contextbridge cb", "# ContextBridge managed completion", "serve:Run only the local bridge service", "mcp:Expose bounded local tools over MCP stdio", "benchmark:Measure bridge-only overhead and resource footprint", "stop:Safely stop the local ContextBridge process", "cluster:Use a remote pool", "route:Explain a preview or durable cluster route", "status submit chat selftest route", "completion)", "--attach-image[", "--job-timeout[", "--managed-service[", "--discover["}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -57,6 +57,9 @@ func TestPowerShellTabExpansionTracksTrailingSpaceAndOptionPosition(t *testing.T
 		{"short selftest shortcut", "cb selftest ", []string{"--providers", "--run", "--timeout"}, []string{"status", "chat"}},
 		{"short selftest partial flag", "cb selftest --r", []string{"--run"}, []string{"--providers", "status", "chat"}},
 		{"nested partial action", "contextbridge cluster se", []string{"selftest"}, []string{"status", "submit"}},
+		{"route shortcut action", "contextbridge route ", []string{"explain"}, []string{"status", "submit"}},
+		{"route shortcut flags", "contextbridge route explain ", []string{"--file", "--job", "--json"}, []string{"status", "submit"}},
+		{"nested route action", "contextbridge cluster route ", []string{"explain", "--file", "--job"}, []string{"status", "submit"}},
 		{"MCP stdio options", "contextbridge mcp serve ", []string{"--config"}, []string{"--json", "status"}},
 		{"safe stop", "contextbridge stop ", []string{"--config", "--force"}, []string{"--slots", "status"}},
 	}
@@ -117,7 +120,7 @@ func TestCompletionRootCommandsStayUnique(t *testing.T) {
 		}
 		seen[command] = true
 	}
-	for _, required := range []string{"serve", "stop", "console", "mcp", "benchmark", "cluster", "selftest", "completion", "version"} {
+	for _, required := range []string{"serve", "stop", "console", "mcp", "benchmark", "cluster", "route", "selftest", "completion", "version"} {
 		if !seen[required] {
 			t.Errorf("completion root is missing %q", required)
 		}
@@ -172,6 +175,8 @@ func TestBashCompletionOffersRootCommandFlagsAtCurrentWord(t *testing.T) {
 		{"update root", "contextbridge update --", 2, []string{"--force", "--managed-service", "--relay-only"}, nil},
 		{"update action", "contextbridge update apply --", 3, []string{"--config", "--force"}, nil},
 		{"cluster selftest", "contextbridge cluster selftest --", 3, []string{"--run", "--job-timeout"}, nil},
+		{"route shortcut", "contextbridge route explain --", 3, []string{"--file", "--job", "--json"}, nil},
+		{"cluster route", "contextbridge cluster route --", 3, []string{"--file", "--job", "--json"}, nil},
 		{"root selftest", "contextbridge selftest --", 2, []string{"--providers", "--run", "--job-timeout"}, nil},
 		{"short root selftest", "cb selftest --", 2, []string{"--providers", "--run"}, nil},
 		{"after selftest boolean", "contextbridge cluster selftest --run ''", 4, []string{"--image", "--job-timeout"}, nil},
