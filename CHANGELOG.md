@@ -2,6 +2,24 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.78 - 2026-09-19
+
+### Fixed
+
+- fresh Gemini chats now verify the exact ContextBridge-owned user turn after
+  Gemini publishes its permanent conversation URL, even when the current UI
+  duplicates part of the prompt in a hidden accessibility label
+- Gemini recovery and image-response pairing use the same bounded rendered
+  prompt-line extraction, so minimized tabs can finish without weakening
+  conversation ownership checks or repeating Send
+
+### Security
+
+- fresh-chat promotion still requires the newest user turn, a stable element
+  identifier, the expected provider origin, and the nonce-bound exact prompt
+  digest; duplicated wrapper text, mismatched visible text, and unrelated
+  responses continue to fail closed
+
 ## 0.5.77 - 2026-09-19
 
 ### Fixed
