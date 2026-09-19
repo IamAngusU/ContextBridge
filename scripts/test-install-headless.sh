@@ -250,7 +250,7 @@ HOME="$shadowed/home" \
   CONTEXTBRIDGE_NO_DASHBOARD="1" \
   CONTEXTBRIDGE_NONINTERACTIVE="1" \
   sh "$root/install.sh" > "$shadowed/out"
-grep -F -- 'active cb command belongs to' "$shadowed/out" >/dev/null
+grep -F -- "Skipped the short 'cb' command because it already belongs to $shadowed/foreign/cb." "$shadowed/out" >/dev/null
 grep -Fqx -- 'complete -o default -F _contextbridge_complete contextbridge' "$shadowed/home/.local/share/bash-completion/completions/contextbridge"
 test ! -e "$shadowed/home/.local/share/bash-completion/completions/cb"
 grep -Fqx -- '#compdef contextbridge' "$shadowed/home/.zfunc/_contextbridge"
