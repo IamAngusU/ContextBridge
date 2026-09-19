@@ -2,6 +2,31 @@
 
 All notable changes are documented here. ContextBridge follows semantic versioning.
 
+## 0.5.74 - 2026-09-19
+
+### Added
+
+- `Idempotency-Key` provides durable producer-scoped deduplication for cluster
+  submissions; an exact replay returns the retained job, while changed content
+  with the same key returns HTTP `409`
+- `contextbridge cluster submit --idempotency-key KEY` exposes that contract to
+  native clients and reports when a duplicate submission was suppressed
+
+### Fixed
+
+- Connect now removes browser tab IDs that were closed since the previous
+  session instead of letting one stale ID abort every healthy attached tab
+- the first heartbeat repeats the same reconciliation, closing the race where
+  a tab disappears after Connect inspected it but before registration
+
+### Security
+
+- idempotency keys are hashed before durable storage, scoped to the
+  authenticated producer, written atomically with queue admission, and removed
+  with normal job retention
+- duplicate admission does not emit another queue event or dispatch signal and
+  does not weaken the existing fail-closed boundary for ambiguous provider work
+
 ## 0.5.73 - 2026-09-19
 
 ### Added

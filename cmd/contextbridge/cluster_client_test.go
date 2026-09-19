@@ -31,11 +31,13 @@ func TestReadClusterAPIResponseAcceptsExactLimitAndRejectsOneByteMore(t *testing
 func TestClusterSubmitUsesCompactResponsesForSubmitAndPoll(t *testing.T) {
 	var compactSubmit atomic.Bool
 	var compactPoll atomic.Bool
+	var idempotencyKey atomic.Value
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/cluster/jobs":
 			compactSubmit.Store(r.URL.Query().Get("compact") == "1")
+			idempotencyKey.Store(r.Header.Get("Idempotency-Key"))
 			_ = json.NewEncoder(w).Encode(cluster.Job{ID: "job-compact-cli", Status: cluster.JobQueued})
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/cluster/jobs/job-compact-cli":
 			compactPoll.Store(r.URL.Query().Get("compact") == "1")
@@ -68,11 +70,14 @@ func TestClusterSubmitUsesCompactResponsesForSubmitAndPoll(t *testing.T) {
 	if err := os.WriteFile(jobPath, []byte(jobJSON), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := clusterSubmitCommand([]string{"--config", configPath, "--file", jobPath, "--token", strings.Repeat("t", 40)}); err != nil {
+	if err := clusterSubmitCommand([]string{"--config", configPath, "--file", jobPath, "--token", strings.Repeat("t", 40), "--idempotency-key", "release-demo-42"}); err != nil {
 		t.Fatal(err)
 	}
 	if !compactSubmit.Load() || !compactPoll.Load() {
 		t.Fatalf("cluster submit did not request compact envelopes: submit=%v poll=%v", compactSubmit.Load(), compactPoll.Load())
+	}
+	if got, _ := idempotencyKey.Load().(string); got != "release-demo-42" {
+		t.Fatalf("cluster submit idempotency header = %q", got)
 	}
 }
 

@@ -41,6 +41,7 @@ ChatGPT and Gemini are detected automatically from stable DOM and accessibility 
 - **1:1, N:1, 1:N, and N:N compute:** connect one app to one worker, let scoped producers share a worker, distribute one queue across many workers, or share a capability-aware node pool between producers.
 - **Outbound worker connections:** workers join through WebSockets without router port forwarding or fixed public worker ports.
 - **Durable scheduling:** priority queue, bounded history, fail-closed recovery from ambiguous worker loss, groups, tags, task requirements, and VRAM-aware placement survive relay restarts.
+- **Retry-safe admission:** a producer-scoped idempotency key returns the same durable job after a lost HTTP reply and rejects changed content, without pretending ambiguous provider execution is universally exactly-once.
 - **Explainable placement:** preview a route without submitting work, or inspect the bounded decision persisted with an assigned job, including stable rejection reasons and additive score components.
 - **Optional E2EE jobs:** a producer can seal a payload for the selected worker with X25519 and AES-256-GCM so the relay cannot read the payload or result.
 - **Bounded model pipelines:** chain extraction, embeddings, retrieval, vision, and generation with fixed steps and explicit loop limits.
@@ -218,6 +219,7 @@ Create a scoped producer token once:
 ```bash
 contextbridge cluster token --role producer --subject support-api
 contextbridge cluster submit --file examples/cluster-job.json --token cb_producer_TOKEN
+contextbridge cluster submit --file examples/cluster-job.json --token cb_producer_TOKEN --idempotency-key support-ticket-42-v1
 contextbridge cluster submit --file examples/cluster-job.json --token cb_producer_TOKEN --e2ee
 contextbridge cluster chat --token cb_producer_TOKEN
 contextbridge cluster chat --token cb_producer_TOKEN --e2ee
@@ -225,6 +227,12 @@ contextbridge route explain --file examples/cluster-job.json --token cb_producer
 ```
 
 Set requirements such as `task`, `provider`, `group`, `model`, `vision`, `embedding`, tags, or minimum free VRAM. Use `provider: browser` to require a live, taught web-chat tab, or `provider: ollama` to require a local Ollama engine. The scheduler chooses a compatible online node using live concurrency, queue, RAM, and VRAM data. Measured VRAM demand is a preference, not a hidden requirement, so CPU-only workers remain useful unless `min_free_vram_bytes` is explicitly set. If a worker disappears after assignment, normal TLS and E2EE jobs both fail closed because execution may already have reached the provider; an operator can inspect the job and explicitly resubmit it. E2EE resubmission also reserves a new worker key.
+
+Use `--idempotency-key` when an application may retry a cluster submission
+after losing the HTTP response. The exact same producer request returns the
+retained job; changed content with the same key conflicts. This deduplicates
+relay admission, not an execution whose outcome became ambiguous after a
+worker or provider accepted it. See the [job protocol](docs/protocol.md).
 
 `contextbridge route explain --file job.json` evaluates the live pool without
 creating a job. After assignment, `contextbridge route explain --job JOB_ID`
@@ -262,7 +270,7 @@ Inside interactive chat, `/model …`, `/reasoning …`, `/profile …`, `/image
 
 1. Load `extension/chromium` in Chrome, Edge, Opera, Brave, or Vivaldi. Use `extension/firefox` for Firefox.
 2. Open the extension on a ChatGPT or Gemini page. It recognizes the provider automatically. Click **Connect this AI page**: with no tabs attached, this explicitly attaches the current page and starts the browser bridge in one flow. To prepare several tabs first, click **Attach this page** on each; the same button becomes **Detach this page**. Existing conversations are never attached merely by viewing them.
-3. The local service and saved pairing token are checked during Connect; no separate profile or service test is required. First-time setup may ask you to paste the local pairing token once under **Advanced setup and diagnostics**. Multi-tab filters, fresh-chat auto-attach, profile teaching, and model scanning remain available under Advanced. Each attached tab is one serial browser slot, and detaching prevents future jobs but cannot unsend website work already in progress.
+3. The local service and saved pairing token are checked during Connect; no separate profile or service test is required. First-time setup may ask you to paste the local pairing token once under **Advanced setup and diagnostics**. Multi-tab filters, fresh-chat auto-attach, profile teaching, and model scanning remain available under Advanced. Each attached tab is one serial browser slot, and detaching prevents future jobs but cannot unsend website work already in progress. Tabs closed since the previous browser session are pruned during Connect and again at heartbeat time, so one stale browser ID cannot take healthy tabs offline.
 4. For another provider, choose **Customize detection** and click the requested controls directly in the page.
 
 Add `--stream` to `contextbridge cluster submit` to print progressive browser text while the final normalized result remains on stdout. Plaintext progress is deliberately disabled for E2EE jobs.
@@ -495,7 +503,7 @@ Releases do not depend on GitHub Actions. From PowerShell, build every supported
 platform bundle, both extension archives, and `SHA256SUMS` locally:
 
 ```powershell
-.\scripts\build-release.ps1 -Version v0.5.73
+.\scripts\build-release.ps1 -Version v0.5.74
 ```
 
 Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md), use a focused issue for behavior changes, and include tests for routing or protocol work.

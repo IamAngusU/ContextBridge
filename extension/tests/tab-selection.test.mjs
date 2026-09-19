@@ -49,6 +49,10 @@ const context = vm.createContext({
   chrome: {
     runtime: { onMessage: { addListener() {} }, sendMessage: async (message) => {
       runtimeMessages.push(message.type);
+      if (message.type === 'reconcile-tabs') {
+        const ids = (stored.tabIds || []).map(Number).filter(Boolean);
+        return { ok: true, tabIds: ids, tabs: await Promise.all(ids.map((id) => context.chrome.tabs.get(id))), removed: [] };
+      }
       if (message.type === 'start' && pendingStart) await pendingStart;
       return message.type === 'start' && startError ? { ok: false, error: startError } : { ok: true };
     } },
@@ -198,4 +202,20 @@ assert.equal(statuses.at(-1).state, 'connecting', `a stale stored flag is not pr
 stored.lastHeartbeatAt = Date.now();
 await context.refreshState();
 assert.equal(statuses.at(-1).state, 'live');
+
+stored.running = false;
+stored.tabId = 61;
+stored.tabIds = [61, 62];
+context.chrome.runtime.sendMessage = async (message) => {
+  runtimeMessages.push(message.type);
+  if (message.type === 'reconcile-tabs') {
+    stored.tabId = 62;
+    stored.tabIds = [62];
+    return { ok: true, tabIds: [62], tabs: [{ id: 62, url: 'https://chatgpt.com/c/live' }], removed: [61] };
+  }
+  return { ok: true };
+};
+await listeners.get('pair:click')();
+assert.deepEqual(Array.from(stored.tabIds), [62]);
+assert.match(statuses.at(-1).message, /removed 1 closed tab/);
 console.log('Current AI page auto-detected; one Connect click attaches and starts it');

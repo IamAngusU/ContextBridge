@@ -162,6 +162,32 @@ Unknown JSON fields are rejected. HTTP responses use `Cache-Control: no-store`.
 
 Client-supplied job IDs may contain 1 to 128 ASCII letters, numbers, dots, underscores, and hyphens. Path separators and repeated dots are rejected. A duplicate ID returns HTTP `409` and never replaces an earlier job.
 
+Cluster producers can make an uncertain submission retry-safe with one
+`Idempotency-Key` header containing 1–200 visible ASCII characters. The relay
+binds a hash of that key to the authenticated producer and the exact normalized
+request in the same BoltDB transaction that admits the job. An exact retry
+returns the retained job with HTTP `200` and `Idempotency-Replayed: true`; the
+first admission returns HTTP `202`. Reusing the key for different content
+returns HTTP `409`. Another producer may independently use the same key, and
+the raw key is never stored. This prevents duplicate **admission** after a lost
+HTTP response; it does not claim exactly-once execution after a worker has
+received a job. The binding is released only when retention removes the job.
+For E2EE, a replay must resend the same sealed request bytes and reservation
+fields—fresh encryption intentionally conflicts instead of being guessed equal.
+Because `cluster submit --e2ee` creates a fresh one-time reservation on every
+invocation, the native CLI rejects that combination with `--idempotency-key`;
+an application that persists and resends the exact prepared sealed envelope
+can use the HTTP contract directly.
+
+The native client exposes this as:
+
+```bash
+contextbridge cluster submit \
+  --config /var/lib/contextbridge/config.yml \
+  --file ./job.json \
+  --idempotency-key "my-app:record-42:v1"
+```
+
 ## Cluster Protocol
 
 Cluster endpoints use separate admin, observer, producer, and node bearer credentials. Pairing request and polling endpoints use short-lived device credentials and rate limits.

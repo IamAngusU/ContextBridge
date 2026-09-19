@@ -1650,11 +1650,20 @@ func clusterSubmitCommand(args []string) error {
 	stream := flags.Bool("stream", false, "print progressive browser text to stderr while waiting")
 	artifactDir := flags.String("artifacts", "", "save returned images and files in this directory")
 	sealed := flags.Bool("e2ee", false, "encrypt payload for the selected worker")
+	idempotencyKey := flags.String("idempotency-key", "", "deduplicate an exact producer submission retry")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if *file == "" {
 		return errors.New("--file is required")
+	}
+	if *idempotencyKey != "" {
+		if err := cluster.ValidateIdempotencyKey(*idempotencyKey); err != nil {
+			return err
+		}
+		if *sealed {
+			return errors.New("--idempotency-key cannot be combined with --e2ee in the native client because each invocation creates a fresh one-time reservation; exact prepared sealed retries remain available through the cluster API")
+		}
 	}
 	cfg, err := config.Load(*path)
 	if err != nil {
@@ -1698,7 +1707,12 @@ func clusterSubmitCommand(args []string) error {
 		input.AssignmentSecret = reservation.Secret
 	}
 	var job cluster.Job
-	if err := clusterPOST(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/jobs?compact=1", *token, input, &job); err != nil {
+	headers := http.Header{}
+	if *idempotencyKey != "" {
+		headers.Set("Idempotency-Key", *idempotencyKey)
+	}
+	responseHeaders, err := clusterPOSTHeaders(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/jobs?compact=1", *token, input, &job, headers)
+	if err != nil {
 		return err
 	}
 	if *sealed {
@@ -1706,7 +1720,11 @@ func clusterSubmitCommand(args []string) error {
 			return err
 		}
 	}
-	fmt.Println("Queued:", job.ID)
+	if responseHeaders.Get("Idempotency-Replayed") == "true" {
+		fmt.Println("Queued:", job.ID, "(existing; duplicate submission suppressed)")
+	} else {
+		fmt.Println("Queued:", job.ID)
+	}
 	if !*wait {
 		return nil
 	}
@@ -1891,26 +1909,38 @@ func clusterGET(ctx context.Context, target, token string, output interface{}) e
 }
 
 func clusterPOST(ctx context.Context, target, token string, input, output interface{}) error {
+	_, err := clusterPOSTHeaders(ctx, target, token, input, output, nil)
+	return err
+}
+
+func clusterPOSTHeaders(ctx context.Context, target, token string, input, output interface{}, headers http.Header) (http.Header, error) {
 	raw, _ := json.Marshal(input)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(raw))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
+	for name, values := range headers {
+		for _, value := range values {
+			req.Header.Add(name, value)
+		}
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	body, err := readClusterAPIResponse(resp.Body)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("relay returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
+		return resp.Header.Clone(), fmt.Errorf("relay returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
 	if output != nil {
-		return json.Unmarshal(body, output)
+		if err := json.Unmarshal(body, output); err != nil {
+			return resp.Header.Clone(), err
+		}
 	}
-	return nil
+	return resp.Header.Clone(), nil
 }
 
 const maximumClusterAPIResponseBytes = cluster.MaximumJobResultWireBytes + (2 << 20)

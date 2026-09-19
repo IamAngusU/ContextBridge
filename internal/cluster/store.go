@@ -34,6 +34,8 @@ var (
 	bucketPipelineRuns        = []byte("pipeline_runs")
 	bucketSessionPlacements   = []byte("session_placements_v1")
 	bucketBrowserSessionLocks = []byte("browser_session_locks_v1")
+	bucketJobIdempotency      = []byte("job_idempotency_v1")
+	bucketJobIdempotencyByJob = []byte("job_idempotency_by_job_v1")
 	keyJobOwnerIndexVersion   = []byte("job_owner_index_version")
 	jobOwnerIndexVersion      = []byte("1")
 )
@@ -55,6 +57,7 @@ var (
 	ErrOwnerPipelineCapacity       = errors.New("producer active pipeline capacity is full")
 	ErrNodePublicKeyMismatch       = errors.New("node public key differs from paired identity")
 	ErrBrowserSessionBusy          = errors.New("browser session already has an active job or reservation")
+	ErrIdempotencyConflict         = errors.New("idempotency key was already used for a different request")
 )
 
 type reservation struct {
@@ -67,6 +70,11 @@ type sessionPlacement struct {
 	NodeID       string    `json:"node_id"`
 	BrowserTabID int       `json:"browser_tab_id,omitempty"`
 	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+type jobIdempotencyRecord struct {
+	JobID       string `json:"job_id"`
+	RequestHash string `json:"request_hash"`
 }
 
 // browserSessionLock serializes non-ephemeral jobs for one pseudonymous
@@ -90,7 +98,7 @@ func OpenStore(path string) (*Store, error) {
 		return nil, err
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, name := range [][]byte{bucketJobs, bucketJobIndex, bucketJobOwnerIndex, bucketStoreMeta, bucketQueue, bucketNodes, bucketTokens, bucketPairings, bucketPairCodes, bucketAssignments, bucketEvents, bucketPipelineRuns, bucketSessionPlacements, bucketBrowserSessionLocks, bucketHistoricalTotals} {
+		for _, name := range [][]byte{bucketJobs, bucketJobIndex, bucketJobOwnerIndex, bucketStoreMeta, bucketQueue, bucketNodes, bucketTokens, bucketPairings, bucketPairCodes, bucketAssignments, bucketEvents, bucketPipelineRuns, bucketSessionPlacements, bucketBrowserSessionLocks, bucketJobIdempotency, bucketJobIdempotencyByJob, bucketHistoricalTotals} {
 			if _, createErr := tx.CreateBucketIfNotExists(name); createErr != nil {
 				return createErr
 			}
@@ -467,7 +475,8 @@ func (s *Store) SetNodeConnected(id string, connected bool) error {
 }
 
 func (s *Store) CreateJob(request SubmitRequest) (Job, error) {
-	return s.createJob(request, 0, 0)
+	job, _, err := s.createJob(request, 0, 0, "", "")
+	return job, err
 }
 
 // CreateJobAdmitted atomically checks and consumes queue capacity in the same
@@ -478,10 +487,18 @@ func (s *Store) CreateJobAdmitted(request SubmitRequest, maxQueued int, maxOwner
 	if len(maxOwner) > 0 {
 		ownerLimit = maxOwner[0]
 	}
-	return s.createJob(request, maxQueued, ownerLimit)
+	job, _, err := s.createJob(request, maxQueued, ownerLimit, "", "")
+	return job, err
 }
 
-func (s *Store) createJob(request SubmitRequest, maxQueued, maxOwner int) (Job, error) {
+// CreateJobAdmittedIdempotent atomically binds an authenticated producer's
+// key to one admitted request. An exact retry returns the retained job without
+// consuming queue capacity; a different request with the same key fails.
+func (s *Store) CreateJobAdmittedIdempotent(request SubmitRequest, maxQueued, maxOwner int, idempotencyKey, requestHash string) (Job, bool, error) {
+	return s.createJob(request, maxQueued, maxOwner, idempotencyKey, requestHash)
+}
+
+func (s *Store) createJob(request SubmitRequest, maxQueued, maxOwner int, idempotencyKey, requestHash string) (Job, bool, error) {
 	now := time.Now().UTC()
 	job := Job{
 		ID: request.ID, OwnerSubject: cleanLabel(request.OwnerSubject, 120), TenantID: cleanLabel(request.TenantID, 200), Source: cleanLabel(request.Source, 120), Requirements: request.Requirements,
@@ -492,7 +509,7 @@ func (s *Store) createJob(request SubmitRequest, maxQueued, maxOwner int) (Job, 
 	if job.ID == "" {
 		job.ID = randomID("job")
 	} else if !validJobID(job.ID) {
-		return Job{}, errors.New("job id must use 1-128 safe ASCII characters and must not contain '..'")
+		return Job{}, false, errors.New("job id must use 1-128 safe ASCII characters and must not contain '..'")
 	}
 	if job.MaxAttempts <= 0 {
 		job.MaxAttempts = 3
@@ -501,12 +518,35 @@ func (s *Store) createJob(request SubmitRequest, maxQueued, maxOwner int) (Job, 
 		job.MaxAttempts = 10
 	}
 	if job.Priority < -100 || job.Priority > 100 {
-		return Job{}, errors.New("priority must be between -100 and 100")
+		return Job{}, false, errors.New("priority must be between -100 and 100")
 	}
 	if len(job.Payload) == 0 && job.SealedPayload == nil {
-		return Job{}, errors.New("payload or sealed_payload is required")
+		return Job{}, false, errors.New("payload or sealed_payload is required")
 	}
+	if idempotencyKey != "" {
+		if job.OwnerSubject == "" {
+			return Job{}, false, errors.New("authenticated producer is required for idempotency")
+		}
+		if err := ValidateIdempotencyKey(idempotencyKey); err != nil {
+			return Job{}, false, err
+		}
+		if len(requestHash) != sha256.Size*2 {
+			return Job{}, false, errors.New("idempotency request hash is invalid")
+		}
+	}
+	replayed := false
 	err := s.db.Update(func(tx *bolt.Tx) error {
+		if idempotencyKey != "" {
+			existing, found, lookupErr := lookupIdempotentJobTx(tx, job.OwnerSubject, idempotencyKey, requestHash)
+			if lookupErr != nil {
+				return lookupErr
+			}
+			if found {
+				job = existing
+				replayed = true
+				return nil
+			}
+		}
 		if tx.Bucket(bucketJobs).Get([]byte(job.ID)) != nil {
 			return os.ErrExist
 		}
@@ -531,9 +571,15 @@ func (s *Store) createJob(request SubmitRequest, maxQueued, maxOwner int) (Job, 
 		if err := putJobOwnerIndex(tx.Bucket(bucketJobOwnerIndex), job); err != nil {
 			return err
 		}
-		return tx.Bucket(bucketQueue).Put(queueKey(job), []byte(job.ID))
+		if err := tx.Bucket(bucketQueue).Put(queueKey(job), []byte(job.ID)); err != nil {
+			return err
+		}
+		if idempotencyKey != "" {
+			return saveIdempotentJobTx(tx, job.OwnerSubject, idempotencyKey, requestHash, job.ID)
+		}
+		return nil
 	})
-	return job, err
+	return job, replayed, err
 }
 
 func validJobID(value string) bool {
@@ -554,6 +600,60 @@ func validJobID(value string) bool {
 		}
 	}
 	return true
+}
+
+// ValidateIdempotencyKey accepts a deliberately small HTTP-safe alphabet.
+// Spaces and control characters are excluded so intermediaries cannot
+// reinterpret producer keys. The relay stores only a producer-scoped hash.
+func ValidateIdempotencyKey(value string) error {
+	if len(value) < 1 || len(value) > 200 {
+		return errors.New("idempotency key must contain 1-200 visible ASCII characters")
+	}
+	for index := 0; index < len(value); index++ {
+		if value[index] < 0x21 || value[index] > 0x7e {
+			return errors.New("idempotency key must contain 1-200 visible ASCII characters")
+		}
+	}
+	return nil
+}
+
+func jobIdempotencyKey(owner, key string) []byte {
+	sum := sha256.Sum256([]byte(cleanLabel(owner, 120) + "\x00" + key + "\x00job-admission-v1"))
+	return []byte(hex.EncodeToString(sum[:]))
+}
+
+func lookupIdempotentJobTx(tx *bolt.Tx, owner, key, requestHash string) (Job, bool, error) {
+	indexKey := jobIdempotencyKey(owner, key)
+	raw := tx.Bucket(bucketJobIdempotency).Get(indexKey)
+	if raw == nil {
+		return Job{}, false, nil
+	}
+	var record jobIdempotencyRecord
+	if err := json.Unmarshal(raw, &record); err != nil {
+		return Job{}, false, fmt.Errorf("decode idempotency record: %w", err)
+	}
+	if record.RequestHash != requestHash {
+		return Job{}, false, ErrIdempotencyConflict
+	}
+	var job Job
+	if err := getJSON(tx.Bucket(bucketJobs), record.JobID, &job); err != nil {
+		return Job{}, false, fmt.Errorf("idempotency record references unavailable job: %w", err)
+	}
+	if job.OwnerSubject != cleanLabel(owner, 120) {
+		return Job{}, false, errors.New("idempotency record owner mismatch")
+	}
+	return job, true, nil
+}
+
+func saveIdempotentJobTx(tx *bolt.Tx, owner, key, requestHash, jobID string) error {
+	indexKey := jobIdempotencyKey(owner, key)
+	if tx.Bucket(bucketJobIdempotency).Get(indexKey) != nil {
+		return ErrIdempotencyConflict
+	}
+	if err := putJSON(tx.Bucket(bucketJobIdempotency), string(indexKey), jobIdempotencyRecord{JobID: jobID, RequestHash: requestHash}); err != nil {
+		return err
+	}
+	return tx.Bucket(bucketJobIdempotencyByJob).Put([]byte(jobID), indexKey)
 }
 
 // CreateReservationAdmitted garbage-collects expired reservations and admits a
@@ -616,16 +716,52 @@ func (s *Store) CreateReservationAdmitted(assignment Assignment, secret, owner s
 // the reservation into the bounded job queue. If the queue is full the
 // reservation remains available until its original expiry.
 func (s *Store) ConsumeReservationAdmitted(id, secret string, sealed *SealedEnvelope, source, tenant, owner string, priority, attempts, maxQueued int, maxOwner ...int) (Job, error) {
-	var job Job
 	ownerLimit := 0
 	if len(maxOwner) > 0 {
 		ownerLimit = maxOwner[0]
 	}
+	job, _, err := s.consumeReservationAdmitted(id, secret, sealed, source, tenant, owner, priority, attempts, maxQueued, ownerLimit, "", "")
+	return job, err
+}
+
+// ConsumeReservationAdmittedIdempotent gives the one-time E2EE promotion the
+// same retry semantics as ordinary admission. A replay is resolved before the
+// consumed reservation is read, but only when the exact sealed request hash
+// matches the producer-scoped key.
+func (s *Store) ConsumeReservationAdmittedIdempotent(id, secret string, sealed *SealedEnvelope, source, tenant, owner string, priority, attempts, maxQueued, maxOwner int, idempotencyKey, requestHash string) (Job, bool, error) {
+	return s.consumeReservationAdmitted(id, secret, sealed, source, tenant, owner, priority, attempts, maxQueued, maxOwner, idempotencyKey, requestHash)
+}
+
+func (s *Store) consumeReservationAdmitted(id, secret string, sealed *SealedEnvelope, source, tenant, owner string, priority, attempts, maxQueued, ownerLimit int, idempotencyKey, requestHash string) (Job, bool, error) {
+	var job Job
+	replayed := false
 	owner = cleanLabel(owner, 120)
 	if owner == "" {
-		return Job{}, ErrReservationOwnerMismatch
+		return Job{}, false, ErrReservationOwnerMismatch
+	}
+	if sealed == nil {
+		return Job{}, false, errors.New("reserved assignments require a sealed payload")
+	}
+	if idempotencyKey != "" {
+		if err := ValidateIdempotencyKey(idempotencyKey); err != nil {
+			return Job{}, false, err
+		}
+		if len(requestHash) != sha256.Size*2 {
+			return Job{}, false, errors.New("idempotency request hash is invalid")
+		}
 	}
 	err := s.db.Update(func(tx *bolt.Tx) error {
+		if idempotencyKey != "" {
+			existing, found, lookupErr := lookupIdempotentJobTx(tx, owner, idempotencyKey, requestHash)
+			if lookupErr != nil {
+				return lookupErr
+			}
+			if found {
+				job = existing
+				replayed = true
+				return nil
+			}
+		}
 		var saved reservation
 		if err := getJSON(tx.Bucket(bucketAssignments), id, &saved); err != nil {
 			return err
@@ -647,9 +783,6 @@ func (s *Store) ConsumeReservationAdmitted(id, secret string, sealed *SealedEnve
 		}
 		if saved.Assignment.Attempt != 1 {
 			return ErrReservationContextMismatch
-		}
-		if sealed == nil {
-			return errors.New("reserved assignments require a sealed payload")
 		}
 		if tx.Bucket(bucketJobs).Get([]byte(saved.Assignment.JobID)) != nil {
 			return os.ErrExist
@@ -685,9 +818,14 @@ func (s *Store) ConsumeReservationAdmitted(id, secret string, sealed *SealedEnve
 		if err := tx.Bucket(bucketQueue).Put(queueKey(job), []byte(job.ID)); err != nil {
 			return err
 		}
+		if idempotencyKey != "" {
+			if err := saveIdempotentJobTx(tx, owner, idempotencyKey, requestHash, job.ID); err != nil {
+				return err
+			}
+		}
 		return tx.Bucket(bucketAssignments).Delete([]byte(id))
 	})
-	return job, err
+	return job, replayed, err
 }
 
 // GarbageCollectReservations removes expired E2EE assignment reservations.
