@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.6.2 - 2026-09-20
+
+- Made release archives deterministic from a clean Git commit and
+  `SOURCE_DATE_EPOCH`, including normalized ordering, timestamps, ownership,
+  and file modes for ZIP and tar.gz outputs.
+- Added a CycloneDX 1.5 `SBOM.cdx.json` to every platform archive.
+- Added a machine-readable `BUILD-PROVENANCE.json` that records the source
+  commit, build inputs, reproducibility controls, and artifact digests.
+- Kept the trust boundary explicit: the current build record is unsigned and
+  is not presented as publisher identity or a third-party attestation.
+
 ## v0.6.1 - 2026-09-20
 
 - Fixed the Windows installer so `-NoPath` can intentionally create a custom

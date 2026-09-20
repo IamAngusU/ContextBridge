@@ -16,6 +16,26 @@ if ($VerifyOnly) {
     Write-Host "Release version $Version is valid." -ForegroundColor Green
     return
 }
+$gitCommand = Get-Command git -ErrorAction Stop
+$sourceCommit = (& $gitCommand.Source -C $repoRoot rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or -not ($sourceCommit -match '^[0-9a-f]{40,64}$')) {
+    throw "Release source commit could not be resolved."
+}
+$workingTreeStatus = @(& $gitCommand.Source -C $repoRoot status --porcelain --untracked-files=all)
+if ($LASTEXITCODE -ne 0) {
+    throw "Release source cleanliness could not be verified."
+}
+if ($workingTreeStatus.Count -ne 0) {
+    throw "Release builds require a clean Git worktree. Commit or remove local changes first."
+}
+$sourceDateEpoch = $env:SOURCE_DATE_EPOCH
+if (-not $sourceDateEpoch) {
+    $sourceDateEpoch = (& $gitCommand.Source -C $repoRoot show -s --format=%ct HEAD).Trim()
+}
+$epochValue = 0L
+if (-not [Int64]::TryParse($sourceDateEpoch, [ref]$epochValue) -or $epochValue -lt 0) {
+    throw "SOURCE_DATE_EPOCH must be a non-negative Unix timestamp."
+}
 if (-not $OutputDirectory) {
     $OutputDirectory = Join-Path $repoRoot "release-artifacts\$Version"
 }
@@ -32,6 +52,7 @@ $temporary = Join-Path ([IO.Path]::GetTempPath()) ("contextbridge-release-" + [g
 $originalGOOS = $env:GOOS
 $originalGOARCH = $env:GOARCH
 $originalCGO = $env:CGO_ENABLED
+$originalSourceDateEpoch = $env:SOURCE_DATE_EPOCH
 
 function Copy-BundleFiles([string]$Destination) {
     foreach ($directory in @("examples", "deploy", "docs")) {
@@ -46,11 +67,15 @@ try {
     New-Item -ItemType Directory -Path $releaseStage | Out-Null
     New-Item -ItemType Directory -Path $temporary -Force | Out-Null
     $archiveTool = Join-Path $temporary "contextbridge-release-archive.exe"
+    $sbomTool = Join-Path $temporary "contextbridge-release-sbom.exe"
+    $env:SOURCE_DATE_EPOCH = $sourceDateEpoch
     $env:GOOS = $originalGOOS
     $env:GOARCH = $originalGOARCH
     $env:CGO_ENABLED = $originalCGO
     & $goCommand.Source build -trimpath -o $archiveTool ./scripts/release-archive
     if ($LASTEXITCODE -ne 0) { throw "Release archive helper could not be built." }
+    & $goCommand.Source build -trimpath -o $sbomTool ./scripts/release-sbom
+    if ($LASTEXITCODE -ne 0) { throw "Release SBOM helper could not be built." }
 
     $platforms = @(
         @{ OS = "windows"; Arch = "amd64"; Extension = ".exe"; Format = "zip" },
@@ -68,21 +93,52 @@ try {
         $stage = Join-Path $temporary ("$($platform.OS)-$($platform.Arch)")
         New-Item -ItemType Directory -Path $stage -Force | Out-Null
         $binary = Join-Path $stage ("contextbridge" + $platform.Extension)
-        & $goCommand.Source build -trimpath -ldflags "-s -w -X main.version=$Version" -o $binary ./cmd/contextbridge
+        & $goCommand.Source build -trimpath -buildvcs=true -ldflags "-s -w -X main.version=$Version" -o $binary ./cmd/contextbridge
         if ($LASTEXITCODE -ne 0) { throw "Go build failed for $($platform.OS)/$($platform.Arch)." }
         Copy-BundleFiles $stage
+        & $sbomTool $binary $Version $sourceDateEpoch (Join-Path $stage "SBOM.cdx.json")
+        if ($LASTEXITCODE -ne 0) { throw "SBOM generation failed for $($platform.OS)/$($platform.Arch)." }
 
         $baseName = "contextbridge_$($platform.OS)_$($platform.Arch)"
         if ($platform.Format -eq "zip") {
             $asset = Join-Path $releaseStage "$baseName.zip"
-            Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $asset -CompressionLevel Optimal
         } else {
             $asset = Join-Path $releaseStage "$baseName.tar.gz"
-            & $archiveTool $stage $asset
-            if ($LASTEXITCODE -ne 0) { throw "Archive creation failed for $baseName." }
         }
+        & $archiveTool $stage $asset
+        if ($LASTEXITCODE -ne 0) { throw "Archive creation failed for $baseName." }
     }
 
+    $subjects = @(Get-ChildItem -LiteralPath $releaseStage -File | Sort-Object Name | ForEach-Object {
+        [ordered]@{
+            name = $_.Name
+            sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            size_bytes = $_.Length
+        }
+    })
+    $provenance = [ordered]@{
+        schema_version = 1
+        kind = "unsigned-build-record"
+        release = $Version
+        source_repository = "https://github.com/IamAngusU/ContextBridge"
+        source_commit = $sourceCommit
+        source_date_epoch = $epochValue
+        builder = [ordered]@{
+            tool = "scripts/build-release.ps1"
+            go = ((& $goCommand.Source version) -join " ").Trim()
+        }
+        reproducibility = [ordered]@{
+            clean_git_worktree_required = $true
+            trimpath = $true
+            cgo_enabled = $false
+            normalized_archive_metadata = $true
+        }
+        signature_status = "unsigned"
+        subjects = $subjects
+    }
+    $utf8NoBom = New-Object Text.UTF8Encoding($false)
+    $provenanceJSON = ($provenance | ConvertTo-Json -Depth 8) -replace "`r`n", "`n"
+    [IO.File]::WriteAllText((Join-Path $releaseStage "BUILD-PROVENANCE.json"), ($provenanceJSON + "`n"), $utf8NoBom)
     Write-ContextBridgeChecksumFile -Directory $releaseStage -Path (Join-Path $releaseStage "SHA256SUMS")
     if (Test-Path -LiteralPath $outputPath) {
         throw "Release output appeared while the build was running: $outputPath"
@@ -93,6 +149,7 @@ try {
     $env:GOOS = $originalGOOS
     $env:GOARCH = $originalGOARCH
     $env:CGO_ENABLED = $originalCGO
+    $env:SOURCE_DATE_EPOCH = $originalSourceDateEpoch
     if (Test-Path -LiteralPath $releaseStage) {
         $resolvedStage = [IO.Path]::GetFullPath($releaseStage)
         $parentPrefix = [IO.Path]::GetFullPath($outputParent).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar

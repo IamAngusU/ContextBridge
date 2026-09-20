@@ -160,7 +160,8 @@ execution fingerprint where they cannot change model behavior.
 - Folder inbox: atomic file-based ingestion for simple local automation.
 
 See [docs/architecture.md](docs/architecture.md),
-[docs/security.md](docs/security.md), and [docs/adapters.md](docs/adapters.md).
+[docs/security.md](docs/security.md), [docs/supply-chain.md](docs/supply-chain.md),
+and [docs/adapters.md](docs/adapters.md).
 
 ## Honest boundaries
 
@@ -190,6 +191,9 @@ See [docs/architecture.md](docs/architecture.md),
   when the new executable is actually running and healthy.
 - Adapter endpoints are untrusted capability reporters; scheduling uses bounded
   normalized evidence and exact lease ownership.
+- Release archives are deterministic from a clean commit, contain a CycloneDX
+  SBOM, and ship with a machine-readable build record. That record is currently
+  unsigned and is not represented as proof of publisher identity.
 
 Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
