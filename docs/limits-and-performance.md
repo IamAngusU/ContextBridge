@@ -112,6 +112,62 @@ advertised endpoints, diagnostics, GPUs, models, capabilities, reconnects, and
 configured intervals. Bolt reuses pages and does not compact on deletion, so
 fresh-file growth is not a forecast for every retention mix.
 
+## Dated Linux/amd64 VPS snapshot
+
+This second snapshot was measured on 2026-09-20 from source commit
+`7018d831798f09719386432dde82db22b1184707`. The binary was built with the
+checksum-verified official Go 1.25.14 Linux/amd64 toolchain using `-trimpath
+-ldflags "-s -w"` and version label `v0.7.0-dev`. The host was Ubuntu 22.04.5
+LTS on a two-vCPU AMD EPYC 9354P allocation with 8.3 GB of memory.
+
+Settings matched the Windows run: 128 measured samples, eight warmups,
+concurrency 1/4/16/64, 1,000 cancelled jobs for database growth, and a
+ten-second idle window. The smaller shared VPS is intentionally reported
+separately instead of blending unlike hosts into one headline number.
+
+### Durable relay submit/read/cancel
+
+| Clients | p50 | p95 | p99 | Throughput |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 12.165 ms | 25.418 ms | 36.304 ms | 73.8 ops/s |
+| 4 | 34.951 ms | 66.869 ms | 84.926 ms | 104.8 ops/s |
+| 16 | 115.173 ms | 242.771 ms | 255.881 ms | 120.6 ops/s |
+| 64 | 351.352 ms | 423.437 ms | 426.053 ms | 165.1 ops/s |
+
+### Small E2EE job and result
+
+| Clients | p50 | p95 | p99 | Throughput |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.217 ms | 0.320 ms | 0.496 ms | 4,260.3 ops/s |
+| 4 | 0.253 ms | 0.773 ms | 2.138 ms | 7,563.5 ops/s |
+| 16 | 0.337 ms | 8.386 ms | 11.567 ms | 5,433.9 ops/s |
+| 64 | 0.278 ms | 9.192 ms | 10.715 ms | 8,053.8 ops/s |
+
+### Verify one 64 KiB artifact
+
+| Clients | p50 | p95 | p99 | Throughput |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.141 ms | 0.316 ms | 0.446 ms | 5,846.9 ops/s |
+| 4 | 0.239 ms | 1.031 ms | 1.175 ms | 10,402.4 ops/s |
+| 16 | 0.885 ms | 3.103 ms | 4.014 ms | 11,314.8 ops/s |
+| 64 | 3.059 ms | 8.398 ms | 8.935 ms | 12,022.0 ops/s |
+
+### Resource footprint
+
+| Measurement | Observation | Scope |
+| --- | ---: | --- |
+| Stripped core binary | 10.3 MiB | Built executable only |
+| Idle benchmark process + relay RSS | 12.7 MiB | Current Linux RSS after warmup |
+| Go heap allocated / runtime reserved | 0.8 MiB / 8.0 MiB | Same process and sample window |
+| Idle CPU | 0.10% of one core | 9.9 ms process CPU time during the 10 s window |
+| Fresh Bolt allocation growth | 4.0 MiB / 1,000 jobs | 1,000 small jobs created and cancelled; allocated file growth, not device writes |
+| Generic adapter status payload | 245 B / heartbeat; 172.3 KiB/hour | One idle endpoint at 5 s; application JSON only |
+| Worker heartbeat payload | 704 B / heartbeat; 495.0 KiB/hour | One GPU and one model at 5 s; WebSocket JSON only |
+
+The same exclusions and heartbeat caveats as the Windows snapshot apply. The
+VPS results demonstrate portability and constrained-host behavior; they are
+not presented as a comparison of operating systems.
+
 ## Explicit exclusions and unavailable metrics
 
 The benchmark excludes model/provider inference, adapter execution, Internet

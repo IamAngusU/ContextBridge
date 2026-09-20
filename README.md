@@ -60,17 +60,17 @@ capabilities, costs, agent approvals, and execution receipts.
 ## Measured bridge overhead
 
 ContextBridge measures its own coordination paths separately from model and
-network latency. On the dated Windows workstation snapshot documented below,
-the single-client p50 was **2.402 ms** for an authenticated durable
-submit/read/cancel cycle, **0.098 ms** for a small E2EE job-and-result round
-trip, and **0.065 ms** to decode, validate, and SHA-256-check a 64 KiB
-artifact.
+network latency. These single-client observations cover both a Windows
+workstation and a constrained two-vCPU Linux VPS.
 
-| Operation | p50 | p95 | p99 | Throughput |
-| --- | ---: | ---: | ---: | ---: |
-| Durable relay submit/read/cancel | 2.402 ms | 3.516 ms | 3.740 ms | 418.5 ops/s |
-| Small E2EE job + result | 0.098 ms | 0.168 ms | 0.193 ms | 8,582.9 ops/s |
-| Verify one 64 KiB artifact | 0.065 ms | 0.125 ms | 0.134 ms | 13,834.8 ops/s |
+| Host | Operation | p50 | p95 | p99 | Throughput |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Windows · i9-12900K | Durable relay submit/read/cancel | 2.402 ms | 3.516 ms | 3.740 ms | 418.5 ops/s |
+| Windows · i9-12900K | Small E2EE job + result | 0.098 ms | 0.168 ms | 0.193 ms | 8,582.9 ops/s |
+| Windows · i9-12900K | Verify one 64 KiB artifact | 0.065 ms | 0.125 ms | 0.134 ms | 13,834.8 ops/s |
+| Linux · 2-vCPU VPS | Durable relay submit/read/cancel | 12.165 ms | 25.418 ms | 36.304 ms | 73.8 ops/s |
+| Linux · 2-vCPU VPS | Small E2EE job + result | 0.217 ms | 0.320 ms | 0.496 ms | 4,260.3 ops/s |
+| Linux · 2-vCPU VPS | Verify one 64 KiB artifact | 0.141 ms | 0.316 ms | 0.446 ms | 5,846.9 ops/s |
 
 These are reproducible engineering observations, not an SLA and not AI
 inference time. The exact source commit, host, sample settings, concurrency

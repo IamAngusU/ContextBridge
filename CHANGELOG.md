@@ -14,6 +14,17 @@
   vendored Go module sources to every AGPL binary release.
 - Made the AGPL release builder reject every version below v0.7.0 so an
   accidental v0.6.4 cannot cross the documented license boundary.
+- Restored the canonical ContextBridge wordmark to the public landing page and
+  documented the public core by capability instead of relying on source-code
+  discovery.
+- Published reproducible Windows and Linux bridge-only latency, throughput,
+  resource-footprint, payload-limit, and exclusion evidence without folding
+  model or Internet latency into the numbers.
+- Added public operational guides for pooling, placement, schedules, bounded
+  agents, integrations, portable resource packs, and explicit limits.
+- Added distribution regression tests that require the brand and core guides
+  while preventing private out-of-tree adapter names from entering public text
+  surfaces.
 
 ## v0.6.3 - 2026-09-20
 
