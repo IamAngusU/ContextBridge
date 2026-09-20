@@ -1,0 +1,673 @@
+package bridge
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"io"
+	"math"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+)
+
+// Adapter heartbeats tolerate short scheduler stalls without hiding an
+// explicit paused state.
+const adapterHeartbeatGracePeriod = 90 * time.Second
+
+const (
+	maximumMetricsFileBytes = 8 << 20
+	maximumMetricDimensions = 1024
+	maximumMetricKeyBytes   = 256
+)
+
+type Store struct {
+	dir       string
+	mu        sync.Mutex
+	queued    map[string]*queuedJob
+	completed map[string]Output
+	adapter   AdapterClientStatus
+	tunnel    TunnelStatus
+	activity  []Activity
+	metrics   Metrics
+}
+
+type TunnelStatus struct {
+	Connected  bool      `json:"connected"`
+	State      string    `json:"state"`
+	Target     string    `json:"target,omitempty"`
+	Transport  string    `json:"transport,omitempty"`
+	LocalPort  int       `json:"local_port,omitempty"`
+	RemotePort int       `json:"remote_port,omitempty"`
+	LastSeen   time.Time `json:"last_seen,omitempty"`
+}
+
+type Metrics struct {
+	JobsTotal                 uint64            `json:"jobs_total"`
+	JobsFailed                uint64            `json:"jobs_failed"`
+	LatencyTotalMS            uint64            `json:"latency_total_ms"`
+	ByRoute                   map[string]uint64 `json:"by_route"`
+	ByTask                    map[string]uint64 `json:"by_task"`
+	ByProvider                map[string]uint64 `json:"by_provider"`
+	ByModel                   map[string]uint64 `json:"by_model"`
+	ByFlag                    map[string]uint64 `json:"by_flag"`
+	ProviderLatency           map[string]uint64 `json:"provider_latency_ms"`
+	ProviderSamples           map[string]uint64 `json:"provider_latency_samples"`
+	ProviderFailures          map[string]uint64 `json:"provider_failures"`
+	ByAttemptedProvider       map[string]uint64 `json:"by_attempted_provider"`
+	AttemptedProviderFailures map[string]uint64 `json:"attempted_provider_failures"`
+	ByAttemptedModel          map[string]uint64 `json:"by_attempted_model"`
+	ByReasoning               map[string]uint64 `json:"by_reasoning"`
+	ReasoningFailures         map[string]uint64 `json:"reasoning_failures"`
+	ModelFailures             map[string]uint64 `json:"model_failures"`
+	BySelection               map[string]uint64 `json:"by_selection"`
+	SelectionFailures         map[string]uint64 `json:"selection_failures"`
+	EmbeddingVectors          uint64            `json:"embedding_vectors"`
+	UpdatedAt                 time.Time         `json:"updated_at"`
+}
+
+type AdapterClientStatus struct {
+	Connected       bool                    `json:"connected"`
+	State           string                  `json:"state"`
+	ProfileLabel    string                  `json:"profile_label,omitempty"`
+	Ready           bool                    `json:"ready"`
+	AdapterVersion  string                  `json:"adapter_version,omitempty"`
+	Adapter         string                  `json:"adapter,omitempty"`
+	ActiveEndpoints int                     `json:"active_endpoints,omitempty"`
+	BusyEndpoints   int                     `json:"busy_endpoints,omitempty"`
+	Endpoints       []AdapterEndpointStatus `json:"endpoints,omitempty"`
+	LastSeen        time.Time               `json:"last_seen,omitempty"`
+}
+
+type AdapterEndpointStatus struct {
+	ID                  int                     `json:"id,omitempty"`
+	Profile             string                  `json:"profile,omitempty"`
+	State               string                  `json:"state,omitempty"`
+	SessionKey          string                  `json:"session_key,omitempty"`
+	SessionKeySupported bool                    `json:"session_key_supported,omitempty"`
+	CanCreateSession    bool                    `json:"can_create_session,omitempty"`
+	DefaultNewSession   bool                    `json:"default_new_session,omitempty"`
+	CurrentModel        string                  `json:"current_model,omitempty"`
+	CurrentReasoning    string                  `json:"current_reasoning,omitempty"`
+	Models              []string                `json:"models,omitempty"`
+	ReasoningLevels     []string                `json:"reasoning_levels,omitempty"`
+	ModelScan           string                  `json:"model_scan,omitempty"`
+	ReasoningScan       string                  `json:"reasoning_scan,omitempty"`
+	LastFailure         *AdapterEndpointFailure `json:"last_failure,omitempty"`
+}
+
+type AdapterEndpointFailure struct {
+	Code        string    `json:"code"`
+	Reason      string    `json:"reason,omitempty"`
+	LeaseReason string    `json:"lease_reason,omitempty"`
+	At          time.Time `json:"at"`
+}
+
+type Activity struct {
+	Time    time.Time `json:"time"`
+	Kind    string    `json:"kind"`
+	Message string    `json:"message"`
+	JobID   string    `json:"job_id,omitempty"`
+}
+
+type queuedJob struct {
+	job             Job
+	profile         interface{}
+	deadline        time.Time
+	leasedTil       time.Time
+	leaseGeneration uint64
+	actionUnknown   bool
+	done            chan Output
+	progress        *AdapterProgress
+}
+
+func (s *Store) UpdateAdapterProgress(id string, generation uint64, progress AdapterProgress) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.queued[id]
+	now := time.Now()
+	if !ok || now.After(item.deadline) {
+		if ok {
+			delete(s.queued, id)
+		}
+		return false
+	}
+	if !validAdapterLease(item, generation, now) {
+		return false
+	}
+	if item.progress != nil && progress.Sequence <= item.progress.Sequence {
+		return true
+	}
+	progress.UpdatedAt = time.Now().UTC()
+	copy := progress
+	item.progress = &copy
+	return true
+}
+
+func (s *Store) AdapterProgress(id string) (AdapterProgress, bool, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.queued[id]
+	if !ok || time.Now().After(item.deadline) {
+		if ok {
+			delete(s.queued, id)
+		}
+		return AdapterProgress{}, false, false
+	}
+	if item.progress == nil {
+		return AdapterProgress{}, true, false
+	}
+	return *item.progress, true, true
+}
+
+func NewStore(dir string) (*Store, error) {
+	if err := os.MkdirAll(filepath.Join(dir, "jobs"), 0700); err != nil {
+		return nil, err
+	}
+	store := &Store{
+		dir:       dir,
+		queued:    map[string]*queuedJob{},
+		completed: map[string]Output{},
+		metrics: Metrics{
+			ByRoute: map[string]uint64{}, ByTask: map[string]uint64{}, ByProvider: map[string]uint64{},
+			ByModel: map[string]uint64{}, ByFlag: map[string]uint64{}, ProviderLatency: map[string]uint64{}, ProviderSamples: map[string]uint64{}, ProviderFailures: map[string]uint64{},
+			ByAttemptedProvider: map[string]uint64{}, AttemptedProviderFailures: map[string]uint64{}, ByAttemptedModel: map[string]uint64{}, ByReasoning: map[string]uint64{}, ReasoningFailures: map[string]uint64{}, ModelFailures: map[string]uint64{}, BySelection: map[string]uint64{}, SelectionFailures: map[string]uint64{},
+		},
+	}
+	raw, _ := readMetricsFile(filepath.Join(dir, "metrics.json"))
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &store.metrics)
+	}
+	store.metrics.normalizeDimensions()
+	return store, nil
+}
+
+func (s *Store) SaveJob(job Job) error {
+	raw, err := json.MarshalIndent(job, "", "  ")
+	if err != nil {
+		return err
+	}
+	file, err := os.OpenFile(filepath.Join(s.dir, "jobs", storageID(job.ID)+".json"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	_, err = file.Write(append(raw, '\n'))
+	return err
+}
+
+func (s *Store) SaveOutput(id string, output Output) error {
+	payload := interface{}(output)
+	if output.Mode == "decision" && output.Decision != nil {
+		payload = *output.Decision
+	}
+	raw, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return err
+	}
+	// #nosec G703 -- storageID returns a validated safe ID or a fixed-length SHA-256-derived name.
+	return os.WriteFile(filepath.Join(s.dir, "jobs", storageID(id)+".result.json"), append(raw, '\n'), 0600)
+}
+
+func (s *Store) RecordCompleted(job Job, output Output) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.completed[job.ID] = output
+	s.metrics.JobsTotal = saturatingMetricAdd(s.metrics.JobsTotal, 1)
+	if output.Error != "" {
+		s.metrics.JobsFailed = saturatingMetricAdd(s.metrics.JobsFailed, 1)
+	}
+	if output.LatencyMS > 0 {
+		s.metrics.LatencyTotalMS = saturatingMetricAdd(s.metrics.LatencyTotalMS, uint64(output.LatencyMS))
+	}
+	route := job.Route
+	if route == "" {
+		route = "default"
+	}
+	task := job.Task
+	if task == "" {
+		task = job.Kind
+	}
+	if task == "" {
+		task = output.Mode
+	}
+	provider := output.Provider
+	model := output.Model
+	if provider == "" && output.Decision != nil {
+		provider = output.Decision.Provider
+	}
+	if model == "" && output.Decision != nil {
+		model = output.Decision.Model
+	}
+	if provider == "" {
+		provider = "unknown"
+	}
+	if model == "" {
+		model = "unknown"
+	}
+	incrementMetric(s.metrics.ByRoute, route, 1)
+	incrementMetric(s.metrics.ByTask, task, 1)
+	incrementMetric(s.metrics.ByProvider, provider, 1)
+	incrementMetric(s.metrics.ByModel, model, 1)
+	attemptedProvider := strings.TrimSpace(job.Provider)
+	if attemptedProvider == "" {
+		attemptedProvider = strings.TrimSpace(job.routeProvider)
+	}
+	if attemptedProvider == "" {
+		attemptedProvider = provider
+	}
+	attemptedModel := strings.TrimSpace(job.Model)
+	if attemptedModel == "" {
+		attemptedModel = strings.TrimSpace(output.SelectedModel)
+	}
+	if attemptedModel == "" {
+		attemptedModel = model
+	}
+	reasoning := strings.TrimSpace(job.Reasoning)
+	if reasoning == "" {
+		reasoning = strings.TrimSpace(output.SelectedReasoning)
+	}
+	if reasoning == "" {
+		reasoning = "unknown"
+	}
+	selection := attemptedProvider + " / " + attemptedModel + " / " + reasoning
+	incrementMetric(s.metrics.ByAttemptedProvider, attemptedProvider, 1)
+	incrementMetric(s.metrics.ByAttemptedModel, attemptedModel, 1)
+	incrementMetric(s.metrics.ByReasoning, reasoning, 1)
+	incrementMetric(s.metrics.BySelection, selection, 1)
+	if output.Error != "" {
+		incrementMetric(s.metrics.AttemptedProviderFailures, attemptedProvider, 1)
+		incrementMetric(s.metrics.ModelFailures, attemptedModel, 1)
+		incrementMetric(s.metrics.ReasoningFailures, reasoning, 1)
+		incrementMetric(s.metrics.SelectionFailures, selection, 1)
+	}
+	if output.LatencyMS > 0 {
+		incrementMetric(s.metrics.ProviderLatency, provider, uint64(output.LatencyMS))
+		incrementMetric(s.metrics.ProviderSamples, provider, 1)
+	}
+	if output.Error != "" {
+		incrementMetric(s.metrics.ProviderFailures, provider, 1)
+	}
+	if output.Decision != nil {
+		for _, flag := range output.Decision.Flags {
+			if flag != "" {
+				incrementMetric(s.metrics.ByFlag, flag, 1)
+			}
+		}
+	}
+	s.metrics.EmbeddingVectors = saturatingMetricAdd(s.metrics.EmbeddingVectors, uint64(len(output.Embeddings)))
+	s.metrics.UpdatedAt = time.Now().UTC()
+	s.persistMetricsLocked()
+}
+
+func readMetricsFile(path string) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Size() < 0 || info.Size() > maximumMetricsFileBytes {
+		return nil, errors.New("metrics file is not a bounded regular file")
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, maximumMetricsFileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > maximumMetricsFileBytes {
+		return nil, errors.New("metrics file exceeds its size limit")
+	}
+	return raw, nil
+}
+
+func (metrics *Metrics) normalizeDimensions() {
+	metrics.ByRoute = normalizeMetricMap(metrics.ByRoute)
+	metrics.ByTask = normalizeMetricMap(metrics.ByTask)
+	metrics.ByProvider = normalizeMetricMap(metrics.ByProvider)
+	metrics.ByModel = normalizeMetricMap(metrics.ByModel)
+	metrics.ByFlag = normalizeMetricMap(metrics.ByFlag)
+	metrics.ProviderLatency = normalizeMetricMap(metrics.ProviderLatency)
+	metrics.ProviderSamples = normalizeMetricMap(metrics.ProviderSamples)
+	metrics.ProviderFailures = normalizeMetricMap(metrics.ProviderFailures)
+	metrics.ByAttemptedProvider = normalizeMetricMap(metrics.ByAttemptedProvider)
+	metrics.AttemptedProviderFailures = normalizeMetricMap(metrics.AttemptedProviderFailures)
+	metrics.ByAttemptedModel = normalizeMetricMap(metrics.ByAttemptedModel)
+	metrics.ByReasoning = normalizeMetricMap(metrics.ByReasoning)
+	metrics.ReasoningFailures = normalizeMetricMap(metrics.ReasoningFailures)
+	metrics.ModelFailures = normalizeMetricMap(metrics.ModelFailures)
+	metrics.BySelection = normalizeMetricMap(metrics.BySelection)
+	metrics.SelectionFailures = normalizeMetricMap(metrics.SelectionFailures)
+}
+
+func normalizeMetricMap(input map[string]uint64) map[string]uint64 {
+	result := make(map[string]uint64, min(len(input), maximumMetricDimensions))
+	keys := make([]string, 0, len(input))
+	for key := range input {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		incrementMetric(result, key, input[key])
+	}
+	return result
+}
+
+func incrementMetric(values map[string]uint64, key string, delta uint64) {
+	key = truncateUTF8(strings.TrimSpace(key), maximumMetricKeyBytes)
+	if key == "" {
+		key = "unknown"
+	}
+	if _, exists := values[key]; !exists && len(values) >= maximumMetricDimensions-1 {
+		key = "other"
+	}
+	values[key] = saturatingMetricAdd(values[key], delta)
+}
+
+func saturatingMetricAdd(left, right uint64) uint64 {
+	if math.MaxUint64-left < right {
+		return math.MaxUint64
+	}
+	return left + right
+}
+
+func storageID(id string) string {
+	if jobIDPattern.MatchString(id) && !strings.Contains(id, "..") {
+		return id
+	}
+	sum := sha256.Sum256([]byte(id))
+	return "job-" + hex.EncodeToString(sum[:16])
+}
+
+func (s *Store) Queue(job Job, profile interface{}, timeout time.Duration) <-chan Output {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	done := make(chan Output, 1)
+	s.queued[job.ID] = &queuedJob{
+		job:      job,
+		profile:  profile,
+		deadline: time.Now().Add(timeout),
+		done:     done,
+	}
+	s.addActivityLocked("queued", "Adapter job queued", job.ID)
+	return done
+}
+
+func (s *Store) NextAdapterJob(profile string, lease time.Duration) *adapterJob {
+	return s.NextAdapterJobForEndpoint(profile, 0, lease)
+}
+
+func (s *Store) NextAdapterJobForEndpoint(profile string, endpointID int, lease time.Duration) *adapterJob {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	for id, item := range s.queued {
+		if now.After(item.deadline) {
+			delete(s.queued, id)
+			continue
+		}
+		if now.Before(item.leasedTil) {
+			continue
+		}
+		if item.job.ContextBridgeAdapterEndpointID > 0 && item.job.ContextBridgeAdapterEndpointID != endpointID {
+			continue
+		}
+		if profile != "" {
+			if p, ok := item.profile.(map[string]interface{}); ok {
+				if name, _ := p["name"].(string); name != "" && name != profile {
+					continue
+				}
+			}
+		}
+		item.leaseGeneration++
+		if item.leaseGeneration == 0 {
+			item.leaseGeneration = 1
+		}
+		item.leasedTil = now.Add(lease)
+		return &adapterJob{Job: item.job, Profile: item.profile, Deadline: item.deadline,
+			LeaseGeneration: item.leaseGeneration, LeaseExpiresAt: item.leasedTil, ObservationOnly: item.actionUnknown}
+	}
+	return nil
+}
+
+func (s *Store) Complete(id string, generation uint64, output Output) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.queued[id]
+	if !ok {
+		return false
+	}
+	if time.Now().After(item.deadline) {
+		delete(s.queued, id)
+		return false
+	}
+	if !validAdapterLease(item, generation, time.Now()) {
+		return false
+	}
+	delete(s.queued, id)
+	completed := cloneOutput(output)
+	s.completed[id] = completed
+	message := "Adapter result received"
+	if output.Decision != nil {
+		message += ": " + output.Decision.Verdict
+	} else if output.Error != "" {
+		message += ": " + output.Error
+	}
+	s.addActivityLocked("completed", message, id)
+	item.done <- completed
+	close(item.done)
+	return true
+}
+
+func cloneOutput(output Output) Output {
+	clone := output
+	clone.Artifacts = append([]Artifact{}, output.Artifacts...)
+	if output.Decision != nil {
+		decision := *output.Decision
+		decision.Flags = append([]string{}, output.Decision.Flags...)
+		clone.Decision = &decision
+	}
+	return clone
+}
+
+func (s *Store) Cancel(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.queued, id)
+}
+
+func (s *Store) Renew(id string, generation uint64, lease time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.queued[id]
+	now := time.Now()
+	if !ok || now.After(item.deadline) {
+		if ok {
+			delete(s.queued, id)
+		}
+		return false
+	}
+	if !validAdapterLease(item, generation, now) {
+		return false
+	}
+	item.leasedTil = now.Add(lease)
+	return true
+}
+
+// ReleaseAdapterLease returns an unprocessed lease to the adapter queue. It
+// never clears actionUnknown: if an external action may already have happened,
+// the next generation remains observation-only.
+func (s *Store) ReleaseAdapterLease(id string, generation uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.queued[id]
+	now := time.Now()
+	if !ok || now.After(item.deadline) || !validAdapterLease(item, generation, now) {
+		return false
+	}
+	item.leasedTil = time.Time{}
+	return true
+}
+
+// AdapterLeaseActive reports whether generation still owns the current,
+// unexpired adapter lease. Unlike Renew it never extends the lease. The
+// adapter uses this after a process restart to reserve the endpoint before it
+// starts polling for more work without keeping an
+// abandoned job alive merely by checking it.
+func (s *Store) AdapterLeaseStatus(id string, generation uint64) (time.Time, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.queued[id]
+	now := time.Now()
+	if !ok || now.After(item.deadline) || !validAdapterLease(item, generation, now) {
+		return time.Time{}, false
+	}
+	return item.leasedTil.UTC(), true
+}
+
+// MarkAdapterAction is the point of no automatic retry. It is called before
+// the adapter crosses its external side-effect boundary. If this worker
+// disappears afterward, the next lease is observation-only because the
+// external system may already have accepted the action.
+func (s *Store) MarkAdapterAction(id string, generation uint64, lease time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.queued[id]
+	now := time.Now()
+	if !ok || now.After(item.deadline) {
+		if ok {
+			delete(s.queued, id)
+		}
+		return false
+	}
+	if !validAdapterLease(item, generation, now) {
+		return false
+	}
+	item.actionUnknown = true
+	item.leasedTil = now.Add(lease)
+	return true
+}
+
+func validAdapterLease(item *queuedJob, generation uint64, now time.Time) bool {
+	return generation != 0 && item.leaseGeneration == generation && now.Before(item.leasedTil)
+}
+
+func (s *Store) AdapterCompletionContext(id string, generation uint64) (OutputSpec, string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.queued[id]
+	if !ok || !validAdapterLease(item, generation, time.Now()) {
+		return OutputSpec{}, "", false
+	}
+	model := "adapter-endpoint"
+	if requested := strings.TrimSpace(item.job.Model); requested != "" {
+		model = "adapter:" + requested
+	}
+	if profile, profileOK := item.profile.(map[string]interface{}); profileOK {
+		if name, _ := profile["name"].(string); name != "" && item.job.Model == "" {
+			model = "adapter:" + name
+		}
+	}
+	return item.job.Output, model, true
+}
+
+func (s *Store) Stats() (queued, completed int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.queued), len(s.completed)
+}
+
+func (s *Store) RecordAdapterHeartbeat(status AdapterClientStatus) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	status.Connected = status.State != "paused"
+	status.LastSeen = time.Now().UTC()
+	wasConnected := s.adapter.Connected && time.Since(s.adapter.LastSeen) < adapterHeartbeatGracePeriod
+	s.adapter = status
+	if status.Connected && !wasConnected {
+		s.addActivityLocked("adapter", "Adapter process connected", "")
+	}
+}
+
+func (s *Store) AdapterStatus() AdapterClientStatus {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	status := s.adapter
+	status.Connected = status.Connected && time.Since(status.LastSeen) < adapterHeartbeatGracePeriod
+	return status
+}
+
+func (s *Store) RecordTunnelHeartbeat(status TunnelStatus) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	status.Connected = status.State == "connected"
+	status.LastSeen = time.Now().UTC()
+	wasConnected := s.tunnel.Connected && time.Since(s.tunnel.LastSeen) < 45*time.Second
+	s.tunnel = status
+	if status.Connected && !wasConnected {
+		s.addActivityLocked("tunnel", "Secure tunnel connected", "")
+	}
+}
+
+func (s *Store) TunnelStatus() TunnelStatus {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	status := s.tunnel
+	status.Connected = status.Connected && time.Since(status.LastSeen) < 45*time.Second
+	if status.State == "" {
+		status.State = "not configured"
+	}
+	if !status.Connected && status.State == "connected" {
+		status.State = "stale"
+	}
+	return status
+}
+
+func (s *Store) Metrics() Metrics {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	raw, _ := json.Marshal(s.metrics)
+	var result Metrics
+	_ = json.Unmarshal(raw, &result)
+	return result
+}
+
+func (s *Store) Activity() []Activity {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result := make([]Activity, len(s.activity))
+	copy(result, s.activity)
+	return result
+}
+
+func (s *Store) AddActivity(kind, message, jobID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.addActivityLocked(kind, message, jobID)
+}
+
+func (s *Store) addActivityLocked(kind, message, jobID string) {
+	s.activity = append([]Activity{{
+		Time: time.Now().UTC(), Kind: kind, Message: message, JobID: jobID,
+	}}, s.activity...)
+	if len(s.activity) > 60 {
+		s.activity = s.activity[:60]
+	}
+}
+
+func (s *Store) persistMetricsLocked() {
+	raw, err := json.MarshalIndent(s.metrics, "", "  ")
+	if err != nil {
+		return
+	}
+	temporary := filepath.Join(s.dir, "metrics.json.tmp")
+	if os.WriteFile(temporary, append(raw, '\n'), 0600) == nil {
+		_ = os.Rename(temporary, filepath.Join(s.dir, "metrics.json"))
+	}
+}

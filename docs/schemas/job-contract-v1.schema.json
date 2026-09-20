@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/IamAngusU/ContextBridge/blob/main/docs/schemas/job-contract-v1.schema.json",
+  "title": "ContextBridge Job Contract v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["requirements"],
+  "properties": {
+    "contract_version": { "const": "contextbridge.job.v1", "default": "contextbridge.job.v1" },
+    "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", "not": { "pattern": "\\.\\." } },
+    "tenant_id": { "type": "string" },
+    "source": { "type": "string" },
+    "requirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task"],
+      "properties": {
+        "task": { "type": "string", "minLength": 1 },
+        "session_id": { "type": "string" },
+        "provider": { "type": "string" },
+        "adapter_profile": { "type": "string" },
+        "model": { "type": "string" },
+        "reasoning": { "type": "string" },
+        "adapter_fresh_session": { "type": "boolean" },
+        "adapter_ephemeral_session": { "type": "boolean" },
+        "group": { "type": "string" },
+        "required_tags": { "type": "array", "maxItems": 32, "items": { "type": "string" } },
+        "preferred_nodes": { "type": "array", "maxItems": 32, "items": { "type": "string" } },
+        "min_free_vram_bytes": { "type": "integer", "minimum": 0 },
+        "vision": { "type": "boolean" },
+        "embedding": { "type": "boolean" },
+        "egress": { "type": "string", "enum": ["local_only", "remote_allowed"] },
+        "max_cost_usd": { "type": "number", "minimum": 0, "maximum": 1000000 }
+      }
+    },
+    "payload": {},
+    "sealed_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "ephemeral_public", "nonce", "ciphertext"],
+      "properties": {
+        "algorithm": { "type": "string" },
+        "ephemeral_public": { "type": "string" },
+        "nonce": { "type": "string" },
+        "ciphertext": { "type": "string" }
+      }
+    },
+    "assignment_id": { "type": "string" },
+    "assignment_secret": { "type": "string" },
+    "priority": { "type": "integer", "minimum": -100, "maximum": 100 },
+    "max_attempts": { "type": "integer" }
+  },
+  "oneOf": [
+    { "required": ["payload"], "not": { "required": ["sealed_payload"] } },
+    { "required": ["sealed_payload"], "not": { "required": ["payload"] } }
+  ],
+  "allOf": [
+    { "if": { "required": ["sealed_payload"] }, "then": { "required": ["assignment_id", "assignment_secret"] } },
+    {
+      "if": { "anyOf": [{ "required": ["assignment_id"] }, { "required": ["assignment_secret"] }] },
+      "then": { "required": ["assignment_id", "assignment_secret", "sealed_payload"] }
+    }
+  ]
+}

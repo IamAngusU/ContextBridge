@@ -1,0 +1,9 @@
+[Unit]
+Description=Verified ContextBridge relay update when idle
+After=network-online.target contextbridge-relay.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/contextbridge update auto --config /var/lib/contextbridge/config.yml --managed-service contextbridge-relay.service --relay-only --json
+TimeoutStartSec=240

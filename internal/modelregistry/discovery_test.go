@@ -1,0 +1,183 @@
+package modelregistry
+
+import (
+	"context"
+	"math"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/IamAngusU/ContextBridge/internal/config"
+)
+
+func TestMemoryEstimateSaturatesInsteadOfOverflowing(t *testing.T) {
+	if got := memoryEstimate(math.MaxInt64); got != math.MaxInt64 {
+		t.Fatalf("memory estimate overflowed: got %d", got)
+	}
+	if got := memoryEstimate(100); got != 120 {
+		t.Fatalf("memory estimate = %d, want 120", got)
+	}
+}
+
+func TestDiscoverOllamaAndLocalModels(t *testing.T) {
+	t.Setenv("OLLAMA_MODELS", filepath.Join(t.TempDir(), "ollama-models"))
+	t.Setenv("OLLAMA_HOST", "")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/tags":
+			_, _ = w.Write([]byte(`{"models":[{"name":"llava:7b","size":4096,"details":{"parameter_size":"7B","quantization_level":"Q4_K_M","family":"llava"}}]}`))
+		case "/api/ps":
+			_, _ = w.Write([]byte(`{"models":[{"name":"llava:7b","size_vram":2048}]}`))
+		case "/api/show":
+			_, _ = w.Write([]byte(`{"capabilities":["completion","vision"]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	directory := t.TempDir()
+	path := filepath.Join(directory, "qwen2.5-vl-7b-q4_k_m.gguf")
+	if err := os.WriteFile(path, make([]byte, 100), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{Storage: config.Storage{Models: directory}, Providers: config.Providers{Ollama: config.OllamaProvider{URL: server.URL}}}
+	models, err := Discover(context.Background(), cfg, []string{directory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 2 {
+		t.Fatalf("expected Ollama and local model, got %#v", models)
+	}
+	var local, ollama *DiscoveryEntry
+	for index := range models {
+		switch models[index].Provider {
+		case "local-file":
+			local = &models[index]
+		case "ollama":
+			ollama = &models[index]
+		}
+	}
+	if local == nil || local.Quantization != "Q4_K_M" || local.Parameters != "7B" || len(local.Capabilities) != 2 {
+		t.Fatalf("local metadata was not inferred: %#v", local)
+	}
+	if ollama == nil || !ollama.Loaded || ollama.VRAM != 2048 || len(ollama.Capabilities) != 2 || !ollama.CapabilitiesVerified || ollama.CapabilitySource != "ollama_show" {
+		t.Fatalf("Ollama runtime metadata was not discovered: %#v", ollama)
+	}
+}
+
+func TestDiscoverRejectsMissingPath(t *testing.T) {
+	t.Setenv("OLLAMA_MODELS", filepath.Join(t.TempDir(), "ollama-models"))
+	t.Setenv("OLLAMA_HOST", "")
+	_, err := Discover(context.Background(), config.Config{}, []string{filepath.Join(t.TempDir(), "missing")})
+	if err == nil {
+		t.Fatal("expected a missing model path to fail clearly")
+	}
+}
+
+func TestDiscoverOllamaTrustsAdvertisedCapabilitiesForOpaqueName(t *testing.T) {
+	t.Setenv("OLLAMA_MODELS", filepath.Join(t.TempDir(), "ollama-models"))
+	t.Setenv("OLLAMA_HOST", "")
+	showCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/tags":
+			// This is the official tags shape: capabilities live on /api/show.
+			_, _ = w.Write([]byte(`{"models":[{"name":"opaque:latest","digest":"sha256:opaque"}]}`))
+		case "/api/ps":
+			_, _ = w.Write([]byte(`{"models":[]}`))
+		case "/api/show":
+			if r.Method != http.MethodPost {
+				t.Errorf("show used %s, want POST", r.Method)
+			}
+			showCalls++
+			_, _ = w.Write([]byte(`{"capabilities":["completion","vision"]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := config.Config{Storage: config.Storage{Models: t.TempDir()}, Providers: config.Providers{Ollama: config.OllamaProvider{URL: server.URL}}}
+	models, err := Discover(context.Background(), cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 1 || strings.Join(models[0].Capabilities, ",") != "text,vision" || !models[0].CapabilitiesVerified || models[0].CapabilitySource != "ollama_show" {
+		t.Fatalf("advertised Ollama capabilities were not preserved: %#v", models)
+	}
+	if showCalls != 1 {
+		t.Fatalf("model capabilities were not read once from /api/show: %d", showCalls)
+	}
+	models, err = Discover(context.Background(), cfg, nil)
+	if err != nil || showCalls != 1 {
+		t.Fatalf("digest capability cache was not reused: calls=%d err=%v", showCalls, err)
+	}
+}
+
+func TestOllamaImageGenerationIsNotVisionUnderstanding(t *testing.T) {
+	capabilities := OllamaCapabilities([]string{"image"}, "misleading-vision-model")
+	if got := strings.Join(capabilities, ","); got != "image_generation" {
+		t.Fatalf("Ollama image generation was confused with vision understanding: %q", got)
+	}
+	if capabilities := OllamaCapabilities([]string{"unrecognized"}, "llava:7b"); len(capabilities) != 0 {
+		t.Fatalf("authoritative advertised capabilities fell back to name guessing: %#v", capabilities)
+	}
+}
+
+func TestOllamaCapabilityEvidenceMarksNameFallbackUnverified(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	capabilities, verified, source := ResolveOllamaCapabilityEvidence(context.Background(), server.Client(), server.URL, "llava:7b", "fallback-only", nil, "llava:7b")
+	if verified || source != "name_inference" || strings.Join(capabilities, ",") != "text,vision" {
+		t.Fatalf("name inference was not clearly separated from provider evidence: capabilities=%v verified=%v source=%q", capabilities, verified, source)
+	}
+}
+
+func TestDiscoverInstalledOllamaManifestWhileDaemonIsOffline(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("OLLAMA_MODELS", root)
+	t.Setenv("OLLAMA_HOST", "")
+	manifest := filepath.Join(root, "manifests", "registry.ollama.ai", "library", "qwen2.5vl", "7b")
+	if err := os.MkdirAll(filepath.Dir(manifest), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifest, []byte(`{"config":{"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"layers":[{"mediaType":"application/vnd.ollama.image.model","size":6000}]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "blobs"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "blobs", "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), []byte(`{"model_format":"gguf","model_family":"qwen25vl","model_type":"7B","file_type":"Q4_K_M"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	models, err := Discover(context.Background(), config.Config{Storage: config.Storage{Models: filepath.Join(root, "managed")}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 1 || models[0].Name != "qwen2.5vl:7b" || !models[0].Installed || models[0].Ready || models[0].Parameters != "7B" || len(models[0].Capabilities) != 2 {
+		t.Fatalf("offline manifest not classified correctly: %#v", models)
+	}
+}
+
+func TestDiscoverOllamaManifestRejectsOversizedMetadata(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("OLLAMA_MODELS", root)
+	manifest := filepath.Join(root, "manifests", "registry.ollama.ai", "library", "oversized", "latest")
+	if err := os.MkdirAll(filepath.Dir(manifest), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifest, make([]byte, (1<<20)+1), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if models := discoverOllamaManifests(); len(models) != 0 {
+		t.Fatalf("oversized manifest was inventoried: %#v", models)
+	}
+}

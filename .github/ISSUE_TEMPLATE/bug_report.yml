@@ -1,0 +1,59 @@
+name: Bug report
+description: Report a reproducible ContextBridge problem
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for helping make ContextBridge more reliable. Remove tokens and private submitted content from all logs.
+  - type: input
+    id: version
+    attributes:
+      label: ContextBridge version
+      description: Paste the output of `contextbridge version` and identify any separately installed adapter version.
+      placeholder: v0.6.0
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Local service, CLI, or terminal panel
+        - Dashboard or schedules
+        - Ollama or managed local runtime
+        - Hardware or model detection
+        - Cluster relay, worker, queue, or pairing
+        - Out-of-tree adapter or endpoint selection
+        - Images, uploads, or returned artifacts
+        - Installer, update, PATH, or autostart
+        - Protocol, security, or integration
+        - Website or documentation
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Include the smallest safe example that reproduces the issue.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed tokens, credentials, private URLs, and submitted user content.
+          required: true
