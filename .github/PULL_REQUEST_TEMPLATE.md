@@ -1,3 +1,8 @@
+> External core code pull requests cannot be accepted until the project
+> publishes a professionally reviewed contributor agreement for its
+> dual-licensing model. Issues, reproduction cases, and documentation feedback
+> remain welcome. See CONTRIBUTING.md before submitting.
+
 ## What changed
 
 Describe the user-visible behavior and why it is needed.

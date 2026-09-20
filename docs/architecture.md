@@ -9,7 +9,10 @@ ContextBridge separates four roles:
 
 Workers initiate outbound connections. A producer never receives a worker's
 local credential or direct filesystem access. The relay sees scheduling
-metadata; E2EE can keep prompt and result content opaque to it.
+metadata. For an E2EE job, prompt and result payloads can remain opaque to the
+relay, but job identifiers, timing, routing requirements, worker assignment,
+cost evidence, sizes, and other coordination metadata are not described as
+secret. ContextBridge does not claim that the relay is zero knowledge.
 
 Scheduling follows this order:
 

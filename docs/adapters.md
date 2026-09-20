@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
 # Out-of-tree adapters
 
 The public core exposes a provider-neutral adapter boundary for optional

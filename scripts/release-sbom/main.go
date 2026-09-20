@@ -90,7 +90,7 @@ func writeSBOM(binary, version, rawEpoch, output string) error {
 		BOMFormat: "CycloneDX", SpecVersion: "1.5", Version: 1,
 		Metadata: bomMetadata{
 			Timestamp: time.Unix(seconds, 0).UTC().Format(time.RFC3339),
-			Component: bomComponent{Type: "application", BOMRef: mainRef, Name: "ContextBridge", Version: strings.TrimPrefix(version, "v"), PURL: mainRef},
+			Component: rootComponent(mainRef, version),
 		},
 	}
 	dependencies := make([]string, 0, len(info.Deps))
@@ -131,6 +131,14 @@ func writeSBOM(binary, version, rawEpoch, output string) error {
 		return closeErr
 	}
 	return nil
+}
+
+func rootComponent(mainRef, version string) bomComponent {
+	return bomComponent{
+		Type: "application", BOMRef: mainRef, Name: "ContextBridge",
+		Version: strings.TrimPrefix(version, "v"), PURL: mainRef,
+		Licenses: []bomLicenseChoice{{License: &bomLicense{ID: "AGPL-3.0-only"}}},
+	}
 }
 
 func moduleComponent(path, version, sum string) (bomComponent, error) {

@@ -27,6 +27,7 @@ func TestPublicCoreDistributionSurfaceIsExplicit(t *testing.T) {
 		"docs":        true,
 		"examples":    true,
 		"internal":    true,
+		"LICENSES":    true,
 		"scripts":     true,
 	}
 	allowedFiles := map[string]bool{
@@ -42,7 +43,9 @@ func TestPublicCoreDistributionSurfaceIsExplicit(t *testing.T) {
 		"install.ps1":              true,
 		"install.sh":               true,
 		"LICENSE":                  true,
+		"LICENSING.md":             true,
 		"Makefile":                 true,
+		"NOTICE":                   true,
 		"README.md":                true,
 		"SECURITY.md":              true,
 		"TRADEMARKS.md":            true,

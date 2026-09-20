@@ -161,7 +161,8 @@ execution fingerprint where they cannot change model behavior.
 
 See [docs/architecture.md](docs/architecture.md),
 [docs/security.md](docs/security.md), [docs/supply-chain.md](docs/supply-chain.md),
-and [docs/adapters.md](docs/adapters.md).
+[docs/adapters.md](docs/adapters.md), and the
+[Hosted Relay readiness boundary](docs/hosted-relay.md).
 
 ## Honest boundaries
 
@@ -178,6 +179,8 @@ and [docs/adapters.md](docs/adapters.md).
 - The project does not claim GDPR certification, SOC 2 attestation, or a legal
   compliance guarantee. It provides controls and evidence that can support an
   operator's own compliance program.
+- The repository contains a relay foundation, not a currently offered
+  production multi-tenant Hosted Relay, SLA, or zero-knowledge service.
 
 ## Security defaults
 
@@ -211,8 +214,13 @@ GPU/runtime availability naturally varies by host.
 
 ## License
 
-MIT. See [LICENSE](LICENSE). The code license does not grant permission to use
-the ContextBridge name or visual identity in a way that implies an unofficial
-fork, service, or product is maintained or endorsed by this project. Accurate
-origin statements such as “based on ContextBridge” remain welcome; see
+The v0.7 development-line core is AGPL-3.0-only. Reusable schemas, examples,
+and the adapter contract are Apache-2.0 exceptions with explicit directory or
+SPDX notices. Published v0.6.x releases remain MIT; their permissions are not
+withdrawn. See [LICENSING.md](LICENSING.md) for the exact file boundaries.
+
+The code licenses do not grant permission to use the ContextBridge name or
+visual identity in a way that implies an unofficial fork, service, or product
+is maintained or endorsed by this project. Accurate origin statements such as
+“based on ContextBridge” remain welcome; see
 [TRADEMARKS.md](TRADEMARKS.md).

@@ -16,3 +16,8 @@ a planner cannot widen them.
 Do not expose the local loopback service publicly. Put a relay behind HTTPS,
 use separate scoped tokens, and keep configuration files readable only by the
 service account.
+
+E2EE is a payload boundary, not an anonymity claim. The relay still processes
+the coordination metadata required to authenticate, schedule, meter, and
+complete a job. Marketing and operator documentation must name the protected
+payloads rather than describe the entire service as zero knowledge.

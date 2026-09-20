@@ -55,10 +55,10 @@ $originalCGO = $env:CGO_ENABLED
 $originalSourceDateEpoch = $env:SOURCE_DATE_EPOCH
 
 function Copy-BundleFiles([string]$Destination) {
-    foreach ($directory in @("examples", "deploy", "docs")) {
+    foreach ($directory in @("examples", "deploy", "docs", "LICENSES")) {
         Copy-Item -LiteralPath (Join-Path $repoRoot $directory) -Destination (Join-Path $Destination $directory) -Recurse
     }
-    foreach ($file in @("config.example.yml", "README.md", "LICENSE", "TRADEMARKS.md", "THIRD_PARTY_NOTICES.txt", "CHANGELOG.md", "install.sh", "install.ps1")) {
+    foreach ($file in @("config.example.yml", "README.md", "LICENSE", "LICENSING.md", "NOTICE", "TRADEMARKS.md", "THIRD_PARTY_NOTICES.txt", "CHANGELOG.md", "install.sh", "install.ps1")) {
         Copy-Item -LiteralPath (Join-Path $repoRoot $file) -Destination (Join-Path $Destination $file)
     }
 }

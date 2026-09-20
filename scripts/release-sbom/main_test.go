@@ -8,6 +8,15 @@ import (
 	"testing"
 )
 
+func TestRootComponentDeclaresCoreLicense(t *testing.T) {
+	component := rootComponent("pkg:golang/example/contextbridge@v0.7.0", "v0.7.0")
+	if component.Version != "0.7.0" || len(component.Licenses) != 1 ||
+		component.Licenses[0].License == nil ||
+		component.Licenses[0].License.ID != "AGPL-3.0-only" {
+		t.Fatalf("root component = %#v", component)
+	}
+}
+
 func TestGoModuleDigest(t *testing.T) {
 	digest := sha256.Sum256([]byte("module"))
 	encoded := "h1:" + base64.StdEncoding.EncodeToString(digest[:])

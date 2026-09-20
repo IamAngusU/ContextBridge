@@ -64,9 +64,17 @@ try {
         if ($sbom.bomFormat -ne "CycloneDX" -or $sbom.specVersion -ne "1.5" -or $sbom.metadata.component.name -ne "ContextBridge") {
             throw "Embedded SBOM is not the expected CycloneDX document."
         }
+        if (-not $sbom.metadata.component.licenses -or $sbom.metadata.component.licenses[0].license.id -ne "AGPL-3.0-only") {
+            throw "Embedded SBOM does not identify the ContextBridge core license."
+        }
         $noticeEntry = $zip.Entries | Where-Object { $_.FullName -eq "THIRD_PARTY_NOTICES.txt" } | Select-Object -First 1
         if (-not $noticeEntry) {
             throw "Windows archive does not contain THIRD_PARTY_NOTICES.txt."
+        }
+        foreach ($requiredEntry in @("LICENSE", "LICENSING.md", "LICENSES/Apache-2.0.txt", "NOTICE", "TRADEMARKS.md")) {
+            if (-not ($zip.Entries | Where-Object { $_.FullName -eq $requiredEntry } | Select-Object -First 1)) {
+                throw "Windows archive does not contain $requiredEntry."
+            }
         }
         $noticeReader = New-Object IO.StreamReader($noticeEntry.Open())
         try {

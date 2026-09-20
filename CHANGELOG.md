@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased - v0.7.0
+
+- Established a forward-only license boundary: the core on this branch is
+  AGPL-3.0-only, while the published v0.6.x line remains available under MIT.
+- Marked the reusable schemas, examples, and adapter contract as Apache-2.0.
+- Documented the optional hosted-relay direction without claiming that the
+  current relay is already a production multi-tenant service or zero knowledge.
+- Paused external core code contributions until a professionally reviewed
+  contributor agreement supports the planned dual-licensing model.
+
 ## v0.6.3 - 2026-09-20
 
 - Added bundled third-party license and notice material to every release.
