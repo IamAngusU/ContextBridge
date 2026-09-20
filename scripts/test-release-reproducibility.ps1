@@ -64,6 +64,21 @@ try {
         if ($sbom.bomFormat -ne "CycloneDX" -or $sbom.specVersion -ne "1.5" -or $sbom.metadata.component.name -ne "ContextBridge") {
             throw "Embedded SBOM is not the expected CycloneDX document."
         }
+        $noticeEntry = $zip.Entries | Where-Object { $_.FullName -eq "THIRD_PARTY_NOTICES.txt" } | Select-Object -First 1
+        if (-not $noticeEntry) {
+            throw "Windows archive does not contain THIRD_PARTY_NOTICES.txt."
+        }
+        $noticeReader = New-Object IO.StreamReader($noticeEntry.Open())
+        try {
+            $notices = $noticeReader.ReadToEnd()
+        } finally {
+            $noticeReader.Dispose()
+        }
+        foreach ($component in $sbom.components) {
+            if (-not $component.licenses -or -not $notices.Contains("Component: $($component.name)@$($component.version)")) {
+                throw "Runtime component $($component.name)@$($component.version) lacks SBOM license metadata or bundled notice text."
+            }
+        }
     } finally {
         $zip.Dispose()
     }

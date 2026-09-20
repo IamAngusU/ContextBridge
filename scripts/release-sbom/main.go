@@ -30,17 +30,27 @@ type bomMetadata struct {
 }
 
 type bomComponent struct {
-	Type    string    `json:"type"`
-	BOMRef  string    `json:"bom-ref"`
-	Name    string    `json:"name"`
-	Version string    `json:"version,omitempty"`
-	PURL    string    `json:"purl,omitempty"`
-	Hashes  []bomHash `json:"hashes,omitempty"`
+	Type     string             `json:"type"`
+	BOMRef   string             `json:"bom-ref"`
+	Name     string             `json:"name"`
+	Version  string             `json:"version,omitempty"`
+	PURL     string             `json:"purl,omitempty"`
+	Hashes   []bomHash          `json:"hashes,omitempty"`
+	Licenses []bomLicenseChoice `json:"licenses,omitempty"`
 }
 
 type bomHash struct {
 	Algorithm string `json:"alg"`
 	Content   string `json:"content"`
+}
+
+type bomLicenseChoice struct {
+	License    *bomLicense `json:"license,omitempty"`
+	Expression string      `json:"expression,omitempty"`
+}
+
+type bomLicense struct {
+	ID string `json:"id"`
 }
 
 type bomDependency struct {
@@ -92,7 +102,10 @@ func writeSBOM(binary, version, rawEpoch, output string) error {
 		if dependency.Replace != nil {
 			module = dependency.Replace
 		}
-		component := moduleComponent(module.Path, module.Version, module.Sum)
+		component, err := moduleComponent(module.Path, module.Version, module.Sum)
+		if err != nil {
+			return err
+		}
 		document.Components = append(document.Components, component)
 		dependencies = append(dependencies, component.BOMRef)
 	}
@@ -120,13 +133,25 @@ func writeSBOM(binary, version, rawEpoch, output string) error {
 	return nil
 }
 
-func moduleComponent(path, version, sum string) bomComponent {
+func moduleComponent(path, version, sum string) (bomComponent, error) {
 	ref := modulePURL(path, version)
 	component := bomComponent{Type: "library", BOMRef: ref, Name: path, Version: version, PURL: ref}
 	if digest, ok := goModuleDigest(sum); ok {
 		component.Hashes = []bomHash{{Algorithm: "SHA-256", Content: digest}}
 	}
-	return component
+	licenses, ok := runtimeDependencyLicenses[path]
+	if !ok || len(licenses) == 0 {
+		return bomComponent{}, fmt.Errorf("runtime dependency %s has no reviewed license metadata", path)
+	}
+	component.Licenses = licenses
+	return component, nil
+}
+
+var runtimeDependencyLicenses = map[string][]bomLicenseChoice{
+	"github.com/coder/websocket": {{License: &bomLicense{ID: "ISC"}}},
+	"go.etcd.io/bbolt":           {{License: &bomLicense{ID: "MIT"}}},
+	"golang.org/x/sys":           {{License: &bomLicense{ID: "BSD-3-Clause"}}},
+	"gopkg.in/yaml.v3":           {{Expression: "MIT AND Apache-2.0"}},
 }
 
 func modulePURL(path, version string) string {

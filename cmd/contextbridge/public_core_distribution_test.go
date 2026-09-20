@@ -45,6 +45,8 @@ func TestPublicCoreDistributionSurfaceIsExplicit(t *testing.T) {
 		"Makefile":                 true,
 		"README.md":                true,
 		"SECURITY.md":              true,
+		"TRADEMARKS.md":            true,
+		"THIRD_PARTY_NOTICES.txt":  true,
 	}
 	entries, err := os.ReadDir(root)
 	if err != nil {

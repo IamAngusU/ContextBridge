@@ -9,7 +9,13 @@ Every platform archive contains:
 - the `contextbridge` executable;
 - the public documentation, examples, and deployment files; and
 - `SBOM.cdx.json`, a CycloneDX 1.5 software bill of materials derived from the
-  Go build information embedded in that executable.
+  Go build information embedded in that executable; and
+- `THIRD_PARTY_NOTICES.txt`, containing the license and notice material for
+  every dependency linked into that executable.
+
+Runtime license metadata is an allowlist. Adding a linked dependency without a
+reviewed SPDX license entry stops SBOM generation and therefore stops the
+release build instead of silently publishing incomplete attribution.
 
 The release directory also contains:
 

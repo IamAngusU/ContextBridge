@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.6.3 - 2026-09-20
+
+- Added bundled third-party license and notice material to every release.
+- Added reviewed SPDX license evidence to SBOM components and made release
+  generation fail closed when a new runtime dependency lacks that metadata.
+- Documented fair use of the ContextBridge project identity so forks can give
+  accurate credit without implying that modified products are official.
+
 ## v0.6.2 - 2026-09-20
 
 - Made release archives deterministic from a clean Git commit and

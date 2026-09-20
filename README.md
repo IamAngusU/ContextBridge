@@ -192,8 +192,9 @@ and [docs/adapters.md](docs/adapters.md).
 - Adapter endpoints are untrusted capability reporters; scheduling uses bounded
   normalized evidence and exact lease ownership.
 - Release archives are deterministic from a clean commit, contain a CycloneDX
-  SBOM, and ship with a machine-readable build record. That record is currently
-  unsigned and is not represented as proof of publisher identity.
+  SBOM with reviewed runtime-license metadata, bundled third-party notices, and
+  a machine-readable build record. That record is currently unsigned and is
+  not represented as proof of publisher identity.
 
 Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
@@ -210,4 +211,8 @@ GPU/runtime availability naturally varies by host.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE). The code license does not grant permission to use
+the ContextBridge name or visual identity in a way that implies an unofficial
+fork, service, or product is maintained or endorsed by this project. Accurate
+origin statements such as “based on ContextBridge” remain welcome; see
+[TRADEMARKS.md](TRADEMARKS.md).
