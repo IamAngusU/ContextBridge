@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.6.1 - 2026-09-20
+
+- Fixed the Windows installer so `-NoPath` can intentionally create a custom
+  launcher without treating its absence from `PATH` as a collision.
+
 ## v0.6.0 - 2026-09-20
 
 - Established the public ContextBridge core as a vendor-neutral local-first

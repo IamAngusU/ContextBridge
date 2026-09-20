@@ -276,9 +276,13 @@ if ($CommandName) {
     }
     $customAliasText = "$customAliasMarker`r`n@echo off`r`n`"%~dp0contextbridge.exe`" %*`r`n"
     [IO.File]::WriteAllText($customAlias, $customAliasText, [Text.Encoding]::ASCII)
-    $customCommandInstalled = Test-ContextBridgeCommandPath -CommandInfo (Get-Command $CommandName -ErrorAction SilentlyContinue | Select-Object -First 1) -ExpectedPath $customAlias
-    if (-not $customCommandInstalled) {
-        throw "The custom ContextBridge command '$CommandName' was created but is shadowed by another command."
+    if ($NoPath) {
+        Muted "The custom launcher is at $customAlias but was intentionally not added to PATH."
+    } else {
+        $customCommandInstalled = Test-ContextBridgeCommandPath -CommandInfo (Get-Command $CommandName -ErrorAction SilentlyContinue | Select-Object -First 1) -ExpectedPath $customAlias
+        if (-not $customCommandInstalled) {
+            throw "The custom ContextBridge command '$CommandName' was created but is shadowed by another command."
+        }
     }
 }
 
@@ -286,7 +290,7 @@ $completionCommandNames = @()
 if ($canonicalCommandInstalled) { $completionCommandNames += 'contextbridge' }
 if ($cbAliasInstalled) { $completionCommandNames += 'cb' }
 if ($customCommandInstalled) { $completionCommandNames += $CommandName }
-$preferredCommand = if ($customCommandInstalled) { $CommandName } elseif ($cbAliasInstalled -and -not $canonicalCommandInstalled) { 'cb' } else { 'contextbridge' }
+$preferredCommand = if ($customCommandInstalled) { $CommandName } elseif ($cbAliasInstalled -and -not $canonicalCommandInstalled) { 'cb' } elseif ($canonicalCommandInstalled) { 'contextbridge' } else { '"' + $exe + '"' }
 if ($completionCommandNames.Count -gt 0) {
     Good "Commands ready: $(Get-ContextBridgeCompletionCommands -Commands $completionCommandNames)"
 } else {
