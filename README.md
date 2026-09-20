@@ -196,8 +196,11 @@ See [docs/architecture.md](docs/architecture.md),
   normalized evidence and exact lease ownership.
 - Release archives are deterministic from a clean commit, contain a CycloneDX
   SBOM with reviewed runtime-license metadata, bundled third-party notices, and
-  a machine-readable build record. That record is currently unsigned and is
-  not represented as proof of publisher identity.
+  an explicit corresponding-source offer. Every AGPL binary release also
+  publishes a deterministic source archive with vendored Go module sources.
+  The machine-readable build record binds that archive to the exact commit.
+  That record is currently unsigned and is not represented as proof of
+  publisher identity.
 
 Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 

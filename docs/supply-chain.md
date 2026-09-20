@@ -17,6 +17,13 @@ Runtime license metadata is an allowlist. Adding a linked dependency without a
 reviewed SPDX license entry stops SBOM generation and therefore stops the
 release build instead of silently publishing incomplete attribution.
 
+AGPL binary releases additionally publish a deterministic
+contextbridge_vN.N.N_source.tar.gz asset. It contains the tracked source, build
+and installation scripts, license material, a commit-bound SOURCE.md, and
+vendored Go module sources. Every platform archive contains the same source
+offer, and BUILD-PROVENANCE.json binds the source asset to the exact release
+commit. Release notes must link the source asset explicitly.
+
 The release directory also contains:
 
 - `SHA256SUMS`, covering every archive and the build record; and

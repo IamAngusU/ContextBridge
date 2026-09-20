@@ -27,8 +27,8 @@ try {
 
     $firstHashes = Read-ReleaseHashes $first
     $secondHashes = Read-ReleaseHashes $second
-    if ($firstHashes.Count -ne 8 -or $secondHashes.Count -ne 8) {
-        throw "Expected six archives, BUILD-PROVENANCE.json, and SHA256SUMS in each release."
+    if ($firstHashes.Count -ne 9 -or $secondHashes.Count -ne 9) {
+        throw "Expected six platform archives, one source archive, BUILD-PROVENANCE.json, and SHA256SUMS in each release."
     }
     foreach ($name in $firstHashes.Keys) {
         if (-not $secondHashes.ContainsKey($name)) {
@@ -43,8 +43,27 @@ try {
     if ($record.kind -ne "unsigned-build-record" -or $record.signature_status -ne "unsigned") {
         throw "Build record does not state its unsigned trust boundary."
     }
-    if ($record.subjects.Count -ne 6 -or -not ($record.source_commit -match '^[0-9a-f]{40,64}$')) {
+    if ($record.subjects.Count -ne 7 -or -not ($record.source_commit -match '^[0-9a-f]{40,64}$')) {
         throw "Build record does not identify all archives or the exact source commit."
+    }
+    $sourceAssetName = "contextbridge_v0.0.0_source.tar.gz"
+    if ($record.corresponding_source.asset -ne $sourceAssetName -or
+        $record.corresponding_source.exact_commit -ne $record.source_commit -or
+        -not $record.corresponding_source.vendored_go_modules) {
+        throw "Build record does not identify the complete corresponding-source asset."
+    }
+    $sourceArchive = Join-Path $first $sourceAssetName
+    if (-not (Test-Path -LiteralPath $sourceArchive -PathType Leaf)) {
+        throw "Release does not contain the corresponding-source archive."
+    }
+    $sourceEntries = @(& tar -tzf $sourceArchive)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Corresponding-source archive could not be inspected."
+    }
+    foreach ($requiredSource in @("SOURCE.md", "LICENSE", "go.mod", "cmd/contextbridge/main.go", "scripts/build-release.ps1", "vendor/modules.txt")) {
+        if ($sourceEntries -notcontains $requiredSource) {
+            throw "Corresponding-source archive does not contain $requiredSource."
+        }
     }
 
     Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -71,10 +90,20 @@ try {
         if (-not $noticeEntry) {
             throw "Windows archive does not contain THIRD_PARTY_NOTICES.txt."
         }
-        foreach ($requiredEntry in @("LICENSE", "LICENSING.md", "LICENSES/Apache-2.0.txt", "NOTICE", "TRADEMARKS.md")) {
+        foreach ($requiredEntry in @("LICENSE", "LICENSING.md", "LICENSES/Apache-2.0.txt", "NOTICE", "SOURCE.md", "TRADEMARKS.md")) {
             if (-not ($zip.Entries | Where-Object { $_.FullName -eq $requiredEntry } | Select-Object -First 1)) {
                 throw "Windows archive does not contain $requiredEntry."
             }
+        }
+        $sourceEntry = $zip.Entries | Where-Object { $_.FullName -eq "SOURCE.md" } | Select-Object -First 1
+        $sourceReader = New-Object IO.StreamReader($sourceEntry.Open())
+        try {
+            $sourceOffer = $sourceReader.ReadToEnd()
+        } finally {
+            $sourceReader.Dispose()
+        }
+        if (-not $sourceOffer.Contains($record.source_commit) -or -not $sourceOffer.Contains($sourceAssetName)) {
+            throw "Binary archive source offer is not bound to the release commit and source asset."
         }
         $noticeReader = New-Object IO.StreamReader($noticeEntry.Open())
         try {
