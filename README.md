@@ -219,8 +219,8 @@ GPU/runtime availability naturally varies by host.
 
 The v0.7 development-line core is AGPL-3.0-only. Reusable schemas, examples,
 and the adapter contract are Apache-2.0 exceptions with explicit directory or
-SPDX notices. Published v0.6.x releases remain MIT; their permissions are not
-withdrawn. See [LICENSING.md](LICENSING.md) for the exact file boundaries.
+SPDX notices. Releases v0.6.0 through v0.6.3 remain MIT; their permissions are
+not withdrawn. See [LICENSING.md](LICENSING.md) for the exact file boundaries.
 
 The code licenses do not grant permission to use the ContextBridge name or
 visual identity in a way that implies an unofficial fork, service, or product

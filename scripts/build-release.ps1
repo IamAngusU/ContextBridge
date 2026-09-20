@@ -12,6 +12,11 @@ $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 if (-not ($Version -match '^v\d+\.\d+\.\d+$')) {
     throw "Stable releases require a version in the form vN.N.N."
 }
+$parsedVersion = [Version]$Version.Substring(1)
+$minimumAGPLRelease = [Version]"0.7.0"
+if ($parsedVersion -lt $minimumAGPLRelease) {
+    throw "This AGPL release builder refuses versions below v0.7.0. Published v0.6.0 through v0.6.3 remain MIT releases."
+}
 if ($VerifyOnly) {
     Write-Host "Release version $Version is valid." -ForegroundColor Green
     return

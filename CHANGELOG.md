@@ -3,7 +3,8 @@
 ## Unreleased - v0.7.0
 
 - Established a forward-only license boundary: the core on this branch is
-  AGPL-3.0-only, while the published v0.6.x line remains available under MIT.
+  AGPL-3.0-only, while published releases v0.6.0 through v0.6.3 remain
+  available under MIT.
 - Marked the reusable schemas, examples, and adapter contract as Apache-2.0.
 - Documented the optional hosted-relay direction without claiming that the
   current relay is already a production multi-tenant service or zero knowledge.
@@ -11,6 +12,8 @@
   contributor agreement supports the planned dual-licensing model.
 - Added a commit-bound source offer and deterministic source asset with
   vendored Go module sources to every AGPL binary release.
+- Made the AGPL release builder reject every version below v0.7.0 so an
+  accidental v0.6.4 cannot cross the documented license boundary.
 
 ## v0.6.3 - 2026-09-20
 

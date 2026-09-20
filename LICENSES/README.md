@@ -7,8 +7,8 @@
   [Apache-2.0.txt](Apache-2.0.txt).
 - Runtime dependency notices and their original terms are collected in
   [THIRD_PARTY_NOTICES.txt](../THIRD_PARTY_NOTICES.txt).
-- Published v0.6.x source and binaries retain the MIT License shipped with
-  those releases.
+- Source and binaries published as v0.6.0 through v0.6.3 retain the MIT
+  License shipped with those releases.
 
 An exception applies only where LICENSING.md, a directory notice, or an SPDX
 identifier says so. Otherwise the root core license applies.

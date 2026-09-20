@@ -19,10 +19,21 @@ function Read-ReleaseHashes([string]$Directory) {
 
 try {
     New-Item -ItemType Directory -Path $temporaryRoot | Out-Null
+    $legacyRejected = $false
+    try {
+        & (Join-Path $PSScriptRoot "build-release.ps1") -Version "v0.6.4" -VerifyOnly
+    } catch {
+        $legacyRejected = $_.Exception.Message.Contains("refuses versions below v0.7.0")
+    }
+    if (-not $legacyRejected) {
+        throw "AGPL release builder did not reject the legacy MIT version range."
+    }
+    & (Join-Path $PSScriptRoot "build-release.ps1") -Version "v0.7.0" -VerifyOnly
+    if (-not $?) { throw "AGPL release builder did not accept v0.7.0." }
     $env:SOURCE_DATE_EPOCH = $null
-    & (Join-Path $PSScriptRoot "build-release.ps1") -Version "v0.0.0" -OutputDirectory $first -GoExecutable $GoExecutable
+    & (Join-Path $PSScriptRoot "build-release.ps1") -Version "v0.7.0" -OutputDirectory $first -GoExecutable $GoExecutable
     if (-not $?) { throw "First release build failed." }
-    & (Join-Path $PSScriptRoot "build-release.ps1") -Version "v0.0.0" -OutputDirectory $second -GoExecutable $GoExecutable
+    & (Join-Path $PSScriptRoot "build-release.ps1") -Version "v0.7.0" -OutputDirectory $second -GoExecutable $GoExecutable
     if (-not $?) { throw "Second release build failed." }
 
     $firstHashes = Read-ReleaseHashes $first
@@ -46,7 +57,7 @@ try {
     if ($record.subjects.Count -ne 7 -or -not ($record.source_commit -match '^[0-9a-f]{40,64}$')) {
         throw "Build record does not identify all archives or the exact source commit."
     }
-    $sourceAssetName = "contextbridge_v0.0.0_source.tar.gz"
+    $sourceAssetName = "contextbridge_v0.7.0_source.tar.gz"
     if ($record.corresponding_source.asset -ne $sourceAssetName -or
         $record.corresponding_source.exact_commit -ne $record.source_commit -or
         -not $record.corresponding_source.vendored_go_modules) {

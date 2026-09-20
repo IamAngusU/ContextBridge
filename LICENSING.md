@@ -2,8 +2,9 @@
 
 ## Version boundary
 
-The published v0.6.x releases remain available under the MIT License that
-accompanied them. Those permissions are not withdrawn.
+The published v0.6.0 through v0.6.3 releases remain available under the MIT
+License that accompanied them. Those permissions are not withdrawn. The
+current AGPL release builder rejects any new version below v0.7.0.
 
 The ContextBridge core on the v0.7.0 development line is licensed under
 AGPL-3.0-only, copyright 2026 Angus Uelsmann. The full terms are in
