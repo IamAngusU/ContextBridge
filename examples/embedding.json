@@ -1,0 +1,16 @@
+{
+  "source": "search-indexer",
+  "route": "embedding",
+  "task": "embedding",
+  "tenant_id": "acme",
+  "texts": [
+    "First document",
+    "Second document"
+  ],
+  "metadata": {
+    "embedding_role": "passage"
+  },
+  "output": {
+    "mode": "embedding"
+  }
+}

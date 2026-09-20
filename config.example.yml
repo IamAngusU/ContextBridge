@@ -1,0 +1,180 @@
+version: 1
+
+server:
+  listen: 127.0.0.1:32145
+  token: replace-with-a-random-local-token
+
+storage:
+  directory: ./data
+  inbox: ./inbox
+  models: ./models
+
+runtime:
+  hardware_refresh_seconds: 10
+
+terminal:
+  style: panel # panel or classic; applies to interactive terminals only
+
+portable_resources:
+  enabled: true # bounded marker discovery only; never auto-runs removable-drive code
+  scan_roots: [] # empty = local fixed/removable volumes and common mount roots
+  max_packs: 32
+
+updates:
+  enabled: null # off by default; enable from the dashboard or CLI
+  channel: stable
+  repository: IamAngusU/ContextBridge
+  check_interval_hours: 24
+
+routes:
+  default:
+    provider: ollama
+    fallback: []
+    timeout_seconds: 180
+    adapter_profile: ""
+  inkwall:
+    provider: ollama
+    fallback: []
+    timeout_seconds: 180
+    adapter_profile: ""
+    task: moderation
+  extraction:
+    provider: nuextract
+    fallback: [ollama]
+    timeout_seconds: 180
+    adapter_profile: ""
+    task: extraction
+  embedding:
+    provider: jina
+    fallback: [ollama]
+    timeout_seconds: 180
+    task: embedding
+  rag_ingest:
+    provider: jina
+    timeout_seconds: 180
+    task: rag_ingest
+  rag_query:
+    provider: jina
+    timeout_seconds: 180
+    task: rag_query
+
+providers:
+  ollama:
+    url: http://127.0.0.1:11434
+    model: auto
+    images: true
+    timeout_seconds: 45
+  adapter:
+    lease_seconds: 90
+
+engines:
+  nuextract:
+    type: llama_cpp
+    model: nuextract3
+    executable: auto
+    listen: 127.0.0.1:32146
+    auto_start: false
+    gpu: prefer
+    mode: generation
+    timeout_seconds: 120
+  jina:
+    type: llama_cpp
+    model: jina-v4-retrieval
+    executable: auto
+    listen: 127.0.0.1:32147
+    auto_start: false
+    gpu: prefer
+    mode: embedding
+    pooling: mean
+    timeout_seconds: 120
+
+models:
+  nuextract3:
+    repository: numind/NuExtract3-GGUF
+    file: NuExtract3-Q4_K_M.gguf
+    projector_file: mmproj-NuExtract3-BF16.gguf
+    kind: extraction
+  jina-v4-retrieval:
+    repository: jinaai/jina-embeddings-v4-text-retrieval-GGUF
+    file: jina-embeddings-v4-text-retrieval-Q4_K_M.gguf
+    kind: embedding
+    query_prefix: "Query: "
+    passage_prefix: "Passage: "
+    dimensions: 2048
+
+tunnel:
+  mode: external
+  target: ""
+  local_port: 0
+  remote_port: 0
+
+rag:
+  enabled: true
+  backend: local
+  directory: ./data/rag
+  embedding_route: embedding
+  max_documents: 10000
+
+cluster:
+  relay:
+    enabled: false
+    listen: 127.0.0.1:32150
+    public_url: ""
+    database: ./data/cluster.db
+    admin_token: replace-with-a-random-relay-admin-token
+    allowed_origins: []
+    max_queue: 10000
+    max_job_bytes: 12582912
+    pairing_ttl_seconds: 600
+    retention_days: 30
+    max_terminal_jobs: 500
+    max_events: 5000
+    max_terminal_pipeline_runs: 200
+    max_session_placements: 5000
+    retention_sweep_seconds: 300
+  worker:
+    enabled: false
+    relay_url: ""
+    identity_file: ./data/cluster-identity.json
+    node_name: auto
+    groups: [default]
+    tags: []
+    max_concurrent: 1
+    allowed_tasks: []
+    allowed_providers: []
+    allowed_models: []
+    local_url: http://127.0.0.1:32145
+    local_token: replace-with-the-local-service-token
+    heartbeat_seconds: 5
+  policies:
+    allowed_tasks: [moderation, generation, extraction, embedding, rag_ingest, rag_query, vision]
+    max_attempts: 3
+    max_job_runtime_seconds: 900
+    max_pipeline_steps: 24
+    max_pipeline_runtime_seconds: 1800
+    # Optional named project authority envelopes are disabled unless the owner
+    # adds and explicitly enables them. See docs/bounded-agent.md.
+    agent_authorities: {}
+    execution:
+      enabled: false
+      tenant_mode: open
+      require_tenant: false
+      local_providers: [arsenal, llama_cpp, modelkit, modelkit_vision, ollama]
+      remote_providers: []
+      cost_bounded_providers: []
+      default:
+        egress: any
+        allowed_providers: []
+        allowed_groups: []
+        require_cost_budget: false
+        max_cost_usd: 0
+      tenants: {}
+  pricing:
+    compute_per_hour_usd: 0
+    input_per_million_usd: 0
+    output_per_million_usd: 0
+    equivalent_input_per_million_usd: 0
+    equivalent_output_per_million_usd: 0
+  pipelines: {}
+
+adapter_profiles: {}

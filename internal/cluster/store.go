@@ -1,0 +1,2495 @@
+package cluster
+
+import (
+	"bytes"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base32"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	bolt "go.etcd.io/bbolt"
+)
+
+var (
+	bucketJobs                = []byte("jobs")
+	bucketJobIndex            = []byte("job_index")
+	bucketJobOwnerIndex       = []byte("job_owner_index_v1")
+	bucketStoreMeta           = []byte("store_meta")
+	bucketQueue               = []byte("queue")
+	bucketNodes               = []byte("nodes")
+	bucketTokens              = []byte("tokens")
+	bucketPairings            = []byte("pairings")
+	bucketPairCodes           = []byte("pair_codes")
+	bucketAssignments         = []byte("assignments")
+	bucketEvents              = []byte("events")
+	bucketPipelineRuns        = []byte("pipeline_runs")
+	bucketSessionPlacements   = []byte("session_placements_v1")
+	bucketAdapterSessionLocks = []byte("adapter_session_locks_v1")
+	bucketJobIdempotency      = []byte("job_idempotency_v1")
+	bucketJobIdempotencyByJob = []byte("job_idempotency_by_job_v1")
+	keyJobOwnerIndexVersion   = []byte("job_owner_index_version")
+	jobOwnerIndexVersion      = []byte("1")
+	keyJobContractVersion     = []byte("job_contract_version")
+	jobContractVersion        = []byte("1")
+)
+
+const maximumPendingPairings = 1000
+
+type Store struct {
+	db                      *bolt.DB
+	savePipelineRunTestHook func(PipelineRun) error
+}
+
+var (
+	ErrQueueFull                   = errors.New("relay queue is full")
+	ErrOwnerQueueCapacity          = errors.New("producer queue capacity is full")
+	ErrReservationCapacity         = errors.New("assignment reservation capacity is full")
+	ErrOwnerReservationCapacity    = errors.New("producer assignment reservation capacity is full")
+	ErrReservationOwnerMismatch    = errors.New("assignment belongs to another producer")
+	ErrReservationContextMismatch  = errors.New("assignment tenant context does not match the reservation")
+	ErrReservationInvalidOrExpired = errors.New("assignment is invalid or expired")
+	ErrPipelineCapacity            = errors.New("active pipeline capacity is full")
+	ErrOwnerPipelineCapacity       = errors.New("producer active pipeline capacity is full")
+	ErrNodePublicKeyMismatch       = errors.New("node public key differs from paired identity")
+	ErrAdapterSessionBusy          = errors.New("adapter session already has an active job or reservation")
+	ErrIdempotencyConflict         = errors.New("idempotency key was already used for a different request")
+)
+
+type reservation struct {
+	Assignment   Assignment `json:"assignment"`
+	SecretHash   string     `json:"secret_hash"`
+	OwnerSubject string     `json:"owner_subject"`
+}
+
+type sessionPlacement struct {
+	NodeID            string    `json:"node_id"`
+	AdapterEndpointID int       `json:"adapter_endpoint_id,omitempty"`
+	UpdatedAt         time.Time `json:"updated_at"`
+}
+
+type jobIdempotencyRecord struct {
+	JobID       string `json:"job_id"`
+	RequestHash string `json:"request_hash"`
+}
+
+// adapterSessionLock serializes non-ephemeral jobs for one pseudonymous
+// producer/session scope. Explicit profiles are independent; provider-less or
+// profile-less routes use a wildcard scope that conflicts with every profile.
+// Assignment locks expire with their E2EE reservation; job locks live until
+// execution is proven terminal.
+type adapterSessionLock struct {
+	Kind      string    `json:"kind"`
+	HolderID  string    `json:"holder_id"`
+	Scope     string    `json:"scope"`
+	ExpiresAt time.Time `json:"expires_at,omitempty"`
+}
+
+func OpenStore(path string) (*Store, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return nil, err
+	}
+	db, err := bolt.Open(path, 0600, &bolt.Options{Timeout: 3 * time.Second, NoGrowSync: false})
+	if err != nil {
+		return nil, err
+	}
+	err = db.Update(func(tx *bolt.Tx) error {
+		for _, name := range [][]byte{bucketJobs, bucketJobIndex, bucketJobOwnerIndex, bucketStoreMeta, bucketQueue, bucketNodes, bucketTokens, bucketPairings, bucketPairCodes, bucketAssignments, bucketEvents, bucketPipelineRuns, bucketSessionPlacements, bucketAdapterSessionLocks, bucketJobIdempotency, bucketJobIdempotencyByJob, bucketHistoricalTotals} {
+			if _, createErr := tx.CreateBucketIfNotExists(name); createErr != nil {
+				return createErr
+			}
+		}
+		if err := ensureJobOwnerIndex(tx); err != nil {
+			return err
+		}
+		if err := ensureJobContractVersion(tx); err != nil {
+			return err
+		}
+		return rebuildAdapterSessionLocks(tx, time.Now().UTC())
+	})
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	return &Store{db: db}, nil
+}
+
+func (s *Store) Close() error { return s.db.Close() }
+
+// ensureJobContractVersion upgrades retained pre-contract records exactly
+// once. Empty means the compatibility baseline (V1); an explicit unknown
+// version fails closed so an older binary never silently reinterprets future
+// durable state.
+func ensureJobContractVersion(tx *bolt.Tx) error {
+	meta := tx.Bucket(bucketStoreMeta)
+	if bytes.Equal(meta.Get(keyJobContractVersion), jobContractVersion) {
+		return nil
+	}
+	type update struct {
+		id  string
+		job Job
+	}
+	updates := make([]update, 0)
+	if err := tx.Bucket(bucketJobs).ForEach(func(key, value []byte) error {
+		var job Job
+		if err := json.Unmarshal(value, &job); err != nil {
+			return fmt.Errorf("migrate job contract for %q: %w", key, err)
+		}
+		if job.ID == "" || job.ID != string(key) {
+			return fmt.Errorf("migrate job contract: record key %q does not match id %q", key, job.ID)
+		}
+		version, err := NormalizeJobContractVersion(job.ContractVersion)
+		if err != nil {
+			return fmt.Errorf("migrate job contract for %q: %w", key, err)
+		}
+		if job.ContractVersion != version {
+			job.ContractVersion = version
+			updates = append(updates, update{id: string(key), job: job})
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, item := range updates {
+		if err := putJSON(tx.Bucket(bucketJobs), item.id, item.job); err != nil {
+			return err
+		}
+	}
+	return meta.Put(keyJobContractVersion, jobContractVersion)
+}
+
+func (s *Store) CreateToken(role, subject string, groups []string, lifetime time.Duration) (string, TokenRecord, error) {
+	if role != "admin" && role != "producer" && role != "node" && role != "observer" {
+		return "", TokenRecord{}, fmt.Errorf("unsupported token role %s", role)
+	}
+	if err := validateTokenIdentity(role, subject, groups); err != nil {
+		return "", TokenRecord{}, err
+	}
+	if lifetime < 0 || lifetime > 10*365*24*time.Hour {
+		return "", TokenRecord{}, errors.New("token lifetime must be zero or at most 10 years")
+	}
+	token, err := randomToken("cb_" + role + "_")
+	if err != nil {
+		return "", TokenRecord{}, err
+	}
+	record := TokenRecord{ID: randomID("tok"), Role: role, Subject: cleanLabel(subject, 120), Groups: cleanList(groups, 32, 80), CreatedAt: time.Now().UTC()}
+	if lifetime > 0 {
+		record.ExpiresAt = record.CreatedAt.Add(lifetime)
+	}
+	err = s.db.Update(func(tx *bolt.Tx) error {
+		return putJSON(tx.Bucket(bucketTokens), tokenHash(token), record)
+	})
+	return token, record, err
+}
+
+func (s *Store) EnsureToken(token, role, subject string, groups []string) error {
+	if len(token) < 32 {
+		return errors.New("token must contain at least 32 characters")
+	}
+	if role != "admin" && role != "producer" && role != "node" && role != "observer" {
+		return fmt.Errorf("unsupported token role %s", role)
+	}
+	if err := validateTokenIdentity(role, subject, groups); err != nil {
+		return err
+	}
+	record := TokenRecord{ID: randomID("tok"), Role: role, Subject: cleanLabel(subject, 120), Groups: cleanList(groups, 32, 80), CreatedAt: time.Now().UTC()}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketTokens)
+		key := tokenHash(token)
+		if bucket.Get([]byte(key)) != nil {
+			return nil
+		}
+		return putJSON(bucket, key, record)
+	})
+}
+
+func validateTokenIdentity(role, subject string, groups []string) error {
+	if (role == "producer" || role == "node") && !validRoutingLabel(subject, 120) {
+		return fmt.Errorf("%s token subject must be 1 to 120 safe UTF-8 bytes", role)
+	}
+	if subject != "" && !validRoutingLabel(subject, 120) {
+		return errors.New("token subject must be at most 120 safe UTF-8 bytes")
+	}
+	if len(groups) > 32 {
+		return errors.New("token may contain at most 32 groups")
+	}
+	for _, group := range groups {
+		if !validRoutingLabel(group, 80) {
+			return errors.New("token groups must contain 1 to 80 safe UTF-8 bytes")
+		}
+	}
+	return nil
+}
+
+func (s *Store) Authenticate(token string) (TokenRecord, bool) {
+	if token == "" {
+		return TokenRecord{}, false
+	}
+	var record TokenRecord
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return getJSON(tx.Bucket(bucketTokens), tokenHash(token), &record)
+	})
+	if err != nil || record.Revoked || (!record.ExpiresAt.IsZero() && time.Now().After(record.ExpiresAt)) {
+		return TokenRecord{}, false
+	}
+	return record, true
+}
+
+func (s *Store) RevokeToken(id string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketTokens)
+		cursor := bucket.Cursor()
+		for key, value := cursor.First(); key != nil; key, value = cursor.Next() {
+			var record TokenRecord
+			if json.Unmarshal(value, &record) == nil && record.ID == id {
+				record.Revoked = true
+				return putJSON(bucket, string(key), record)
+			}
+		}
+		return os.ErrNotExist
+	})
+}
+
+func (s *Store) CreatePairing(request PairRequest, verificationURI string, lifetime time.Duration) (PairResponse, error) {
+	deviceCode, err := randomToken("dev_")
+	if err != nil {
+		return PairResponse{}, err
+	}
+	if lifetime <= 0 || lifetime > 30*time.Minute {
+		lifetime = 10 * time.Minute
+	}
+	pairing := Pairing{
+		DeviceCodeHash: tokenHash(deviceCode), NodeName: cleanLabel(request.NodeName, 100),
+		PublicKey: request.PublicKey, Groups: cleanList(request.Groups, 16, 80), ExpiresAt: time.Now().UTC().Add(lifetime),
+	}
+	publicKey, err := parsePublicKey(pairing.PublicKey)
+	if err != nil {
+		return PairResponse{}, fmt.Errorf("invalid node public key: %w", err)
+	}
+	pairing.PublicKeyFingerprint = publicKeyFingerprint(publicKey.Bytes())
+	err = s.db.Update(func(tx *bolt.Tx) error {
+		if _, err := garbageCollectPairings(tx, time.Now().UTC()); err != nil {
+			return err
+		}
+		pairings := tx.Bucket(bucketPairings)
+		codes := tx.Bucket(bucketPairCodes)
+		if pairings.Stats().KeyN >= maximumPendingPairings {
+			return errors.New("too many pending pairing requests")
+		}
+		for attempt := 0; attempt < 16; attempt++ {
+			candidate, codeErr := randomUserCode()
+			if codeErr != nil {
+				return codeErr
+			}
+			if codes.Get([]byte(candidate)) == nil {
+				pairing.UserCode = candidate
+				break
+			}
+		}
+		if pairing.UserCode == "" {
+			return errors.New("could not allocate a unique pairing code")
+		}
+		if err := putJSON(pairings, pairing.DeviceCodeHash, pairing); err != nil {
+			return err
+		}
+		return codes.Put([]byte(pairing.UserCode), []byte(pairing.DeviceCodeHash))
+	})
+	return PairResponse{DeviceCode: deviceCode, UserCode: pairing.UserCode, VerificationURI: verificationURI, ExpiresAt: pairing.ExpiresAt, IntervalSeconds: 5}, err
+}
+
+func (s *Store) ListPairings() ([]Pairing, error) {
+	if _, err := s.GarbageCollectPairings(time.Now().UTC()); err != nil {
+		return nil, err
+	}
+	result := []Pairing{}
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketPairings).ForEach(func(_, value []byte) error {
+			var pairing Pairing
+			if err := json.Unmarshal(value, &pairing); err != nil {
+				return err
+			}
+			if pairing.PublicKeyFingerprint == "" {
+				if publicKey, parseErr := parsePublicKey(pairing.PublicKey); parseErr == nil {
+					pairing.PublicKeyFingerprint = publicKeyFingerprint(publicKey.Bytes())
+				}
+			}
+			pairing.PendingToken = ""
+			if time.Now().Before(pairing.ExpiresAt) {
+				result = append(result, pairing)
+			}
+			return nil
+		})
+	})
+	sort.Slice(result, func(i, j int) bool { return result[i].ExpiresAt.Before(result[j].ExpiresAt) })
+	return result, err
+}
+
+func (s *Store) DecidePairing(userCode string, approve bool) (Pairing, error) {
+	userCode = strings.ToUpper(strings.TrimSpace(userCode))
+	if _, err := s.GarbageCollectPairings(time.Now().UTC()); err != nil {
+		return Pairing{}, err
+	}
+	var result Pairing
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		hash := tx.Bucket(bucketPairCodes).Get([]byte(userCode))
+		if len(hash) == 0 {
+			return os.ErrNotExist
+		}
+		if err := getJSON(tx.Bucket(bucketPairings), string(hash), &result); err != nil {
+			return err
+		}
+		if time.Now().After(result.ExpiresAt) {
+			return errors.New("pairing code expired")
+		}
+		if !approve {
+			result.Denied = true
+			return putJSON(tx.Bucket(bucketPairings), result.DeviceCodeHash, result)
+		}
+		token, tokenErr := randomToken("cb_node_")
+		if tokenErr != nil {
+			return tokenErr
+		}
+		result.Approved = true
+		result.NodeID = randomID("node")
+		result.PendingToken = token
+		record := TokenRecord{ID: randomID("tok"), Role: "node", Subject: result.NodeID, Groups: result.Groups, CreatedAt: time.Now().UTC()}
+		if err := putJSON(tx.Bucket(bucketTokens), tokenHash(token), record); err != nil {
+			return err
+		}
+		node := Node{ID: result.NodeID, Name: result.NodeName, PublicKey: result.PublicKey, State: "paired", LastSeen: time.Now().UTC()}
+		if err := putJSON(tx.Bucket(bucketNodes), node.ID, node); err != nil {
+			return err
+		}
+		return putJSON(tx.Bucket(bucketPairings), result.DeviceCodeHash, result)
+	})
+	result.PendingToken = ""
+	return result, err
+}
+
+func (s *Store) PollPairing(deviceCode string) (string, Pairing, string, error) {
+	hash := tokenHash(deviceCode)
+	var pairing Pairing
+	var token string
+	state := "authorization_pending"
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		if err := getJSON(tx.Bucket(bucketPairings), hash, &pairing); err != nil {
+			return err
+		}
+		if time.Now().After(pairing.ExpiresAt) {
+			state = "expired_token"
+			if err := deletePairCodeForHash(tx.Bucket(bucketPairCodes), pairing.UserCode, []byte(hash)); err != nil {
+				return err
+			}
+			return tx.Bucket(bucketPairings).Delete([]byte(hash))
+		}
+		if pairing.Denied {
+			state = "access_denied"
+			return nil
+		}
+		if !pairing.Approved || pairing.PendingToken == "" {
+			return nil
+		}
+		state = "approved"
+		token = pairing.PendingToken
+		pairing.PendingToken = ""
+		// Keep the token-free device record until its normal expiry so a repeat
+		// poll preserves the protocol's authorization_pending response. The
+		// short approval code is no longer useful and can be removed now.
+		if err := putJSON(tx.Bucket(bucketPairings), hash, pairing); err != nil {
+			return err
+		}
+		return deletePairCodeForHash(tx.Bucket(bucketPairCodes), pairing.UserCode, []byte(hash))
+	})
+	pairing.PendingToken = ""
+	return state, pairing, token, err
+}
+
+// GarbageCollectPairings deletes only expired pairing delivery records and
+// their matching short-code indexes. Node identities and job history are not
+// part of this lifecycle.
+func (s *Store) GarbageCollectPairings(now time.Time) (int, error) {
+	removed := 0
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		var err error
+		removed, err = garbageCollectPairings(tx, now)
+		return err
+	})
+	return removed, err
+}
+
+func garbageCollectPairings(tx *bolt.Tx, now time.Time) (int, error) {
+	pairings := tx.Bucket(bucketPairings)
+	codes := tx.Bucket(bucketPairCodes)
+	removed := 0
+	cursor := pairings.Cursor()
+	for key, value := cursor.First(); key != nil; key, value = cursor.Next() {
+		var pairing Pairing
+		if err := json.Unmarshal(value, &pairing); err != nil {
+			return removed, err
+		}
+		if pairing.ExpiresAt.After(now) {
+			continue
+		}
+		if err := deletePairCodeForHash(codes, pairing.UserCode, key); err != nil {
+			return removed, err
+		}
+		if err := cursor.Delete(); err != nil {
+			return removed, err
+		}
+		removed++
+	}
+	return removed, nil
+}
+
+func deletePairCodeForHash(codes *bolt.Bucket, userCode string, expectedHash []byte) error {
+	key := []byte(strings.ToUpper(strings.TrimSpace(userCode)))
+	if current := codes.Get(key); !bytes.Equal(current, expectedHash) {
+		return nil
+	}
+	return codes.Delete(key)
+}
+
+func (s *Store) UpsertNode(node Node) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		var existing Node
+		_ = getJSON(tx.Bucket(bucketNodes), node.ID, &existing)
+		mergeStoredNodeState(&node, existing)
+		return putJSON(tx.Bucket(bucketNodes), node.ID, node)
+	})
+}
+
+// UpsertNodePinned stores live node state without allowing possession of the
+// bearer token to rotate the public key established during pairing. A token
+// created manually by an administrator may pin its key on first use; every
+// later connection must present that exact key.
+func (s *Store) UpsertNodePinned(node Node) error {
+	if _, err := parsePublicKey(node.PublicKey); err != nil {
+		return fmt.Errorf("invalid node public key: %w", err)
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		var existing Node
+		err := getJSON(tx.Bucket(bucketNodes), node.ID, &existing)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if existing.PublicKey != "" && node.PublicKey != existing.PublicKey {
+			return ErrNodePublicKeyMismatch
+		}
+		if existing.PublicKey != "" {
+			node.PublicKey = existing.PublicKey
+		}
+		mergeStoredNodeState(&node, existing)
+		return putJSON(tx.Bucket(bucketNodes), node.ID, node)
+	})
+}
+
+func mergeStoredNodeState(node *Node, existing Node) {
+	node.JobsTotal = existing.JobsTotal
+	node.JobsFailed = existing.JobsFailed
+	node.ComputeMS = existing.ComputeMS
+	node.CostUSD = existing.CostUSD
+	node.CostKnownJobs = existing.CostKnownJobs
+	node.CostUnknownJobs = existing.CostUnknownJobs
+	if node.PublicKey == "" {
+		node.PublicKey = existing.PublicKey
+	}
+}
+
+func (s *Store) GetNode(id string) (Node, error) {
+	var node Node
+	err := s.db.View(func(tx *bolt.Tx) error { return getJSON(tx.Bucket(bucketNodes), id, &node) })
+	return node, err
+}
+
+func (s *Store) ListNodes() ([]Node, error) {
+	nodes := []Node{}
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketNodes).ForEach(func(_, value []byte) error {
+			var node Node
+			if err := json.Unmarshal(value, &node); err != nil {
+				return err
+			}
+			nodes = append(nodes, node)
+			return nil
+		})
+	})
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Name < nodes[j].Name })
+	return nodes, err
+}
+
+func (s *Store) SetNodeConnected(id string, connected bool) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		var node Node
+		if err := getJSON(tx.Bucket(bucketNodes), id, &node); err != nil {
+			return err
+		}
+		node.Connected = connected
+		node.LastSeen = time.Now().UTC()
+		if connected {
+			node.State = "online"
+			if node.ConnectedAt.IsZero() {
+				node.ConnectedAt = node.LastSeen
+			}
+		} else {
+			node.State = "offline"
+			node.Capabilities.Running = 0
+		}
+		return putJSON(tx.Bucket(bucketNodes), id, node)
+	})
+}
+
+func (s *Store) CreateJob(request SubmitRequest) (Job, error) {
+	job, _, err := s.createJob(request, 0, 0, "", "")
+	return job, err
+}
+
+// CreateJobAdmitted atomically checks and consumes queue capacity in the same
+// write transaction that creates the job. maxOwner is optional to preserve the
+// existing store API; a non-positive limit is unbounded.
+func (s *Store) CreateJobAdmitted(request SubmitRequest, maxQueued int, maxOwner ...int) (Job, error) {
+	ownerLimit := 0
+	if len(maxOwner) > 0 {
+		ownerLimit = maxOwner[0]
+	}
+	job, _, err := s.createJob(request, maxQueued, ownerLimit, "", "")
+	return job, err
+}
+
+// CreateJobAdmittedIdempotent atomically binds an authenticated producer's
+// key to one admitted request. An exact retry returns the retained job without
+// consuming queue capacity; a different request with the same key fails.
+func (s *Store) CreateJobAdmittedIdempotent(request SubmitRequest, maxQueued, maxOwner int, idempotencyKey, requestHash string) (Job, bool, error) {
+	return s.createJob(request, maxQueued, maxOwner, idempotencyKey, requestHash)
+}
+
+func (s *Store) createJob(request SubmitRequest, maxQueued, maxOwner int, idempotencyKey, requestHash string) (Job, bool, error) {
+	now := time.Now().UTC()
+	if err := request.PolicyDecision.ValidateAllowed(); err != nil {
+		return Job{}, false, err
+	}
+	contractVersion, err := NormalizeJobContractVersion(request.ContractVersion)
+	if err != nil {
+		return Job{}, false, err
+	}
+	job := Job{
+		ID: request.ID, ContractVersion: contractVersion, OwnerSubject: cleanLabel(request.OwnerSubject, 120), TenantID: cleanLabel(request.TenantID, 200), Source: cleanLabel(request.Source, 120), Requirements: request.Requirements, PolicyDecision: request.PolicyDecision,
+		Payload: request.Payload, SealedPayload: request.Sealed, Status: JobQueued, Priority: request.Priority,
+		MaxAttempts: request.MaxAttempts, CreatedAt: now, UpdatedAt: now,
+		Pipeline: cleanLabel(request.Pipeline, 120), Step: cleanLabel(request.Step, 120), ParentID: cleanLabel(request.ParentID, 128),
+	}
+	if job.ID == "" {
+		job.ID = randomID("job")
+	} else if !validJobID(job.ID) {
+		return Job{}, false, errors.New("job id must use 1-128 safe ASCII characters and must not contain '..'")
+	}
+	if job.MaxAttempts <= 0 {
+		job.MaxAttempts = 3
+	}
+	if job.MaxAttempts > 10 {
+		job.MaxAttempts = 10
+	}
+	if job.Priority < -100 || job.Priority > 100 {
+		return Job{}, false, errors.New("priority must be between -100 and 100")
+	}
+	if len(job.Payload) == 0 && job.SealedPayload == nil {
+		return Job{}, false, errors.New("payload or sealed_payload is required")
+	}
+	if idempotencyKey != "" {
+		if job.OwnerSubject == "" {
+			return Job{}, false, errors.New("authenticated producer is required for idempotency")
+		}
+		if err := ValidateIdempotencyKey(idempotencyKey); err != nil {
+			return Job{}, false, err
+		}
+		if len(requestHash) != sha256.Size*2 {
+			return Job{}, false, errors.New("idempotency request hash is invalid")
+		}
+	}
+	replayed := false
+	err = s.db.Update(func(tx *bolt.Tx) error {
+		if idempotencyKey != "" {
+			existing, found, lookupErr := lookupIdempotentJobTx(tx, job.OwnerSubject, idempotencyKey, requestHash)
+			if lookupErr != nil {
+				return lookupErr
+			}
+			if found {
+				job = existing
+				replayed = true
+				return nil
+			}
+		}
+		if tx.Bucket(bucketJobs).Get([]byte(job.ID)) != nil {
+			return os.ErrExist
+		}
+		if maxQueued > 0 || maxOwner > 0 {
+			queued, owned, err := queueCounts(tx, job.OwnerSubject)
+			if err != nil {
+				return err
+			}
+			if maxQueued > 0 && queued >= maxQueued {
+				return ErrQueueFull
+			}
+			if maxOwner > 0 && owned >= maxOwner {
+				return ErrOwnerQueueCapacity
+			}
+		}
+		if err := putJSON(tx.Bucket(bucketJobs), job.ID, job); err != nil {
+			return err
+		}
+		if err := tx.Bucket(bucketJobIndex).Put(jobIndexKey(job), []byte(job.ID)); err != nil {
+			return err
+		}
+		if err := putJobOwnerIndex(tx.Bucket(bucketJobOwnerIndex), job); err != nil {
+			return err
+		}
+		if err := tx.Bucket(bucketQueue).Put(queueKey(job), []byte(job.ID)); err != nil {
+			return err
+		}
+		if idempotencyKey != "" {
+			return saveIdempotentJobTx(tx, job.OwnerSubject, idempotencyKey, requestHash, job.ID)
+		}
+		return nil
+	})
+	return job, replayed, err
+}
+
+func validJobID(value string) bool {
+	if len(value) < 1 || len(value) > 128 || strings.Contains(value, "..") {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		alphaNumeric := character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9'
+		if index == 0 {
+			if !alphaNumeric {
+				return false
+			}
+			continue
+		}
+		if !alphaNumeric && character != '.' && character != '_' && character != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+// ValidateIdempotencyKey accepts a deliberately small HTTP-safe alphabet.
+// Spaces and control characters are excluded so intermediaries cannot
+// reinterpret producer keys. The relay stores only a producer-scoped hash.
+func ValidateIdempotencyKey(value string) error {
+	if len(value) < 1 || len(value) > 200 {
+		return errors.New("idempotency key must contain 1-200 visible ASCII characters")
+	}
+	for index := 0; index < len(value); index++ {
+		if value[index] < 0x21 || value[index] > 0x7e {
+			return errors.New("idempotency key must contain 1-200 visible ASCII characters")
+		}
+	}
+	return nil
+}
+
+func jobIdempotencyKey(owner, key string) []byte {
+	sum := sha256.Sum256([]byte(cleanLabel(owner, 120) + "\x00" + key + "\x00job-admission-v1"))
+	return []byte(hex.EncodeToString(sum[:]))
+}
+
+func lookupIdempotentJobTx(tx *bolt.Tx, owner, key, requestHash string) (Job, bool, error) {
+	indexKey := jobIdempotencyKey(owner, key)
+	raw := tx.Bucket(bucketJobIdempotency).Get(indexKey)
+	if raw == nil {
+		return Job{}, false, nil
+	}
+	var record jobIdempotencyRecord
+	if err := json.Unmarshal(raw, &record); err != nil {
+		return Job{}, false, fmt.Errorf("decode idempotency record: %w", err)
+	}
+	if record.RequestHash != requestHash {
+		return Job{}, false, ErrIdempotencyConflict
+	}
+	var job Job
+	if err := getJSON(tx.Bucket(bucketJobs), record.JobID, &job); err != nil {
+		return Job{}, false, fmt.Errorf("idempotency record references unavailable job: %w", err)
+	}
+	if job.OwnerSubject != cleanLabel(owner, 120) {
+		return Job{}, false, errors.New("idempotency record owner mismatch")
+	}
+	return job, true, nil
+}
+
+func saveIdempotentJobTx(tx *bolt.Tx, owner, key, requestHash, jobID string) error {
+	indexKey := jobIdempotencyKey(owner, key)
+	if tx.Bucket(bucketJobIdempotency).Get(indexKey) != nil {
+		return ErrIdempotencyConflict
+	}
+	if err := putJSON(tx.Bucket(bucketJobIdempotency), string(indexKey), jobIdempotencyRecord{JobID: jobID, RequestHash: requestHash}); err != nil {
+		return err
+	}
+	return tx.Bucket(bucketJobIdempotencyByJob).Put([]byte(jobID), indexKey)
+}
+
+// CreateReservationAdmitted garbage-collects expired reservations and admits a
+// new one under global and per-owner bounds in one write transaction. The
+// owner is later required when the reservation is consumed.
+func (s *Store) CreateReservationAdmitted(assignment Assignment, secret, owner string, maxGlobal, maxOwner int) error {
+	owner = cleanLabel(owner, 120)
+	if owner == "" {
+		return errors.New("assignment owner is required")
+	}
+	assignment.OwnerSubject = owner
+	if assignment.Attempt == 0 {
+		assignment.Attempt = 1
+	}
+	if assignment.Attempt != 1 {
+		return errors.New("reserved assignments must start at attempt 1")
+	}
+	if err := validateTenantID(assignment.TenantID); err != nil {
+		return err
+	}
+	if err := assignment.PolicyDecision.ValidateAllowed(); err != nil {
+		return err
+	}
+	if assignment.ID == "" || !validJobID(assignment.ID) || assignment.JobID == "" || !validJobID(assignment.JobID) {
+		return errors.New("assignment and job ids must use safe ASCII characters")
+	}
+	if secret == "" {
+		return errors.New("assignment secret is required")
+	}
+	if !assignment.ExpiresAt.After(time.Now().UTC()) {
+		return ErrReservationInvalidOrExpired
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		now := time.Now().UTC()
+		assignments := tx.Bucket(bucketAssignments)
+		if err := garbageCollectReservations(assignments, now); err != nil {
+			return err
+		}
+		if _, err := garbageCollectAdapterSessionLocks(tx, now); err != nil {
+			return err
+		}
+		if assignments.Get([]byte(assignment.ID)) != nil || tx.Bucket(bucketJobs).Get([]byte(assignment.JobID)) != nil {
+			return os.ErrExist
+		}
+		global, owned, err := reservationCounts(assignments, owner)
+		if err != nil {
+			return err
+		}
+		if maxGlobal > 0 && global >= maxGlobal {
+			return ErrReservationCapacity
+		}
+		if maxOwner > 0 && owned >= maxOwner {
+			return ErrOwnerReservationCapacity
+		}
+		if err := acquireAdapterSessionLockTx(tx, owner, assignment.Requirements, adapterSessionLockAssignment, assignment.ID, assignment.ExpiresAt, now, adapterSessionNeedsLockTx(tx, assignment.Requirements, assignment.NodeID)); err != nil {
+			return err
+		}
+		return putJSON(assignments, assignment.ID, reservation{Assignment: assignment, SecretHash: tokenHash(secret), OwnerSubject: owner})
+	})
+}
+
+// ConsumeReservationAdmitted verifies producer ownership and atomically moves
+// the reservation into the bounded job queue. If the queue is full the
+// reservation remains available until its original expiry.
+func (s *Store) ConsumeReservationAdmitted(id, secret string, sealed *SealedEnvelope, source, tenant, owner string, priority, attempts, maxQueued int, maxOwner ...int) (Job, error) {
+	ownerLimit := 0
+	if len(maxOwner) > 0 {
+		ownerLimit = maxOwner[0]
+	}
+	job, _, err := s.consumeReservationAdmitted(id, secret, sealed, source, tenant, owner, priority, attempts, maxQueued, ownerLimit, "", "", nil)
+	return job, err
+}
+
+// ConsumeReservationAdmittedWithPolicy additionally proves that the relay's
+// current policy grants the same authorization as the one authenticated in
+// the sealed reservation. It prevents a stale reservation from surviving a
+// policy or execution-classification change.
+func (s *Store) ConsumeReservationAdmittedWithPolicy(id, secret string, sealed *SealedEnvelope, source, tenant, owner string, priority, attempts, maxQueued int, policy PolicyDecision, maxOwner ...int) (Job, error) {
+	ownerLimit := 0
+	if len(maxOwner) > 0 {
+		ownerLimit = maxOwner[0]
+	}
+	job, _, err := s.consumeReservationAdmitted(id, secret, sealed, source, tenant, owner, priority, attempts, maxQueued, ownerLimit, "", "", &policy)
+	return job, err
+}
+
+// ConsumeReservationAdmittedIdempotent gives the one-time E2EE promotion the
+// same retry semantics as ordinary admission. A replay is resolved before the
+// consumed reservation is read, but only when the exact sealed request hash
+// matches the producer-scoped key.
+func (s *Store) ConsumeReservationAdmittedIdempotent(id, secret string, sealed *SealedEnvelope, source, tenant, owner string, priority, attempts, maxQueued, maxOwner int, idempotencyKey, requestHash string) (Job, bool, error) {
+	return s.consumeReservationAdmitted(id, secret, sealed, source, tenant, owner, priority, attempts, maxQueued, maxOwner, idempotencyKey, requestHash, nil)
+}
+
+func (s *Store) ConsumeReservationAdmittedIdempotentWithPolicy(id, secret string, sealed *SealedEnvelope, source, tenant, owner string, priority, attempts, maxQueued, maxOwner int, idempotencyKey, requestHash string, policy PolicyDecision) (Job, bool, error) {
+	return s.consumeReservationAdmitted(id, secret, sealed, source, tenant, owner, priority, attempts, maxQueued, maxOwner, idempotencyKey, requestHash, &policy)
+}
+
+func (s *Store) consumeReservationAdmitted(id, secret string, sealed *SealedEnvelope, source, tenant, owner string, priority, attempts, maxQueued, ownerLimit int, idempotencyKey, requestHash string, expectedPolicy *PolicyDecision) (Job, bool, error) {
+	var job Job
+	replayed := false
+	owner = cleanLabel(owner, 120)
+	if owner == "" {
+		return Job{}, false, ErrReservationOwnerMismatch
+	}
+	if sealed == nil {
+		return Job{}, false, errors.New("reserved assignments require a sealed payload")
+	}
+	if idempotencyKey != "" {
+		if err := ValidateIdempotencyKey(idempotencyKey); err != nil {
+			return Job{}, false, err
+		}
+		if len(requestHash) != sha256.Size*2 {
+			return Job{}, false, errors.New("idempotency request hash is invalid")
+		}
+	}
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		if idempotencyKey != "" {
+			existing, found, lookupErr := lookupIdempotentJobTx(tx, owner, idempotencyKey, requestHash)
+			if lookupErr != nil {
+				return lookupErr
+			}
+			if found {
+				job = existing
+				replayed = true
+				return nil
+			}
+		}
+		var saved reservation
+		if err := getJSON(tx.Bucket(bucketAssignments), id, &saved); err != nil {
+			return err
+		}
+		now := time.Now().UTC()
+		if !saved.Assignment.ExpiresAt.After(now) {
+			_ = tx.Bucket(bucketAssignments).Delete([]byte(id))
+			_ = releaseAdapterSessionLockTx(tx, saved.OwnerSubject, saved.Assignment.Requirements, adapterSessionLockAssignment, saved.Assignment.ID)
+			return ErrReservationInvalidOrExpired
+		}
+		if !constantEqual(saved.SecretHash, tokenHash(secret)) {
+			return ErrReservationInvalidOrExpired
+		}
+		if saved.OwnerSubject == "" || saved.OwnerSubject != owner || saved.Assignment.OwnerSubject != owner {
+			return ErrReservationOwnerMismatch
+		}
+		if tenant != saved.Assignment.TenantID {
+			return ErrReservationContextMismatch
+		}
+		if expectedPolicy != nil && !saved.Assignment.PolicyDecision.EquivalentAuthorization(*expectedPolicy) {
+			return ErrReservationContextMismatch
+		}
+		if saved.Assignment.Attempt != 1 {
+			return ErrReservationContextMismatch
+		}
+		if tx.Bucket(bucketJobs).Get([]byte(saved.Assignment.JobID)) != nil {
+			return os.ErrExist
+		}
+		if maxQueued > 0 || ownerLimit > 0 {
+			queued, owned, err := queueCounts(tx, owner)
+			if err != nil {
+				return err
+			}
+			if maxQueued > 0 && queued >= maxQueued {
+				return ErrQueueFull
+			}
+			if ownerLimit > 0 && owned >= ownerLimit {
+				return ErrOwnerQueueCapacity
+			}
+		}
+		job = Job{ID: saved.Assignment.JobID, ContractVersion: JobContractV1, OwnerSubject: saved.Assignment.OwnerSubject, Source: cleanLabel(source, 120), TenantID: saved.Assignment.TenantID, Requirements: saved.Assignment.Requirements, PolicyDecision: saved.Assignment.PolicyDecision, SealedPayload: sealed, Status: JobQueued, AssignedNode: saved.Assignment.NodeID, Priority: priority, MaxAttempts: attempts, CreatedAt: now, UpdatedAt: now}
+		if job.MaxAttempts <= 0 {
+			job.MaxAttempts = 1
+		}
+		if err := promoteAdapterSessionLockTx(tx, saved, job, now); err != nil {
+			return err
+		}
+		if err := putJSON(tx.Bucket(bucketJobs), job.ID, job); err != nil {
+			return err
+		}
+		if err := tx.Bucket(bucketJobIndex).Put(jobIndexKey(job), []byte(job.ID)); err != nil {
+			return err
+		}
+		if err := putJobOwnerIndex(tx.Bucket(bucketJobOwnerIndex), job); err != nil {
+			return err
+		}
+		if err := tx.Bucket(bucketQueue).Put(queueKey(job), []byte(job.ID)); err != nil {
+			return err
+		}
+		if idempotencyKey != "" {
+			if err := saveIdempotentJobTx(tx, owner, idempotencyKey, requestHash, job.ID); err != nil {
+				return err
+			}
+		}
+		return tx.Bucket(bucketAssignments).Delete([]byte(id))
+	})
+	return job, replayed, err
+}
+
+// GarbageCollectReservations removes expired E2EE assignment reservations.
+// It is safe to call from the relay's periodic dispatch loop.
+func (s *Store) GarbageCollectReservations(now time.Time) (int, error) {
+	removed := 0
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		var err error
+		removed, err = garbageCollectReservationsCount(tx.Bucket(bucketAssignments), now)
+		if err != nil {
+			return err
+		}
+		_, err = garbageCollectAdapterSessionLocks(tx, now)
+		return err
+	})
+	return removed, err
+}
+
+// maintenanceCandidates reports whether the relay has any reservation or
+// queued-job records that can require periodic cleanup. It deliberately reads
+// only the first key in each small index bucket: terminal Job values may embed
+// multi-megabyte artifacts and must not be decoded merely to prove that an
+// otherwise idle relay has no stale work.
+func (s *Store) maintenanceCandidates() (reservations, queued bool, err error) {
+	err = s.db.View(func(tx *bolt.Tx) error {
+		assignmentKey, _ := tx.Bucket(bucketAssignments).Cursor().First()
+		queueKey, _ := tx.Bucket(bucketQueue).Cursor().First()
+		reservations = assignmentKey != nil
+		queued = queueKey != nil
+		return nil
+	})
+	return reservations, queued, err
+}
+
+func garbageCollectReservations(bucket *bolt.Bucket, now time.Time) error {
+	_, err := garbageCollectReservationsCount(bucket, now)
+	return err
+}
+
+func garbageCollectReservationsCount(bucket *bolt.Bucket, now time.Time) (int, error) {
+	removed := 0
+	cursor := bucket.Cursor()
+	for key, value := cursor.First(); key != nil; key, value = cursor.Next() {
+		var saved reservation
+		if err := json.Unmarshal(value, &saved); err != nil {
+			return removed, err
+		}
+		if saved.Assignment.ExpiresAt.After(now) {
+			continue
+		}
+		if err := cursor.Delete(); err != nil {
+			return removed, err
+		}
+		removed++
+	}
+	return removed, nil
+}
+
+func reservationCounts(bucket *bolt.Bucket, owner string) (global, owned int, err error) {
+	err = bucket.ForEach(func(_, value []byte) error {
+		var saved reservation
+		if decodeErr := json.Unmarshal(value, &saved); decodeErr != nil {
+			return decodeErr
+		}
+		global++
+		if saved.OwnerSubject == owner {
+			owned++
+		}
+		return nil
+	})
+	return global, owned, err
+}
+
+func countAndCleanQueue(tx *bolt.Tx) (int, error) {
+	total, _, err := queueCounts(tx, "")
+	return total, err
+}
+
+func queueCounts(tx *bolt.Tx, owner string) (total, owned int, err error) {
+	queue := tx.Bucket(bucketQueue)
+	jobs := tx.Bucket(bucketJobs)
+	cursor := queue.Cursor()
+	for key, id := cursor.First(); key != nil; key, id = cursor.Next() {
+		raw := jobs.Get(id)
+		if raw == nil {
+			if err := cursor.Delete(); err != nil {
+				return 0, 0, err
+			}
+			continue
+		}
+		var job Job
+		if err := json.Unmarshal(raw, &job); err != nil {
+			return 0, 0, err
+		}
+		if job.Status != JobQueued {
+			if err := cursor.Delete(); err != nil {
+				return 0, 0, err
+			}
+			continue
+		}
+		total++
+		if job.OwnerSubject == owner {
+			owned++
+		}
+	}
+	return total, owned, nil
+}
+
+func (s *Store) GetJob(id string) (Job, error) {
+	var job Job
+	err := s.db.View(func(tx *bolt.Tx) error { return getJSON(tx.Bucket(bucketJobs), id, &job) })
+	return job, err
+}
+
+// RecentSessionNode returns the worker most recently used by this producer's
+// logical session. A session is only an affinity hint: the relay can still use
+// another compatible worker when the previous one is offline.
+func (s *Store) RecentSessionNode(owner, session string) (string, bool) {
+	node, _, ok := s.RecentSessionPlacement(owner, Requirements{SessionID: session})
+	return node, ok
+}
+
+// RecentSessionPlacement keeps an adapter session on the concrete endpoint
+// chosen for its previous turn. Adapter endpoint identifiers are meaningful only
+// together with their worker node, so both values come from the same job.
+func (s *Store) RecentSessionPlacement(owner string, requirements Requirements) (node string, adapterEndpointID int, ok bool) {
+	owner = cleanLabel(owner, 120)
+	session := canonicalSessionID(requirements.SessionID)
+	key := sessionPlacementKey(owner, requirements)
+	var placement sessionPlacement
+	if err := s.db.View(func(tx *bolt.Tx) error {
+		return getJSON(tx.Bucket(bucketSessionPlacements), key, &placement)
+	}); err == nil && placement.NodeID != "" {
+		return placement.NodeID, placement.AdapterEndpointID, true
+	}
+	var selected Job
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketJobs).ForEach(func(_, value []byte) error {
+			var job Job
+			if json.Unmarshal(value, &job) != nil || job.OwnerSubject != owner ||
+				canonicalSessionID(job.Requirements.SessionID) != session || job.AssignedNode == "" || !terminalJobStatus(job.Status) ||
+				!sameSessionPlacementScope(job.Requirements, requirements) {
+				return nil
+			}
+			if strings.EqualFold(strings.TrimSpace(requirements.Provider), "adapter") && (job.ExecutedAdapterEndpointID <= 0 || job.EphemeralAdapterEndpoint) {
+				return nil
+			}
+			if selected.ID == "" || job.UpdatedAt.After(selected.UpdatedAt) {
+				selected = job
+			}
+			return nil
+		})
+	})
+	if err != nil || selected.AssignedNode == "" {
+		return "", 0, false
+	}
+	endpointID := selected.ExecutedAdapterEndpointID
+	placement = sessionPlacement{NodeID: selected.AssignedNode, AdapterEndpointID: endpointID, UpdatedAt: selected.UpdatedAt}
+	_ = s.db.Update(func(tx *bolt.Tx) error { return putSessionPlacement(tx, key, placement) })
+	return selected.AssignedNode, endpointID, true
+}
+
+func canonicalSessionID(session string) string {
+	session = strings.TrimSpace(session)
+	if session == "" {
+		return "default"
+	}
+	return session
+}
+
+func sameSessionPlacementScope(previous, current Requirements) bool {
+	previousAdapter := strings.EqualFold(strings.TrimSpace(previous.Provider), "adapter")
+	currentAdapter := strings.EqualFold(strings.TrimSpace(current.Provider), "adapter")
+	if previousAdapter || currentAdapter {
+		return previousAdapter && currentAdapter &&
+			strings.EqualFold(strings.TrimSpace(previous.AdapterProfile), strings.TrimSpace(current.AdapterProfile))
+	}
+	return true
+}
+
+func sessionPlacementKey(owner string, requirements Requirements) string {
+	scope := "node"
+	if strings.EqualFold(strings.TrimSpace(requirements.Provider), "adapter") {
+		scope = "adapter\x00" + strings.ToLower(strings.TrimSpace(requirements.AdapterProfile))
+	}
+	sum := sha256.Sum256([]byte(owner + "\x00" + canonicalSessionID(requirements.SessionID) + "\x00" + scope))
+	return hex.EncodeToString(sum[:])
+}
+
+const (
+	adapterSessionLockAssignment = "assignment"
+	adapterSessionLockJob        = "job"
+)
+
+func adapterSessionLockEligible(requirements Requirements) bool {
+	provider := strings.TrimSpace(requirements.Provider)
+	return !requirements.AdapterEphemeralSession && (strings.EqualFold(provider, "adapter") || provider == "")
+}
+
+// adapterSessionNeedsLockTx identifies jobs that can reach the adapter
+// session boundary. Every provider-less job qualifies because an
+// operator-owned route may switch/fallback to a adapter after the last node
+// heartbeat; negative or stale capability telemetry is not safety evidence.
+func adapterSessionNeedsLockTx(tx *bolt.Tx, requirements Requirements, nodeID string) bool {
+	return adapterSessionLockEligible(requirements)
+}
+
+func adapterSessionLockBase(owner string, requirements Requirements) string {
+	// The worker injects one producer/session key for explicit adapter and
+	// provider-less fallback jobs. The profile is a separate selector because
+	// the adapter scopes one logical session independently per provider UI.
+	sum := sha256.Sum256([]byte(cleanLabel(owner, 120) + "\x00" + canonicalSessionID(requirements.SessionID) + "\x00adapter-session-lock-v1"))
+	return hex.EncodeToString(sum[:])
+}
+
+func adapterSessionLockScope(requirements Requirements) string {
+	if strings.EqualFold(strings.TrimSpace(requirements.Provider), "adapter") {
+		if profile := strings.ToLower(strings.TrimSpace(requirements.AdapterProfile)); profile != "" {
+			return "profile:" + profile
+		}
+	}
+	return "*"
+}
+
+func adapterSessionLockPrefix(owner string, requirements Requirements) string {
+	return adapterSessionLockBase(owner, requirements) + "\x00" + adapterSessionLockScope(requirements) + "\x00"
+}
+
+func adapterSessionLockKey(owner string, requirements Requirements, kind, holderID string) string {
+	return adapterSessionLockPrefix(owner, requirements) + kind + "\x00" + holderID
+}
+
+func adapterSessionLockActive(lock adapterSessionLock, now time.Time) bool {
+	return lock.ExpiresAt.IsZero() || lock.ExpiresAt.After(now)
+}
+
+func adapterSessionBusyTx(tx *bolt.Tx, owner string, requirements Requirements, excludeKind, excludeID string, now time.Time) (bool, error) {
+	if !adapterSessionLockEligible(requirements) {
+		return false, nil
+	}
+	bucket := tx.Bucket(bucketAdapterSessionLocks)
+	prefix := []byte(adapterSessionLockBase(owner, requirements) + "\x00")
+	wantedScope := adapterSessionLockScope(requirements)
+	cursor := bucket.Cursor()
+	for key, value := cursor.Seek(prefix); key != nil && bytes.HasPrefix(key, prefix); key, value = cursor.Next() {
+		var lock adapterSessionLock
+		if err := json.Unmarshal(value, &lock); err != nil {
+			return false, err
+		}
+		if !adapterSessionLockActive(lock, now) {
+			if err := cursor.Delete(); err != nil {
+				return false, err
+			}
+			continue
+		}
+		if wantedScope != "*" && lock.Scope != "*" && lock.Scope != wantedScope {
+			continue
+		}
+		if lock.Kind == excludeKind && lock.HolderID == excludeID {
+			continue
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+func acquireAdapterSessionLockTx(tx *bolt.Tx, owner string, requirements Requirements, kind, holderID string, expiresAt, now time.Time, required bool) error {
+	if !required {
+		return nil
+	}
+	busy, err := adapterSessionBusyTx(tx, owner, requirements, kind, holderID, now)
+	if err != nil {
+		return err
+	}
+	if busy {
+		return ErrAdapterSessionBusy
+	}
+	return putJSON(tx.Bucket(bucketAdapterSessionLocks), adapterSessionLockKey(owner, requirements, kind, holderID), adapterSessionLock{
+		Kind: kind, HolderID: holderID, Scope: adapterSessionLockScope(requirements), ExpiresAt: expiresAt,
+	})
+}
+
+func releaseAdapterSessionLockTx(tx *bolt.Tx, owner string, requirements Requirements, kind, holderID string) error {
+	if !adapterSessionLockEligible(requirements) {
+		return nil
+	}
+	return tx.Bucket(bucketAdapterSessionLocks).Delete([]byte(adapterSessionLockKey(owner, requirements, kind, holderID)))
+}
+
+func promoteAdapterSessionLockTx(tx *bolt.Tx, saved reservation, job Job, now time.Time) error {
+	assignmentKey := []byte(adapterSessionLockKey(saved.OwnerSubject, saved.Assignment.Requirements, adapterSessionLockAssignment, saved.Assignment.ID))
+	locked := tx.Bucket(bucketAdapterSessionLocks).Get(assignmentKey) != nil
+	if !locked && !adapterSessionNeedsLockTx(tx, job.Requirements, job.AssignedNode) {
+		return nil
+	}
+	if err := releaseAdapterSessionLockTx(tx, saved.OwnerSubject, saved.Assignment.Requirements, adapterSessionLockAssignment, saved.Assignment.ID); err != nil {
+		return err
+	}
+	return acquireAdapterSessionLockTx(tx, job.OwnerSubject, job.Requirements, adapterSessionLockJob, job.ID, time.Time{}, now, true)
+}
+
+func garbageCollectAdapterSessionLocks(tx *bolt.Tx, now time.Time) (int, error) {
+	removed := 0
+	cursor := tx.Bucket(bucketAdapterSessionLocks).Cursor()
+	for key, value := cursor.First(); key != nil; key, value = cursor.Next() {
+		var lock adapterSessionLock
+		if err := json.Unmarshal(value, &lock); err != nil {
+			return removed, err
+		}
+		if adapterSessionLockActive(lock, now) {
+			continue
+		}
+		if err := cursor.Delete(); err != nil {
+			return removed, err
+		}
+		removed++
+	}
+	return removed, nil
+}
+
+// rebuildAdapterSessionLocks makes the lock table derivable rather than a
+// second source of truth. This both repairs upgrades from older databases and
+// reconstructs reservations/active executions after a relay process crash.
+func rebuildAdapterSessionLocks(tx *bolt.Tx, now time.Time) error {
+	locks := tx.Bucket(bucketAdapterSessionLocks)
+	for cursor, key, _ := locks.Cursor(), []byte(nil), []byte(nil); ; {
+		if key == nil {
+			key, _ = cursor.First()
+		} else {
+			key, _ = cursor.Next()
+		}
+		if key == nil {
+			break
+		}
+		if err := cursor.Delete(); err != nil {
+			return err
+		}
+	}
+	if err := tx.Bucket(bucketAssignments).ForEach(func(_, value []byte) error {
+		var saved reservation
+		if err := json.Unmarshal(value, &saved); err != nil {
+			return err
+		}
+		if !saved.Assignment.ExpiresAt.After(now) || !adapterSessionNeedsLockTx(tx, saved.Assignment.Requirements, saved.Assignment.NodeID) {
+			return nil
+		}
+		return putJSON(locks, adapterSessionLockKey(saved.OwnerSubject, saved.Assignment.Requirements, adapterSessionLockAssignment, saved.Assignment.ID), adapterSessionLock{
+			Kind: adapterSessionLockAssignment, HolderID: saved.Assignment.ID, Scope: adapterSessionLockScope(saved.Assignment.Requirements), ExpiresAt: saved.Assignment.ExpiresAt,
+		})
+	}); err != nil {
+		return err
+	}
+	return tx.Bucket(bucketJobs).ForEach(func(_, value []byte) error {
+		var job Job
+		if err := json.Unmarshal(value, &job); err != nil {
+			return err
+		}
+		active := job.Status == JobAssigned || job.Status == JobRunning ||
+			(job.Status == JobQueued && job.SealedPayload != nil && job.AssignedNode != "")
+		if !active || !adapterSessionNeedsLockTx(tx, job.Requirements, job.AssignedNode) {
+			return nil
+		}
+		return putJSON(locks, adapterSessionLockKey(job.OwnerSubject, job.Requirements, adapterSessionLockJob, job.ID), adapterSessionLock{
+			Kind: adapterSessionLockJob, HolderID: job.ID, Scope: adapterSessionLockScope(job.Requirements),
+		})
+	})
+}
+
+// AdapterSessionBusy is a cheap scheduler hint. The write-transaction checks
+// in reservation creation and assignment remain authoritative against races.
+func (s *Store) AdapterSessionBusy(owner string, requirements Requirements, excludeJobID string) (bool, error) {
+	if !adapterSessionLockEligible(requirements) {
+		return false, nil
+	}
+	var busy bool
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		var err error
+		busy, err = adapterSessionBusyTx(tx, owner, requirements, adapterSessionLockJob, excludeJobID, time.Now().UTC())
+		return err
+	})
+	return busy, err
+}
+
+// ReleaseAdapterSessionJobLock is used only when the relay has proof that a
+// cancelled/terminalized worker execution ended (matching result or teardown).
+func (s *Store) ReleaseAdapterSessionJobLock(jobID string) (bool, error) {
+	released := false
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		var job Job
+		if err := getJSON(tx.Bucket(bucketJobs), jobID, &job); err != nil {
+			return err
+		}
+		if !adapterSessionLockEligible(job.Requirements) {
+			return nil
+		}
+		key := []byte(adapterSessionLockKey(job.OwnerSubject, job.Requirements, adapterSessionLockJob, job.ID))
+		if tx.Bucket(bucketAdapterSessionLocks).Get(key) == nil {
+			return nil
+		}
+		if err := tx.Bucket(bucketAdapterSessionLocks).Delete(key); err != nil {
+			return err
+		}
+		released = true
+		return nil
+	})
+	return released, err
+}
+
+func adapterSessionJobLockExistsTx(tx *bolt.Tx, job Job) bool {
+	return adapterSessionLockEligible(job.Requirements) && tx.Bucket(bucketAdapterSessionLocks).Get([]byte(adapterSessionLockKey(job.OwnerSubject, job.Requirements, adapterSessionLockJob, job.ID))) != nil
+}
+
+func putSessionPlacement(tx *bolt.Tx, key string, placement sessionPlacement) error {
+	if placement.NodeID == "" || placement.UpdatedAt.IsZero() {
+		return nil
+	}
+	bucket := tx.Bucket(bucketSessionPlacements)
+	var current sessionPlacement
+	if getJSON(bucket, key, &current) == nil && !placement.UpdatedAt.After(current.UpdatedAt) {
+		return nil
+	}
+	return putJSON(bucket, key, placement)
+}
+
+func (s *Store) SaveJob(job Job) error {
+	job.UpdatedAt = time.Now().UTC()
+	return s.db.Update(func(tx *bolt.Tx) error {
+		var previous Job
+		previousExists := getJSON(tx.Bucket(bucketJobs), job.ID, &previous) == nil
+		if err := putJSON(tx.Bucket(bucketJobs), job.ID, job); err != nil {
+			return err
+		}
+		if previousExists && !bytes.Equal(jobIndexKey(previous), jobIndexKey(job)) {
+			if err := tx.Bucket(bucketJobIndex).Delete(jobIndexKey(previous)); err != nil {
+				return err
+			}
+		}
+		if !previousExists || !bytes.Equal(jobIndexKey(previous), jobIndexKey(job)) {
+			if err := tx.Bucket(bucketJobIndex).Put(jobIndexKey(job), []byte(job.ID)); err != nil {
+				return err
+			}
+		}
+		if previousExists && !bytes.Equal(jobOwnerIndexKey(previous), jobOwnerIndexKey(job)) {
+			if err := deleteJobOwnerIndex(tx.Bucket(bucketJobOwnerIndex), previous); err != nil {
+				return err
+			}
+		}
+		return putJobOwnerIndex(tx.Bucket(bucketJobOwnerIndex), job)
+	})
+}
+
+func (s *Store) AssignJob(id, nodeID string, selectedAdapterEndpoint ...int) (Job, error) {
+	if len(selectedAdapterEndpoint) > 1 {
+		return Job{}, errors.New("only one adapter endpoint may be selected")
+	}
+	selection := (*adapterAssignment)(nil)
+	if len(selectedAdapterEndpoint) == 1 {
+		selection = &adapterAssignment{EndpointID: selectedAdapterEndpoint[0]}
+	}
+	return s.assignJob(id, nodeID, selection, nil)
+}
+
+func (s *Store) AssignJobWithDecision(id, nodeID string, decision RoutingDecision) (Job, error) {
+	return s.assignJob(id, nodeID, nil, &decision)
+}
+
+type adapterAssignment struct {
+	EndpointID      int
+	SessionRecovery bool
+}
+
+func (s *Store) AssignAdapterJob(id, nodeID string, endpointID int, sessionRecovery bool) (Job, error) {
+	return s.assignJob(id, nodeID, &adapterAssignment{EndpointID: endpointID, SessionRecovery: sessionRecovery}, nil)
+}
+
+func (s *Store) AssignAdapterJobWithDecision(id, nodeID string, endpointID int, sessionRecovery bool, decision RoutingDecision) (Job, error) {
+	return s.assignJob(id, nodeID, &adapterAssignment{EndpointID: endpointID, SessionRecovery: sessionRecovery}, &decision)
+}
+
+func (s *Store) assignJob(id, nodeID string, adapter *adapterAssignment, decision *RoutingDecision) (Job, error) {
+	var job Job
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		if err := getJSON(tx.Bucket(bucketJobs), id, &job); err != nil {
+			return err
+		}
+		if job.Status != JobQueued {
+			return errors.New("job is no longer queued")
+		}
+		if job.SealedPayload != nil && job.AssignedNode != "" && job.AssignedNode != nodeID {
+			return errors.New("sealed job is bound to another node")
+		}
+		if adapter != nil {
+			if !strings.EqualFold(job.Requirements.Provider, "adapter") {
+				return errors.New("adapter endpoint selection requires provider adapter")
+			}
+			if adapter.EndpointID < 0 {
+				return errors.New("adapter endpoint selection is invalid")
+			}
+			if job.SealedPayload != nil && (adapter.EndpointID != job.Requirements.AdapterEndpointID || adapter.SessionRecovery != job.Requirements.AdapterSessionRecovery) {
+				return errors.New("sealed adapter assignment cannot change authenticated endpoint requirements")
+			}
+			if adapter.EndpointID > 0 && job.Requirements.AdapterEndpointID > 0 && job.Requirements.AdapterEndpointID != adapter.EndpointID {
+				return errors.New("adapter job is bound to another endpoint")
+			}
+			job.Requirements.AdapterEndpointID = adapter.EndpointID
+			job.Requirements.AdapterSessionRecovery = adapter.SessionRecovery
+		}
+		if err := acquireAdapterSessionLockTx(tx, job.OwnerSubject, job.Requirements, adapterSessionLockJob, job.ID, time.Time{}, time.Now().UTC(), adapterSessionNeedsLockTx(tx, job.Requirements, nodeID)); err != nil {
+			return err
+		}
+		job.Status = JobAssigned
+		job.AssignedNode = nodeID
+		job.Attempt++
+		job.Progress = nil
+		job.AssignedAt = time.Now().UTC()
+		job.UpdatedAt = job.AssignedAt
+		if decision != nil {
+			if decision.SelectedNodeID != "" && decision.SelectedNodeID != nodeID {
+				return errors.New("routing decision selects another node")
+			}
+			selectedCandidateFound := false
+			for _, candidate := range decision.Candidates {
+				if candidate.NodeID == nodeID && candidate.Eligible {
+					selectedCandidateFound = true
+					break
+				}
+			}
+			if !selectedCandidateFound {
+				return errors.New("routing decision does not contain the selected eligible node")
+			}
+			decisionCopy := *decision
+			decisionCopy.Preview = false
+			decisionCopy.JobID = job.ID
+			decisionCopy.SelectedNodeID = nodeID
+			decisionCopy.Requirements = job.Requirements
+			if decisionCopy.ID == "" {
+				decisionCopy.ID = randomID("route")
+			}
+			if decisionCopy.CreatedAt.IsZero() {
+				decisionCopy.CreatedAt = job.AssignedAt
+			}
+			job.RoutingDecision = &decisionCopy
+		}
+		if err := putJSON(tx.Bucket(bucketJobs), id, job); err != nil {
+			return err
+		}
+		return deleteQueueEntry(tx.Bucket(bucketQueue), id)
+	})
+	return job, err
+}
+
+func (s *Store) MarkRunning(id, nodeID string, attempt int) (Job, error) {
+	var job Job
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		if err := getJSON(tx.Bucket(bucketJobs), id, &job); err != nil {
+			return err
+		}
+		if job.Status != JobAssigned || job.AssignedNode != nodeID || attempt <= 0 || job.Attempt != attempt {
+			return errors.New("job is not assigned to this node and attempt")
+		}
+		job.Status = JobRunning
+		job.StartedAt = time.Now().UTC()
+		job.UpdatedAt = job.StartedAt
+		return putJSON(tx.Bucket(bucketJobs), id, job)
+	})
+	return job, err
+}
+
+func (s *Store) UpdateJobProgress(id, nodeID string, attempt int, progress JobProgress) (Job, error) {
+	var job Job
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		if err := getJSON(tx.Bucket(bucketJobs), id, &job); err != nil {
+			return err
+		}
+		if (job.Status != JobAssigned && job.Status != JobRunning) || job.AssignedNode != nodeID || attempt <= 0 || job.Attempt != attempt {
+			return errors.New("job is not running on this node and attempt")
+		}
+		if job.SealedPayload != nil {
+			return errors.New("plaintext progress is disabled for encrypted jobs")
+		}
+		if progress.Sequence == 0 || len(progress.Text) > 1<<20 || len(progress.Detail) > 500 || progress.Percent < 0 || progress.Percent > 100 {
+			return errors.New("invalid job progress")
+		}
+		if job.Progress != nil && progress.Sequence <= job.Progress.Sequence {
+			return nil
+		}
+		progress.Phase = cleanLabel(progress.Phase, 30)
+		progress.Detail = cleanLabel(progress.Detail, 500)
+		progress.UpdatedAt = time.Now().UTC()
+		copy := progress
+		job.Progress = &copy
+		job.UpdatedAt = progress.UpdatedAt
+		return putJSON(tx.Bucket(bucketJobs), id, job)
+	})
+	return job, err
+}
+
+func (s *Store) CancelJob(id string) (Job, error) {
+	var job Job
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		if err := getJSON(tx.Bucket(bucketJobs), id, &job); err != nil {
+			return err
+		}
+		if job.Status == JobCompleted || job.Status == JobFailed || job.Status == JobCancelled {
+			return errors.New("job is already final")
+		}
+		job.Status = JobCancelled
+		job.FinishedAt = time.Now().UTC()
+		job.UpdatedAt = job.FinishedAt
+		if err := deleteQueueEntry(tx.Bucket(bucketQueue), id); err != nil {
+			return err
+		}
+		return putJSON(tx.Bucket(bucketJobs), id, job)
+	})
+	return job, err
+}
+
+func (s *Store) CompleteJob(id, nodeID string, attempt int, result json.RawMessage, sealed *SealedEnvelope, usage Usage, jobError string, execution ...*ExecutionMetadata) (Job, error) {
+	return s.CompleteJobWithFailure(id, nodeID, attempt, result, sealed, usage, jobError, "", execution...)
+}
+
+// CompleteJobWithFailure persists a bounded stable failure class while
+// retaining the existing diagnostic text. Unknown worker-supplied classes are
+// never trusted as new API identifiers; they collapse to a reviewed fallback.
+func (s *Store) CompleteJobWithFailure(id, nodeID string, attempt int, result json.RawMessage, sealed *SealedEnvelope, usage Usage, jobError, failureCode string, execution ...*ExecutionMetadata) (Job, error) {
+	var job Job
+	if len(execution) > 1 {
+		return Job{}, errors.New("only one execution metadata record may be reported")
+	}
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		if err := getJSON(tx.Bucket(bucketJobs), id, &job); err != nil {
+			return err
+		}
+		if job.Status != JobAssigned && job.Status != JobRunning {
+			return errors.New("job is not assigned")
+		}
+		if nodeID == "" || job.AssignedNode != nodeID {
+			return errors.New("job is not assigned to this node")
+		}
+		if attempt <= 0 || job.Attempt != attempt {
+			return errors.New("job result belongs to a stale assignment attempt")
+		}
+		completionError := validateWorkerResult(job, result, sealed, jobError)
+		var executedAdapterEndpointID int
+		if len(execution) == 1 && execution[0] != nil && execution[0].AdapterEndpointID != 0 {
+			executedAdapterEndpointID = execution[0].AdapterEndpointID
+			provider := strings.TrimSpace(job.Requirements.Provider)
+			if executedAdapterEndpointID < 1 || provider != "" && !strings.EqualFold(provider, "adapter") {
+				completionError = errors.New("adapter execution metadata does not match this job")
+			}
+		}
+		if completionError == nil {
+			job.Result = result
+			job.SealedResult = sealed
+			// The authenticated request is authoritative. A worker may confirm
+			// that a endpoint was ephemeral, but it cannot downgrade an explicitly
+			// per-job adapter chat into durable session placement.
+			job.EphemeralAdapterEndpoint = job.Requirements.AdapterEphemeralSession
+			if executedAdapterEndpointID > 0 {
+				job.ExecutedAdapterEndpointID = executedAdapterEndpointID
+				job.EphemeralAdapterEndpoint = job.EphemeralAdapterEndpoint || execution[0].EphemeralAdapterEndpoint
+			}
+		} else {
+			// A malformed completion from the assigned worker is terminal. Retrying
+			// an execution whose side effects are unknown could submit a adapter
+			// prompt twice; the producer must explicitly create a new job.
+			job.Result = nil
+			job.SealedResult = nil
+			jobError = "worker result rejected: " + completionError.Error()
+			failureCode = FailureWorkerResultRejected
+		}
+		if !job.AssignedAt.IsZero() && job.AssignedAt.After(job.CreatedAt) {
+			usage.QueueMS = nonNegativeDurationMilliseconds(job.AssignedAt.Sub(job.CreatedAt))
+		}
+		job.Usage = usage
+		job.Error = cleanLabel(jobError, 500)
+		job.FailureCode = normalizedWorkerFailureCode(failureCode, jobError)
+		job.FinishedAt = time.Now().UTC()
+		job.UpdatedAt = job.FinishedAt
+		if jobError == "" {
+			job.FailureCode = ""
+			if job.Progress != nil {
+				job.Progress.Sequence = saturatingUint64Add(job.Progress.Sequence, 1)
+				job.Progress.Phase = "final"
+				job.Progress.Busy = false
+				job.Progress.UpdatedAt = job.FinishedAt
+			}
+			job.Status = JobCompleted
+		} else {
+			job.Status = JobFailed
+		}
+		if err := putJSON(tx.Bucket(bucketJobs), id, job); err != nil {
+			return err
+		}
+		if strings.EqualFold(strings.TrimSpace(job.Requirements.Provider), "adapter") {
+			if job.ExecutedAdapterEndpointID > 0 && !job.EphemeralAdapterEndpoint {
+				if err := putSessionPlacement(tx, sessionPlacementKey(job.OwnerSubject, job.Requirements), sessionPlacement{
+					NodeID: job.AssignedNode, AdapterEndpointID: job.ExecutedAdapterEndpointID, UpdatedAt: job.UpdatedAt,
+				}); err != nil {
+					return err
+				}
+			}
+		} else if err := putSessionPlacement(tx, sessionPlacementKey(job.OwnerSubject, job.Requirements), sessionPlacement{
+			NodeID: job.AssignedNode, AdapterEndpointID: job.ExecutedAdapterEndpointID, UpdatedAt: job.UpdatedAt,
+		}); err != nil {
+			return err
+		}
+		if err := releaseAdapterSessionLockTx(tx, job.OwnerSubject, job.Requirements, adapterSessionLockJob, job.ID); err != nil {
+			return err
+		}
+		if job.Status == JobCompleted || job.Status == JobFailed {
+			var node Node
+			if getJSON(tx.Bucket(bucketNodes), job.AssignedNode, &node) == nil {
+				node.JobsTotal = saturatingUint64Add(node.JobsTotal, 1)
+				if job.Status == JobFailed {
+					node.JobsFailed = saturatingUint64Add(node.JobsFailed, 1)
+				}
+				node.ComputeMS = saturatingUint64Add(node.ComputeMS, usage.ComputeMS)
+				node.CostUSD = saturatingCostAdd(node.CostUSD, usage.EstimatedCostUSD)
+				node.CostKnownJobs = saturatingUint64Add(node.CostKnownJobs, usage.CostKnownJobs)
+				node.CostUnknownJobs = saturatingUint64Add(node.CostUnknownJobs, usage.CostUnknownJobs)
+				_ = putJSON(tx.Bucket(bucketNodes), node.ID, node)
+			}
+		}
+		return nil
+	})
+	return job, err
+}
+
+func validateWorkerResult(job Job, result json.RawMessage, sealed *SealedEnvelope, jobError string) error {
+	if strings.TrimSpace(jobError) != "" {
+		if len(result) != 0 || sealed != nil {
+			return errors.New("failed completion must not include a result")
+		}
+		return nil
+	}
+	if job.SealedPayload == nil {
+		if sealed != nil {
+			return errors.New("plaintext job returned an encrypted result")
+		}
+		if len(result) == 0 || int64(len(result)) > MaximumJobResultBytes || !utf8.Valid(result) || !json.Valid(result) {
+			return fmt.Errorf("plaintext result must be valid JSON up to %d bytes", MaximumJobResultBytes)
+		}
+		var object map[string]json.RawMessage
+		if json.Unmarshal(result, &object) != nil || object == nil {
+			return errors.New("plaintext result must be a JSON object")
+		}
+		return nil
+	}
+	if len(result) != 0 || sealed == nil {
+		return errors.New("encrypted job must return only an encrypted result")
+	}
+	if sealed.Algorithm != sealedAlgorithm || sealed.EphemeralPublic != "" {
+		return errors.New("encrypted result envelope is invalid")
+	}
+	nonce, err := decode(sealed.Nonce)
+	if err != nil || len(nonce) != 12 {
+		return errors.New("encrypted result nonce is invalid")
+	}
+	ciphertext, err := decode(sealed.Ciphertext)
+	if err != nil || len(ciphertext) < 16 || int64(len(ciphertext)) > MaximumJobResultBytes+16 {
+		return fmt.Errorf("encrypted result ciphertext must represent at most %d bytes", MaximumJobResultBytes)
+	}
+	return nil
+}
+
+func (s *Store) RequeueNode(nodeID, reason string) ([]Job, error) {
+	updated := []Job{}
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketJobs)
+		type pending struct {
+			key []byte
+			job Job
+		}
+		changes := []pending{}
+		if err := bucket.ForEach(func(key, value []byte) error {
+			var job Job
+			if json.Unmarshal(value, &job) != nil || job.AssignedNode != nodeID {
+				return nil
+			}
+			if job.Status == JobCancelled {
+				return releaseAdapterSessionLockTx(tx, job.OwnerSubject, job.Requirements, adapterSessionLockJob, job.ID)
+			}
+			if job.Status != JobAssigned && job.Status != JobRunning {
+				return nil
+			}
+			job.Error = cleanLabel(reason+"; execution state is ambiguous; explicit resubmission required", 500)
+			job.FailureCode = FailureExecutionStateAmbiguous
+			job.UpdatedAt = time.Now().UTC()
+			job.Status = JobFailed
+			job.FinishedAt = job.UpdatedAt
+			if err := deleteQueueEntry(tx.Bucket(bucketQueue), job.ID); err != nil {
+				return err
+			}
+			if err := releaseAdapterSessionLockTx(tx, job.OwnerSubject, job.Requirements, adapterSessionLockJob, job.ID); err != nil {
+				return err
+			}
+			changes = append(changes, pending{key: append([]byte(nil), key...), job: job})
+			updated = append(updated, job)
+			return nil
+		}); err != nil {
+			return err
+		}
+		for _, change := range changes {
+			encoded, err := json.Marshal(change.job)
+			if err != nil {
+				return err
+			}
+			if err := bucket.Put(change.key, encoded); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return updated, err
+}
+
+// RecoverRelayRestart closes every execution whose worker connection belonged
+// to the previous relay process and marks persisted nodes offline. An assigned
+// or running provider action may already have happened, so these jobs must
+// fail closed instead of becoming eligible for automatic re-execution.
+func (s *Store) RecoverRelayRestart(reason string) ([]Job, error) {
+	now := time.Now().UTC()
+	reason = cleanLabel(reason+"; execution state is ambiguous; explicit resubmission required", 500)
+	updated := []Job{}
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		nodes := tx.Bucket(bucketNodes)
+		if err := nodes.ForEach(func(key, value []byte) error {
+			var node Node
+			if json.Unmarshal(value, &node) != nil {
+				return nil
+			}
+			node.Connected = false
+			node.State = "offline"
+			node.Capabilities.Running = 0
+			encoded, err := json.Marshal(node)
+			if err != nil {
+				return err
+			}
+			return nodes.Put(key, encoded)
+		}); err != nil {
+			return err
+		}
+
+		jobs := tx.Bucket(bucketJobs)
+		type pending struct {
+			key []byte
+			job Job
+		}
+		changes := []pending{}
+		if err := jobs.ForEach(func(key, value []byte) error {
+			var job Job
+			if json.Unmarshal(value, &job) != nil || (job.Status != JobAssigned && job.Status != JobRunning) {
+				return nil
+			}
+			job.Error = reason
+			job.FailureCode = FailureExecutionStateAmbiguous
+			job.Status = JobFailed
+			job.UpdatedAt = now
+			job.FinishedAt = now
+			job.Progress = nil
+			if err := deleteQueueEntry(tx.Bucket(bucketQueue), job.ID); err != nil {
+				return err
+			}
+			if err := releaseAdapterSessionLockTx(tx, job.OwnerSubject, job.Requirements, adapterSessionLockJob, job.ID); err != nil {
+				return err
+			}
+			changes = append(changes, pending{key: append([]byte(nil), key...), job: job})
+			updated = append(updated, job)
+			return nil
+		}); err != nil {
+			return err
+		}
+		for _, change := range changes {
+			encoded, err := json.Marshal(change.job)
+			if err != nil {
+				return err
+			}
+			if err := jobs.Put(change.key, encoded); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return updated, err
+}
+
+func (s *Store) RecoverStaleJobs(now time.Time, sealedWait, execution time.Duration) ([]Job, error) {
+	if sealedWait <= 0 {
+		sealedWait = 2 * time.Minute
+	}
+	if execution <= 0 {
+		execution = 15 * time.Minute
+	}
+	updated := []Job{}
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		jobs := tx.Bucket(bucketJobs)
+		type change struct {
+			key []byte
+			job Job
+		}
+		changes := []change{}
+		if err := jobs.ForEach(func(key, value []byte) error {
+			var job Job
+			if json.Unmarshal(value, &job) != nil {
+				return nil
+			}
+			staleBound := job.Status == JobQueued && job.SealedPayload != nil && job.AssignedNode != "" && now.Sub(job.CreatedAt) > sealedWait
+			staleExecution := (job.Status == JobAssigned || job.Status == JobRunning) && !job.AssignedAt.IsZero() && now.Sub(job.AssignedAt) > execution
+			if !staleBound && !staleExecution {
+				return nil
+			}
+			job.UpdatedAt = now
+			if staleExecution {
+				job.Status, job.Error, job.FinishedAt = JobFailed, "worker execution timed out; execution state is ambiguous; explicit resubmission required", now
+				job.FailureCode = FailureExecutionTimeoutAmbiguous
+			} else {
+				job.Status, job.Error, job.FinishedAt = JobFailed, "encrypted worker reservation expired; explicit resubmission required", now
+				job.FailureCode = FailureEncryptedReservationExpired
+			}
+			if err := deleteQueueEntry(tx.Bucket(bucketQueue), job.ID); err != nil {
+				return err
+			}
+			if staleBound {
+				if err := releaseAdapterSessionLockTx(tx, job.OwnerSubject, job.Requirements, adapterSessionLockJob, job.ID); err != nil {
+					return err
+				}
+			}
+			changes = append(changes, change{key: append([]byte(nil), key...), job: job})
+			updated = append(updated, job)
+			return nil
+		}); err != nil {
+			return err
+		}
+		for _, item := range changes {
+			raw, err := json.Marshal(item.job)
+			if err != nil {
+				return err
+			}
+			if err := jobs.Put(item.key, raw); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return updated, err
+}
+
+func (s *Store) QueuedJobs(limit int) ([]Job, error) {
+	if limit <= 0 || limit > 5000 {
+		limit = 100
+	}
+	queued := make([]Job, 0, limit)
+	err := s.db.View(func(tx *bolt.Tx) error {
+		cursor := tx.Bucket(bucketQueue).Cursor()
+		for key, id := cursor.First(); key != nil && len(queued) < limit; key, id = cursor.Next() {
+			var job Job
+			if err := getJSON(tx.Bucket(bucketJobs), string(id), &job); err != nil {
+				return err
+			}
+			if job.Status == JobQueued {
+				queued = append(queued, job)
+			}
+		}
+		return nil
+	})
+	return queued, err
+}
+
+// QueuedJobsFair preserves priority ordering while round-robining producers
+// within each priority tier. One producer therefore cannot hide another's
+// equally urgent work beyond the dispatch scan window.
+func (s *Store) QueuedJobsFair(limit int) ([]Job, error) {
+	return s.QueuedJobsFairAfter(limit, nil)
+}
+
+// QueuedJobsFairAfter starts each same-priority owner rotation immediately
+// after the owner that most recently received a slot. The relay updates that
+// cursor only after a successful dispatch, preventing a deep queue from
+// winning every repeated one-slot scan.
+func (s *Store) QueuedJobsFairAfter(limit int, afterOwner map[int]string) ([]Job, error) {
+	jobs, _, _, err := s.QueuedJobsFairPage(limit, 0, afterOwner)
+	return jobs, err
+}
+
+// QueuedJobsFairPage returns a rotating window over the complete fair order.
+// Dispatch uses this to make progress past a large prefix of temporarily
+// incompatible jobs without sacrificing owner round-robin within priorities.
+func (s *Store) QueuedJobsFairPage(limit, offset int, afterOwner map[int]string) ([]Job, int, int, error) {
+	if limit <= 0 || limit > 5000 {
+		limit = 100
+	}
+	all := []Job{}
+	err := s.db.View(func(tx *bolt.Tx) error {
+		cursor := tx.Bucket(bucketQueue).Cursor()
+		for key, id := cursor.First(); key != nil; key, id = cursor.Next() {
+			var job Job
+			if err := getJSON(tx.Bucket(bucketJobs), string(id), &job); err != nil {
+				return err
+			}
+			if job.Status == JobQueued {
+				all = append(all, job)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	ordered := make([]Job, 0, len(all))
+	for start := 0; start < len(all); {
+		end := start + 1
+		for end < len(all) && all[end].Priority == all[start].Priority {
+			end++
+		}
+		appendFairPriorityTier(&ordered, all[start:end], len(all), afterOwner[all[start].Priority])
+		start = end
+	}
+	total := len(ordered)
+	if total == 0 {
+		return nil, 0, 0, nil
+	}
+	offset %= total
+	if offset < 0 {
+		offset += total
+	}
+	count := min(limit, total)
+	result := make([]Job, 0, count)
+	for index := 0; index < count; index++ {
+		result = append(result, ordered[(offset+index)%total])
+	}
+	return result, total, (offset + count) % total, nil
+}
+
+func appendFairPriorityTier(target *[]Job, tier []Job, limit int, afterOwner string) {
+	owners := make([]string, 0)
+	byOwner := make(map[string][]Job)
+	for _, job := range tier {
+		owner := job.OwnerSubject
+		if _, exists := byOwner[owner]; !exists {
+			owners = append(owners, owner)
+		}
+		byOwner[owner] = append(byOwner[owner], job)
+	}
+	if afterOwner != "" && len(owners) > 1 {
+		for index, owner := range owners {
+			if owner == afterOwner {
+				next := index + 1
+				owners = append(append([]string{}, owners[next:]...), owners[:next]...)
+				break
+			}
+		}
+	}
+	for remaining := len(tier); remaining > 0 && len(*target) < limit; {
+		for _, owner := range owners {
+			jobs := byOwner[owner]
+			if len(jobs) == 0 {
+				continue
+			}
+			*target = append(*target, jobs[0])
+			byOwner[owner] = jobs[1:]
+			remaining--
+			if len(*target) >= limit {
+				return
+			}
+		}
+	}
+}
+
+func (s *Store) ListJobs(limit int, status string) ([]Job, error) {
+	return s.ListJobsForOwner(limit, status, "")
+}
+
+// ListJobsForOwner uses a durable owner+createdAt index for producer-scoped
+// history. Old databases build the index once, atomically, during OpenStore;
+// this hot path never decodes another producer's records.
+func (s *Store) ListJobsForOwner(limit int, status, owner string) ([]Job, error) {
+	if limit <= 0 || limit > 5000 {
+		limit = 100
+	}
+	owner = cleanLabel(owner, 120)
+	jobs := []Job{}
+	err := s.db.View(func(tx *bolt.Tx) error {
+		index := tx.Bucket(bucketJobIndex)
+		var prefix []byte
+		if owner != "" {
+			index = tx.Bucket(bucketJobOwnerIndex)
+			prefix = jobOwnerIndexPrefix(owner)
+		}
+		cursor := index.Cursor()
+		key, id := cursor.Last()
+		if len(prefix) > 0 {
+			upper := prefixUpperBound(prefix)
+			if upper != nil {
+				key, id = cursor.Seek(upper)
+				if key == nil {
+					key, id = cursor.Last()
+				} else {
+					key, id = cursor.Prev()
+				}
+			}
+		}
+		for ; key != nil && len(jobs) < limit; key, id = cursor.Prev() {
+			if len(prefix) > 0 && !bytes.HasPrefix(key, prefix) {
+				break
+			}
+			var job Job
+			if err := getJSON(tx.Bucket(bucketJobs), string(id), &job); err != nil {
+				return err
+			}
+			if owner != "" && (job.OwnerSubject != owner || !bytes.Equal(key, jobOwnerIndexKey(job))) {
+				return errors.New("job owner index does not match its authoritative record")
+			}
+			if (owner == "" || job.OwnerSubject == owner) && (status == "" || job.Status == status) {
+				jobs = append(jobs, job)
+			}
+		}
+		return nil
+	})
+	return jobs, err
+}
+
+func (s *Store) CountJobs(status string) (int, error) {
+	count := 0
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketJobs).ForEach(func(_, value []byte) error {
+			var job Job
+			if err := json.Unmarshal(value, &job); err != nil {
+				return err
+			}
+			if status == "" || job.Status == status {
+				count++
+			}
+			return nil
+		})
+	})
+	return count, err
+}
+
+func (s *Store) EstimateVRAM(requirements Requirements) uint64 {
+	samples := []uint64{}
+	_ = s.db.View(func(tx *bolt.Tx) error {
+		cursor := tx.Bucket(bucketJobIndex).Cursor()
+		for key, id := cursor.Last(); key != nil && len(samples) < 500; key, id = cursor.Prev() {
+			var job Job
+			if getJSON(tx.Bucket(bucketJobs), string(id), &job) != nil || job.Status != JobCompleted || job.Usage.ResourceScope != "job" || job.Usage.PeakVRAMBytes == 0 {
+				continue
+			}
+			if requirements.Model != "" && !strings.EqualFold(job.Requirements.Model, requirements.Model) {
+				continue
+			}
+			if requirements.Model == "" && !strings.EqualFold(job.Requirements.Task, requirements.Task) {
+				continue
+			}
+			samples = append(samples, job.Usage.PeakVRAMBytes)
+		}
+		return nil
+	})
+	if len(samples) < 3 {
+		return 0
+	}
+	sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
+	estimate := samples[(len(samples)-1)*9/10]
+	return estimate + estimate/10
+}
+
+func (s *Store) AddEvent(event Event) error {
+	if event.ID == "" {
+		event.ID = randomID("event")
+	}
+	if event.Time.IsZero() {
+		event.Time = time.Now().UTC()
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		key := fmt.Sprintf("%020d:%s", event.Time.UnixNano(), event.ID)
+		return putJSON(tx.Bucket(bucketEvents), key, event)
+	})
+}
+
+func (s *Store) ListEvents(limit int) ([]Event, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	events := []Event{}
+	err := s.db.View(func(tx *bolt.Tx) error {
+		cursor := tx.Bucket(bucketEvents).Cursor()
+		for key, value := cursor.Last(); key != nil && len(events) < limit; key, value = cursor.Prev() {
+			var event Event
+			if err := json.Unmarshal(value, &event); err != nil {
+				return err
+			}
+			events = append(events, event)
+		}
+		return nil
+	})
+	return events, err
+}
+
+func (s *Store) Overview() (Overview, error) {
+	overview := Overview{JobsByState: map[string]uint64{}, GeneratedAt: time.Now().UTC()}
+	_, overview.UTCOffsetSeconds = time.Now().Zone()
+	nodes, err := s.ListNodes()
+	if err != nil {
+		return overview, err
+	}
+	overview.NodesTotal = len(nodes)
+	for _, node := range nodes {
+		if node.Connected && time.Since(node.LastSeen) < 30*time.Second {
+			overview.NodesOnline++
+		}
+		overview.Usage.ComputeMS = saturatingUint64Add(overview.Usage.ComputeMS, node.ComputeMS)
+		overview.Usage.EstimatedCostUSD = saturatingCostAdd(overview.Usage.EstimatedCostUSD, node.CostUSD)
+		overview.Usage.CostKnownJobs = saturatingUint64Add(overview.Usage.CostKnownJobs, node.CostKnownJobs)
+		overview.Usage.CostUnknownJobs = saturatingUint64Add(overview.Usage.CostUnknownJobs, node.CostUnknownJobs)
+		accounted := saturatingUint64Add(node.CostKnownJobs, node.CostUnknownJobs)
+		if node.JobsTotal > accounted {
+			overview.Usage.CostUnknownJobs = saturatingUint64Add(overview.Usage.CostUnknownJobs, node.JobsTotal-accounted)
+		}
+	}
+	err = s.db.View(func(tx *bolt.Tx) error {
+		totals, err := readHistoricalJobTotals(tx.Bucket(bucketHistoricalTotals))
+		if err != nil {
+			return err
+		}
+		mergeHistoricalJobTotals(&overview, totals)
+		return tx.Bucket(bucketJobs).ForEach(func(_, value []byte) error {
+			var job Job
+			if err := json.Unmarshal(value, &job); err != nil {
+				return err
+			}
+			overview.JobsByState[job.Status] = saturatingUint64Add(overview.JobsByState[job.Status], 1)
+			overview.Usage.InputTokens = saturatingUint64Add(overview.Usage.InputTokens, job.Usage.InputTokens)
+			overview.Usage.OutputTokens = saturatingUint64Add(overview.Usage.OutputTokens, job.Usage.OutputTokens)
+			overview.Usage.TotalTokens = saturatingUint64Add(overview.Usage.TotalTokens, job.Usage.TotalTokens)
+			overview.Usage.EquivalentCostUSD = saturatingCostAdd(overview.Usage.EquivalentCostUSD, job.Usage.EquivalentCostUSD)
+			overview.Usage.SavedCostUSD = saturatingCostAdd(overview.Usage.SavedCostUSD, job.Usage.SavedCostUSD)
+			return nil
+		})
+	})
+	overview.Usage.CostStatus = aggregateCostStatus(overview.Usage.CostKnownJobs, overview.Usage.CostUnknownJobs, overview.Usage.CostStatus, "")
+	return overview, err
+}
+
+func (s *Store) SavePipelineRun(run PipelineRun) error {
+	if s.savePipelineRunTestHook != nil {
+		if err := s.savePipelineRunTestHook(run); err != nil {
+			return err
+		}
+	}
+	return s.db.Update(func(tx *bolt.Tx) error { return putJSON(tx.Bucket(bucketPipelineRuns), run.ID, run) })
+}
+
+// CreatePipelineRunAdmitted atomically counts active runs and persists the new
+// run in one Bolt write transaction. This prevents parallel HTTP requests from
+// all passing a non-atomic count before starting their goroutines.
+func (s *Store) CreatePipelineRunAdmitted(run PipelineRun, maxGlobal, maxOwner int) error {
+	if run.ID == "" || !validJobID(run.ID) {
+		return errors.New("pipeline run id must use safe ASCII characters")
+	}
+	if run.Status != "running" {
+		return errors.New("an admitted pipeline run must start in running state")
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketPipelineRuns)
+		if bucket.Get([]byte(run.ID)) != nil {
+			return os.ErrExist
+		}
+		global, owned, err := activePipelineCounts(bucket, run.OwnerSubject)
+		if err != nil {
+			return err
+		}
+		if maxGlobal > 0 && global >= maxGlobal {
+			return ErrPipelineCapacity
+		}
+		if maxOwner > 0 && owned >= maxOwner {
+			return ErrOwnerPipelineCapacity
+		}
+		return putJSON(bucket, run.ID, run)
+	})
+}
+
+func activePipelineCounts(bucket *bolt.Bucket, owner string) (global, owned int, err error) {
+	err = bucket.ForEach(func(_, value []byte) error {
+		var run PipelineRun
+		if decodeErr := json.Unmarshal(value, &run); decodeErr != nil {
+			return decodeErr
+		}
+		if run.Status != "running" {
+			return nil
+		}
+		global++
+		if run.OwnerSubject == owner {
+			owned++
+		}
+		return nil
+	})
+	return global, owned, err
+}
+
+// HasActivePipelineRuns scans the authoritative pipeline bucket without a
+// presentation limit. ListPipelineRuns is intentionally capped and therefore
+// cannot safely answer lifecycle or updater-idle decisions.
+func (s *Store) HasActivePipelineRuns() (bool, error) {
+	active := false
+	err := s.db.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketPipelineRuns)
+		return bucket.ForEach(func(_, value []byte) error {
+			var run PipelineRun
+			if err := json.Unmarshal(value, &run); err != nil {
+				return err
+			}
+			if run.Status == "running" {
+				active = true
+			}
+			return nil
+		})
+	})
+	return active, err
+}
+
+// FailActivePipelineRuns closes orphaned admission slots on relay startup.
+// Pipeline goroutines are process-local and cannot survive a restart.
+func (s *Store) FailActivePipelineRuns(reason string) (int, error) {
+	reason = cleanLabel(reason, 500)
+	if reason == "" {
+		reason = "relay restarted before pipeline completion"
+	}
+	failed := 0
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketPipelineRuns)
+		updates := map[string]PipelineRun{}
+		if err := bucket.ForEach(func(key, value []byte) error {
+			var run PipelineRun
+			if err := json.Unmarshal(value, &run); err != nil {
+				return err
+			}
+			if run.Status != "running" {
+				return nil
+			}
+			run.Status = "failed"
+			run.Error = reason
+			run.FinishedAt = time.Now().UTC()
+			updates[string(key)] = run
+			failed++
+			return nil
+		}); err != nil {
+			return err
+		}
+		for key, run := range updates {
+			if err := putJSON(bucket, key, run); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return failed, err
+}
+
+func (s *Store) GetPipelineRun(id string) (PipelineRun, error) {
+	var run PipelineRun
+	err := s.db.View(func(tx *bolt.Tx) error { return getJSON(tx.Bucket(bucketPipelineRuns), id, &run) })
+	return run, err
+}
+
+func (s *Store) ListPipelineRuns(limit int) ([]PipelineRun, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 50
+	}
+	runs := []PipelineRun{}
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketPipelineRuns).ForEach(func(_, value []byte) error {
+			var run PipelineRun
+			if err := json.Unmarshal(value, &run); err != nil {
+				return err
+			}
+			runs = append(runs, run)
+			return nil
+		})
+	})
+	sort.Slice(runs, func(i, j int) bool { return runs[i].CreatedAt.After(runs[j].CreatedAt) })
+	if len(runs) > limit {
+		runs = runs[:limit]
+	}
+	return runs, err
+}
+
+func putJSON(bucket *bolt.Bucket, key string, value interface{}) error {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	return bucket.Put([]byte(key), encoded)
+}
+
+func getJSON(bucket *bolt.Bucket, key string, target interface{}) error {
+	value := bucket.Get([]byte(key))
+	if value == nil {
+		return os.ErrNotExist
+	}
+	return json.Unmarshal(value, target)
+}
+
+func tokenHash(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+func randomToken(prefix string) (string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	return prefix + encode(raw), nil
+}
+
+func randomID(prefix string) string {
+	raw := make([]byte, 16)
+	if _, err := rand.Read(raw); err != nil {
+		return fmt.Sprintf("%s_%d", prefix, time.Now().UnixNano())
+	}
+	return prefix + "_" + hex.EncodeToString(raw)
+}
+
+func randomUserCode() (string, error) {
+	raw := make([]byte, 5)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	code := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(raw)
+	return code[:4] + "-" + code[4:8], nil
+}
+
+func publicKeyFingerprint(publicKey []byte) string {
+	digest := sha256.Sum256(publicKey)
+	return "sha256:" + hex.EncodeToString(digest[:])
+}
+
+func jobIndexKey(job Job) []byte {
+	return []byte(fmt.Sprintf("%020d:%s", job.CreatedAt.UnixNano(), job.ID))
+}
+
+func jobOwnerIndexPrefix(owner string) []byte {
+	digest := sha256.Sum256([]byte(owner))
+	return append([]byte(nil), digest[:]...)
+}
+
+func jobOwnerIndexKey(job Job) []byte {
+	if job.OwnerSubject == "" {
+		return nil
+	}
+	return append(jobOwnerIndexPrefix(job.OwnerSubject), jobIndexKey(job)...)
+}
+
+func putJobOwnerIndex(bucket *bolt.Bucket, job Job) error {
+	key := jobOwnerIndexKey(job)
+	if len(key) == 0 {
+		return nil
+	}
+	return bucket.Put(key, []byte(job.ID))
+}
+
+func deleteJobOwnerIndex(bucket *bolt.Bucket, job Job) error {
+	key := jobOwnerIndexKey(job)
+	if len(key) == 0 {
+		return nil
+	}
+	value := bucket.Get(key)
+	if value != nil && bytes.Equal(value, []byte(job.ID)) {
+		return bucket.Delete(key)
+	}
+	return nil
+}
+
+func prefixUpperBound(prefix []byte) []byte {
+	upper := append([]byte(nil), prefix...)
+	for index := len(upper) - 1; index >= 0; index-- {
+		if upper[index] != 0xff {
+			upper[index]++
+			return upper[:index+1]
+		}
+	}
+	return nil
+}
+
+func ensureJobOwnerIndex(tx *bolt.Tx) error {
+	meta := tx.Bucket(bucketStoreMeta)
+	if bytes.Equal(meta.Get(keyJobOwnerIndexVersion), jobOwnerIndexVersion) {
+		return nil
+	}
+	if err := tx.DeleteBucket(bucketJobOwnerIndex); err != nil && !errors.Is(err, bolt.ErrBucketNotFound) {
+		return err
+	}
+	index, err := tx.CreateBucket(bucketJobOwnerIndex)
+	if err != nil {
+		return err
+	}
+	if err := tx.Bucket(bucketJobs).ForEach(func(key, value []byte) error {
+		var job Job
+		if err := json.Unmarshal(value, &job); err != nil {
+			return fmt.Errorf("migrate job owner index for %q: %w", key, err)
+		}
+		if job.ID != string(key) {
+			return fmt.Errorf("migrate job owner index: record key %q does not match id %q", key, job.ID)
+		}
+		return putJobOwnerIndex(index, job)
+	}); err != nil {
+		return err
+	}
+	return meta.Put(keyJobOwnerIndexVersion, jobOwnerIndexVersion)
+}
+
+func queueKey(job Job) []byte {
+	return []byte(fmt.Sprintf("%03d:%020d:%s", 100-job.Priority, job.CreatedAt.UnixNano(), job.ID))
+}
+
+func deleteQueueEntry(bucket *bolt.Bucket, jobID string) error {
+	cursor := bucket.Cursor()
+	for key, id := cursor.First(); key != nil; key, id = cursor.Next() {
+		if string(id) == jobID {
+			return bucket.Delete(key)
+		}
+	}
+	return nil
+}
+
+func cleanLabel(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	value = strings.Map(func(r rune) rune {
+		if r < 32 || r == 127 {
+			return -1
+		}
+		return r
+	}, value)
+	if len(value) > limit {
+		value = truncateUTF8Bytes(value, limit)
+	}
+	return value
+}
+
+func truncateUTF8Bytes(value string, limit int) string {
+	if limit < 0 || len(value) <= limit {
+		return value
+	}
+	value = value[:limit]
+	for value != "" && !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value
+}
+
+func cleanList(values []string, maxItems, maxLength int) []string {
+	if len(values) > maxItems {
+		values = values[:maxItems]
+	}
+	result := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for _, value := range values {
+		value = cleanLabel(value, maxLength)
+		if value != "" && !seen[value] {
+			seen[value] = true
+			result = append(result, value)
+		}
+	}
+	return result
+}

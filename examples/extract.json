@@ -1,0 +1,12 @@
+{
+  "source": "support-import",
+  "route": "default",
+  "kind": "extract",
+  "prompt": "Extract the language, topic, and a one-sentence summary.",
+  "text": "The customer asks whether the desktop application supports German on Windows 11.",
+  "output": {
+    "mode": "json",
+    "required_keys": ["language", "topic", "summary"],
+    "max_bytes": 8192
+  }
+}

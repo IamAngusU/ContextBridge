@@ -1,0 +1,8 @@
+/contextbridge
+/dist/
+/release-artifacts/
+/.buildcheck/
+/data/
+/inbox/
+/config.yml
+*.log

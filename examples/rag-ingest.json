@@ -1,0 +1,14 @@
+{
+  "source": "knowledge-sync",
+  "route": "rag_ingest",
+  "tenant_id": "acme",
+  "documents": [
+    {
+      "id": "handbook-001",
+      "text": "Support is available from Monday to Friday.",
+      "metadata": {
+        "source": "handbook"
+      }
+    }
+  ]
+}

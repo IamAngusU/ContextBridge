@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.25.x'
+          cache: true
+      - run: go test ./...
+      - run: go vet ./...
+
+  race:
+    name: Race detector
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.25.x'
+          cache: true
+      - run: go test -race ./internal/bridge ./internal/cluster
+
+  security:
+    name: Dependency and static security gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.25.x'
+          cache: true
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+      # These generic rules flag intentional operator-selected paths,
+      # executable permissions, fixed native Windows calls, and best-effort
+      # cleanup. The remaining rule set and local #nosec proofs are gated.
+      - run: go run github.com/securego/gosec/v2/cmd/gosec@v2.22.10 -exclude=G103,G104,G204,G302,G304,G602 -exclude-generated ./...
+
+  installers:
+    name: Installers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: bash scripts/test-install-headless.sh
+      - run: pwsh -NoProfile -File scripts/test-install-powershell.ps1
