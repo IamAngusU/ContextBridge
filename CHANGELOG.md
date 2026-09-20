@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.6.0 - 2026-09-20
 
 - Established the public ContextBridge core as a vendor-neutral local-first
   execution fabric.
