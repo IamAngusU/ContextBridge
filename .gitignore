@@ -2,6 +2,7 @@
 /dist/
 /release-artifacts/
 /.buildcheck/
+/.tmp-metrics/
 /data/
 /inbox/
 /config.yml

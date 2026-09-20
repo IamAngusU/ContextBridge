@@ -1,0 +1,67 @@
+# Pools and placement
+
+ContextBridge treats compute as a pool of independently owned workers. A
+producer may be local to the relay or remote; workers connect outbound and
+advertise bounded capability evidence.
+
+## Supported topologies
+
+| Topology | Meaning |
+| --- | --- |
+| 1:1 | One producer sends to one worker. |
+| N:1 | Multiple scoped producers share one worker. |
+| 1:N | One producer routes across several compatible workers. |
+| N:N | Multiple producers share a policy-aware worker pool. |
+
+The current relay is one durable coordination authority. ContextBridge does
+not claim active multi-relay consensus or transparent cross-relay replication.
+
+## Selection order
+
+The scheduler first rejects nodes that cannot prove hard requirements such as:
+
+- task and provider support;
+- exact model, worker group, or tag;
+- adapter profile and endpoint readiness;
+- minimum RAM/VRAM or required GPU backend;
+- artifact, visual-input, or other declared capability;
+- free slot capacity and execution-policy scope.
+
+It then ranks remaining nodes using live capacity and bounded resource
+evidence. `contextbridge route explain --file JOB.json` previews the decision
+without submitting provider work. The selected job stores rejection reasons
+and additive score components so placement is inspectable later.
+
+## Reservations and ambiguous loss
+
+A relay reservation names one worker and one lease. The worker validates the
+contract again before execution, and the relay accepts progress/result data
+only from the current owner. If a connection disappears after assignment or
+execution may have begun, the job is not silently replayed on another node.
+This prefers an explicit ambiguous failure over a duplicate external action.
+
+Retry-safe admission is separate: a producer-scoped idempotency key returns the
+same durable job after a lost submit response and rejects changed content under
+the same key. It does not pretend provider execution is universally
+exactly-once.
+
+## GPU and model evidence
+
+Workers can report multiple GPUs, backends, total/free memory, utilization,
+temperature, models, loaded state, and supported tasks. The scheduler can use
+that evidence for requirements and ranking. ContextBridge does not split one
+inference across GPUs unless the selected runtime already supports that. A
+machine with no usable GPU remains a valid CPU worker when its engine and job
+requirements permit it.
+
+Use:
+
+```sh
+contextbridge cluster status --config ./config.yml
+contextbridge hardware --config ./config.yml
+contextbridge models --config ./config.yml
+contextbridge route explain --config ./config.yml --file ./examples/cluster-job.json
+```
+
+Clock differences displayed for nodes are approximate observations based on
+heartbeat receipt, not a time-synchronization guarantee.

@@ -1,6 +1,17 @@
-# ContextBridge
+<p align="center">
+  <img src="assets/brand/contextbridge-wordmark.svg" width="420" alt="ContextBridge">
+</p>
 
-Own the compute. Route the work.
+<h1 align="center">ContextBridge</h1>
+
+<p align="center"><strong>Own the compute. Route the work.</strong></p>
+
+<p align="center">
+  <a href="https://github.com/IamAngusU/ContextBridge/releases/latest"><img alt="Latest stable release" src="https://img.shields.io/github/v/release/IamAngusU/ContextBridge?display_name=tag&amp;sort=semver&amp;style=flat-square&amp;color=2a9d8f"></a>
+  <a href="LICENSING.md"><img alt="v0.7 development license: AGPL-3.0-only" src="https://img.shields.io/badge/v0.7%20development-AGPL--3.0--only-20231f?style=flat-square"></a>
+  <img alt="Go 1.25" src="https://img.shields.io/badge/Go-1.25-00ADD8?style=flat-square&amp;logo=go&amp;logoColor=white">
+  <img alt="Windows, Linux, and macOS" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-59636e?style=flat-square">
+</p>
 
 ContextBridge is a local-first execution fabric for AI workloads. It turns the
 models, APIs, computers, GPUs, removable resource packs, and servers you control
@@ -45,6 +56,43 @@ capabilities, costs, agent approvals, and execution receipts.
   OpenAI-compatible input surface.
 - Fail-closed routing: unknown capability, unknown price, ambiguous ownership,
   or lost execution state is not silently treated as success or zero cost.
+
+## Measured bridge overhead
+
+ContextBridge measures its own coordination paths separately from model and
+network latency. On the dated Windows workstation snapshot documented below,
+the single-client p50 was **2.402 ms** for an authenticated durable
+submit/read/cancel cycle, **0.098 ms** for a small E2EE job-and-result round
+trip, and **0.065 ms** to decode, validate, and SHA-256-check a 64 KiB
+artifact.
+
+| Operation | p50 | p95 | p99 | Throughput |
+| --- | ---: | ---: | ---: | ---: |
+| Durable relay submit/read/cancel | 2.402 ms | 3.516 ms | 3.740 ms | 418.5 ops/s |
+| Small E2EE job + result | 0.098 ms | 0.168 ms | 0.193 ms | 8,582.9 ops/s |
+| Verify one 64 KiB artifact | 0.065 ms | 0.125 ms | 0.134 ms | 13,834.8 ops/s |
+
+These are reproducible engineering observations, not an SLA and not AI
+inference time. The exact source commit, host, sample settings, concurrency
+1/4/16/64 tables, resource footprint, protocol limits, exclusions, and the
+command for measuring another machine are in
+[Limits and measured ContextBridge overhead](docs/limits-and-performance.md).
+
+## Capability map
+
+| Layer | Public core capability |
+| --- | --- |
+| Inputs | CLI, authenticated JSON/HTTP, folder inbox, MCP, OpenAI-compatible requests, PHP example |
+| Compute | Ollama, managed `llama.cpp`, reviewed OpenAI-compatible engines, optional provider-neutral adapters |
+| Pool | 1:1, N:1, 1:N, and N:N topologies; outbound workers; scoped relay credentials |
+| Placement | Hard capability matching, groups/tags, task/model constraints, RAM/VRAM evidence, capacity ranking |
+| Automation | Durable schedules, bounded pipelines, reviewed plans, local-only auto agents, named authority envelopes |
+| Evidence | Route explanations, progress, receipts, artifact hashes, protocol manifests, conformance checks, benchmarks |
+| Safety | E2EE payloads, cost/egress policy, idempotency, fail-closed recovery, verified updates and release provenance |
+
+The map is backed by commands and tests in this repository rather than a
+future-feature list. Start with the [documentation index](docs/README.md) for
+the corresponding operational and security boundaries.
 
 ## Five-minute start
 
@@ -159,9 +207,13 @@ execution fingerprint where they cannot change model behavior.
 - PHP 8.1+: dependency-free example for shared hosting.
 - Folder inbox: atomic file-based ingestion for simple local automation.
 
-See [docs/architecture.md](docs/architecture.md),
-[docs/security.md](docs/security.md), [docs/supply-chain.md](docs/supply-chain.md),
-[docs/adapters.md](docs/adapters.md), and the
+See the [application integration guide](docs/integrations.md),
+[automation guide](docs/automation.md),
+[pool and placement model](docs/pools-and-placement.md),
+[portable-resource boundary](docs/portable-resources.md),
+[architecture](docs/architecture.md), [security model](docs/security.md),
+[supply-chain evidence](docs/supply-chain.md),
+[adapter contract](docs/adapters.md), and the
 [Hosted Relay readiness boundary](docs/hosted-relay.md).
 
 ## Honest boundaries
