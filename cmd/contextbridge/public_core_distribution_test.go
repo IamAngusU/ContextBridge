@@ -4,68 +4,61 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 )
 
-// This repository is the provider-neutral public core. Keep implementation-
-// specific adapters out-of-tree so a private adapter cannot accidentally enter
-// a public release through a later merge or release-script change.
-func TestPublicCoreContainsNoBundledVendorAdapter(t *testing.T) {
+// The public repository is an intentionally small, provider-neutral source
+// distribution. Treat its root surface as an allowlist so an optional
+// out-of-tree component cannot enter a release through a later merge or build
+// change without an explicit public-surface review.
+func TestPublicCoreDistributionSurfaceIsExplicit(t *testing.T) {
 	_, source, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("cannot locate public-core source tree")
 	}
 	root := filepath.Clean(filepath.Join(filepath.Dir(source), "..", ".."))
-	for _, relative := range []string{"extension", filepath.Join("cmd", "contextbridge", "browser_inspect.go")} {
-		if _, err := os.Stat(filepath.Join(root, relative)); err == nil || !os.IsNotExist(err) {
-			t.Fatalf("public core contains private adapter path %q", relative)
-		}
+	allowedDirectories := map[string]bool{
+		".buildcheck": true, // local ignored release verification output
+		".git":        true,
+		".github":     true,
+		"assets":      true,
+		"cmd":         true,
+		"deploy":      true,
+		"docs":        true,
+		"examples":    true,
+		"internal":    true,
+		"scripts":     true,
 	}
-
-	banned := []string{
-		"chat" + "gpt",
-		"gem" + "ini",
-		"chro" + "mium",
-		"fire" + "fox",
-		"play" + "wright",
-		"sele" + "nium",
-		"prompt-" + "textarea",
-		"conversation-" + "turn",
-		"model-" + "response",
+	allowedFiles := map[string]bool{
+		".editorconfig":            true,
+		".gitattributes":           true,
+		".gitignore":               true,
+		".markdownlint-cli2.jsonc": true,
+		"CHANGELOG.md":             true,
+		"config.example.yml":       true,
+		"CONTRIBUTING.md":          true,
+		"go.mod":                   true,
+		"go.sum":                   true,
+		"install.ps1":              true,
+		"install.sh":               true,
+		"LICENSE":                  true,
+		"Makefile":                 true,
+		"README.md":                true,
+		"SECURITY.md":              true,
 	}
-	textExtensions := map[string]bool{
-		".css": true, ".go": true, ".html": true, ".js": true, ".json": true,
-		".md": true, ".php": true, ".ps1": true, ".sh": true, ".txt": true,
-		".yaml": true, ".yml": true,
-	}
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if entry.IsDir() {
-			if entry.Name() == ".git" || entry.Name() == ".buildcheck" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !textExtensions[strings.ToLower(filepath.Ext(path))] {
-			return nil
-		}
-		raw, readErr := os.ReadFile(path)
-		if readErr != nil {
-			return readErr
-		}
-		lower := strings.ToLower(string(raw))
-		for _, token := range banned {
-			if strings.Contains(lower, token) {
-				relative, _ := filepath.Rel(root, path)
-				t.Fatalf("public core contains a private adapter fingerprint in %s", relative)
-			}
-		}
-		return nil
-	})
+	entries, err := os.ReadDir(root)
 	if err != nil {
 		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			if !allowedDirectories[entry.Name()] {
+				t.Fatalf("public source distribution contains an unreviewed root directory %q", entry.Name())
+			}
+			continue
+		}
+		if !allowedFiles[entry.Name()] {
+			t.Fatalf("public source distribution contains an unreviewed root file %q", entry.Name())
+		}
 	}
 }

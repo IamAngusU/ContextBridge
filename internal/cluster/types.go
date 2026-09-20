@@ -27,8 +27,8 @@ const JobContractV1 = "contextbridge.job.v1"
 // the relay must apply the same bound to untrusted hello and heartbeat frames.
 const MaximumWorkerConcurrency = 64
 
-// Adapter capability inventories are routing evidence, not a copy of page
-// contents. Keep the per-endpoint lists deliberately small so a compromised local
+// Adapter capability inventories are routing evidence, not a copy of provider
+// payloads. Keep the per-endpoint lists deliberately small so a compromised local
 // status endpoint or worker cannot turn heartbeats into an unbounded protocol
 // payload.
 const (
@@ -89,7 +89,7 @@ type Requirements struct {
 	AdapterSessionRecovery bool `json:"adapter_session_recovery,omitempty" yaml:"-"`
 	// AdapterSessionKey is an opaque relay-derived selector used only while
 	// ranking fresh adapter telemetry. It is never accepted from or serialized
-	// back to producers and contains no raw session name, URL, or page content.
+	// back to producers and contains no raw session name, locator, or provider content.
 	AdapterSessionKey string `json:"-" yaml:"-"`
 	// AdapterFreshSession asks the selected adapter worker to create a new provider
 	// endpoint session when this logical session does not already have a binding.
@@ -137,8 +137,9 @@ type ModelCapability struct {
 	Provider             string   `json:"provider,omitempty"`
 }
 
-// AdapterSessionCapability reports only the visible selection and state of an
-// explicitly attached endpoint. Chat contents and endpoint titles never leave the PC.
+// AdapterSessionCapability reports only the bounded routing selection and state
+// of an explicitly registered endpoint. Provider content and display labels
+// never leave the node.
 type AdapterSessionCapability struct {
 	EndpointID          int      `json:"endpoint_id"`
 	Profile             string   `json:"profile,omitempty"`

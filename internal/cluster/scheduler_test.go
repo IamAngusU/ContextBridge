@@ -78,10 +78,10 @@ func TestProviderRequirementSelectsReadyAdapterWorker(t *testing.T) {
 	now := time.Now().UTC()
 	nodes := []Node{
 		{ID: "local-model", Connected: true, LastSeen: now, Capabilities: Capabilities{Tasks: []string{"generation"}, Providers: []string{"ollama"}, MaxConcurrent: 1}},
-		{ID: "web-chat", Connected: true, LastSeen: now, Capabilities: Capabilities{Tasks: []string{"generation"}, Providers: []string{"adapter"}, MaxConcurrent: 1}},
+		{ID: "stateful-adapter", Connected: true, LastSeen: now, Capabilities: Capabilities{Tasks: []string{"generation"}, Providers: []string{"adapter"}, MaxConcurrent: 1}},
 	}
 	ranked := Rank(nodes, Requirements{Task: "generation", Provider: "adapter"})
-	if len(ranked) != 1 || ranked[0].Node.ID != "web-chat" {
+	if len(ranked) != 1 || ranked[0].Node.ID != "stateful-adapter" {
 		t.Fatalf("adapter provider requirement was not enforced: %#v", ranked)
 	}
 }
