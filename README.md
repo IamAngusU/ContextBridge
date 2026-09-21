@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/IamAngusU/ContextBridge/releases/latest"><img alt="Latest stable release" src="https://img.shields.io/github/v/release/IamAngusU/ContextBridge?display_name=tag&amp;sort=semver&amp;style=flat-square&amp;color=2a9d8f"></a>
-  <a href="LICENSING.md"><img alt="v0.7 development license: AGPL-3.0-only" src="https://img.shields.io/badge/v0.7%20development-AGPL--3.0--only-20231f?style=flat-square"></a>
+  <a href="LICENSING.md"><img alt="v0.7 core license: AGPL-3.0-only" src="https://img.shields.io/badge/v0.7%20core-AGPL--3.0--only-20231f?style=flat-square"></a>
   <img alt="Go 1.25" src="https://img.shields.io/badge/Go-1.25-00ADD8?style=flat-square&amp;logo=go&amp;logoColor=white">
   <img alt="Windows, Linux, and macOS" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-59636e?style=flat-square">
 </p>
@@ -303,7 +303,7 @@ GPU/runtime availability naturally varies by host.
 
 ## License
 
-The v0.7 development-line core is AGPL-3.0-only. Reusable schemas, examples,
+The v0.7.0 core and current main branch are AGPL-3.0-only. Reusable schemas, examples,
 and the adapter contract are Apache-2.0 exceptions with explicit directory or
 SPDX notices. Releases v0.6.0 through v0.6.3 remain MIT; their permissions are
 not withdrawn. See [LICENSING.md](LICENSING.md) for the exact file boundaries.

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased - v0.7.0
+## v0.7.0 - 2026-09-21
 
 - Added a public Ed25519 verifier for issuer-backed interoperability
   statements that bind exact subject bytes, ContextBridge source, scope,
