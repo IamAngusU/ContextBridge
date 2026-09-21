@@ -78,6 +78,9 @@ func TestPublicCoreProductSurfaceIsPresent(t *testing.T) {
 		"internal/bridge/dashboard/mark.svg",
 		"docs/README.md",
 		"docs/compatibility.md",
+		"docs/verification.md",
+		"docs/schemas/verification-statement-v1.schema.json",
+		"docs/schemas/verification-trust-key-v1.schema.json",
 		"docs/operations.md",
 		"docs/limits-and-performance.md",
 		"docs/bounded-agent.md",
@@ -100,6 +103,7 @@ func TestPublicCoreProductSurfaceIsPresent(t *testing.T) {
 		"assets/brand/contextbridge-wordmark.svg",
 		"docs/README.md",
 		"docs/compatibility.md",
+		"docs/verification.md",
 		"docs/limits-and-performance.md",
 	} {
 		if !strings.Contains(string(readme), reference) {

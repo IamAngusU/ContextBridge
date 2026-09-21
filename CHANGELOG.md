@@ -2,6 +2,16 @@
 
 ## Unreleased - v0.7.0
 
+- Added a public Ed25519 verifier for issuer-backed interoperability
+  statements that bind exact subject bytes, ContextBridge source, scope,
+  evidence digests, and a maximum 366-day validity window without placing an
+  issuer private key in the distributable binary.
+- Kept free self-run conformance distinct from the future `ContextBridge
+  Verified` service and documented why verification expires by time while
+  technical evidence remains bound to an exact version and artifact.
+- Corrected the security policy's stale MIT-only description after the
+  forward-only AGPL license boundary.
+
 - Established a forward-only license boundary: the core on this branch is
   AGPL-3.0-only, while published releases v0.6.0 through v0.6.3 remain
   available under MIT.

@@ -15,8 +15,8 @@ func TestCompletionScriptsCoverBothAliasesAndNestedCommands(t *testing.T) {
 		script string
 		want   []string
 	}{
-		{"powershell", powershellCompletionScript(), []string{"-CommandName contextbridge, cb", "'serve'", "'stop' = @('--config','--force')", "'uninstall' = @('--config','--install-dir','--purge','--force','--yes','--dry-run')", "'mcp serve' = @('--config')", "'benchmark' = @('--json','--samples'", "'selftest'", "'selftest' = @('--config','--providers'", "'cluster status' = @('--config','--json')", "'cluster protocol' = @('--config','--token','--json')", "'cluster conformance' = @('relay','worker'", "'cluster contract' = @('validate'", "'cluster receipt' = @('show','export','verify'", "'route explain' = @('--config','--file','--job','--token','--json')", "--attach-image", "--reasoning"}},
-		{"bash", bashCompletionScript(), []string{"# ContextBridge managed completion", "contextbridge cb", "init serve run stop uninstall", "stop) candidates=\"--config --force\"", "uninstall) candidates=\"--config --install-dir --purge --force --yes --dry-run\"", "\"mcp serve\") candidates=\"--config\"", "cluster) candidates=\"status protocol conformance submit chat agent selftest route", "\"cluster conformance\") candidates=\"relay worker", "\"cluster agent\") candidates=\"plan run auto", "\"cluster contract\") candidates=\"validate", "\"cluster receipt\") candidates=\"show export verify", "\"cluster status\") candidates=\"--config --json\"", "\"route explain\") candidates=\"--config --file --job --token --json\"", "--attach-image", "--reasoning"}},
+		{"powershell", powershellCompletionScript(), []string{"-CommandName contextbridge, cb", "'serve'", "'stop' = @('--config','--force')", "'uninstall' = @('--config','--install-dir','--purge','--force','--yes','--dry-run')", "'mcp serve' = @('--config')", "'benchmark' = @('--json','--samples'", "'verification verify' = @('--file','--trust-key'", "'selftest'", "'selftest' = @('--config','--providers'", "'cluster status' = @('--config','--json')", "'cluster protocol' = @('--config','--token','--json')", "'cluster conformance' = @('relay','worker'", "'cluster contract' = @('validate'", "'cluster receipt' = @('show','export','verify'", "'route explain' = @('--config','--file','--job','--token','--json')", "--attach-image", "--reasoning"}},
+		{"bash", bashCompletionScript(), []string{"# ContextBridge managed completion", "contextbridge cb", "init serve run stop uninstall", "stop) candidates=\"--config --force\"", "uninstall) candidates=\"--config --install-dir --purge --force --yes --dry-run\"", "\"mcp serve\") candidates=\"--config\"", "\"verification verify\") candidates=\"--file --trust-key", "cluster) candidates=\"status protocol conformance submit chat agent selftest route", "\"cluster conformance\") candidates=\"relay worker", "\"cluster agent\") candidates=\"plan run auto", "\"cluster contract\") candidates=\"validate", "\"cluster receipt\") candidates=\"show export verify", "\"cluster status\") candidates=\"--config --json\"", "\"route explain\") candidates=\"--config --file --job --token --json\"", "--attach-image", "--reasoning"}},
 		{"zsh", zshCompletionScript(), []string{"#compdef contextbridge cb", "# ContextBridge managed completion", "serve:Run only the local bridge service", "mcp:Expose bounded local tools over MCP stdio", "benchmark:Measure bridge-only overhead and resource footprint", "stop:Safely stop the local ContextBridge process", "uninstall:Remove owned program files", "cluster:Use a remote pool", "route:Explain a preview or durable cluster route", "status protocol conformance submit chat agent selftest route contract", "_values 'conformance target' relay worker", "_values 'agent action' plan run auto", "_values 'contract action' validate", "completion)", "uninstall)", "--install-dir[", "--attach-image[", "--job-timeout[", "--managed-service[", "--discover["}},
 	}
 	for _, test := range tests {
@@ -132,7 +132,7 @@ func TestCompletionRootCommandsStayUnique(t *testing.T) {
 		}
 		seen[command] = true
 	}
-	for _, required := range []string{"serve", "stop", "uninstall", "console", "mcp", "benchmark", "cluster", "route", "selftest", "completion", "version"} {
+	for _, required := range []string{"serve", "stop", "uninstall", "console", "mcp", "benchmark", "verification", "cluster", "route", "selftest", "completion", "version"} {
 		if !seen[required] {
 			t.Errorf("completion root is missing %q", required)
 		}
@@ -183,6 +183,7 @@ func TestBashCompletionOffersRootCommandFlagsAtCurrentWord(t *testing.T) {
 		{"models", "contextbridge models --", 2, []string{"--config", "--json", "--discover"}, nil},
 		{"mcp serve", "contextbridge mcp serve --", 3, []string{"--config"}, nil},
 		{"benchmark", "contextbridge benchmark --", 2, []string{"--json", "--samples", "--idle-duration", "--binary"}, nil},
+		{"verification", "contextbridge verification verify --", 3, []string{"--file", "--trust-key", "--artifact", "--require-artifact", "--evidence-dir", "--require-evidence", "--json"}, nil},
 		{"hardware", "contextbridge hardware --", 2, []string{"--json"}, []string{"--config"}},
 		{"update root", "contextbridge update --", 2, []string{"--force", "--managed-service", "--relay-only"}, nil},
 		{"update action", "contextbridge update apply --", 3, []string{"--config", "--force"}, nil},

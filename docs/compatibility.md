@@ -80,6 +80,10 @@ A passing report is point-in-time evidence for the exact endpoint, worker,
 configuration, and versions tested. It is not a permanent badge, security
 audit, performance result, or endorsement by the ContextBridge project.
 
+The optional [signed verification format](verification.md) can bind reviewed
+reports to exact product bytes, scope, issuer, and a validity window. It does
+not replace these free self-run commands.
+
 ## Accurate compatibility statements
 
 Prefer a statement that names the surface and version:

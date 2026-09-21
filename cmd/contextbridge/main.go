@@ -89,6 +89,8 @@ func main() {
 		err = mcpCommand(os.Args[2:])
 	case "benchmark":
 		err = performanceCommand(os.Args[2:])
+	case "verification":
+		err = verificationCommand(os.Args[2:])
 	case "relay":
 		err = relayCommand(os.Args[2:])
 	case "pair":
@@ -154,6 +156,7 @@ Usage:
   contextbridge runtime install [--config path] llama.cpp
   contextbridge mcp serve [--config path]
   contextbridge benchmark [--json] [--samples N] [--warmup N] [--database-jobs N] [--idle-duration D] [--binary path]
+  contextbridge verification verify --file STATEMENT.json --trust-key KEY.json [--artifact FILE] [--require-artifact] [--evidence-dir DIR] [--require-evidence] [--json]
   contextbridge relay [--config path]
   contextbridge pair [--config path] [--relay URL] [--identity path] [--name NAME]
   contextbridge worker [--config path] [--relay URL] [--identity path] [--name NAME] [--slots N] [--providers LIST] [--models LIST] [--tasks LIST] [--topmost]

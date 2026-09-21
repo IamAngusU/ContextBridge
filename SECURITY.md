@@ -18,6 +18,7 @@ ownership, tenant isolation, artifact validation, path traversal, command
 execution, update verification, cost enforcement, agent authority, and adapter
 capability spoofing.
 
-ContextBridge is MIT licensed. It does not claim certification, legal
-compliance, or suitability for a regulated deployment without the operator's
-own review and controls.
+The current core is AGPL-3.0-only; published v0.6.0 through v0.6.3 releases
+retain the MIT License that accompanied them. ContextBridge does not claim
+certification, legal compliance, or suitability for a regulated deployment
+without the operator's own review and controls.

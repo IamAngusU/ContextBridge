@@ -25,6 +25,7 @@ license merely by copying these materials:
 - docs/schemas/**
 - docs/adapters.md
 - docs/compatibility.md
+- docs/verification.md
 - examples/**
 
 The Apache-2.0 text is in
@@ -46,6 +47,13 @@ proprietary modification, embedding, redistribution, warranty, support, or
 other contractual terms. No commercial license is granted by this statement;
 one exists only when signed by the copyright holder and the customer.
 
+A negotiated commercial grant may be time-limited, renewed, or scoped to a
+specific product or deployment. That contractual validity is separate from
+the permanent license carried by each published source release. The public
+core is not being moved to a delayed-open-source license: a calendar-only
+boundary is ambiguous about which immutable bytes received which rights and
+would weaken the project's open interoperability position.
+
 Before any external core code contribution is accepted, the project will use a
 professionally reviewed contributor agreement that expressly supports this
 dual-licensing model. Issues, security reports, design discussion, and
@@ -56,3 +64,8 @@ documentation feedback remain welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 Copyright and trademark are separate. Honest compatibility and origin
 statements remain welcome, while modified products must not imply that they are
 official ContextBridge releases. See [TRADEMARKS.md](TRADEMARKS.md).
+
+Free self-run conformance and optional issuer-backed verification are also
+separate from code licensing. A signed verification statement may expire and
+is bound to exact product bytes and scope; it grants no software-license or
+trademark rights. See [docs/verification.md](docs/verification.md).

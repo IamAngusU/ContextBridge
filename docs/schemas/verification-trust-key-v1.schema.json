@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/IamAngusU/ContextBridge/blob/main/docs/schemas/verification-trust-key-v1.schema.json",
+  "title": "ContextBridge Verification Trust Key v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "key_id", "issuer", "algorithm", "public_key"],
+  "properties": {
+    "schema": { "const": "contextbridge.verification-trust-key.v1" },
+    "key_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+    "issuer": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "algorithm": { "const": "ed25519" },
+    "public_key": { "type": "string", "minLength": 44, "maxLength": 44 }
+  }
+}

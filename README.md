@@ -116,7 +116,7 @@ on a constrained host, not an operating-system comparison or SLA.
 | Pool | 1:1, N:1, 1:N, and N:N topologies; outbound workers; scoped relay credentials |
 | Placement | Hard capability matching, groups/tags, task/model constraints, RAM/VRAM evidence, capacity ranking |
 | Automation | Durable schedules, bounded pipelines, reviewed plans, local-only auto agents, named authority envelopes |
-| Evidence | Route explanations, progress, receipts, artifact hashes, protocol manifests, conformance checks, benchmarks |
+| Evidence | Route explanations, progress, receipts, artifact hashes, protocol manifests, conformance checks, signed time-bounded verification, benchmarks |
 | Safety | E2EE payloads, cost/egress policy, idempotency, fail-closed recovery, verified updates and release provenance |
 
 The map is backed by commands and tests in this repository rather than a
@@ -243,6 +243,7 @@ See the [application integration guide](docs/integrations.md),
 [portable-resource boundary](docs/portable-resources.md),
 [architecture](docs/architecture.md), [security model](docs/security.md),
 [supply-chain evidence](docs/supply-chain.md),
+[verification and conformance](docs/verification.md),
 [adapter contract](docs/adapters.md), and the
 [Hosted Relay readiness boundary](docs/hosted-relay.md).
 
@@ -263,6 +264,9 @@ See the [application integration guide](docs/integrations.md),
   operator's own compliance program.
 - The repository contains a relay foundation, not a currently offered
   production multi-tenant Hosted Relay, SLA, or zero-knowledge service.
+- Free conformance is not a paid badge. `ContextBridge Verified` is reserved
+  for a future announced program that issues signed statements bound to exact
+  product bytes, scope, evidence, and an expiry date.
 
 ## Security defaults
 

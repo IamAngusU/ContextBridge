@@ -33,7 +33,7 @@ jobs:
         with:
           go-version: '1.25.x'
           cache: true
-      - run: go test -race ./internal/bridge ./internal/cluster
+      - run: go test -race ./internal/bridge ./internal/cluster ./internal/verification
 
   security:
     name: Dependency and static security gates

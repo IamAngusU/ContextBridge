@@ -22,6 +22,8 @@ described as vendor integrations here.
 
 - [Compatibility boundaries](compatibility.md): versioned job, relay, worker,
   adapter, and resource-pack claims plus commands for collecting evidence.
+- [Verification](verification.md): free self-run conformance and the signed,
+  version- and time-bounded statement format for future reviewed verification.
 - [Bounded agents](bounded-agent.md): manual approval, local-only auto mode,
   and operator-owned authority envelopes.
 - [Application integrations](integrations.md): native jobs, OpenAI-compatible
@@ -31,6 +33,10 @@ described as vendor integrations here.
   managed coordination service.
 - [Job Contract v1 schema](schemas/job-contract-v1.schema.json): reusable
   machine-readable submission boundary.
+- [Verification Statement v1 schema](schemas/verification-statement-v1.schema.json):
+  portable signed-review envelope.
+- [Verification Trust Key v1 schema](schemas/verification-trust-key-v1.schema.json):
+  portable issuer public-key document.
 
 ## Build and verify
 

@@ -26,6 +26,13 @@ Do not use the ContextBridge identifiers to imply an endorsement or official
 relationship that does not exist, or register a confusingly similar product,
 package, service, account, or domain name.
 
+`ContextBridge Verified` and any corresponding badge identify a signed,
+unexpired statement issued under a project verification program. They may be
+used only for the exact product, artifact, scope, and validity window named in
+that statement and only after such a program and its terms have been publicly
+announced. Running the free conformance suite or verifying a signature from an
+arbitrary third-party key does not grant that designation.
+
 This policy is intended to preserve accurate attribution and prevent user
 confusion, not to prevent honest discussion, interoperability, or compatible
 independent implementations. Questions or permission requests may be opened as

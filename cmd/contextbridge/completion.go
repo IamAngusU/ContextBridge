@@ -9,18 +9,19 @@ import (
 var completionRootCommands = []string{
 	"init", "serve", "run", "stop", "console", "submit", "schedule", "result", "review",
 	"health", "dashboard", "status", "doctor", "hardware", "models", "resources", "uninstall",
-	"pull", "runtime", "mcp", "benchmark", "relay", "pair", "worker", "cluster", "route", "selftest", "update", "completion", "version", "help",
+	"pull", "runtime", "mcp", "benchmark", "verification", "relay", "pair", "worker", "cluster", "route", "selftest", "update", "completion", "version", "help",
 }
 
 var completionSubcommands = map[string][]string{
-	"schedule":   {"add", "list", "show", "pause", "resume", "run", "delete"},
-	"runtime":    {"install"},
-	"mcp":        {"serve"},
-	"cluster":    {"status", "protocol", "conformance", "submit", "chat", "agent", "selftest", "route", "contract", "receipt", "login", "token", "pairing", "configure", "dashboard", "pipeline"},
-	"route":      {"explain"},
-	"update":     {"status", "check", "apply", "enable", "disable", "auto"},
-	"completion": {"powershell", "bash", "zsh"},
-	"uninstall":  {"--config", "--install-dir", "--purge", "--force", "--yes", "--dry-run"},
+	"schedule":     {"add", "list", "show", "pause", "resume", "run", "delete"},
+	"runtime":      {"install"},
+	"mcp":          {"serve"},
+	"verification": {"verify"},
+	"cluster":      {"status", "protocol", "conformance", "submit", "chat", "agent", "selftest", "route", "contract", "receipt", "login", "token", "pairing", "configure", "dashboard", "pipeline"},
+	"route":        {"explain"},
+	"update":       {"status", "check", "apply", "enable", "disable", "auto"},
+	"completion":   {"powershell", "bash", "zsh"},
+	"uninstall":    {"--config", "--install-dir", "--purge", "--force", "--yes", "--dry-run"},
 }
 
 // completionCommand emits static, auditable shell integration. It deliberately
@@ -54,6 +55,7 @@ $script:ContextBridgeSubcommands = @{
     schedule = @('add','list','show','pause','resume','run','delete')
     runtime = @('install')
     mcp = @('serve')
+    verification = @('verify')
     cluster = @('status','protocol','conformance','submit','chat','agent','selftest','route','contract','receipt','login','token','pairing','configure','dashboard','pipeline')
     route = @('explain')
     update = @('status','check','apply','enable','disable','auto')
@@ -81,6 +83,7 @@ $script:ContextBridgeOptions = @{
     'runtime install' = @('--config')
     'mcp serve' = @('--config')
     'benchmark' = @('--json','--samples','--warmup','--database-jobs','--idle-duration','--binary')
+    'verification verify' = @('--file','--trust-key','--artifact','--require-artifact','--evidence-dir','--require-evidence','--json')
     'relay' = @('--config')
     'pair' = @('--config','--relay','--identity','--name')
     'worker' = @('--config','--relay','--identity','--name','--slots','--providers','--models','--tasks','--groups','--no-updates','--topmost')
@@ -112,7 +115,7 @@ $script:ContextBridgeValueOptions = @{
     '--role' = @('producer','observer')
 }
 $script:ContextBridgeTakesValue = @(
-    '--config','--install-dir','--file','--job','--artifacts','--attach-image','--identity','--job-dir','--token-file',
+	'--config','--install-dir','--file','--job','--artifacts','--artifact','--attach-image','--identity','--job-dir','--token-file','--trust-key','--evidence-dir',
     '--slots','--endpoint','--relay','--name','--providers','--models','--tasks','--groups',
     '--token','--provider','--group','--model','--profile','--reasoning','--session','--prompt',
 	'--min-artifacts','--min-images','--local-model','--image-profile','--timeout','--job-timeout','--poll','--idempotency-key',
@@ -181,7 +184,7 @@ _contextbridge_complete() {
   if (( COMP_CWORD > 2 )); then
     subcommand="${COMP_WORDS[2]:-}"
     case "$command" in
-      schedule|runtime|mcp|cluster|route|update)
+      schedule|runtime|mcp|verification|cluster|route|update)
         if [[ -n "$subcommand" && "$subcommand" != -* ]]; then
           option_key="$command $subcommand"
         fi
@@ -190,7 +193,7 @@ _contextbridge_complete() {
   fi
 
   case "$previous" in
-    --config|--file|--artifacts|--attach-image|--identity|--job-dir|--token-file|--binary)
+    --config|--file|--artifacts|--artifact|--attach-image|--identity|--job-dir|--token-file|--binary|--trust-key|--evidence-dir)
       if declare -F _filedir >/dev/null 2>&1; then _filedir; else COMPREPLY=( $(compgen -f -- "$current") ); fi
       return ;;
     --provider) candidates="adapter ollama nuextract jina" ;;
@@ -198,7 +201,7 @@ _contextbridge_complete() {
     --reasoning) candidates="instant medium high xhigh pro max" ;;
     --mode) candidates="local relay worker all" ;;
     --role) candidates="producer observer" ;;
-    --wait|--e2ee|--stream|--json|--no-open|--topmost|--image|--new-session|--new-session-per-job|--foreground-new-session|--run|--dry-run|--keep-artifacts|--no-updates|--discover|--force|--relay-only) boolean_previous=1 ;;
+    --wait|--e2ee|--stream|--json|--no-open|--topmost|--image|--new-session|--new-session-per-job|--foreground-new-session|--run|--dry-run|--keep-artifacts|--no-updates|--discover|--force|--relay-only|--require-artifact|--require-evidence) boolean_previous=1 ;;
   esac
   if [ -n "${candidates:-}" ]; then
     COMPREPLY=( $(compgen -W "$candidates" -- "$current") )
@@ -226,6 +229,7 @@ _contextbridge_complete() {
       "cluster token") candidates="--config --role --subject" ;;
       "cluster pairing") candidates="--config --approve --deny" ;;
       "mcp serve") candidates="--config" ;;
+      "verification verify") candidates="--file --trust-key --artifact --require-artifact --evidence-dir --require-evidence --json" ;;
       benchmark) candidates="--json --samples --warmup --database-jobs --idle-duration --binary" ;;
       "schedule add") candidates="--config --file" ;;
       "schedule "*) candidates="--config --file" ;;
@@ -255,12 +259,13 @@ _contextbridge_complete() {
 	elif [[ "$option_key" == "cluster receipt" && "$COMP_CWORD" -eq 3 ]]; then
 	  candidates="show export verify"
   elif [ "$COMP_CWORD" -eq 1 ]; then
-    candidates="init serve run stop uninstall console submit schedule result review health dashboard status doctor hardware models resources pull runtime mcp benchmark relay pair worker cluster route selftest update completion version help"
+    candidates="init serve run stop uninstall console submit schedule result review health dashboard status doctor hardware models resources pull runtime mcp benchmark verification relay pair worker cluster route selftest update completion version help"
   elif [ "$COMP_CWORD" -eq 2 ]; then
     case "$command" in
       schedule) candidates="add list show pause resume run delete" ;;
       runtime) candidates="install" ;;
       mcp) candidates="serve" ;;
+      verification) candidates="verify" ;;
 	  cluster) candidates="status protocol conformance submit chat agent selftest route contract receipt login token pairing configure dashboard pipeline" ;;
       route) candidates="explain" ;;
       update) candidates="status check apply enable disable auto" ;;
@@ -302,6 +307,7 @@ root=(
     'runtime:Manage local runtimes'
     'mcp:Expose bounded local tools over MCP stdio'
     'benchmark:Measure bridge-only overhead and resource footprint'
+    'verification:Verify signed, time-bounded interoperability statements'
     'relay:Run a relay'
     'pair:Pair this worker'
     'worker:Run a worker'
@@ -342,6 +348,13 @@ case "$words[2]" in
     ;;
   benchmark)
     _arguments '--json[Print machine-readable JSON]' '--samples[Timed samples per operation and concurrency]:count:' '--warmup[Warm-up samples per operation]:count:' '--database-jobs[Jobs used for database growth measurement]:count:' '--idle-duration[Idle relay sampling duration]:duration:' '--binary[Binary whose size is reported]:binary:_files'
+    ;;
+  verification)
+    if (( CURRENT == 3 )); then
+      _values 'verification action' verify
+      return
+    fi
+    _arguments '--file[Signed verification statement]:statement file:_files' '--trust-key[Trusted issuer public key]:trust key:_files' '--artifact[Subject artifact to re-hash]:artifact file:_files' '--require-artifact[Require and re-hash the subject artifact]' '--evidence-dir[Directory containing signed evidence files]:directory:_directories' '--require-evidence[Require and re-hash every signed evidence file]' '--json[Print machine-readable verification result]'
     ;;
   cluster)
     if (( CURRENT == 3 )); then
