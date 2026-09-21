@@ -46,8 +46,14 @@ func readProcessResourcePoint() (processResourcePoint, error) {
 		if err != nil {
 			return processResourcePoint{}, err
 		}
-		pageSize := uint64(os.Getpagesize())
-		if pageSize > 0 && pages > math.MaxUint64/pageSize {
+		pageSizeInt := os.Getpagesize()
+		if pageSizeInt <= 0 {
+			return processResourcePoint{}, fmt.Errorf("invalid operating-system page size: %d", pageSizeInt)
+		}
+		// #nosec G115 -- the checked positive int is representable by uint64 on
+		// every supported architecture; the multiplication below saturates.
+		pageSize := uint64(pageSizeInt)
+		if pages > math.MaxUint64/pageSize {
 			point.ResidentBytes = math.MaxUint64
 		} else {
 			point.ResidentBytes = pages * pageSize

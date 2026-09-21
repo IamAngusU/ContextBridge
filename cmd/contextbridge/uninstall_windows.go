@@ -33,9 +33,7 @@ func executeUninstall(plan uninstallPlan) error {
 	if err := os.WriteFile(scriptPath, []byte(windowsUninstallHelper), 0600); err != nil {
 		return fmt.Errorf("write uninstall helper: %w", err)
 	}
-	command := exec.Command("powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "-PlanPath", planPath, "-ParentPID", strconv.Itoa(os.Getpid()))
-	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x00000200 | 0x00000008}
-	if err := command.Start(); err != nil {
+	if err := startWindowsUninstallHelper(scriptPath, planPath, os.Getpid()); err != nil {
 		return fmt.Errorf("start uninstall handoff: %w", err)
 	}
 	fmt.Println("ContextBridge uninstall scheduled. This process will exit so Windows can remove the executable.")
@@ -43,6 +41,33 @@ func executeUninstall(plan uninstallPlan) error {
 		fmt.Println("Locally managed configuration and data from the displayed plan will also be removed.")
 	}
 	return nil
+}
+
+func startWindowsUninstallHelper(scriptPath, planPath string, parentPID int) error {
+	arguments := []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "-PlanPath", planPath, "-ParentPID", strconv.Itoa(parentPID)}
+	// A terminal or service manager can place ContextBridge in a kill-on-close
+	// Windows job. Prefer an explicit breakaway so the handoff survives long
+	// enough to remove the executable after this process exits. Some restricted
+	// jobs forbid breakaway, so retain a no-window fallback for ordinary shells.
+	const (
+		createNewProcessGroup  = 0x00000200
+		createBreakawayFromJob = 0x01000000
+		createNoWindow         = 0x08000000
+	)
+	var lastErr error
+	for _, creationFlags := range []uint32{
+		createNewProcessGroup | createBreakawayFromJob | createNoWindow,
+		createNewProcessGroup | createNoWindow,
+	} {
+		command := exec.Command("powershell.exe", arguments...)
+		command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: creationFlags}
+		if err := command.Start(); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+	}
+	return lastErr
 }
 
 const windowsUninstallHelper = `param(

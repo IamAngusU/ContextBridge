@@ -36,6 +36,8 @@
   `--purge` mode that preserves external or ambiguous paths.
 - Clarified that the dated shared-VPS benchmark can contain uncontrolled
   noisy-neighbour variance and is not evidence of an operating-system gap.
+- Hardened Linux resident-memory measurement by rejecting an invalid
+  non-positive operating-system page size before unsigned conversion.
 
 ## v0.6.3 - 2026-09-20
 
