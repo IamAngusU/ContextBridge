@@ -32,8 +32,9 @@ function Write-ContextBridgeInstallManifest {
         [Parameter(Mandatory = $true)][string]$Root,
         [Parameter(Mandatory = $true)][string[]]$OwnedPaths
     )
-    $resolvedRoot = [IO.Path]::GetFullPath($Root).TrimEnd('\')
-    $rootPrefix = $resolvedRoot + '\'
+    $separators = [char[]]@([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $resolvedRoot = [IO.Path]::GetFullPath($Root).TrimEnd($separators)
+    $rootPrefix = $resolvedRoot + [IO.Path]::DirectorySeparatorChar
     $normalized = @()
     foreach ($relative in @($OwnedPaths | Sort-Object -Unique)) {
         if (-not $relative -or [IO.Path]::IsPathRooted($relative) -or $relative.Contains('\')) {
