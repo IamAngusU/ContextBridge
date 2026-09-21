@@ -1,0 +1,16 @@
+{
+  "contract_version": "contextbridge.job.v1",
+  "source": "my-web-app",
+  "requirements": { "task": "generation", "provider": "ollama" },
+  "payload": {
+    "provider": "ollama",
+    "prompt": "Summarize the supplied note. Return a JSON object with summary (string) and action_items (array of strings). Do not invent missing facts.",
+    "text": "Delivery moved to Friday. Notify support.",
+    "output": {
+      "mode": "json",
+      "required_keys": ["summary", "action_items"],
+      "max_bytes": 4096
+    }
+  },
+  "max_attempts": 1
+}

@@ -23,6 +23,9 @@ contextbridge cluster submit --config ./config.yml --file ./examples/cluster-job
 
 The reusable schema is [Job Contract v1](schemas/job-contract-v1.schema.json).
 Relay admission and worker execution both revalidate the bounded contract.
+For a minimal Ollama request without group/tag prerequisites, start with
+[the text and JSON pool examples](../examples/pool/README.md). That guide also
+separates per-job choices, operator authority and supported file inputs.
 
 ## OpenAI-compatible input
 
@@ -65,11 +68,19 @@ session-routing keys before it crosses the MCP boundary.
 
 ## PHP and shared hosting
 
-`examples/php/ContextBridgeClient.php` is dependency-free PHP 8.1+ code for a
-server-side application. It performs complete socket writes, uses
-producer-scoped idempotency, polls bounded responses, and verifies embedded
-artifact bytes. Keep producer tokens on the server; do not ship them to a
-browser or mobile binary.
+[ContextBridgeClient.php](../examples/php/ContextBridgeClient.php) requires
+PHP 8.1+, the cURL extension and outbound HTTPS with working certificate trust.
+It needs no Composer packages and no CB executable or model on the web host.
+It uses producer-scoped idempotency, bounded responses and verified embedded
+artifact saves. Keep producer tokens on the server, outside the public document
+root; do not ship them to a browser or mobile binary.
+
+[Follow the shared-hosting example](../examples/pool/README.md#3-submit-from-php-shared-hosting)
+for a real request, token setup, later polling and optional job controls.
+Submission is not completion. Persist the job ID and poll from a later
+authenticated application request instead of assuming a long-running PHP
+request will survive hosting limits. The example sends plaintext job payloads
+over HTTPS; the client does not implement the E2EE reservation/sealing flow.
 
 Run its local regression test with:
 

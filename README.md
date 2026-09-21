@@ -16,13 +16,13 @@
   <a href="docs/operations.md"><img src="docs/assets/readme/badge-platforms.svg" height="34" alt="Windows, Linux and macOS"></a>
 </p>
 
-<p align="center"><a href="#get-running">Install</a> · <a href="#connect-your-devices">Connect devices</a> · <a href="#measured-overhead">Benchmarks</a> · <a href="#command-desk">Commands</a> · <a href="#uninstall">Uninstall</a> · <a href="docs/README.md">Docs</a></p>
+<p align="center"><a href="#get-running">Install</a> · <a href="#connect-your-devices">Connect devices</a> · <a href="#send-work-from-your-app">Send a job</a> · <a href="#measured-overhead">Benchmarks</a> · <a href="#uninstall">Uninstall</a> · <a href="docs/README.md">Docs</a></p>
 
 ContextBridge lets an app on your laptop, VPS or shared hosting send AI jobs to a pool of resources you control. It selects a compatible worker, applies configured policies, tracks the job and validates returned artifacts. **Keep your runtimes. Connect your resources.**
 
 | Your setup | What CB adds |
 | --- | --- |
-| App on a VPS, model on your PC | A relay connects them; your worker dials out. |
+| Website on shared hosting, model on your PC | A PHP/HTTPS request reaches your pool; the worker dials out. |
 | Several machines, different capabilities | Route by requirements and available capacity, with an explanation. |
 | Multiple apps sharing the pool | Separate producer credentials instead of shared admin secrets. |
 
@@ -128,6 +128,38 @@ The client submits work without joining as a worker. Login stores the token in i
 For your own app, use the producer token with the [native job API or PHP client](docs/integrations.md). The local OpenAI-compatible API uses the **local service token**, not the relay producer token. [Pool and placement details](docs/pools-and-placement.md).
 
 </details>
+
+## Send work from your app
+
+**Shared hosting works too:** your server-side PHP application posts a job to the relay and retrieves the result later. The [PHP client](examples/php/ContextBridgeClient.php) needs PHP 8.1+, cURL and outbound HTTPS, not a CB process, shell access or a GPU on the web host. The relay and workers run elsewhere.
+
+This is a real pool request. Save it as `job.json` ([example file](examples/pool/text-job.json)):
+
+```json
+{
+  "contract_version": "contextbridge.job.v1",
+  "source": "my-web-app",
+  "requirements": { "task": "generation", "provider": "ollama" },
+  "payload": {
+    "provider": "ollama",
+    "prompt": "Summarize the supplied text in two sentences.",
+    "text": "Delivery moved to Friday. Notify support.",
+    "output": { "mode": "text", "max_bytes": 4096 }
+  },
+  "max_attempts": 1
+}
+```
+
+From a configured CLI client, preview admission and then submit:
+
+```sh
+contextbridge cluster contract validate --file ./job.json --json
+contextbridge cluster submit --file ./job.json
+```
+
+**Your job, your constraints:** choose a provider/model, worker group, JSON keys or output size. Egress and cost limits require enabled operator policy and supported enforcement; a prompt cannot grant extra permissions. Text files can supply text, one supported image can be attached, and capable adapters can return files. There is no generic `files[]` upload field.
+
+[PHP submission, polling, text/JSON examples and file boundaries](examples/pool/README.md) · [Operator and per-job controls](examples/pool/README.md#4-choose-what-a-job-may-use-and-return). The PHP example uses HTTPS, not E2EE; keep producer tokens server-side.
 
 ## Measured overhead
 
