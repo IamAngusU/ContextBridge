@@ -162,6 +162,16 @@ echo "Download checksum verified."
 mkdir -p "$INSTALL_DIR" "$BIN_DIR"
 tar -xzf "$tmp/$asset" -C "$INSTALL_DIR"
 chmod 0755 "$INSTALL_DIR/contextbridge"
+manifest_stage="$(mktemp "$INSTALL_DIR/.contextbridge-install.XXXXXX")"
+if ! cat > "$manifest_stage" <<'EOF'
+{"schema_version":1,"product":"ContextBridge","paths":["CHANGELOG.md","LICENSE","LICENSES","LICENSING.md","NOTICE","README.md","SBOM.cdx.json","SOURCE.md","THIRD_PARTY_NOTICES.txt","TRADEMARKS.md","config.example.yml","contextbridge","deploy","docs","examples","install.ps1","install.sh"]}
+EOF
+then
+  rm -f "$manifest_stage"
+  exit 1
+fi
+chmod 0600 "$manifest_stage"
+mv -f "$manifest_stage" "$INSTALL_DIR/.contextbridge-install.json"
 canonical_command_installed=0
 if [ "$canonical_name_available" = "1" ]; then
   install -m 0755 "$INSTALL_DIR/contextbridge" "$BIN_DIR/contextbridge"

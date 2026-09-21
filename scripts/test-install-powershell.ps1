@@ -27,6 +27,13 @@ $commandsFunctionAst = @($ast.FindAll({
 }, $true))
 Assert-True ($commandsFunctionAst.Count -eq 1) 'Expected exactly one completion-command helper in install.ps1.'
 Invoke-Expression $commandsFunctionAst[0].Extent.Text
+$manifestFunctionAst = @($ast.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'Write-ContextBridgeInstallManifest'
+}, $true))
+Assert-True ($manifestFunctionAst.Count -eq 1) 'Expected exactly one ownership-manifest helper in install.ps1.'
+Invoke-Expression $manifestFunctionAst[0].Extent.Text
 Assert-True ((Get-ContextBridgeCompletionCommands -Commands @('contextbridge', 'cb')) -eq 'contextbridge and cb') 'Installed cb alias was omitted from the completion success label.'
 Assert-True ((Get-ContextBridgeCompletionCommands -Commands @('contextbridge')) -eq 'contextbridge') 'Single-command completion label changed.'
 Assert-True ((Get-ContextBridgeCompletionCommands -Commands @('contextbridge', 'cb', 'bridge-ai')) -eq 'contextbridge, cb and bridge-ai') 'Custom command was omitted from the completion success label.'
@@ -59,6 +66,23 @@ try {
     $beginMarker = '# >>> ContextBridge completion >>>'
     $endMarker = '# <<< ContextBridge completion <<<'
     $completionPath = Join-Path $testRoot "completion's script.ps1"
+
+    $manifestRoot = Join-Path $testRoot 'manifest-root'
+    New-Item -ItemType Directory -Path $manifestRoot | Out-Null
+    Write-ContextBridgeInstallManifest -Root $manifestRoot -OwnedPaths @('contextbridge.exe', 'config.example.yml', 'optional-adapter')
+    $manifest = Get-Content -LiteralPath (Join-Path $manifestRoot '.contextbridge-install.json') -Raw | ConvertFrom-Json
+    Assert-True ($manifest.schema_version -eq 1) 'Ownership manifest schema changed.'
+    Assert-True ($manifest.product -eq 'ContextBridge') 'Ownership manifest product identity changed.'
+    Assert-True (@($manifest.paths).Contains('optional-adapter')) 'Optional package path was omitted from the ownership manifest.'
+    $manifestHash = (Get-FileHash -LiteralPath (Join-Path $manifestRoot '.contextbridge-install.json') -Algorithm SHA256).Hash
+    $unsafeManifestFailed = $false
+    try {
+        Write-ContextBridgeInstallManifest -Root $manifestRoot -OwnedPaths @('contextbridge.exe', '../outside')
+    } catch {
+        $unsafeManifestFailed = $true
+    }
+    Assert-True $unsafeManifestFailed 'Ownership manifest accepted a path escape.'
+    Assert-True ((Get-FileHash -LiteralPath (Join-Path $manifestRoot '.contextbridge-install.json') -Algorithm SHA256).Hash -eq $manifestHash) 'Rejected manifest input changed the last valid manifest.'
 
     # A CRLF profile written by the installer must be byte-identical after a
     # second run and retain exactly one registration block.

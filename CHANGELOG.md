@@ -38,6 +38,10 @@
   noisy-neighbour variance and is not evidence of an operating-system gap.
 - Hardened Linux resident-memory measurement by rejecting an invalid
   non-positive operating-system page size before unsigned conversion.
+- Added a strict installer-ownership manifest so optional packages can register
+  their own program paths without exposing package details in the public core.
+- Rejected filesystem roots and the user home as purge authority, and added a
+  Windows post-uninstall verification report for any owned item left behind.
 
 ## v0.6.3 - 2026-09-20
 

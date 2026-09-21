@@ -3,12 +3,15 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -19,16 +22,23 @@ import (
 )
 
 type uninstallPlan struct {
-	InstallDir     string   `json:"install_dir"`
-	InstallBinary  string   `json:"install_binary"`
-	CurrentBinary  string   `json:"current_binary"`
-	ConfigPath     string   `json:"config_path"`
-	ProgramPaths   []string `json:"program_paths"`
-	CommandPaths   []string `json:"command_paths"`
-	PurgePaths     []string `json:"purge_paths,omitempty"`
-	PreservedPaths []string `json:"preserved_paths,omitempty"`
-	CleanupDirs    []string `json:"cleanup_dirs,omitempty"`
-	Purge          bool     `json:"purge"`
+	InstallDir      string   `json:"install_dir"`
+	InstallBinary   string   `json:"install_binary"`
+	CurrentBinary   string   `json:"current_binary"`
+	ConfigPath      string   `json:"config_path"`
+	ProgramPaths    []string `json:"program_paths"`
+	CommandPaths    []string `json:"command_paths"`
+	PurgePaths      []string `json:"purge_paths,omitempty"`
+	PreservedPaths  []string `json:"preserved_paths,omitempty"`
+	CleanupDirs     []string `json:"cleanup_dirs,omitempty"`
+	VerificationLog string   `json:"verification_log,omitempty"`
+	Purge           bool     `json:"purge"`
+}
+
+type installOwnershipManifest struct {
+	SchemaVersion int      `json:"schema_version"`
+	Product       string   `json:"product"`
+	Paths         []string `json:"paths"`
 }
 
 type uninstallOptions struct {
@@ -47,6 +57,8 @@ var uninstallBundleFiles = []string{
 }
 
 var uninstallBundleDirectories = []string{"LICENSES", "deploy", "docs", "examples"}
+
+const installOwnershipManifestName = ".contextbridge-install.json"
 
 func uninstallCommand(args []string) error {
 	flags := flag.NewFlagSet("uninstall", flag.ContinueOnError)
@@ -123,6 +135,10 @@ func buildUninstallPlan(options uninstallOptions) (uninstallPlan, error) {
 	}
 	plan.ProgramPaths = appendExistingOwnedPath(plan.ProgramPaths, plan.InstallBinary, installDir, true)
 	plan.ProgramPaths = append(plan.ProgramPaths, managedCommandFiles(installDir)...)
+	plan, err = addInstallOwnershipManifestPaths(plan)
+	if err != nil {
+		return uninstallPlan{}, err
+	}
 	plan.CommandPaths = discoverManagedCommandPaths(plan.InstallBinary, current)
 	plan.CleanupDirs = []string{installDir}
 
@@ -143,6 +159,84 @@ func buildUninstallPlan(options uninstallOptions) (uninstallPlan, error) {
 		return uninstallPlan{}, err
 	}
 	return plan, nil
+}
+
+func addInstallOwnershipManifestPaths(plan uninstallPlan) (uninstallPlan, error) {
+	manifestPath := filepath.Join(plan.InstallDir, installOwnershipManifestName)
+	raw, err := readSmallRegularFile(manifestPath, 1<<20)
+	if os.IsNotExist(err) {
+		return plan, nil
+	}
+	if err != nil {
+		return uninstallPlan{}, fmt.Errorf("read installer ownership manifest: %w", err)
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.DisallowUnknownFields()
+	manifest := installOwnershipManifest{}
+	if err := decoder.Decode(&manifest); err != nil {
+		return uninstallPlan{}, fmt.Errorf("parse installer ownership manifest: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return uninstallPlan{}, errors.New("installer ownership manifest contains trailing data")
+	}
+	if manifest.SchemaVersion != 1 || manifest.Product != "ContextBridge" {
+		return uninstallPlan{}, errors.New("installer ownership manifest has an unsupported identity or schema")
+	}
+	if len(manifest.Paths) == 0 || len(manifest.Paths) > 1024 {
+		return uninstallPlan{}, errors.New("installer ownership manifest has an invalid path count")
+	}
+	seen := map[string]bool{}
+	hasBinary := false
+	hasMarker := false
+	for _, relative := range manifest.Paths {
+		target, normalized, err := ownedManifestTarget(plan.InstallDir, relative)
+		if err != nil {
+			return uninstallPlan{}, err
+		}
+		key := pathComparisonKey(target)
+		if seen[key] {
+			return uninstallPlan{}, fmt.Errorf("installer ownership manifest repeats %q", normalized)
+		}
+		seen[key] = true
+		if samePath(target, plan.InstallBinary) {
+			hasBinary = true
+		}
+		if samePath(target, filepath.Join(plan.InstallDir, "config.example.yml")) {
+			hasMarker = true
+		}
+		info, err := os.Lstat(target)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return uninstallPlan{}, fmt.Errorf("inspect installer-owned path %q: %w", normalized, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || (!info.Mode().IsRegular() && !info.IsDir()) {
+			return uninstallPlan{}, fmt.Errorf("installer-owned path %q is not a regular file or directory", normalized)
+		}
+		plan.ProgramPaths = append(plan.ProgramPaths, target)
+	}
+	if !hasBinary || !hasMarker {
+		return uninstallPlan{}, errors.New("installer ownership manifest does not bind the ContextBridge binary and installer marker")
+	}
+	plan.ProgramPaths = append(plan.ProgramPaths, manifestPath)
+	return plan, nil
+}
+
+func ownedManifestTarget(installDir, relative string) (string, string, error) {
+	if relative == "" || strings.Contains(relative, "\\") || pathpkg.IsAbs(relative) || pathpkg.Clean(relative) != relative || relative == "." || relative == ".." || strings.HasPrefix(relative, "../") {
+		return "", "", fmt.Errorf("installer ownership manifest contains unsafe relative path %q", relative)
+	}
+	topLevel := strings.Split(relative, "/")[0]
+	switch strings.ToLower(topLevel) {
+	case "config.yml", "data", "inbox", "models":
+		return "", "", fmt.Errorf("installer ownership manifest attempts to own mutable data path %q", relative)
+	}
+	target := filepath.Join(installDir, filepath.FromSlash(relative))
+	if !pathInside(target, installDir) {
+		return "", "", fmt.Errorf("installer ownership manifest path %q escapes the installation", relative)
+	}
+	return target, relative, nil
 }
 
 func discoverInstallDirectory(explicit, current string) (string, error) {
@@ -355,7 +449,7 @@ func safeManagedDataPath(target string, roots ...string) bool {
 	}
 	for _, root := range roots {
 		root, err = filepath.Abs(root)
-		if err != nil || samePath(absolute, root) || !pathInside(absolute, root) {
+		if err != nil || dangerousRoot(root) || samePath(absolute, root) || !pathInside(absolute, root) {
 			continue
 		}
 		resolved, err := resolveExistingPrefix(absolute)
@@ -399,7 +493,10 @@ func resolveExistingPrefix(path string) (string, error) {
 
 func readSmallRegularFile(path string, limit int64) ([]byte, error) {
 	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > limit {
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > limit {
 		return nil, errors.New("not a bounded regular file")
 	}
 	return os.ReadFile(path)

@@ -27,6 +27,39 @@ function Get-ContextBridgeCompletionCommands {
     return (($Commands[0..($Commands.Count - 2)] -join ', ') + ' and ' + $Commands[-1])
 }
 
+function Write-ContextBridgeInstallManifest {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string[]]$OwnedPaths
+    )
+    $resolvedRoot = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+    $rootPrefix = $resolvedRoot + '\'
+    $normalized = @()
+    foreach ($relative in @($OwnedPaths | Sort-Object -Unique)) {
+        if (-not $relative -or [IO.Path]::IsPathRooted($relative) -or $relative.Contains('\')) {
+            throw "Unsafe installer ownership path: $relative"
+        }
+        $target = [IO.Path]::GetFullPath((Join-Path $resolvedRoot $relative))
+        if (-not $target.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Installer ownership path escaped the installation: $relative"
+        }
+        $normalized += $relative
+    }
+    $manifest = [ordered]@{
+        schema_version = 1
+        product = 'ContextBridge'
+        paths = @($normalized)
+    } | ConvertTo-Json -Depth 3
+    $manifestPath = Join-Path $resolvedRoot '.contextbridge-install.json'
+    $stagePath = Join-Path $resolvedRoot ('.contextbridge-install.' + [guid]::NewGuid().ToString('N') + '.tmp')
+    try {
+        [IO.File]::WriteAllText($stagePath, ($manifest + "`n"), (New-Object Text.UTF8Encoding($false)))
+        Move-Item -LiteralPath $stagePath -Destination $manifestPath -Force
+    } finally {
+        Remove-Item -LiteralPath $stagePath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Test-ContextBridgeCommandName {
     param([string]$Name)
     return $Name -match '^[A-Za-z][A-Za-z0-9_-]{0,31}$'
@@ -318,6 +351,20 @@ if (-not $NoCompletion -and $completionCommandNames.Count -gt 0) {
         Muted "PowerShell completion could not be activated automatically. Run: $preferredCommand completion powershell"
     }
 }
+
+$ownedInstallPaths = @('contextbridge.exe', 'config.example.yml')
+foreach ($candidate in @(Get-ChildItem -LiteralPath $InstallDir -File -Filter '*.cmd' -ErrorAction SilentlyContinue)) {
+    $text = [IO.File]::ReadAllText($candidate.FullName)
+    if ($text.StartsWith(':: ContextBridge managed cb alias', [StringComparison]::Ordinal) -or
+        $text.StartsWith(':: ContextBridge managed custom command', [StringComparison]::Ordinal)) {
+        $ownedInstallPaths += $candidate.Name
+    }
+}
+if (Test-Path -LiteralPath (Join-Path $InstallDir 'contextbridge-completion.ps1') -PathType Leaf) {
+    $ownedInstallPaths += 'contextbridge-completion.ps1'
+}
+Write-ContextBridgeInstallManifest -Root $InstallDir -OwnedPaths $ownedInstallPaths
+
 if (-not (Test-Path $config)) {
     & $exe init --config $config
 }

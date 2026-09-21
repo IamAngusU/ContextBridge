@@ -23,6 +23,7 @@ func executeUninstall(plan uninstallPlan) error {
 	}
 	planPath := filepath.Join(directory, "plan.json")
 	scriptPath := filepath.Join(directory, "uninstall.ps1")
+	plan.VerificationLog = filepath.Join(directory, "verification.log")
 	raw, err := json.Marshal(plan)
 	if err != nil {
 		return err
@@ -37,6 +38,7 @@ func executeUninstall(plan uninstallPlan) error {
 		return fmt.Errorf("start uninstall handoff: %w", err)
 	}
 	fmt.Println("ContextBridge uninstall scheduled. This process will exit so Windows can remove the executable.")
+	fmt.Printf("If removal cannot be verified, details will remain at %s.\n", plan.VerificationLog)
 	if plan.Purge {
 		fmt.Println("Locally managed configuration and data from the displayed plan will also be removed.")
 	}
@@ -86,6 +88,7 @@ function SamePath([string]$Left, [string]$Right) {
 }
 
 $ownedExecutables = @($plan.install_binary, $plan.current_binary) | ForEach-Object { FullPath $_ } | Where-Object { $_ }
+$ownedTaskNames = @()
 foreach ($taskName in @('ContextBridge', 'ContextBridge Update')) {
   $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
   if (-not $task) { continue }
@@ -96,6 +99,7 @@ foreach ($taskName in @('ContextBridge', 'ContextBridge Update')) {
     }
   }
   if ($owned) {
+    $ownedTaskNames += $taskName
     Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
   }
@@ -169,6 +173,42 @@ foreach ($directory in @($plan.cleanup_dirs)) {
   if (-not (Get-ChildItem -LiteralPath $directory -Force | Select-Object -First 1)) {
     Remove-Item -LiteralPath $directory -Force -ErrorAction SilentlyContinue
   }
+}
+
+$remaining = New-Object System.Collections.Generic.List[string]
+foreach ($target in $targets) {
+  if (Test-Path -LiteralPath ([string]$target)) { $remaining.Add('path: ' + [string]$target) }
+}
+$userPathAfter = [Environment]::GetEnvironmentVariable('Path', 'User')
+foreach ($entry in @($userPathAfter -split ';' | Where-Object { $_ })) {
+  if (SamePath $entry $installDir) { $remaining.Add('user PATH entry: ' + $entry) }
+}
+foreach ($taskName in $ownedTaskNames) {
+  if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) { $remaining.Add('scheduled task: ' + $taskName) }
+}
+foreach ($profilePath in @($profileCandidates | Where-Object { $_ } | Sort-Object -Unique)) {
+  if (-not (Test-Path -LiteralPath $profilePath -PathType Leaf)) { continue }
+  $profileText = [IO.File]::ReadAllText($profilePath)
+  if ($profileText.Contains('# >>> ContextBridge completion >>>') -or $profileText.Contains('# <<< ContextBridge completion <<<')) {
+    $remaining.Add('PowerShell completion marker: ' + $profilePath)
+  }
+}
+if ($programs) {
+  $menu = Join-Path $programs 'ContextBridge'
+  if (Test-Path -LiteralPath $menu -PathType Container) {
+    $shell = New-Object -ComObject WScript.Shell
+    foreach ($entry in @(Get-ChildItem -LiteralPath $menu -Filter '*.lnk' -File -ErrorAction SilentlyContinue)) {
+      $target = $shell.CreateShortcut($entry.FullName).TargetPath
+      foreach ($executable in $ownedExecutables) {
+        if (SamePath $target $executable) { $remaining.Add('Start Menu shortcut: ' + $entry.FullName) }
+      }
+    }
+  }
+}
+if ($remaining.Count -gt 0) {
+  $lines = @('ContextBridge could not verify complete removal.', 'The following owned items remain:') + @($remaining | Sort-Object -Unique)
+  [IO.File]::WriteAllLines([string]$plan.verification_log, $lines, (New-Object Text.UTF8Encoding($false)))
+  exit 1
 }
 
 $helperDir = Split-Path -Parent $PlanPath

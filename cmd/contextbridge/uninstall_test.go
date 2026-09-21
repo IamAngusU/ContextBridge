@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -116,6 +117,79 @@ func TestSafeManagedDataPathRejectsLinkedEscape(t *testing.T) {
 	}
 	if safeManagedDataPath(filepath.Join(linked, "jobs"), root) {
 		t.Fatal("managed path followed a symlink outside its owned root")
+	}
+}
+
+func TestSafeManagedDataPathRejectsDangerousManagedRoots(t *testing.T) {
+	installDir := t.TempDir()
+	volumeRoot := filepath.VolumeName(installDir) + string(filepath.Separator)
+	if safeManagedDataPath(filepath.Join(volumeRoot, "data"), volumeRoot) {
+		t.Fatalf("filesystem root was accepted as managed purge authority: %s", volumeRoot)
+	}
+	home, err := os.UserHomeDir()
+	if err == nil && safeManagedDataPath(filepath.Join(home, "data"), home) {
+		t.Fatalf("user home was accepted as managed purge authority: %s", home)
+	}
+}
+
+func TestInstallOwnershipManifestAddsPrivateAgnosticProgramPaths(t *testing.T) {
+	installDir, configPath := makeUninstallFixture(t)
+	additional := filepath.Join(installDir, "optional-adapter")
+	if err := os.Mkdir(additional, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeInstallOwnershipManifest(t, installDir, []string{
+		filepath.ToSlash(filepath.Base(fixtureUninstallBinary(installDir))),
+		"config.example.yml",
+		"optional-adapter",
+	})
+	plan, err := buildUninstallPlan(uninstallOptions{InstallDir: installDir, ConfigPath: configPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{additional, filepath.Join(installDir, installOwnershipManifestName)} {
+		if !uninstallPathListContains(plan.ProgramPaths, expected) {
+			t.Errorf("manifest-owned path is absent from uninstall plan: %s", expected)
+		}
+	}
+}
+
+func TestInstallOwnershipManifestRejectsUnsafeOrMutablePaths(t *testing.T) {
+	for name, unsafePath := range map[string]string{
+		"escape":  "../outside",
+		"mutable": "data/jobs.db",
+		"rooted":  "/outside",
+	} {
+		t.Run(name, func(t *testing.T) {
+			installDir, configPath := makeUninstallFixture(t)
+			writeInstallOwnershipManifest(t, installDir, []string{
+				filepath.ToSlash(filepath.Base(fixtureUninstallBinary(installDir))),
+				"config.example.yml",
+				unsafePath,
+			})
+			if _, err := buildUninstallPlan(uninstallOptions{InstallDir: installDir, ConfigPath: configPath, Force: true}); err == nil {
+				t.Fatalf("unsafe manifest path %q was accepted", unsafePath)
+			}
+		})
+	}
+}
+
+func TestInstallOwnershipManifestRequiresBinaryAndMarker(t *testing.T) {
+	installDir, configPath := makeUninstallFixture(t)
+	writeInstallOwnershipManifest(t, installDir, []string{"README.md"})
+	if _, err := buildUninstallPlan(uninstallOptions{InstallDir: installDir, ConfigPath: configPath}); err == nil {
+		t.Fatal("manifest without binary and installer marker was accepted")
+	}
+}
+
+func writeInstallOwnershipManifest(t *testing.T, installDir string, paths []string) {
+	t.Helper()
+	raw, err := json.Marshal(installOwnershipManifest{SchemaVersion: 1, Product: "ContextBridge", Paths: paths})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(installDir, installOwnershipManifestName), raw, 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

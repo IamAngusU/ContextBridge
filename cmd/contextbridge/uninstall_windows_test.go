@@ -23,6 +23,8 @@ func TestWindowsUninstallHelperParsesAndKeepsOwnershipChecks(t *testing.T) {
 		"$begin.Count -ne 1 -or $end.Count -ne 1",
 		"if (-not $targetOwned) { $owned = $false }",
 		"Remove-Item -LiteralPath ([string]$target)",
+		"ContextBridge could not verify complete removal.",
+		"[IO.File]::WriteAllLines([string]$plan.verification_log",
 	} {
 		if !strings.Contains(windowsUninstallHelper, evidence) {
 			t.Errorf("helper is missing ownership or literal-path evidence %q", evidence)

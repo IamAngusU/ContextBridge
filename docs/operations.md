@@ -132,11 +132,26 @@ the bounded paths that can still be proven local and reports that external
 configured paths could not be discovered. It does not turn an unknown path
 into an owned path.
 
+Installers also write a bounded `.contextbridge-install.json` ownership
+manifest. It contains only relative program paths and lets optional packages
+register their own installed directories without teaching the public core what
+those packages contain. The uninstaller rejects malformed manifests, path
+escapes, symlinks, duplicate entries, and attempts to claim mutable
+configuration or data. Older installations without the manifest retain the
+conservative built-in program list; running the current installer once creates
+the manifest.
+
 Both modes refuse to interrupt active work unless `--force` is explicit.
 Redirected or automated use also requires `--yes`; an interactive purge
 requires typing `PURGE`. When automatic installation discovery is impossible,
 `--install-dir` must point to a directory containing both the ContextBridge
 binary and its installer marker file.
+
+Windows performs deletion through a detached helper after the running binary
+exits. It verifies files, launchers, PATH, owned scheduled tasks, completion
+markers, and owned Start Menu shortcuts. A clean uninstall leaves no report;
+if an owned item remains, the helper preserves its plan and writes the exact
+remainder to the verification-log path printed by the command.
 
 ### Fleet decommissioning boundary
 

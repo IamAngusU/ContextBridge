@@ -108,6 +108,10 @@ export CONTEXTBRIDGE_NONINTERACTIVE="1"
 HOME="$home" PATH="$fake_bin:$test_system_path" sh "$root/install.sh" > "$test_root/install.out"
 
 test -x "$CONTEXTBRIDGE_BIN_DIR/contextbridge"
+test -f "$CONTEXTBRIDGE_HOME/.contextbridge-install.json"
+grep -F -- '"schema_version":1' "$CONTEXTBRIDGE_HOME/.contextbridge-install.json" >/dev/null
+grep -F -- '"contextbridge"' "$CONTEXTBRIDGE_HOME/.contextbridge-install.json" >/dev/null
+grep -F -- '"config.example.yml"' "$CONTEXTBRIDGE_HOME/.contextbridge-install.json" >/dev/null
 test -x "$CONTEXTBRIDGE_BIN_DIR/cb"
 test "$(readlink "$CONTEXTBRIDGE_BIN_DIR/cb")" = "$CONTEXTBRIDGE_HOME/contextbridge"
 "$CONTEXTBRIDGE_BIN_DIR/cb" version
