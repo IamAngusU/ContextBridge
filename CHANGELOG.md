@@ -31,6 +31,11 @@
 - Reframed the public introduction around the plain-language outcome—one
   governed pool for resources the operator already controls—without claiming
   certification, adoption, or standard status that has not been earned.
+- Added `contextbridge uninstall` with dry-run planning, ownership-checked
+  integration cleanup, data-preserving defaults, and an explicit bounded
+  `--purge` mode that preserves external or ambiguous paths.
+- Clarified that the dated shared-VPS benchmark can contain uncontrolled
+  noisy-neighbour variance and is not evidence of an operating-system gap.
 
 ## v0.6.3 - 2026-09-20
 

@@ -99,6 +99,62 @@ loopback-managed `run`/`serve` process to stop and refuses while work is active.
 override. Standalone relay/worker processes remain owned by their service
 manager or foreground terminal.
 
+## Remove ContextBridge safely
+
+Preview the exact removal plan first:
+
+```sh
+contextbridge uninstall --config ./config.yml --dry-run
+```
+
+An ordinary uninstall removes only installer-owned program files and
+integrations, including the owned launcher, autostart entry, PATH entry,
+shortcut, and shell completion. Configuration and managed data remain in
+place:
+
+```sh
+contextbridge uninstall --config ./config.yml
+```
+
+Use `--purge` only when the locally managed configuration, credentials, job
+state, models, and runtime data should also be removed:
+
+```sh
+contextbridge uninstall --config ./config.yml --purge
+```
+
+The purge plan follows only paths that remain inside the installation or
+configuration directory after resolving existing symlinks. External artifact
+directories, global Ollama data, portable resource packs, external secret
+files, and other operator-owned paths are reported as preserved rather than
+deleted. A malformed configuration stops the purge; `--force` removes only
+the bounded paths that can still be proven local and reports that external
+configured paths could not be discovered. It does not turn an unknown path
+into an owned path.
+
+Both modes refuse to interrupt active work unless `--force` is explicit.
+Redirected or automated use also requires `--yes`; an interactive purge
+requires typing `PURGE`. When automatic installation discovery is impossible,
+`--install-dir` must point to a directory containing both the ContextBridge
+binary and its installer marker file.
+
+### Fleet decommissioning boundary
+
+`uninstall` acts on the machine that runs it. The current protocol deliberately
+does not turn `--node` or `--all` into remote deletion: a disconnected worker,
+an acknowledgement lost while its relay is being removed, or a combined
+relay-and-worker process would otherwise make “removed everywhere” impossible
+to prove.
+
+A future fleet operation must be a separate decommission-marker protocol, not
+an alias for this command. Its approval must bind an exact sorted node-ID set,
+pool snapshot, purge mode, and expiry; every worker must opt in locally, drain
+admission, acknowledge the marker, and report an independent terminal result.
+Offline, ambiguous, newly joined, and non-opted-in nodes must remain explicit
+failures. The relay itself must be decommissioned last through its local
+operator path. Until those invariants are implemented and tested, run the
+local dry-run and uninstall on each intended machine.
+
 ## Operational invariants
 
 - A job is not replayed after ambiguous execution merely because a connection
@@ -111,6 +167,8 @@ manager or foreground terminal.
   catch-up storm after downtime.
 - Update staging is not reported as installation; the new executable must
   actually become the running healthy version.
+- Removal acts only on installer-owned integrations and proven managed paths;
+  ambiguous or external ownership is preserved.
 
 See [security.md](security.md) for the threat model and
 [limits-and-performance.md](limits-and-performance.md) for bounded payload and

@@ -124,6 +124,10 @@ Settings matched the Windows run: 128 measured samples, eight warmups,
 concurrency 1/4/16/64, 1,000 cancelled jobs for database growth, and a
 ten-second idle window. The smaller shared VPS is intentionally reported
 separately instead of blending unlike hosts into one headline number.
+It is a shared host: CPU steal, storage contention, scheduling pressure, and
+other noisy-neighbour effects were not controlled or measured. They can cause
+both lower throughput and higher run-to-run variance, so the gap must not be
+read as evidence that Linux itself is slower.
 
 ### Durable relay submit/read/cancel
 
@@ -166,7 +170,9 @@ separately instead of blending unlike hosts into one headline number.
 
 The same exclusions and heartbeat caveats as the Windows snapshot apply. The
 VPS results demonstrate portability and constrained-host behavior; they are
-not presented as a comparison of operating systems.
+not presented as a comparison of operating systems. Repeated runs on a
+dedicated host are required before attributing a difference to ContextBridge,
+the operating system, or the hardware rather than shared-host contention.
 
 ## Explicit exclusions and unavailable metrics
 

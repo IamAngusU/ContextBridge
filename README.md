@@ -103,6 +103,9 @@ inference time. The exact source commit, host, sample settings, concurrency
 1/4/16/64 tables, resource footprint, protocol limits, exclusions, and the
 command for measuring another machine are in
 [Limits and measured ContextBridge overhead](docs/limits-and-performance.md).
+The Linux host was a shared VPS; noisy-neighbour effects such as CPU steal and
+storage contention were not controlled. Those results demonstrate operation
+on a constrained host, not an operating-system comparison or SLA.
 
 ## Capability map
 

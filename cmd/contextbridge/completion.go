@@ -8,7 +8,7 @@ import (
 
 var completionRootCommands = []string{
 	"init", "serve", "run", "stop", "console", "submit", "schedule", "result", "review",
-	"health", "dashboard", "status", "doctor", "hardware", "models", "resources",
+	"health", "dashboard", "status", "doctor", "hardware", "models", "resources", "uninstall",
 	"pull", "runtime", "mcp", "benchmark", "relay", "pair", "worker", "cluster", "route", "selftest", "update", "completion", "version", "help",
 }
 
@@ -20,6 +20,7 @@ var completionSubcommands = map[string][]string{
 	"route":      {"explain"},
 	"update":     {"status", "check", "apply", "enable", "disable", "auto"},
 	"completion": {"powershell", "bash", "zsh"},
+	"uninstall":  {"--config", "--install-dir", "--purge", "--force", "--yes", "--dry-run"},
 }
 
 // completionCommand emits static, auditable shell integration. It deliberately
@@ -63,6 +64,7 @@ $script:ContextBridgeOptions = @{
     'serve' = @('--config')
     'run' = @('--config','--slots','--topmost')
     'stop' = @('--config','--force')
+    'uninstall' = @('--config','--install-dir','--purge','--force','--yes','--dry-run')
     'console' = @('--config')
     'submit' = @('--file','--artifacts','--config')
     'schedule' = @('--file','--config')
@@ -110,7 +112,7 @@ $script:ContextBridgeValueOptions = @{
     '--role' = @('producer','observer')
 }
 $script:ContextBridgeTakesValue = @(
-    '--config','--file','--job','--artifacts','--attach-image','--identity','--job-dir','--token-file',
+    '--config','--install-dir','--file','--job','--artifacts','--attach-image','--identity','--job-dir','--token-file',
     '--slots','--endpoint','--relay','--name','--providers','--models','--tasks','--groups',
     '--token','--provider','--group','--model','--profile','--reasoning','--session','--prompt',
 	'--min-artifacts','--min-images','--local-model','--image-profile','--timeout','--job-timeout','--poll','--idempotency-key',
@@ -230,6 +232,7 @@ _contextbridge_complete() {
       init|serve|console|result|health|pull|relay) candidates="--config" ;;
       run) candidates="--config --slots --topmost" ;;
       stop) candidates="--config --force" ;;
+      uninstall) candidates="--config --install-dir --purge --force --yes --dry-run" ;;
       submit) candidates="--config --file --artifacts" ;;
       review) candidates="--config --job-dir" ;;
       dashboard) candidates="--config --no-open" ;;
@@ -252,7 +255,7 @@ _contextbridge_complete() {
 	elif [[ "$option_key" == "cluster receipt" && "$COMP_CWORD" -eq 3 ]]; then
 	  candidates="show export verify"
   elif [ "$COMP_CWORD" -eq 1 ]; then
-    candidates="init serve run stop console submit schedule result review health dashboard status doctor hardware models resources pull runtime mcp benchmark relay pair worker cluster route selftest update completion version help"
+    candidates="init serve run stop uninstall console submit schedule result review health dashboard status doctor hardware models resources pull runtime mcp benchmark relay pair worker cluster route selftest update completion version help"
   elif [ "$COMP_CWORD" -eq 2 ]; then
     case "$command" in
       schedule) candidates="add list show pause resume run delete" ;;
@@ -282,6 +285,7 @@ root=(
     'serve:Run only the local bridge service'
     'run:Run the local service and worker'
     'stop:Safely stop the local ContextBridge process'
+    'uninstall:Remove owned program files and optionally managed data'
     'console:Attach a live terminal to the running service'
     'submit:Submit a local JSON job'
     'schedule:Manage durable schedules'
@@ -422,6 +426,7 @@ case "$words[2]" in
   init|serve|console|health|pull|relay) _arguments "${config[@]}" '*:argument:' ;;
   run) _arguments "${config[@]}" '--slots[Session worker job limit]:slots:' '--topmost[Keep the Windows console above other windows]' ;;
   stop) _arguments "${config[@]}" '--force[Stop even while jobs are active]' ;;
+  uninstall) _arguments "${config[@]}" '--install-dir[Installation directory when automatic discovery is unavailable]:directory:_directories' '--purge[Also remove locally managed configuration and data]' '--force[Allow shutdown with active jobs or unreadable configuration]' '--yes[Confirm the displayed plan non-interactively]' '--dry-run[Show the exact plan without removing anything]' ;;
   submit) _arguments "${config[@]}" '--file[Job JSON file]:job file:_files' '--artifacts[Artifact output directory]:directory:_directories' ;;
   result) _arguments "${config[@]}" '1:job ID:' ;;
   review) _arguments "${config[@]}" '--job-dir[InkWall job directory]:directory:_directories' ;;

@@ -55,6 +55,8 @@ func main() {
 		err = runCommand(os.Args[2:])
 	case "stop":
 		err = stopCommand(os.Args[2:])
+	case "uninstall":
+		err = uninstallCommand(os.Args[2:])
 	case "console":
 		err = consoleCommand(os.Args[2:])
 	case "submit":
@@ -134,6 +136,7 @@ Usage:
   contextbridge serve [--config path]
   contextbridge run [--config path] [--slots N] [--topmost]
   contextbridge stop [--config path] [--force]
+  contextbridge uninstall [--config path] [--install-dir path] [--purge] [--force] [--yes] [--dry-run]
   contextbridge console [--config path] # read-only view; type exit + Enter to close
   contextbridge submit --file job.json [--config path]
   contextbridge schedule add --file schedule.json [--config path]
