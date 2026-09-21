@@ -24,6 +24,7 @@ license merely by copying these materials:
 
 - docs/schemas/**
 - docs/adapters.md
+- docs/compatibility.md
 - examples/**
 
 The Apache-2.0 text is in

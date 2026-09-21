@@ -6,6 +6,8 @@
 
 <p align="center"><strong>Own the compute. Route the work.</strong></p>
 
+<p align="center">Use the models, APIs, GPUs, workers, and servers you already control through one neutral contract.</p>
+
 <p align="center">
   <a href="https://github.com/IamAngusU/ContextBridge/releases/latest"><img alt="Latest stable release" src="https://img.shields.io/github/v/release/IamAngusU/ContextBridge?display_name=tag&amp;sort=semver&amp;style=flat-square&amp;color=2a9d8f"></a>
   <a href="LICENSING.md"><img alt="v0.7 development license: AGPL-3.0-only" src="https://img.shields.io/badge/v0.7%20development-AGPL--3.0--only-20231f?style=flat-square"></a>
@@ -13,10 +15,10 @@
   <img alt="Windows, Linux, and macOS" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-59636e?style=flat-square">
 </p>
 
-ContextBridge is a local-first execution fabric for AI workloads. It turns the
-models, APIs, computers, GPUs, removable resource packs, and servers you control
-into one policy-aware pool that can be used from a terminal, an application, a
-VPS, shared hosting, or an MCP client.
+ContextBridge gives applications one governed way to use the AI resources you
+already control. It turns models, APIs, computers, GPUs, removable resource
+packs, and servers into one policy-aware pool that can be reached from a
+terminal, an application, a VPS, shared hosting, or an MCP client.
 
 You describe the job and its hard requirements. ContextBridge selects a
 compatible worker, reserves capacity, enforces egress and cost policy, verifies
@@ -35,6 +37,30 @@ Its design rule is simple:
 
 That rule is applied to queue state, worker leases, updates, artifacts, model
 capabilities, costs, agent approvals, and execution receipts.
+
+## One contract, many resources
+
+```text
+applications · users · agents · MCP clients
+                     |
+                ContextBridge
+                     |
+       policy · placement · leases · evidence
+                     |
+local engines · APIs · workers · resource packs · adapters
+```
+
+ContextBridge does not try to replace model runtimes, APIs, GPUs, or agent
+frameworks. It gives them a common job boundary and makes them usable as one
+controlled pool. A new compatible resource should expand that pool without
+forcing every caller to learn another credential format, scheduler, failure
+model, or result envelope.
+
+This is a concrete boundary rather than an interoperability slogan: the public
+core ships Job Contract v1, a machine-readable protocol manifest, Relay
+Conformance v1, and Worker Conformance v1. See
+[ContextBridge compatibility boundaries](docs/compatibility.md) for exact
+claims, commands, versions, and limitations.
 
 ## Highlights
 
@@ -210,6 +236,7 @@ execution fingerprint where they cannot change model behavior.
 See the [application integration guide](docs/integrations.md),
 [automation guide](docs/automation.md),
 [pool and placement model](docs/pools-and-placement.md),
+[compatibility boundaries](docs/compatibility.md),
 [portable-resource boundary](docs/portable-resources.md),
 [architecture](docs/architecture.md), [security model](docs/security.md),
 [supply-chain evidence](docs/supply-chain.md),

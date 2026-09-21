@@ -77,6 +77,7 @@ func TestPublicCoreProductSurfaceIsPresent(t *testing.T) {
 		"assets/brand/contextbridge-wordmark.svg",
 		"internal/bridge/dashboard/mark.svg",
 		"docs/README.md",
+		"docs/compatibility.md",
 		"docs/operations.md",
 		"docs/limits-and-performance.md",
 		"docs/bounded-agent.md",
@@ -98,6 +99,7 @@ func TestPublicCoreProductSurfaceIsPresent(t *testing.T) {
 	for _, reference := range []string{
 		"assets/brand/contextbridge-wordmark.svg",
 		"docs/README.md",
+		"docs/compatibility.md",
 		"docs/limits-and-performance.md",
 	} {
 		if !strings.Contains(string(readme), reference) {

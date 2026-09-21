@@ -25,6 +25,12 @@
 - Added distribution regression tests that require the brand and core guides
   while preventing private out-of-tree adapter names from entering public text
   surfaces.
+- Defined accurate, versioned compatibility statements for producers, relays,
+  workers, resource packs, and out-of-tree adapters, backed by the existing
+  protocol manifest and no-inference conformance commands.
+- Reframed the public introduction around the plain-language outcome—one
+  governed pool for resources the operator already controls—without claiming
+  certification, adoption, or standard status that has not been earned.
 
 ## v0.6.3 - 2026-09-20
 

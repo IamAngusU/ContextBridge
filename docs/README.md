@@ -20,6 +20,8 @@ described as vendor integrations here.
 
 ## Automate and integrate
 
+- [Compatibility boundaries](compatibility.md): versioned job, relay, worker,
+  adapter, and resource-pack claims plus commands for collecting evidence.
 - [Bounded agents](bounded-agent.md): manual approval, local-only auto mode,
   and operator-owned authority envelopes.
 - [Application integrations](integrations.md): native jobs, OpenAI-compatible
