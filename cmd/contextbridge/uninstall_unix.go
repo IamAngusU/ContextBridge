@@ -20,7 +20,7 @@ func addPlatformUninstallPlan(plan *uninstallPlan) error {
 
 func executeUninstall(plan uninstallPlan) error {
 	removeUnixAutostart(plan)
-	removeUnixCompletions()
+	removeUnixCompletions(plan)
 	for _, path := range uniqueCleanPaths(append(append(append([]string{}, plan.ProgramPaths...), plan.CommandPaths...), plan.PurgePaths...)) {
 		if err := os.RemoveAll(path); err != nil {
 			return fmt.Errorf("remove %s: %w", path, err)
@@ -92,28 +92,33 @@ func removeUnixAutostart(plan uninstallPlan) {
 	}
 }
 
-func removeUnixCompletions() {
+func removeUnixCompletions(plan uninstallPlan) {
 	home, err := os.UserHomeDir()
 	if err != nil {
+		return
+	}
+	commandNames := make([]string, 0, len(plan.CommandPaths))
+	seenNames := map[string]bool{}
+	for _, commandPath := range plan.CommandPaths {
+		name := filepath.Base(commandPath)
+		if name == "." || name == string(filepath.Separator) || seenNames[name] {
+			continue
+		}
+		seenNames[name] = true
+		commandNames = append(commandNames, name)
+	}
+	if len(commandNames) == 0 {
 		return
 	}
 	dataHome := strings.TrimSpace(os.Getenv("XDG_DATA_HOME"))
 	if dataHome == "" {
 		dataHome = filepath.Join(home, ".local", "share")
 	}
-	for _, directory := range []string{
-		filepath.Join(dataHome, "bash-completion", "completions"),
-		filepath.Join(home, ".zfunc"),
-	} {
-		entries, err := os.ReadDir(directory)
-		if err != nil {
-			continue
-		}
-		for _, entry := range entries {
-			if entry.IsDir() {
-				continue
-			}
-			path := filepath.Join(directory, entry.Name())
+	for _, name := range commandNames {
+		for _, path := range []string{
+			filepath.Join(dataHome, "bash-completion", "completions", name),
+			filepath.Join(home, ".zfunc", "_"+name),
+		} {
 			raw, err := readSmallRegularFile(path, 256<<10)
 			if err == nil && managedCompletionFile(raw) {
 				_ = os.Remove(path)
@@ -124,7 +129,7 @@ func removeUnixCompletions() {
 	if zdot := strings.TrimSpace(os.Getenv("ZDOTDIR")); zdot != "" {
 		zshrc = filepath.Join(zdot, ".zshrc")
 	}
-	_ = removeManagedCompletionBlock(zshrc)
+	_ = removeManagedCompletionBlock(zshrc, commandNames)
 }
 
 func ownedSystemdService(path, installBinary, description string) bool {
@@ -153,7 +158,7 @@ func managedCompletionFile(raw []byte) bool {
 		(bytes.HasPrefix(raw, []byte("#compdef contextbridge cb\n")) && bytes.Contains(raw[:min(len(raw), 128)], []byte("# ContextBridge managed completion\n")))
 }
 
-func removeManagedCompletionBlock(path string) error {
+func removeManagedCompletionBlock(path string, ownedCommandNames []string) error {
 	resolved := path
 	if target, err := filepath.EvalSymlinks(path); err == nil {
 		resolved = target
@@ -170,6 +175,27 @@ func removeManagedCompletionBlock(path string) error {
 	start := bytes.Index(raw, beginMarker)
 	endAt := bytes.Index(raw, endMarker)
 	if start < 0 || endAt <= start {
+		return nil
+	}
+	block := string(raw[start : endAt+len(endMarker)])
+	owned := false
+	for _, name := range ownedCommandNames {
+		for _, line := range strings.Split(block, "\n") {
+			marker := "compdef _contextbridge "
+			at := strings.Index(line, marker)
+			if at < 0 {
+				continue
+			}
+			for _, candidate := range strings.FieldsFunc(line[at+len(marker):], func(r rune) bool {
+				return r == ' ' || r == '\t' || r == ';' || r == '\r'
+			}) {
+				if candidate == name {
+					owned = true
+				}
+			}
+		}
+	}
+	if !owned {
 		return nil
 	}
 	end := endAt + len(endMarker)

@@ -42,6 +42,9 @@
   their own program paths without exposing package details in the public core.
 - Rejected filesystem roots and the user home as purge authority, and added a
   Windows post-uninstall verification report for any owned item left behind.
+- Bound shell-completion cleanup to the exact owned install path or command
+  name, so uninstalling one installation cannot alter another installation's
+  profile block or completion files.
 
 ## v0.6.3 - 2026-09-20
 

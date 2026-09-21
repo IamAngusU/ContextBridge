@@ -20,7 +20,9 @@ func TestWindowsUninstallHelperParsesAndKeepsOwnershipChecks(t *testing.T) {
 	}
 	for _, evidence := range []string{
 		"SamePath ([Environment]::ExpandEnvironmentVariables([string]$action.Execute)) $executable",
-		"$begin.Count -ne 1 -or $end.Count -ne 1",
+		"function Get-ContextBridgeCompletionBlock",
+		"$owned.Count -ne 1",
+		"Join-Path $installDir 'contextbridge-completion.ps1'",
 		"if (-not $targetOwned) { $owned = $false }",
 		"Remove-Item -LiteralPath ([string]$target)",
 		"ContextBridge could not verify complete removal.",

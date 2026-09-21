@@ -39,11 +39,11 @@ func TestOwnedSystemdServiceRequiresDescriptionAndExactBinary(t *testing.T) {
 
 func TestRemoveManagedCompletionBlockPreservesUserProfileText(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".zshrc")
-	content := "before\n# >>> ContextBridge completion >>>\nsource /managed/completion\n# <<< ContextBridge completion <<<\nafter\n"
+	content := "before\n# >>> ContextBridge completion >>>\nfpath=(\"$HOME/.zfunc\" $fpath)\nif (( $+functions[compdef] )); then compdef _contextbridge cb; fi\n# <<< ContextBridge completion <<<\nafter\n"
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := removeManagedCompletionBlock(path); err != nil {
+	if err := removeManagedCompletionBlock(path, []string{"cb"}); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(path)
@@ -58,7 +58,7 @@ func TestRemoveManagedCompletionBlockPreservesUserProfileText(t *testing.T) {
 	if err := os.WriteFile(path, []byte(malformed), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := removeManagedCompletionBlock(path); err != nil {
+	if err := removeManagedCompletionBlock(path, []string{"cb"}); err != nil {
 		t.Fatal(err)
 	}
 	raw, err = os.ReadFile(path)
@@ -67,5 +67,20 @@ func TestRemoveManagedCompletionBlockPreservesUserProfileText(t *testing.T) {
 	}
 	if strings.TrimSpace(string(raw)) != strings.TrimSpace(malformed) {
 		t.Fatal("ambiguous completion markers were rewritten")
+	}
+
+	foreign := "keep\n# >>> ContextBridge completion >>>\nif (( $+functions[compdef] )); then compdef _contextbridge other-cb; fi\n# <<< ContextBridge completion <<<\n"
+	if err := os.WriteFile(path, []byte(foreign), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeManagedCompletionBlock(path, []string{"cb"}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != foreign {
+		t.Fatal("another installation's completion block was removed")
 	}
 }

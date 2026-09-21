@@ -112,14 +112,25 @@ if ($userPath) {
   [Environment]::SetEnvironmentVariable('Path', ($entries -join ';'), 'User')
 }
 
-function Remove-ContextBridgeCompletionBlock([string]$ProfilePath) {
+function Get-ContextBridgeCompletionBlock([string]$Text, [string]$OwnedCompletionPath) {
+  if (-not $Text -or -not $OwnedCompletionPath) { return $null }
+  $begin = [regex]::Matches($Text, '(?m)^# >>> ContextBridge completion >>>\r?$')
+  $end = [regex]::Matches($Text, '(?m)^# <<< ContextBridge completion <<<\r?$')
+  if ($begin.Count -ne 1 -or $end.Count -ne 1 -or $begin[0].Index -ge $end[0].Index) { return $null }
+  $finish = $end[0].Index + $end[0].Length
+  $block = $Text.Substring($begin[0].Index, $finish - $begin[0].Index)
+  $expected = ". '" + (FullPath $OwnedCompletionPath).Replace("'", "''") + "'"
+  $owned = @([regex]::Split($block, '\r?\n') | Where-Object { $_.Trim().Equals($expected, [StringComparison]::OrdinalIgnoreCase) })
+  if ($owned.Count -ne 1) { return $null }
+  return [pscustomobject]@{ Start = $begin[0].Index; Finish = $finish }
+}
+function Remove-ContextBridgeCompletionBlock([string]$ProfilePath, [string]$OwnedCompletionPath) {
   if (-not $ProfilePath -or -not (Test-Path -LiteralPath $ProfilePath -PathType Leaf)) { return }
   $text = [IO.File]::ReadAllText($ProfilePath)
-  $begin = [regex]::Matches($text, '(?m)^# >>> ContextBridge completion >>>\r?$')
-  $end = [regex]::Matches($text, '(?m)^# <<< ContextBridge completion <<<\r?$')
-  if ($begin.Count -ne 1 -or $end.Count -ne 1 -or $begin[0].Index -ge $end[0].Index) { return }
-  $start = $begin[0].Index
-  $finish = $end[0].Index + $end[0].Length
+  $block = Get-ContextBridgeCompletionBlock $text $OwnedCompletionPath
+  if (-not $block) { return }
+  $start = [int]$block.Start
+  $finish = [int]$block.Finish
   if ($finish -lt $text.Length -and $text[$finish] -eq [char]10) { $finish++ }
   $updated = $text.Substring(0, $start) + $text.Substring($finish)
   [IO.File]::WriteAllText($ProfilePath, $updated, (New-Object Text.UTF8Encoding($false)))
@@ -132,7 +143,7 @@ if ($documents) {
   $profileCandidates += (Join-Path $documents 'PowerShell\profile.ps1')
 }
 foreach ($profilePath in @($profileCandidates | Where-Object { $_ } | Sort-Object -Unique)) {
-  Remove-ContextBridgeCompletionBlock $profilePath
+  Remove-ContextBridgeCompletionBlock $profilePath (Join-Path $installDir 'contextbridge-completion.ps1')
 }
 
 $programs = [Environment]::GetFolderPath('Programs')
@@ -189,7 +200,7 @@ foreach ($taskName in $ownedTaskNames) {
 foreach ($profilePath in @($profileCandidates | Where-Object { $_ } | Sort-Object -Unique)) {
   if (-not (Test-Path -LiteralPath $profilePath -PathType Leaf)) { continue }
   $profileText = [IO.File]::ReadAllText($profilePath)
-  if ($profileText.Contains('# >>> ContextBridge completion >>>') -or $profileText.Contains('# <<< ContextBridge completion <<<')) {
+  if (Get-ContextBridgeCompletionBlock $profileText (Join-Path $installDir 'contextbridge-completion.ps1')) {
     $remaining.Add('PowerShell completion marker: ' + $profilePath)
   }
 }
