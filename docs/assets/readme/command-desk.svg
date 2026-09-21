@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="248" viewBox="0 0 800 248" role="img" aria-labelledby="title description">
+<title id="title">ContextBridge command desk</title>
+<desc id="description">Six real commands for inspecting models, workers, routing, conformance and overhead. Requires the configured services described in the README. These are commands, not fabricated terminal output.</desc>
+<style>.bg{fill:#f6f5f1;stroke:#deddd7}.fg{fill:#242421}.muted{fill:#676a61}.line{stroke:#deddd7}@media(prefers-color-scheme:dark){.bg{fill:#242622;stroke:#44473f}.fg{fill:#f1f0e9}.muted{fill:#b5b7ac}.line{stroke:#44473f}}</style>
+<path class="bg" d="M25 1H775C797.8 1 799 2.2 799 25V223C799 245.8 797.8 247 775 247H25C2.2 247 1 245.8 1 223V25C1 2.2 2.2 1 25 1Z"/>
+<path class="line" d="M1 48H799"/>
+<g fill="#a5a89d"><rect x="23" y="20" width="8" height="8" rx="3"/><rect x="38" y="20" width="8" height="8" rx="3"/><rect x="53" y="20" width="8" height="8" rx="3"/></g>
+<text class="fg" x="80" y="29" font-family="Arial,Helvetica,sans-serif" font-size="12" font-weight="600">contextbridge / command desk</text>
+<text class="muted" x="776" y="28" text-anchor="end" font-family="Arial,Helvetica,sans-serif" font-size="10" letter-spacing="1.2">INSPECT · CONNECT · VERIFY</text>
+<g font-family="Consolas,Menlo,monospace" font-size="13.5">
+<text class="muted" x="26" y="82">›</text><text class="fg" x="45" y="82">contextbridge dashboard</text>
+<text class="muted" x="26" y="110">›</text><text class="fg" x="45" y="110">contextbridge models</text>
+<text class="muted" x="26" y="138">›</text><text class="fg" x="45" y="138">contextbridge cluster status</text>
+<text class="muted" x="26" y="166">›</text><text class="fg" x="45" y="166">contextbridge route explain --file ./job.json</text>
+<text class="muted" x="26" y="194">›</text><text class="fg" x="45" y="194">contextbridge cluster conformance worker --json</text>
+<text class="muted" x="26" y="222">›</text><text class="fg" x="45" y="222">contextbridge benchmark --json</text>
+</g>
+<g class="muted" font-family="Arial,Helvetica,sans-serif" font-size="12">
+<text x="555" y="82">Open the local control panel</text><text x="555" y="110">Find available local models</text><text x="555" y="138">See connected pool workers</text><text x="555" y="166">Preview placement; no inference</text><text x="555" y="194">Check bounded worker evidence</text><text x="555" y="222">Measure coordination overhead</text>
+</g>
+</svg>

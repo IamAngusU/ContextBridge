@@ -1,129 +1,30 @@
 <p align="center">
-  <img src="assets/brand/contextbridge-wordmark.svg" width="420" alt="ContextBridge">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/readme/wordmark-dark.svg">
+    <img src="assets/brand/contextbridge-wordmark.svg" width="240" alt="ContextBridge">
+  </picture>
 </p>
 
-<h1 align="center">ContextBridge</h1>
+<h1 align="center">Your AI resources. One connected pool.</h1>
 
-<p align="center"><strong>Own the compute. Route the work.</strong></p>
-
-<p align="center">Use the models, APIs, GPUs, workers, and servers you already control through one neutral contract.</p>
+<p align="center">Own the compute. Route the work.<br>Connect local models, private machines and model APIs without replacing them.</p>
 
 <p align="center">
-  <a href="https://github.com/IamAngusU/ContextBridge/releases/latest"><img alt="Latest stable release" src="https://img.shields.io/github/v/release/IamAngusU/ContextBridge?display_name=tag&amp;sort=semver&amp;style=flat-square&amp;color=2a9d8f"></a>
-  <a href="LICENSING.md"><img alt="v0.7 core license: AGPL-3.0-only" src="https://img.shields.io/badge/v0.7%20core-AGPL--3.0--only-20231f?style=flat-square"></a>
-  <img alt="Go 1.25" src="https://img.shields.io/badge/Go-1.25-00ADD8?style=flat-square&amp;logo=go&amp;logoColor=white">
-  <img alt="Windows, Linux, and macOS" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-59636e?style=flat-square">
+  <a href="https://github.com/IamAngusU/ContextBridge/releases/latest"><img src="docs/assets/readme/badge-release.svg" height="34" alt="Download the latest release"></a>
+  <a href="LICENSING.md"><img src="docs/assets/readme/badge-core.svg" height="34" alt="Core: AGPL-3.0-only"></a>
+  <a href="docs/compatibility.md"><img src="docs/assets/readme/badge-interfaces.svg" height="34" alt="Defined integration surfaces: Apache-2.0"></a>
+  <a href="docs/operations.md"><img src="docs/assets/readme/badge-platforms.svg" height="34" alt="Windows, Linux and macOS"></a>
 </p>
 
-ContextBridge gives applications one governed way to use the AI resources you
-already control. It turns models, APIs, computers, GPUs, removable resource
-packs, and servers into one policy-aware pool that can be reached from a
-terminal, an application, a VPS, shared hosting, or an MCP client.
+<p align="center"><a href="#get-running">Get running</a> · <a href="#connect-your-devices">Connect devices</a> · <a href="#measured-overhead">Benchmarks</a> · <a href="docs/README.md">Documentation</a></p>
 
-You describe the job and its hard requirements. ContextBridge selects a
-compatible worker, reserves capacity, enforces egress and cost policy, verifies
-the result, and records why the route was chosen.
+ContextBridge lets an app on your laptop, VPS or shared hosting send AI jobs to a pool of resources you control. It selects a compatible worker, applies configured policies, tracks the job and validates returned artifacts. **Keep your runtimes. Connect your resources.**
 
-## Why it exists
+**Connect:** Ollama, managed `llama.cpp`, OpenAI-compatible model APIs and optional external adapters. **Control:** capability-aware placement, durable jobs, cost/egress policies and optional E2EE. **Inspect:** route explanations, receipts and free [conformance checks](docs/compatibility.md).
 
-AI infrastructure is usually fragmented: one machine has a GPU, another hosts
-an API credential, a VPS receives requests, and a portable drive contains
-specialized models. ContextBridge joins those resources without opening inbound
-ports on worker machines or pretending an unavailable capability exists.
+## Get running
 
-Its design rule is simple:
-
-> A component saying that something happened is not proof that it happened.
-
-That rule is applied to queue state, worker leases, updates, artifacts, model
-capabilities, costs, agent approvals, and execution receipts.
-
-## One contract, many resources
-
-```text
-applications · users · agents · MCP clients
-                     |
-                ContextBridge
-                     |
-       policy · placement · leases · evidence
-                     |
-local engines · APIs · workers · resource packs · adapters
-```
-
-ContextBridge does not try to replace model runtimes, APIs, GPUs, or agent
-frameworks. It gives them a common job boundary and makes them usable as one
-controlled pool. A new compatible resource should expand that pool without
-forcing every caller to learn another credential format, scheduler, failure
-model, or result envelope.
-
-This is a concrete boundary rather than an interoperability slogan: the public
-core ships Job Contract v1, a machine-readable protocol manifest, Relay
-Conformance v1, and Worker Conformance v1. See
-[ContextBridge compatibility boundaries](docs/compatibility.md) for exact
-claims, commands, versions, and limitations.
-
-## Highlights
-
-- Local Ollama and managed `llama.cpp` engines.
-- OpenAI-compatible API engines with operator-owned credentials and budgets.
-- N:1 and N:N worker pools over an authenticated relay.
-- Capability-aware scheduling for text, vision, images, audio, files,
-  embeddings, RAM, VRAM, tags, models, and worker groups.
-- End-to-end encryption between a producer and one reserved worker.
-- Verified artifact transfer with byte limits, media validation, SHA-256, and
-  non-overwriting saves.
-- Durable queueing, cancellation, idempotency, execution receipts, schedules,
-  and bounded multi-step agents.
-- Named trust policies so operators decide which low-risk work may run without
-  a per-run approval and which work must stop for review.
-- Optional out-of-tree adapters through a provider-neutral endpoint contract.
-  The core contains no vendor-specific adapter implementation.
-- MCP, a dependency-free PHP client example, a JSON job API, and an
-  OpenAI-compatible input surface.
-- Fail-closed routing: unknown capability, unknown price, ambiguous ownership,
-  or lost execution state is not silently treated as success or zero cost.
-
-## Measured bridge overhead
-
-ContextBridge measures its own coordination paths separately from model and
-network latency. These single-client observations cover both a Windows
-workstation and a constrained two-vCPU Linux VPS.
-
-| Host | Operation | p50 | p95 | p99 | Throughput |
-| --- | --- | ---: | ---: | ---: | ---: |
-| Windows · i9-12900K | Durable relay submit/read/cancel | 2.402 ms | 3.516 ms | 3.740 ms | 418.5 ops/s |
-| Windows · i9-12900K | Small E2EE job + result | 0.098 ms | 0.168 ms | 0.193 ms | 8,582.9 ops/s |
-| Windows · i9-12900K | Verify one 64 KiB artifact | 0.065 ms | 0.125 ms | 0.134 ms | 13,834.8 ops/s |
-| Linux · 2-vCPU VPS | Durable relay submit/read/cancel | 12.165 ms | 25.418 ms | 36.304 ms | 73.8 ops/s |
-| Linux · 2-vCPU VPS | Small E2EE job + result | 0.217 ms | 0.320 ms | 0.496 ms | 4,260.3 ops/s |
-| Linux · 2-vCPU VPS | Verify one 64 KiB artifact | 0.141 ms | 0.316 ms | 0.446 ms | 5,846.9 ops/s |
-
-These are reproducible engineering observations, not an SLA and not AI
-inference time. The exact source commit, host, sample settings, concurrency
-1/4/16/64 tables, resource footprint, protocol limits, exclusions, and the
-command for measuring another machine are in
-[Limits and measured ContextBridge overhead](docs/limits-and-performance.md).
-The Linux host was a shared VPS; noisy-neighbour effects such as CPU steal and
-storage contention were not controlled. Those results demonstrate operation
-on a constrained host, not an operating-system comparison or SLA.
-
-## Capability map
-
-| Layer | Public core capability |
-| --- | --- |
-| Inputs | CLI, authenticated JSON/HTTP, folder inbox, MCP, OpenAI-compatible requests, PHP example |
-| Compute | Ollama, managed `llama.cpp`, reviewed OpenAI-compatible engines, optional provider-neutral adapters |
-| Pool | 1:1, N:1, 1:N, and N:N topologies; outbound workers; scoped relay credentials |
-| Placement | Hard capability matching, groups/tags, task/model constraints, RAM/VRAM evidence, capacity ranking |
-| Automation | Durable schedules, bounded pipelines, reviewed plans, local-only auto agents, named authority envelopes |
-| Evidence | Route explanations, progress, receipts, artifact hashes, protocol manifests, conformance checks, signed time-bounded verification, benchmarks |
-| Safety | E2EE payloads, cost/egress policy, idempotency, fail-closed recovery, verified updates and release provenance |
-
-The map is backed by commands and tests in this repository rather than a
-future-feature list. Start with the [documentation index](docs/README.md) for
-the corresponding operational and security boundaries.
-
-## Five-minute start
+For this first run, have **Ollama running with at least one installed text-generation model**. The installer can also set up a managed runtime for other workloads.
 
 ### Windows PowerShell
 
@@ -131,185 +32,143 @@ the corresponding operational and security boundaries.
 irm https://raw.githubusercontent.com/IamAngusU/ContextBridge/main/install.ps1 | iex
 ```
 
-### Linux or macOS
+### Linux / macOS
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/IamAngusU/ContextBridge/main/install.sh | sh
 ```
 
-The installer verifies the release checksum, creates a private local config,
-offers Ollama or a managed runtime, configures the requested relay/worker role,
-and installs shell completion. It never replaces an unrelated `contextbridge`
-or `cb` command. If both names are occupied, choose a custom command name.
+Choose **Existing Ollama**, then **4) Relay and worker on this device**. Leave the public HTTPS URL empty for this local demo. The installer downloads the latest release, checks its published checksum, creates a private configuration and pairs the local worker.
 
-Start the local service:
+Open a **new terminal**. If the installer did not start the service, run `contextbridge run` and leave that terminal open. In another terminal:
 
 ```sh
-contextbridge run --config ./config.yml
+contextbridge doctor
+contextbridge cluster chat --provider ollama --model auto --artifacts off --prompt "Reply exactly with CB-OK"
 ```
 
-Check it:
+Your local relay queues the request, your worker runs a compatible installed model, and the answer returns to the terminal. `auto` selects an available compatible model, not a promised quality tier.
+
+Commands use the installer-created configuration automatically. For a custom installation, append `--config /path/to/config.yml`. Prefer inspecting scripts first? Read [install.ps1](install.ps1) / [install.sh](install.sh), or use the [release archives](https://github.com/IamAngusU/ContextBridge/releases/latest).
+
+## Connect your devices
+
+A **relay** coordinates the pool. A **worker** runs the job. An **application token** lets another client submit work. Workers connect outbound; they need no public inbound ports.
+
+<details>
+<summary><strong>Set up a relay, pair another machine and issue an app token</strong></summary>
+
+### 1. Choose the coordination host
+
+Install CB on your server. Replace `https://relay.example.net` below with your relay's real HTTPS address. Set up an HTTPS reverse proxy with WebSocket support to `127.0.0.1:32150`; the commands below do not create DNS, certificates or the proxy.
+
+Stop an existing managed instance before changing roles (`contextbridge stop`; use its service manager if applicable), then configure and start the relay:
 
 ```sh
-contextbridge doctor --config ./config.yml
-contextbridge status --config ./config.yml
-contextbridge selftest --config ./config.yml
+contextbridge cluster configure --mode relay --listen 127.0.0.1:32150 --public-url https://relay.example.net
+contextbridge run
 ```
 
-The default self-test performs readiness checks only. It sends no model prompt
-unless `--run` is supplied.
+Keep the local service on loopback. Only expose the relay through HTTPS. A coordination-only host needs no model or GPU. [Deployment and operations](docs/operations.md).
 
-## First local job
+### 2. Join each compute device
+
+Install CB on the device with your models. If it is already running, stop it before changing roles. Then:
 
 ```sh
-contextbridge cluster chat \
-  --config ./config.yml \
-  --provider ollama \
-  --model auto \
-  --artifacts off \
-  --prompt "Reply exactly with LOCAL-ROUTE-OK"
+contextbridge cluster configure --mode worker --relay-url https://relay.example.net --name home-pc
+contextbridge pair
 ```
 
-For Windows CMD, put the command on one line or use `^` for continuation.
-PowerShell uses a backtick. A Bash backslash is not a Windows continuation.
-
-## Build a pool
-
-Run a relay on a server and join workers from private machines. Workers dial
-out to the relay; no inbound worker port is required.
+Pairing prints a code and waits. In a **second terminal on the relay host**, inspect pending requests and approve the matching code:
 
 ```sh
-# Relay
-contextbridge cluster configure --config ./config.yml --mode relay --listen auto
-
-# Worker
-contextbridge cluster configure \
-  --config ./config.yml \
-  --mode worker \
-  --relay-url https://relay.example.net \
-  --name gpu-workstation
-contextbridge pair --config ./config.yml --name gpu-workstation
-contextbridge run --config ./config.yml
+contextbridge cluster pairing
+contextbridge cluster pairing --approve PAIRING-CODE
 ```
 
-From the relay or an authenticated producer:
+Replace `PAIRING-CODE` with the code shown on that device. After approval, run `contextbridge run` on the worker. Its identity is saved locally; you do not copy the relay admin token to it. Repeat with a distinct name for each device.
+
+On the relay host, check the pool and send a job:
 
 ```sh
-contextbridge cluster status --config ./config.yml
-contextbridge route explain --file ./examples/cluster-job.json
-contextbridge cluster submit --config ./config.yml --file ./examples/cluster-job.json
+contextbridge cluster status
+contextbridge cluster chat --provider ollama --model auto --artifacts off --prompt "Which tasks can you help with?"
 ```
 
-The scheduler matches hard requirements first, then ranks compatible nodes by
-live capacity and resource evidence. An assigned or running job is never
-silently replayed on another worker after an ambiguous disconnect.
+### 3. Give an application its own token
 
-## “Take care of it” without surrendering control
-
-`cluster agent plan` creates a bounded JSON plan. `cluster agent run` normally
-requires approval of the exact plan and execution fingerprint. For trusted
-projects, an operator may define a named authority that permits only a bounded
-set of providers, profiles, tenants, groups, egress modes, budgets, steps, and
-runtime. The planner cannot grant or widen its own authority.
+On the running relay host, using its private configuration:
 
 ```sh
-contextbridge cluster agent plan \
-  --config ./config.yml \
-  --goal "Draft a concise release note and verify it" \
-  --out plan.json
-
-contextbridge cluster agent run \
-  --config ./config.yml \
-  --plan plan.json \
-  --approve sha256:REVIEWED_HASH
+contextbridge cluster token --role producer --subject my-app
 ```
 
-If execution-relevant configuration changes after approval, the run stops and
-requires a new review. Purely operational settings are separated from the
-execution fingerprint where they cannot change model behavior.
+This prints token JSON. Store it securely; **never give an application the relay admin token**. For a separate CLI client, save the returned JSON as a private **UTF-8** file named `producer-token.json` and transfer it through a secure channel. Do not commit it.
 
-## Use it from applications
-
-- Native JSON jobs: authenticated HTTP queue API.
-- OpenAI-compatible input: for existing clients that can change a base URL.
-- MCP: bounded tools for job submission, status, results, and cancellation.
-- PHP 8.1+: dependency-free example for shared hosting.
-- Folder inbox: atomic file-based ingestion for simple local automation.
-
-See the [application integration guide](docs/integrations.md),
-[automation guide](docs/automation.md),
-[pool and placement model](docs/pools-and-placement.md),
-[compatibility boundaries](docs/compatibility.md),
-[portable-resource boundary](docs/portable-resources.md),
-[architecture](docs/architecture.md), [security model](docs/security.md),
-[supply-chain evidence](docs/supply-chain.md),
-[verification and conformance](docs/verification.md),
-[adapter contract](docs/adapters.md), and the
-[Hosted Relay readiness boundary](docs/hosted-relay.md).
-
-## Honest boundaries
-
-- ContextBridge is an orchestrator, not a model. Output quality remains the
-  selected model's responsibility.
-- `model: auto` means smallest compatible available model, preferring an
-  already loaded one. It does not guess intelligence from a model name.
-- Hardware telemetry is advisory unless the job declares a hard minimum.
-- Unknown remote cost is unknown, not `$0`. A policy may reject it.
-- Multi-GPU telemetry and placement are supported, but ContextBridge does not
-  split one inference across GPUs unless the selected engine does so.
-- Adapters are separate executables owned and configured by the operator. The
-  public core neither ships nor documents vendor-specific adapters.
-- The project does not claim GDPR certification, SOC 2 attestation, or a legal
-  compliance guarantee. It provides controls and evidence that can support an
-  operator's own compliance program.
-- The repository contains a relay foundation, not a currently offered
-  production multi-tenant Hosted Relay, SLA, or zero-knowledge service.
-- Free conformance is not a paid badge. `ContextBridge Verified` is reserved
-  for a future announced program that issues signed statements bound to exact
-  product bytes, scope, evidence, and an expiry date.
-
-## Security defaults
-
-- Local service binds to loopback by default.
-- Relay and worker roles use separate scoped credentials.
-- Worker pairing is explicit and auditable.
-- Secrets are not included in status output, receipts, or execution hashes.
-- Artifact paths, sizes, digests, and media types are verified.
-- Model/runtime downloads are bounded and revision-aware.
-- Updates are opt-in, checksum-verified, staged, and considered installed only
-  when the new executable is actually running and healthy.
-- Adapter endpoints are untrusted capability reporters; scheduling uses bounded
-  normalized evidence and exact lease ownership.
-- Release archives are deterministic from a clean commit, contain a CycloneDX
-  SBOM with reviewed runtime-license metadata, bundled third-party notices, and
-  an explicit corresponding-source offer. Every AGPL binary release also
-  publishes a deterministic source archive with vendored Go module sources.
-  The machine-readable build record binds that archive to the exact commit.
-  That record is currently unsigned and is not represented as proof of
-  publisher identity.
-
-Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
-
-## Development
+On that client, install CB in **local** mode, then point it at the relay and load the credential:
 
 ```sh
-go test ./...
-go vet ./...
-go test -race ./internal/bridge ./internal/cluster
+contextbridge cluster configure --mode local --relay-url https://relay.example.net
+contextbridge cluster login --token-file ./producer-token.json
+contextbridge cluster chat --provider ollama --model auto --artifacts off --prompt "Reply exactly with POOL-OK"
 ```
 
-The repository targets Windows, Linux, and macOS. CI builds and tests all three;
-GPU/runtime availability naturally varies by host.
+The client submits work without joining as a worker. Login stores the token in its private config; remove the temporary token file when no longer needed. Use `--role observer` when issuing a read-only monitoring credential.
 
-## License
+For your own app, use the producer token with the [native job API or PHP client](docs/integrations.md). The local OpenAI-compatible API uses the **local service token**, not the relay producer token. [Pool and placement details](docs/pools-and-placement.md).
 
-The v0.7.0 core and current main branch are AGPL-3.0-only. Reusable schemas, examples,
-and the adapter contract are Apache-2.0 exceptions with explicit directory or
-SPDX notices. Releases v0.6.0 through v0.6.3 remain MIT; their permissions are
-not withdrawn. See [LICENSING.md](LICENSING.md) for the exact file boundaries.
+</details>
 
-The code licenses do not grant permission to use the ContextBridge name or
-visual identity in a way that implies an unofficial fork, service, or product
-is maintained or endorsed by this project. Accurate origin statements such as
-“based on ContextBridge” remain welcome; see
-[TRADEMARKS.md](TRADEMARKS.md).
+## Measured overhead
+
+**Coordination, not inference.** Dated development measurements from **20 September 2026**, with 128 samples after 8 warmups and one concurrent client:
+
+| Operation | Windows p50 / p99 | Linux VPS p50 / p99 |
+| --- | ---: | ---: |
+| Durable submit → read → cancel | 2.402 / 3.740 ms | 12.165 / 36.304 ms |
+| Small E2EE job + result | 0.098 / 0.193 ms | 0.217 / 0.496 ms |
+| Verify a 64 KiB artifact | 0.065 / 0.134 ms | 0.141 / 0.446 ms |
+
+Queue throughput: **418.5 ops/s** on the Windows i9-12900K; **73.8 ops/s** on the shared two-vCPU Linux VPS. Sampled idle benchmark-process + relay RSS: **14.4 / 12.7 MiB**, respectively. No models were running in these measurements.
+
+These are different machines, not an OS comparison or an SLA. Model execution and cross-device network latency are excluded; shared-VPS contention was uncontrolled. [Exact commits, methodology, p95, concurrency 1/4/16/64 and limits](docs/limits-and-performance.md).
+
+## Command desk
+
+<p align="center"><img src="docs/assets/readme/command-desk.svg" width="800" alt="Useful commands: dashboard, models, cluster status, route explain, worker conformance and benchmark. Copyable versions below."></p>
+
+<details>
+<summary><strong>Copy commands and explore automation</strong></summary>
+
+```sh
+contextbridge dashboard
+contextbridge models
+contextbridge cluster status
+contextbridge route explain --file ./job.json
+contextbridge cluster conformance worker --json
+contextbridge benchmark --json
+```
+
+For `route explain`, use a native cluster job such as [examples/cluster-job.json](examples/cluster-job.json). Pool commands require a configured, running relay and an authorized credential. Route previews and conformance checks do not send inference requests.
+
+| Want to… | Command / guide |
+| --- | --- |
+| Connect an MCP client | `contextbridge mcp serve` · [Integrations](docs/integrations.md) |
+| Inspect schedules | `contextbridge schedule list` · [Automation](docs/automation.md) |
+| Read a completed job's receipt | `contextbridge cluster receipt show JOB_ID` |
+| Plan bounded multi-step work | [Agents and approval boundaries](docs/bounded-agent.md) |
+| Reproduce the measurements | `contextbridge benchmark --json` |
+| Check an update / preview removal | `contextbridge update check` / `contextbridge uninstall --dry-run` |
+
+</details>
+
+## Open by design. Precise about trust.
+
+Self-hosting is fully functional. CB coordinates existing runtimes; it does not pool VRAM or split a model itself. Optional E2EE protects job payloads, **not coordination metadata**. Configurable policies are not all enabled by default. Ambiguous execution is not silently retried.
+
+Releases include checksums, SBOMs and third-party notices; AGPL releases also publish corresponding source. Build records are explicitly unsigned. Free conformance is separate from the future **ContextBridge Verified** program. [Security](docs/security.md) · [Supply chain](docs/supply-chain.md) · [Verification](docs/verification.md).
+
+**License:** current core **AGPL-3.0-only**; explicitly listed schemas, examples and interface documents **Apache-2.0**; published **v0.6.0–v0.6.3 remain MIT**. [Exact boundaries](LICENSING.md) · [Project identity](TRADEMARKS.md).
+
+**Early-stage, pre-1.0 software.** Reviews, reproducible bug reports and integration feedback are welcome. External core-code PRs are paused pending the contributor agreement. [Contributing](CONTRIBUTING.md) · [Report a vulnerability privately](SECURITY.md) · [All documentation](docs/README.md).
