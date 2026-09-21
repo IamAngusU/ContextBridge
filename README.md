@@ -16,11 +16,17 @@
   <a href="docs/operations.md"><img src="docs/assets/readme/badge-platforms.svg" height="34" alt="Windows, Linux and macOS"></a>
 </p>
 
-<p align="center"><a href="#get-running">Get running</a> · <a href="#connect-your-devices">Connect devices</a> · <a href="#measured-overhead">Benchmarks</a> · <a href="docs/README.md">Documentation</a></p>
+<p align="center"><a href="#get-running">Install</a> · <a href="#connect-your-devices">Connect devices</a> · <a href="#measured-overhead">Benchmarks</a> · <a href="#command-desk">Commands</a> · <a href="#uninstall">Uninstall</a> · <a href="docs/README.md">Docs</a></p>
 
 ContextBridge lets an app on your laptop, VPS or shared hosting send AI jobs to a pool of resources you control. It selects a compatible worker, applies configured policies, tracks the job and validates returned artifacts. **Keep your runtimes. Connect your resources.**
 
-**Connect:** Ollama, managed `llama.cpp`, OpenAI-compatible model APIs and optional external adapters. **Control:** capability-aware placement, durable jobs, cost/egress policies and optional E2EE. **Inspect:** route explanations, receipts and free [conformance checks](docs/compatibility.md).
+| Your setup | What CB adds |
+| --- | --- |
+| App on a VPS, model on your PC | A relay connects them; your worker dials out. |
+| Several machines, different capabilities | Route by requirements and available capacity, with an explanation. |
+| Multiple apps sharing the pool | Separate producer credentials instead of shared admin secrets. |
+
+Connect **Ollama**, managed **llama.cpp**, **OpenAI-compatible model APIs** and optional external adapters. Get durable jobs, configurable cost/egress boundaries, optional E2EE and free [conformance checks](docs/compatibility.md). No ContextBridge cloud account is required for self-hosting.
 
 ## Get running
 
@@ -49,7 +55,10 @@ contextbridge cluster chat --provider ollama --model auto --artifacts off --prom
 
 Your local relay queues the request, your worker runs a compatible installed model, and the answer returns to the terminal. `auto` selects an available compatible model, not a promised quality tier.
 
-Commands use the installer-created configuration automatically. For a custom installation, append `--config /path/to/config.yml`. Prefer inspecting scripts first? Read [install.ps1](install.ps1) / [install.sh](install.sh), or use the [release archives](https://github.com/IamAngusU/ContextBridge/releases/latest).
+Commands use the installer-created configuration automatically. For a custom installation, append `--config /path/to/config.yml`. Read [install.ps1](install.ps1) / [install.sh](install.sh) before executing them, or use the [release archives](https://github.com/IamAngusU/ContextBridge/releases/latest).
+
+> [!TIP]
+> Trying CB does not lock you in. `contextbridge uninstall --dry-run` previews removal without stopping or deleting anything. [Uninstall keeps your configuration and data by default.](#uninstall)
 
 ## Connect your devices
 
@@ -132,11 +141,16 @@ For your own app, use the producer token with the [native job API or PHP client]
 
 Queue throughput: **418.5 ops/s** on the Windows i9-12900K; **73.8 ops/s** on the shared two-vCPU Linux VPS. Sampled idle benchmark-process + relay RSS: **14.4 / 12.7 MiB**, respectively. No models were running in these measurements.
 
-These are different machines, not an OS comparison or an SLA. Model execution and cross-device network latency are excluded; shared-VPS contention was uncontrolled. [Exact commits, methodology, p95, concurrency 1/4/16/64 and limits](docs/limits-and-performance.md).
+These are different machines, not an OS comparison or an SLA. Model execution and cross-device network latency are excluded; shared-VPS contention was uncontrolled. [Exact commits, methodology, p95, concurrency 1/4/16/64 and limits](docs/limits-and-performance.md). Reproduce on your hardware with `contextbridge benchmark --json`.
 
 ## Command desk
 
-<p align="center"><img src="docs/assets/readme/command-desk.svg" width="800" alt="Useful commands: dashboard, models, cluster status, route explain, worker conformance and benchmark. Copyable versions below."></p>
+<p align="center">
+  <picture>
+    <source media="(max-width: 600px)" srcset="docs/assets/readme/command-desk-mobile.svg">
+    <img src="docs/assets/readme/command-desk.svg" width="800" alt="Command reference: dashboard, models, pool status, route preview, worker conformance, benchmarks and uninstall preview. Copyable commands below.">
+  </picture>
+</p>
 
 <details>
 <summary><strong>Copy commands and explore automation</strong></summary>
@@ -148,9 +162,10 @@ contextbridge cluster status
 contextbridge route explain --file ./job.json
 contextbridge cluster conformance worker --json
 contextbridge benchmark --json
+contextbridge uninstall --dry-run
 ```
 
-For `route explain`, use a native cluster job such as [examples/cluster-job.json](examples/cluster-job.json). Pool commands require a configured, running relay and an authorized credential. Route previews and conformance checks do not send inference requests.
+For `route explain`, use a native cluster job such as [examples/cluster-job.json](examples/cluster-job.json). Pool commands require a configured, running relay and an authorized credential. Route previews and conformance checks do not send inference requests; uninstall dry-run does not stop or remove anything.
 
 | Want to… | Command / guide |
 | --- | --- |
@@ -158,10 +173,25 @@ For `route explain`, use a native cluster job such as [examples/cluster-job.json
 | Inspect schedules | `contextbridge schedule list` · [Automation](docs/automation.md) |
 | Read a completed job's receipt | `contextbridge cluster receipt show JOB_ID` |
 | Plan bounded multi-step work | [Agents and approval boundaries](docs/bounded-agent.md) |
-| Reproduce the measurements | `contextbridge benchmark --json` |
-| Check an update / preview removal | `contextbridge update check` / `contextbridge uninstall --dry-run` |
+| Check for an update without installing it | `contextbridge update check` |
 
 </details>
+
+## Uninstall
+
+**Preview first. Nothing is stopped or removed:**
+
+```sh
+contextbridge uninstall --dry-run
+```
+
+Then remove the installer-owned program and integrations, keeping configuration and managed data:
+
+```sh
+contextbridge uninstall
+```
+
+Acts on **this machine only**, not the whole pool. Active work blocks removal unless explicitly overridden. To deliberately remove locally managed data as well, review [the separate `--purge` option and preserved paths](docs/operations.md#remove-contextbridge-safely). No purge or force flag is needed for an ordinary uninstall.
 
 ## Open by design. Precise about trust.
 

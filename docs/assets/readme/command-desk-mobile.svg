@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="500" viewBox="0 0 480 500" role="img" aria-labelledby="title description">
+<title id="title">ContextBridge command desk</title>
+<desc id="description">Seven real commands including a non-destructive uninstall preview. This is a static command reference, not captured output. Pool commands require a running relay and authorized credentials. Full copyable text is in the README.</desc>
+<style>.bg{fill:#f6f5f1;stroke:#deddd7}.fg{fill:#242421}
+.muted{fill:#676a61}.line{stroke:#deddd7}.dot{fill:#a5a89d}
+.safe{fill:#edeee7}.sans{font-family:Arial,Helvetica,sans-serif}
+.mono{font-family:Consolas,Menlo,monospace}
+@media(prefers-color-scheme:dark){.bg{fill:#242622;stroke:#44473f}
+.fg{fill:#f1f0e9}.muted{fill:#b5b7ac}.line{stroke:#44473f}
+.dot{fill:#858b79}.safe{fill:#30352b}}</style>
+<path class="bg" d="M25 1H455C477.8 1 479 2.2 479 25V475C479 497.8 477.8 499 455 499H25C2.2 499 1 497.8 1 475V25C1 2.2 2.2 1 25 1Z"/>
+<path class="line" d="M1 48H479"/>
+<g class="dot"><rect x="23" y="20" width="8" height="8" rx="3"/><rect x="38" y="20" width="8" height="8" rx="3"/><rect x="53" y="20" width="8" height="8" rx="3"/></g>
+<text class="fg sans" x="80" y="29" font-size="12" font-weight="600">contextbridge / command desk</text>
+<text class="muted mono" x="20" y="78" font-size="14">›</text>
+<text class="fg mono" x="38" y="78" font-size="14.5">contextbridge dashboard</text>
+<text class="muted sans" x="38" y="99" font-size="12">Open the local control panel</text>
+<text class="muted mono" x="20" y="138" font-size="14">›</text>
+<text class="fg mono" x="38" y="138" font-size="14.5">contextbridge models</text>
+<text class="muted sans" x="38" y="159" font-size="12">Find available local models</text>
+<text class="muted mono" x="20" y="198" font-size="14">›</text>
+<text class="fg mono" x="38" y="198" font-size="14.5">contextbridge cluster status</text>
+<text class="muted sans" x="38" y="219" font-size="12">See connected pool workers</text>
+<text class="muted mono" x="20" y="258" font-size="14">›</text>
+<text class="fg mono" x="38" y="258" font-size="14.5">contextbridge route explain --file ./job.json</text>
+<text class="muted sans" x="38" y="279" font-size="12">Preview placement; no inference</text>
+<text class="muted mono" x="20" y="318" font-size="14">›</text>
+<text class="fg mono" x="38" y="318" font-size="14.5">contextbridge cluster conformance worker --json</text>
+<text class="muted sans" x="38" y="339" font-size="12">Check bounded worker evidence</text>
+<text class="muted mono" x="20" y="378" font-size="14">›</text>
+<text class="fg mono" x="38" y="378" font-size="14.5">contextbridge benchmark --json</text>
+<text class="muted sans" x="38" y="399" font-size="12">Measure coordination overhead</text>
+<rect class="safe" x="12" y="418" width="456" height="51" rx="9"/>
+<text class="muted mono" x="20" y="438" font-size="14">›</text>
+<text class="fg mono" x="38" y="438" font-size="14.5">contextbridge uninstall --dry-run</text>
+<text class="muted sans" x="38" y="459" font-size="12">Preview removal; change nothing</text>
+<text class="muted sans" x="38" y="485" font-size="10">COMMAND REFERENCE · Copyable text below</text>
+</svg>
