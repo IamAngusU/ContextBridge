@@ -16,7 +16,7 @@
   <a href="docs/operations.md"><img src="docs/assets/readme/badge-platforms.svg" height="34" alt="Windows, Linux and macOS"></a>
 </p>
 
-<p align="center"><a href="#get-running">Install</a> · <a href="#connect-your-devices">Connect devices</a> · <a href="#send-work-from-your-app">Send a job</a> · <a href="#measured-overhead">Benchmarks</a> · <a href="#uninstall">Uninstall</a> · <a href="docs/README.md">Docs</a></p>
+<p align="center"><a href="#get-running">Install</a> · <a href="#connect-your-devices">Connect devices</a> · <a href="#just-prompt-the-pool">Prompt the pool</a> · <a href="#send-work-from-your-app">Send a job</a> · <a href="#measured-overhead">Benchmarks</a> · <a href="#uninstall">Uninstall</a> · <a href="docs/README.md">Docs</a></p>
 
 ContextBridge lets an app on your laptop, VPS or shared hosting send AI jobs to a pool of resources you control. It selects a compatible worker, applies configured policies, tracks the job and validates returned artifacts. **Keep your runtimes. Connect your resources.**
 
@@ -126,6 +126,48 @@ contextbridge cluster chat --provider ollama --model auto --artifacts off --prom
 The client submits work without joining as a worker. Login stores the token in its private config; remove the temporary token file when no longer needed. Use `--role observer` when issuing a read-only monitoring credential.
 
 For your own app, use the producer token with the [native job API or PHP client](docs/integrations.md). The local OpenAI-compatible API uses the **local service token**, not the relay producer token. [Pool and placement details](docs/pools-and-placement.md).
+
+</details>
+
+
+## Just prompt the pool
+
+Once a client has a producer credential, you do not need to build a job file just to use the pool:
+
+```sh
+contextbridge cluster chat --provider ollama --model auto --artifacts off --prompt "Summarize this in three bullets: ..."
+```
+
+Attach one local image when the selected worker/model supports vision:
+
+```sh
+contextbridge cluster chat --provider ollama --model auto --attach-image ./photo.jpg --artifacts off --prompt "Describe what is visible. Do not guess unreadable text."
+```
+
+`--attach-image` accepts one PNG, JPEG, WebP, or GIF up to 8 MiB decoded. The job carries a vision requirement, so a worker that cannot satisfy it is not eligible.
+
+You can also put hard requirements on the request. For example, if your relay policy classifies Ollama as local and your workers advertise a `private` group:
+
+```sh
+contextbridge cluster chat --provider ollama --group private --egress local_only --e2ee --artifacts off --prompt "Summarize this private note: ..."
+```
+
+`--group private` restricts placement to workers in that group. `--e2ee` encrypts prompt and result payloads between the producer and the reserved worker; the relay still sees coordination metadata. `--egress local_only` is an enforced boundary only when execution policy is enabled and the provider is correctly classified. Worker owners can separately restrict allowed tasks, providers, models, and concurrency. For supported remote providers, `--max-cost-usd` can request a hard cost ceiling; unverifiable pricing fails closed when that ceiling is required.
+
+<details>
+<summary><strong>What can I attach today?</strong></summary>
+
+| Input | Current native path |
+| --- | --- |
+| Text prompt | `cluster chat --prompt "..."` |
+| One image | `--attach-image FILE` for PNG/JPEG/WebP/GIF, max 8 MiB decoded |
+| Multiple images in one job | Not currently a native `cluster chat` input |
+| UTF-8 text file | Read the authorized file in your app and send its contents as `payload.text` |
+| PDF / DOCX / spreadsheet | Extract the text or selected pages first, or use a separate integration |
+| ZIP / arbitrary files | No generic native file-upload field today; CB does not unpack or execute a ZIP because its path was mentioned in a prompt |
+| Returned files | Capable adapters can return verified artifacts; up to 12 share the aggregate 12 MiB decoded budget |
+
+A path or URL inside prompt text does not give ContextBridge permission to read or fetch it. See the [pool input and control examples](examples/pool/README.md) for text/JSON jobs, application uploads, policy setup, and artifact handling.
 
 </details>
 
