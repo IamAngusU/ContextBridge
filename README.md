@@ -138,6 +138,18 @@ Once a client has a producer credential, you do not need to build a job file jus
 contextbridge cluster chat --provider ollama --model auto --artifacts off --prompt "Summarize this in three bullets: ..."
 ```
 
+The answer comes back to the same terminal. For the shortest round-trip check:
+
+```console
+$ contextbridge cluster chat --provider ollama --model auto --artifacts off --prompt "Reply exactly with CB-OK"
+  → angefragt: ollama · Modell auto
+ai  › CB-OK
+  ↳ verwendet: ollama · qwen2.5:latest
+  ✓ 1.8s · <worker-id>
+```
+
+The `ai ›` line is the model answer. ContextBridge then shows execution metadata so you can see what actually handled the job. The selected model, worker ID and timing depend on your pool.
+
 Attach one local image when the selected worker/model supports vision:
 
 ```sh
@@ -198,6 +210,70 @@ From a configured CLI client, preview admission and then submit:
 contextbridge cluster contract validate --file ./job.json --json
 contextbridge cluster submit --file ./job.json
 ```
+
+### Get the answer back
+
+Application code does not parse terminal output. The durable flow is:
+
+```text
+submit -> job ID -> worker runs -> completed -> result.output.text
+```
+
+For a completed text job, the relevant part of the JSON result looks like this:
+
+```json
+{
+  "status": "completed",
+  "result": {
+    "output": {
+      "mode": "text",
+      "text": "Delivery moved to Friday. Notify support."
+    }
+  }
+}
+```
+
+So in any language that can send and read JSON, the answer is simply `result.output.text`. The native relay API accepts the job at `POST /v1/cluster/jobs?compact=1`; fetch it later with `GET /v1/cluster/jobs/JOB_ID?compact=1`.
+
+The included PHP client makes the same flow small. For a CLI script, worker, or other process where waiting is acceptable:
+
+```php
+<?php
+
+require __DIR__ . '/ContextBridgeClient.php';
+
+$relay = getenv('CONTEXTBRIDGE_RELAY_URL') ?: '';
+$token = getenv('CONTEXTBRIDGE_PRODUCER_TOKEN') ?: '';
+$client = new \ContextBridge\ContextBridgeClient($relay, $token);
+
+$request = json_decode(
+    file_get_contents(__DIR__ . '/job.json'),
+    true,
+    64,
+    JSON_THROW_ON_ERROR,
+);
+
+// Use one stable, persisted idempotency key for one logical operation.
+$accepted = $client->submit($request, 'order-123-summary');
+$job = $client->wait($accepted['id']);
+
+echo $job['result']['output']['text'] ?? '';
+```
+
+For a normal web request, do not keep PHP open waiting for the model. Persist the returned job ID, then read it in a later authenticated request or cron/worker:
+
+```php
+$accepted = $client->submit($request, $operationId);
+$jobId = $accepted['id']; // persist this
+
+// Later:
+$job = $client->job($jobId);
+if (($job['status'] ?? '') === 'completed') {
+    $answer = $job['result']['output']['text'] ?? null;
+}
+```
+
+Handle `failed` and `cancelled` separately. Text output can also report `truncated: true` when it reaches the requested byte limit. See the [complete PHP example](examples/pool/README.md#3-submit-from-php-shared-hosting) for production-oriented error handling, polling and idempotency.
 
 **Your job, your constraints:** choose a provider/model, worker group, JSON keys or output size. Egress and cost limits require enabled operator policy and supported enforcement; a prompt cannot grant extra permissions. Text files can supply text, one supported image can be attached, and capable adapters can return files. There is no generic `files[]` upload field.
 
