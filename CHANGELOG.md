@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.7.1 - 2026-09-22
+
+- Standardized `cluster chat`, console, and worker terminal output on clear
+  English labels instead of leaking hard-coded German text on non-German
+  systems.
+- Added locale-independent regression coverage for request, model, reasoning,
+  route, status-panel, node, GPU, and model-state labels.
+
 ## v0.7.0 - 2026-09-21
 
 - Added a public Ed25519 verifier for issuer-backed interoperability

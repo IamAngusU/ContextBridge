@@ -16,6 +16,34 @@ import (
 	"github.com/IamAngusU/ContextBridge/internal/resourcepacks"
 )
 
+func TestSessionLabelsStayEnglishAcrossHostLocales(t *testing.T) {
+	t.Setenv("LC_ALL", "de_DE.UTF-8")
+	t.Setenv("LANG", "de_DE.UTF-8")
+
+	session := &Session{
+		observing:      true,
+		observedOnline: true,
+		observed:       ServiceSnapshot{Version: "v0.test", ActiveEndpoints: 2},
+	}
+	joined := strings.Join([]string{
+		session.commandHelpLocked(),
+		session.panelStatusLocked(),
+		requestedSelection(cluster.WorkerEvent{Provider: "adapter", Model: "model-one", Reasoning: "high"}),
+		adapterStateLabel("working"),
+		adapterStateLabel("rate_limited"),
+	}, "\n")
+	for _, want := range []string{"Show this help", "service v0.test", "queue 0", "model requested:", "reasoning requested:", "running", "cooling down"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("session status is missing English label %q:\n%s", want, joined)
+		}
+	}
+	for _, unwanted := range []string{"Modell", "Denkstufe", "Dienst", "Warteschlange", "läuft", "kühlt ab"} {
+		if strings.Contains(joined, unwanted) {
+			t.Errorf("session status leaked German label %q:\n%s", unwanted, joined)
+		}
+	}
+}
+
 func TestMillisecondsDurationSaturatesInsteadOfWrapping(t *testing.T) {
 	if got := millisecondsDuration(math.MaxUint64); got != time.Duration(math.MaxInt64) {
 		t.Fatalf("duration = %v, want saturation", got)
@@ -114,7 +142,7 @@ func TestMultiGPUSummaryUsesBestSingleDeviceInsteadOfSummingVRAM(t *testing.T) {
 		{Name: "GPU A", MemoryFree: 3 << 30},
 		{Name: "GPU B", MemoryFree: 5 << 30},
 	}})
-	if !strings.Contains(label, "beste GPU 5.0 GiB VRAM frei") || strings.Contains(label, "8.0 GiB") {
+	if !strings.Contains(label, "best GPU 5.0 GiB VRAM free") || strings.Contains(label, "8.0 GiB") {
 		t.Fatalf("multi-GPU summary implies cross-device VRAM pooling: %q", label)
 	}
 }
@@ -137,7 +165,7 @@ func TestAttachedConsoleOnlyLogsObservedChanges(t *testing.T) {
 		!strings.Contains(got, "Completed total 1 (+1 since last check)") || !strings.Contains(got, "[ACTIVITY]") {
 		t.Fatalf("attached console emitted duplicate or missing events: %q", got)
 	}
-	if !strings.Contains(got, "Warteschlange 0 · Adapter 0/1 belegt") {
+	if !strings.Contains(got, "queue 0 · adapters 0/1 busy") {
 		t.Fatalf("attached console live status is missing: %q", got)
 	}
 	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(got, "")
@@ -285,10 +313,10 @@ func TestWorkerConsoleSeparatesRequestedAndReportedModel(t *testing.T) {
 		t.Fatal(err)
 	}
 	output := string(raw)
-	if strings.Count(output, "Endpoint 42 · profile-two · Modell: remote-model-selected") != 1 {
+	if strings.Count(output, "Endpoint 42 · profile-two · model: remote-model-selected") != 1 {
 		t.Fatalf("endpoint model update should be deduplicated: %s", output)
 	}
-	if !strings.Contains(output, "Modell angefragt: remote-model-pro · Denkstufe angefragt: high") {
+	if !strings.Contains(output, "model requested: remote-model-pro · reasoning requested: high") {
 		t.Fatalf("requested selection missing: %s", output)
 	}
 	if !strings.Contains(output, "Endpoint reports: remote-model-selected") {
@@ -336,10 +364,10 @@ func TestWorkerConsoleDoesNotRepeatEndpointWhenReasoningTemporarilyDisappears(t 
 		t.Fatal(err)
 	}
 	output := string(raw)
-	if strings.Count(output, "Endpoint 4242") != 3 || strings.Count(output, "Endpoint 4242 aktualisiert") != 2 {
+	if strings.Count(output, "Endpoint 4242") != 3 || strings.Count(output, "Endpoint 4242 updated") != 2 {
 		t.Fatalf("temporary empty readings should not create endpoint events: %s", output)
 	}
-	if !strings.Contains(output, "Modell: Adapter Model A · Denkstufe: Sofort") {
+	if !strings.Contains(output, "model: Adapter Model A · reasoning: Sofort") {
 		t.Fatalf("real model and reasoning changes were not reported: %s", output)
 	}
 }
@@ -364,8 +392,8 @@ func TestAdapterEndpointsGroupProvidersAndPutWorkingBeforeIdle(t *testing.T) {
 		}
 		previous = index
 	}
-	if !strings.Contains(got, "Endpoint 4 · profile-one · Modell: Adapter Model A · läuft") ||
-		!strings.Contains(got, "Endpoint 3 · profile-one · Modell: Adapter Model A · idle") {
+	if !strings.Contains(got, "Endpoint 4 · profile-one · model: Adapter Model A · running") ||
+		!strings.Contains(got, "Endpoint 3 · profile-one · model: Adapter Model A · idle") {
 		t.Fatalf("endpoint activity is not distinguished: %s", got)
 	}
 	session.recordAdapterSelectionsLocked(endpoints)
@@ -379,7 +407,7 @@ func TestAdapterEndpointsGroupProvidersAndPutWorkingBeforeIdle(t *testing.T) {
 	}
 	endpoints[1].State = "working"
 	session.recordAdapterSelectionsLocked(endpoints)
-	if strings.Count(output.String(), "Endpoint 3 aktualisiert") != 1 || !strings.Contains(output.String(), "Endpoint 3 aktualisiert · profile-one · Modell: Adapter Model A · läuft") {
+	if strings.Count(output.String(), "Endpoint 3 updated") != 1 || !strings.Contains(output.String(), "Endpoint 3 updated · profile-one · model: Adapter Model A · running") {
 		t.Fatalf("real state transition was not logged once: %s", output.String())
 	}
 }
@@ -395,7 +423,7 @@ func TestLocalProviderRemainsVisibleWithoutLoadedModel(t *testing.T) {
 	}
 	session.Banner("v0.test", "worker")
 	session.recordLocalModelsLocked(models, []string{"ollama"})
-	if !strings.Contains(output.String(), "erreichbar · kein Modell geladen") {
+	if !strings.Contains(output.String(), "available · no model loaded") {
 		t.Fatalf("online provider without loaded models should be visible: %s", output.String())
 	}
 	models[2].Loaded = true
@@ -403,8 +431,8 @@ func TestLocalProviderRemainsVisibleWithoutLoadedModel(t *testing.T) {
 	got := output.String()
 	frames := strings.Split(got, "\x1b[H\x1b[2J")
 	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(frames[len(frames)-1], "")
-	if !strings.Contains(plain, "+-- [Lokal · ollama]") || !strings.Contains(plain, "loaded-model · geladen") ||
-		strings.Index(plain, "loaded-model · geladen") > strings.Index(plain, "ready-model · bereit · nicht geladen") {
+	if !strings.Contains(plain, "+-- [Local · ollama]") || !strings.Contains(plain, "loaded-model · loaded") ||
+		strings.Index(plain, "loaded-model · loaded") > strings.Index(plain, "ready-model · ready · not loaded") {
 		t.Fatalf("loaded local model not shown: %s", got)
 	}
 	previous := len(session.history)
@@ -414,7 +442,7 @@ func TestLocalProviderRemainsVisibleWithoutLoadedModel(t *testing.T) {
 	}
 	models[2].Loaded = false
 	session.recordLocalModelsLocked(models, []string{"ollama"})
-	if !strings.Contains(output.String(), "ollama erreichbar · kein Modell geladen") {
+	if !strings.Contains(output.String(), "ollama available · no model loaded") {
 		t.Fatalf("unload transition should be reported once: %s", output.String())
 	}
 }
@@ -440,7 +468,7 @@ func TestPanelLiveGroupsResizeAndHistoryStaySeparate(t *testing.T) {
 		t.Fatalf("session history is missing: %s", latest)
 	}
 	live := latest[:historyIndex]
-	for _, label := range []string{"+-- [profile-one]", "Endpoint 13", "Endpoint 12", "+-- [profile-two]", "Endpoint 11", "+-- [Lokal · ollama]", "erreichbar · kein Modell geladen"} {
+	for _, label := range []string{"+-- [profile-one]", "Endpoint 13", "Endpoint 12", "+-- [profile-two]", "Endpoint 11", "+-- [Local · ollama]", "available · no model loaded"} {
 		if !strings.Contains(live, label) {
 			t.Fatalf("live area missing %q: %s", label, latest)
 		}
@@ -468,7 +496,7 @@ func TestPanelClearsStaleSelectionsWhenServiceIsUnavailable(t *testing.T) {
 	session.ObserveServiceUnavailable("service offline")
 	frames := strings.Split(output.String(), "\x1b[H\x1b[2J")
 	live := strings.Split(frames[len(frames)-1], "+-- HISTORY")[0]
-	if strings.Contains(live, "Endpoint 77") || strings.Contains(live, "[Lokal · ollama]") || !strings.Contains(live, "Dienst offline") {
+	if strings.Contains(live, "Endpoint 77") || strings.Contains(live, "[Local · ollama]") || !strings.Contains(live, "service offline") {
 		t.Fatalf("offline live panel retained stale selections: %s", live)
 	}
 }
@@ -489,7 +517,7 @@ func TestPanelShowsDetectedPortableResourceWithoutClaimingItIsRunning(t *testing
 	})
 	frames := strings.Split(output.String(), "\x1b[H\x1b[2J")
 	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(frames[len(frames)-1], "")
-	if !strings.Contains(plain, "[API · deepseek]") || !strings.Contains(plain, "v4.1 · per API verfügbar") || !strings.Contains(plain, "HOT-PLUG RESOURCES") || !strings.Contains(plain, "ModelKit · example.modelkit · model-runtime · 1 Endpunkt(e)") || strings.Contains(plain, "ModelKit · online") {
+	if !strings.Contains(plain, "[API · deepseek]") || !strings.Contains(plain, "v4.1 · available via API") || !strings.Contains(plain, "HOT-PLUG RESOURCES") || !strings.Contains(plain, "ModelKit · example.modelkit · model-runtime · 1 endpoint(s)") || strings.Contains(plain, "ModelKit · online") {
 		t.Fatalf("portable resource panel is missing or overclaims runtime state: %s", plain)
 	}
 }
@@ -506,7 +534,7 @@ func TestPanelShowsRelayPoolColorsAndMovingJobCue(t *testing.T) {
 	latest := strings.Split(output.String(), "\x1b[H\x1b[2J")
 	frame := latest[len(latest)-1]
 	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(frame, "")
-	if !strings.Contains(plain, "Relay relay.example.test:8443 · 1/2 Worker online") || !strings.Contains(plain, "this-pc#abcdef · idle · 0/4 Jobs · dieser PC") || strings.Contains(plain, "secret-path") {
+	if !strings.Contains(plain, "Relay relay.example.test:8443 · 1/2 workers online") || !strings.Contains(plain, "this-pc#abcdef · idle · 0/4 jobs · this PC") || strings.Contains(plain, "secret-path") {
 		t.Fatalf("relay/node view is missing or leaked URL path: %s", plain)
 	}
 	if !strings.Contains(frame, ansiGreen+"Idle"+ansiReset) || !strings.Contains(frame, ansiRed+"94%"+ansiReset) || !strings.Contains(frame, ansiRed+"offline"+ansiReset) {
@@ -571,19 +599,19 @@ func TestPanelCommandsPreserveInputAndToggleNodeDetails(t *testing.T) {
 	frames := strings.Split(output.String(), "\x1b[H\x1b[2J")
 	latest := frames[len(frames)-1]
 	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(latest, "")
-	if !strings.Contains(plain, "System-GPU 1 · RTX A · 91%") || !strings.Contains(plain, "Worker-Modell · vision-model · geladen · ollama · vision") {
+	if !strings.Contains(plain, "System GPU 1 · RTX A · 91%") || !strings.Contains(plain, "Worker model · vision-model · loaded · ollama · vision") {
 		t.Fatalf("per-node GPU/model toggles did not reveal safe details: %s", plain)
 	}
 	if !strings.Contains(latest, ansiRed+"91%"+ansiReset) || !strings.Contains(plain, "+-- COMMAND") {
 		t.Fatalf("detail color or command box missing: %s", latest)
 	}
-	if !strings.Contains(plain, "exit = nur diese Ansicht schließen") || !strings.Contains(plain, backgroundServiceStopCommand()) {
+	if !strings.Contains(plain, "exit = close only this view") || !strings.Contains(plain, backgroundServiceStopCommand()) {
 		t.Fatalf("command footer does not distinguish view exit from the exact managed-service stop command: %s", plain)
 	}
 	session.nextSection = "TEST"
 	session.writeEventLocked("◇", "clear-me")
 	session.HandleCommand("clear")
-	if len(session.history) != 0 || session.historyTotal != 0 || !strings.Contains(output.String(), "Dienst und Jobs laufen weiter") {
+	if len(session.history) != 0 || session.historyTotal != 0 || !strings.Contains(output.String(), "service and jobs continue running") {
 		t.Fatalf("clear did not limit itself to console history: %#v", session.history)
 	}
 	if !session.HandleCommand("exit") {
@@ -625,7 +653,7 @@ func TestCompactPanelPreservesLatestCommandFeedback(t *testing.T) {
 	session.HandleCommand("definitely-unknown")
 	frames := strings.Split(output.String(), "\x1b[H\x1b[2J")
 	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(frames[len(frames)-1], "")
-	if !strings.Contains(plain, "Unbekannter Befehl: definitely-unknown") {
+	if !strings.Contains(plain, "Unknown command: definitely-unknown") {
 		t.Fatalf("compact panel hid command feedback: %s", plain)
 	}
 }
@@ -640,12 +668,12 @@ func TestHelpCommandRendersReadableRowsInsteadOfOneClippedLine(t *testing.T) {
 	frames := strings.Split(output.String(), "\x1b[H\x1b[2J")
 	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(frames[len(frames)-1], "")
 	for _, want := range []string{
-		"help | ?         Diese Hilfe anzeigen",
-		"clear | cls      Nur den sichtbaren Sitzungsverlauf leeren",
-		"details all|N    GPU- und Modelldetails einer Node umschalten",
-		"gpus all|N       GPU-Details einer Node umschalten",
-		"models all|N     Modelldetails einer Node umschalten",
-		"exit | quit | q   Nur diese Ansicht schließen; Dienst läuft weiter",
+		"help | ?         Show this help",
+		"clear | cls      Clear only the visible session history",
+		"details all|N    Toggle GPU and model details for a node",
+		"gpus all|N       Toggle GPU details for a node",
+		"models all|N     Toggle model details for a node",
+		"exit | quit | q   Close only this view; service continues running",
 	} {
 		if !strings.Contains(plain, want) {
 			t.Errorf("multi-line help is missing %q:\n%s", want, plain)
@@ -669,8 +697,8 @@ func TestForegroundServiceCommandsCannotAccidentallyCloseTheirOwner(t *testing.T
 		t.Fatal("exit in a foreground service requested process shutdown")
 	}
 	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(output.String(), "")
-	if !strings.Contains(plain, "Vordergrunddienst bleibt aktiv") || !strings.Contains(plain, "Ctrl+C stoppt ihn") || !strings.Contains(plain, "contextbridge console") ||
-		!strings.Contains(plain, "Ctrl+C = diesen Vordergrunddienst stoppen") {
+	if !strings.Contains(plain, "Foreground service remains active") || !strings.Contains(plain, "Ctrl+C stops it") || !strings.Contains(plain, "contextbridge console") ||
+		!strings.Contains(plain, "Ctrl+C = stop this foreground service") {
 		t.Fatalf("foreground exit did not explain the safe lifecycle: %s", plain)
 	}
 	if strings.Contains(plain, backgroundServiceStopCommand()) {
@@ -697,7 +725,7 @@ func TestMultiGPUCompactStatusUsesEveryDevice(t *testing.T) {
 		t.Fatalf("compact multi-GPU state ignored an active device: %q", plainState)
 	}
 	label := capabilityLabel(capabilities)
-	if !strings.Contains(label, "2 GPUs") || !strings.Contains(label, "max 91%") || !strings.Contains(label, "beste GPU 6.0 GiB VRAM frei") || strings.Contains(label, "10.0 GiB") {
+	if !strings.Contains(label, "2 GPUs") || !strings.Contains(label, "max 91%") || !strings.Contains(label, "best GPU 6.0 GiB VRAM free") || strings.Contains(label, "10.0 GiB") {
 		t.Fatalf("multi-GPU capability summary is incomplete: %q", label)
 	}
 }
@@ -708,13 +736,13 @@ func TestNodeDetailCommandsRejectNodesOutsideVisiblePanel(t *testing.T) {
 		nodes[index] = PoolNode{ID: fmt.Sprintf("node-%02d", index+1), Name: fmt.Sprintf("node-%02d", index+1), Connected: true, Slots: 1}
 	}
 	session := &Session{poolNodes: nodes, nodeDetails: map[string]nodeDetailVisibility{}}
-	if got := session.toggleNodeDetailsLocked("gpus", "9"); !strings.Contains(got, "nur im Dashboard") {
+	if got := session.toggleNodeDetailsLocked("gpus", "9"); !strings.Contains(got, "only in the dashboard") {
 		t.Fatalf("hidden node index did not explain its visibility limit: %q", got)
 	}
 	if len(session.nodeDetails) != 0 {
 		t.Fatalf("hidden node command changed invisible state: %#v", session.nodeDetails)
 	}
-	if got := session.toggleNodeDetailsLocked("models", "all"); !strings.Contains(got, "1 weitere Node(s)") {
+	if got := session.toggleNodeDetailsLocked("models", "all"); !strings.Contains(got, "1 additional node(s)") {
 		t.Fatalf("all command did not disclose hidden nodes: %q", got)
 	}
 	if len(session.nodeDetails) != maximumVisiblePoolNodes {
@@ -751,26 +779,26 @@ func TestPanelPerNodeDetailsDistinguishZeroGPUMultiGPUAndModelLoadState(t *testi
 	latest := frames[len(frames)-1]
 	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(latest, "")
 	for _, want := range []string{
-		"System-GPU 1 · GPU A · 2% · 3.0 GiB/8.0 GiB frei",
-		"System-GPU 2 · GPU B · 92% · 5.0 GiB/12.0 GiB frei",
-		"Worker-Modell · loaded-model · geladen · ollama · generation",
-		"Worker-Modell · cold-model · bereit · nicht geladen · ollama · vision",
+		"System GPU 1 · GPU A · 2% · 3.0 GiB/8.0 GiB free",
+		"System GPU 2 · GPU B · 92% · 5.0 GiB/12.0 GiB free",
+		"Worker model · loaded-model · loaded · ollama · generation",
+		"Worker model · cold-model · ready · not loaded · ollama · vision",
 	} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("rack details are missing %q: %s", want, plain)
 		}
 	}
-	if strings.Contains(plain, "System-GPU · Zero-GPU") {
+	if strings.Contains(plain, "System GPU · Zero-GPU") {
 		t.Fatalf("details from the untoggled zero-GPU node leaked into the rack view: %s", plain)
 	}
-	if !strings.Contains(latest, ansiGreen+"geladen"+ansiReset) || !strings.Contains(latest, ansiDim+"bereit · nicht geladen"+ansiReset) || !strings.Contains(latest, ansiRed+"92%"+ansiReset) {
+	if !strings.Contains(latest, ansiGreen+"loaded"+ansiReset) || !strings.Contains(latest, ansiDim+"ready · not loaded"+ansiReset) || !strings.Contains(latest, ansiRed+"92%"+ansiReset) {
 		t.Fatalf("GPU/model state colors are not authoritative: %q", latest)
 	}
 
 	session.HandleCommand("gpus 1")
 	frames = strings.Split(output.String(), "\x1b[H\x1b[2J")
 	plain = regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(frames[len(frames)-1], "")
-	if !strings.Contains(plain, "System-GPU · Zero-GPU") {
+	if !strings.Contains(plain, "System GPU · Zero-GPU") {
 		t.Fatalf("zero-GPU node did not expose its per-device state: %s", plain)
 	}
 }
@@ -787,10 +815,10 @@ func TestLocalModelRowsColorLoadedAndUnloadedModels(t *testing.T) {
 	frames := strings.Split(output.String(), "\x1b[H\x1b[2J")
 	latest := frames[len(frames)-1]
 	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(latest, "")
-	if !strings.Contains(plain, "warm · geladen") || !strings.Contains(plain, "cold · bereit · nicht geladen") || strings.Index(plain, "warm · geladen") > strings.Index(plain, "cold · bereit") {
+	if !strings.Contains(plain, "warm · loaded") || !strings.Contains(plain, "cold · ready · not loaded") || strings.Index(plain, "warm · loaded") > strings.Index(plain, "cold · ready") {
 		t.Fatalf("local model rows are missing or not loaded-first: %s", plain)
 	}
-	if !strings.Contains(latest, ansiGreen+"geladen"+ansiReset) || !strings.Contains(latest, ansiDim+"bereit · nicht geladen"+ansiReset) {
+	if !strings.Contains(latest, ansiGreen+"loaded"+ansiReset) || !strings.Contains(latest, ansiDim+"ready · not loaded"+ansiReset) {
 		t.Fatalf("loaded and unloaded local models are not color-distinguished: %q", latest)
 	}
 }

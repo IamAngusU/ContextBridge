@@ -5,6 +5,28 @@ import (
 	"testing"
 )
 
+func TestChatStatusLabelsStayEnglishAcrossHostLocales(t *testing.T) {
+	t.Setenv("LC_ALL", "de_DE.UTF-8")
+	t.Setenv("LANG", "de_DE.UTF-8")
+
+	lines := []string{
+		chatRequestSummary("adapter", "profile-one", "model-one", "high"),
+		chatEndpointReport("model-two", "medium"),
+		chatUsedReport("ollama", "model-three"),
+	}
+	joined := strings.Join(lines, "\n")
+	for _, want := range []string{"requested:", "model ", "reasoning ", "Endpoint reports:", "used:"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("chat status is missing English label %q:\n%s", want, joined)
+		}
+	}
+	for _, unwanted := range []string{"angefragt", "Modell", "Denkstufe", "verwendet"} {
+		if strings.Contains(joined, unwanted) {
+			t.Errorf("chat status leaked German label %q:\n%s", unwanted, joined)
+		}
+	}
+}
+
 func TestChatE2EEToggle(t *testing.T) {
 	state := &chatState{}
 	if handled, _ := state.command("/e2ee on"); !handled || !state.e2ee {

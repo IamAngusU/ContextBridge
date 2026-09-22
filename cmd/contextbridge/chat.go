@@ -322,18 +322,45 @@ func (s *chatState) jobMetadata() map[string]interface{} {
 	return metadata
 }
 
+func chatRequestSummary(provider, profile, model, reasoning string) string {
+	var summary strings.Builder
+	summary.WriteString("  → requested: ")
+	summary.WriteString(provider)
+	if profile != "" {
+		summary.WriteString(" / ")
+		summary.WriteString(profile)
+	}
+	if model != "" {
+		summary.WriteString(" · model ")
+		summary.WriteString(model)
+	}
+	if reasoning != "" {
+		summary.WriteString(" · reasoning ")
+		summary.WriteString(reasoning)
+	}
+	return summary.String()
+}
+
+func chatEndpointReport(model, reasoning string) string {
+	var report strings.Builder
+	report.WriteString("  ↳ Endpoint reports:")
+	if model != "" {
+		report.WriteString(" model ")
+		report.WriteString(model)
+	}
+	if reasoning != "" {
+		report.WriteString(" · reasoning: ")
+		report.WriteString(reasoning)
+	}
+	return report.String()
+}
+
+func chatUsedReport(provider, model string) string {
+	return "  ↳ used: " + provider + " · " + model
+}
+
 func (s *chatState) turn(ctx context.Context, prompt string) error {
-	fmt.Printf("  → angefragt: %s", s.provider)
-	if s.profile != "" {
-		fmt.Printf(" / %s", s.profile)
-	}
-	if s.model != "" {
-		fmt.Printf(" · Modell %s", s.model)
-	}
-	if s.reasoning != "" {
-		fmt.Printf(" · Denkstufe %s", s.reasoning)
-	}
-	fmt.Println()
+	fmt.Println(chatRequestSummary(s.provider, s.profile, s.model, s.reasoning))
 	minimum := s.minArtifacts
 	if s.requireImage || s.minImages > 0 {
 		minimum = max(minimum, max(1, s.minImages))
@@ -514,16 +541,9 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 				fmt.Fprintln(os.Stderr, "! response reached output.max_bytes and is incomplete")
 			}
 			if submission.Output.SelectedModel != "" || submission.Output.SelectedReasoning != "" {
-				fmt.Print("  ↳ Endpoint reports:")
-				if submission.Output.SelectedModel != "" {
-					fmt.Printf(" Modell %s", submission.Output.SelectedModel)
-				}
-				if submission.Output.SelectedReasoning != "" {
-					fmt.Printf(" · Denkstufe: %s", submission.Output.SelectedReasoning)
-				}
-				fmt.Println()
+				fmt.Println(chatEndpointReport(submission.Output.SelectedModel, submission.Output.SelectedReasoning))
 			} else if !strings.EqualFold(s.provider, "adapter") && submission.Output.Model != "" {
-				fmt.Printf("  ↳ verwendet: %s · %s\n", submission.Output.Provider, submission.Output.Model)
+				fmt.Println(chatUsedReport(submission.Output.Provider, submission.Output.Model))
 			}
 			paths, references, err := saveOutputArtifacts(submission.Output, s.artifactDir)
 			if err != nil {

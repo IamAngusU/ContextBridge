@@ -257,7 +257,7 @@ func (s *Session) HandleCommand(command string) bool {
 		if s.commandClosesView {
 			return true
 		}
-		s.commandNotice = "Vordergrunddienst bleibt aktiv · Ctrl+C stoppt ihn; `contextbridge console` ist abkoppelbar."
+		s.commandNotice = "Foreground service remains active · Ctrl+C stops it; `contextbridge console` is detachable."
 	case "help", "?":
 		s.commandNotice = s.commandHelpLocked()
 	case "clear", "cls":
@@ -266,15 +266,15 @@ func (s *Session) HandleCommand(command string) bool {
 		if s.interactive && !s.panelStarted {
 			fmt.Fprint(s.out, "\x1b[2J\x1b[H")
 		}
-		s.commandNotice = "Sitzungsverlauf geleert; Dienst und Jobs laufen weiter."
+		s.commandNotice = "Session history cleared; service and jobs continue running."
 	case "details", "gpus", "models":
 		if len(fields) != 2 {
-			s.commandNotice = fields[0] + " erwartet all oder die angezeigte Node-Nummer, z. B. " + fields[0] + " 1"
+			s.commandNotice = fields[0] + " expects all or a displayed node number, for example " + fields[0] + " 1"
 			break
 		}
 		s.commandNotice = s.toggleNodeDetailsLocked(strings.ToLower(fields[0]), fields[1])
 	default:
-		s.commandNotice = "Unbekannter Befehl: " + cleanTerminalLabel(fields[0], 40) + " · help zeigt alle Befehle"
+		s.commandNotice = "Unknown command: " + cleanTerminalLabel(fields[0], 40) + " · help lists all commands"
 	}
 	s.renderCommandResultLocked()
 	return false
@@ -282,16 +282,16 @@ func (s *Session) HandleCommand(command string) bool {
 
 func (s *Session) commandHelpLocked() string {
 	lines := []string{
-		"help | ?         Diese Hilfe anzeigen",
-		"clear | cls      Nur den sichtbaren Sitzungsverlauf leeren",
-		"details all|N    GPU- und Modelldetails einer Node umschalten",
-		"gpus all|N       GPU-Details einer Node umschalten",
-		"models all|N     Modelldetails einer Node umschalten",
+		"help | ?         Show this help",
+		"clear | cls      Clear only the visible session history",
+		"details all|N    Toggle GPU and model details for a node",
+		"gpus all|N       Toggle GPU details for a node",
+		"models all|N     Toggle model details for a node",
 	}
 	if s.commandClosesView {
-		lines = append(lines, "exit | quit | q   Nur diese Ansicht schließen; Dienst läuft weiter")
+		lines = append(lines, "exit | quit | q   Close only this view; service continues running")
 	} else {
-		lines = append(lines, "Ctrl+C            Diesen Vordergrunddienst stoppen")
+		lines = append(lines, "Ctrl+C            Stop this foreground service")
 	}
 	return strings.Join(lines, "\n")
 }
@@ -301,7 +301,7 @@ func (s *Session) commandHintLocked() string {
 	if s.commandClosesView {
 		return commands + " · exit"
 	}
-	return commands + " · Ctrl+C stoppt den Vordergrunddienst"
+	return commands + " · Ctrl+C stops the foreground service"
 }
 
 func (s *Session) commandNoticeLinesLocked() []string {
@@ -324,9 +324,9 @@ func (s *Session) commandNoticeLinesLocked() []string {
 
 func (s *Session) commandLifecycleHintLocked() string {
 	if s.commandClosesView {
-		return "exit = nur diese Ansicht schließen; Dienst und Jobs laufen weiter"
+		return "exit = close only this view; service and jobs continue running"
 	}
-	return "exit = Dienst bleibt aktiv; Ctrl+C = diesen Vordergrunddienst stoppen"
+	return "exit = service remains active; Ctrl+C = stop this foreground service"
 }
 
 func backgroundServiceStopCommand() string {
@@ -338,7 +338,7 @@ func backgroundServiceStopCommandForOS(_ string) string {
 }
 
 func (s *Session) commandServiceStopHintLocked() string {
-	return "Hintergrunddienst stoppen (in CMD/Shell)"
+	return "Stop the background service (in CMD/shell)"
 }
 
 func (s *Session) renderCommandResultLocked() {
@@ -358,7 +358,7 @@ func (s *Session) renderCommandResultLocked() {
 func (s *Session) toggleNodeDetailsLocked(kind, target string) string {
 	nodes := s.orderedPoolNodesLocked()
 	if len(nodes) == 0 {
-		return "Keine Pool-Nodes verfügbar."
+		return "No pool nodes available."
 	}
 	visibleCount := min(len(nodes), maximumVisiblePoolNodes)
 	visibleNodes := nodes[:visibleCount]
@@ -368,7 +368,7 @@ func (s *Session) toggleNodeDetailsLocked(kind, target string) string {
 		selected = visibleNodes
 	} else if index, err := strconv.Atoi(target); err == nil && index >= 1 && index <= len(nodes) {
 		if index > visibleCount {
-			return fmt.Sprintf("Node %d wird nur im Dashboard angezeigt; im Terminal sind maximal %d Nodes sichtbar.", index, maximumVisiblePoolNodes)
+			return fmt.Sprintf("Node %d is shown only in the dashboard; the terminal displays at most %d nodes.", index, maximumVisiblePoolNodes)
 		}
 		selected = append(selected, visibleNodes[index-1])
 	} else {
@@ -379,10 +379,10 @@ func (s *Session) toggleNodeDetailsLocked(kind, target string) string {
 			}
 		}
 		if len(selected) == 0 {
-			return "Node nicht gefunden: " + cleanTerminalLabel(target, 40)
+			return "Node not found: " + cleanTerminalLabel(target, 40)
 		}
 		if len(selected) > 1 {
-			return "Node-Name ist mehrdeutig; bitte die angezeigte Nummer verwenden."
+			return "Node name is ambiguous; use the displayed number."
 		}
 	}
 	if s.nodeDetails == nil {
@@ -416,17 +416,17 @@ func (s *Session) toggleNodeDetailsLocked(kind, target string) string {
 	}
 	label := "Details"
 	if kind == "gpus" {
-		label = "GPU-Details"
+		label = "GPU details"
 	} else if kind == "models" {
-		label = "Modell-Details"
+		label = "Model details"
 	}
-	state := "ausgeblendet"
+	state := "hidden"
 	if show {
-		state = "eingeblendet"
+		state = "shown"
 	}
-	notice := fmt.Sprintf("%s für %d Node(s) %s.", label, len(selected), state)
+	notice := fmt.Sprintf("%s for %d node(s) %s.", label, len(selected), state)
 	if strings.EqualFold(target, "all") && hiddenCount > 0 {
-		notice += fmt.Sprintf(" %d weitere Node(s) werden nur im Dashboard angezeigt.", hiddenCount)
+		notice += fmt.Sprintf(" %d additional node(s) are shown only in the dashboard.", hiddenCount)
 	}
 	return notice
 }
@@ -527,7 +527,7 @@ func (s *Session) HandleWorker(event cluster.WorkerEvent) {
 	switch event.Kind {
 	case cluster.WorkerConnecting:
 		if s.panelStarted {
-			s.connectionLine = "Verbinde mit Relay…"
+			s.connectionLine = "Connecting to relay…"
 		}
 		if s.status == "" {
 			s.setStatusLocked("Connecting to relay", time.Now())
@@ -535,7 +535,7 @@ func (s *Session) HandleWorker(event cluster.WorkerEvent) {
 	case cluster.WorkerRetrying:
 		s.retries = event.Attempt
 		if s.panelStarted {
-			s.connectionLine = "Relay nicht erreichbar · automatischer Wiederholungsversuch"
+			s.connectionLine = "Relay unavailable · retrying automatically"
 			s.adapterSelections = map[int]adapterSelection{}
 			s.localProviders = nil
 			s.localModels = map[string]localModelSelection{}
@@ -543,7 +543,7 @@ func (s *Session) HandleWorker(event cluster.WorkerEvent) {
 			s.hardware = ""
 			if event.Attempt == 1 || event.Attempt%10 == 0 {
 				s.nextSection = "CONNECTION"
-				s.writeEventLocked("↻", fmt.Sprintf("Relay nicht erreichbar · Versuch %d · %s", event.Attempt, compactError(event.Error)))
+				s.writeEventLocked("↻", fmt.Sprintf("Relay unavailable · attempt %d · %s", event.Attempt, compactError(event.Error)))
 			}
 		}
 		s.setStatusLocked(fmt.Sprintf("Waiting for network · retry %d in %s", event.Attempt, compactDuration(event.RetryIn)), time.Now())
@@ -611,10 +611,10 @@ func (s *Session) HandleWorker(event cluster.WorkerEvent) {
 				detail = "model metadata unavailable · adapter selection unverified"
 			}
 			if event.ReportedReasoning != "" {
-				message += " · Denkstufe: " + cleanTerminalLabel(event.ReportedReasoning, 40)
+				message += " · reasoning: " + cleanTerminalLabel(event.ReportedReasoning, 40)
 			}
 		} else if event.ReportedModel != "" {
-			message += " · verwendet: " + cleanTerminalLabel(event.ReportedProvider, 30) + " · " + cleanTerminalLabel(event.ReportedModel, 80)
+			message += " · used: " + cleanTerminalLabel(event.ReportedProvider, 30) + " · " + cleanTerminalLabel(event.ReportedModel, 80)
 		}
 		s.nextSection = "JOBS"
 		if s.panelEnabledLocked() {
@@ -696,7 +696,7 @@ func (s *Session) ObserveServiceUnavailable(reason string) {
 	}
 	s.observing, s.observedOnline = true, false
 	if s.panelStarted {
-		s.connectionLine = "Dienst nicht erreichbar · automatischer Wiederholungsversuch"
+		s.connectionLine = "Service unavailable · retrying automatically"
 		s.adapterSelections = map[int]adapterSelection{}
 		s.localProviders = nil
 		s.localModels = map[string]localModelSelection{}
@@ -713,10 +713,10 @@ func requestedSelection(event cluster.WorkerEvent) string {
 		parts = append(parts, cleanTerminalLabel(event.Profile, 30))
 	}
 	if event.Model != "" {
-		parts = append(parts, "Modell angefragt: "+cleanTerminalLabel(event.Model, 80))
+		parts = append(parts, "model requested: "+cleanTerminalLabel(event.Model, 80))
 	}
 	if event.Reasoning != "" {
-		parts = append(parts, "Denkstufe angefragt: "+cleanTerminalLabel(event.Reasoning, 40))
+		parts = append(parts, "reasoning requested: "+cleanTerminalLabel(event.Reasoning, 40))
 	}
 	return strings.Join(parts, " · ")
 }
@@ -771,16 +771,16 @@ func (s *Session) recordAdapterSelectionsLocked(sessions []cluster.AdapterSessio
 			selection := current[id]
 			label := fmt.Sprintf("Endpoint %d", id)
 			if _, previouslySeen := s.adapterSelections[id]; previouslySeen {
-				label += " aktualisiert"
+				label += " updated"
 			}
 			parts := []string{selection.profile}
 			if selection.model != "" {
-				parts = append(parts, "Modell: "+selection.model)
+				parts = append(parts, "model: "+selection.model)
 			} else {
-				parts = append(parts, "Modell noch nicht erkannt")
+				parts = append(parts, "model not detected yet")
 			}
 			if selection.reasoning != "" {
-				parts = append(parts, "Denkstufe: "+selection.reasoning)
+				parts = append(parts, "reasoning: "+selection.reasoning)
 			}
 			parts = append(parts, adapterStateLabel(selection.state))
 			s.nextSection = "ADAPTER ENDPOINTS"
@@ -790,7 +790,7 @@ func (s *Session) recordAdapterSelectionsLocked(sessions []cluster.AdapterSessio
 	for id := range s.adapterSelections {
 		if _, ok := current[id]; !ok {
 			s.nextSection = "ADAPTER ENDPOINTS"
-			s.writeEventLocked("◇", fmt.Sprintf("Endpoint %d getrennt", id))
+			s.writeEventLocked("◇", fmt.Sprintf("Endpoint %d disconnected", id))
 		}
 	}
 	s.adapterSelections = current
@@ -822,13 +822,13 @@ func adapterStateRank(state string) int {
 func adapterStateLabel(state string) string {
 	switch strings.ToLower(state) {
 	case "working":
-		return "läuft"
+		return "running"
 	case "waiting":
 		return "idle"
 	case "rate_limited":
-		return "kühlt ab"
+		return "cooling down"
 	default:
-		return "Status unbekannt"
+		return "status unknown"
 	}
 }
 
@@ -871,9 +871,9 @@ func (s *Session) recordLocalModelsLocked(models []cluster.ModelCapability, prov
 		if wasLoaded || previousProviders != strings.Join(providerNames, "\x00") {
 			s.nextSection = "LOCAL MODELS"
 			if len(providerNames) == 0 {
-				s.writeEventLocked("◇", "Kein lokaler Provider erreichbar")
+				s.writeEventLocked("◇", "No local provider available")
 			} else {
-				s.writeEventLocked("◇", strings.Join(providerNames, ", ")+" erreichbar · kein Modell geladen")
+				s.writeEventLocked("◇", strings.Join(providerNames, ", ")+" available · no model loaded")
 			}
 		}
 		s.localModels = current
@@ -901,9 +901,9 @@ func (s *Session) recordLocalModelsLocked(models []cluster.ModelCapability, prov
 		if s.localModels[key] == selection {
 			continue
 		}
-		state := "bereit · nicht geladen"
+		state := "ready · not loaded"
 		if selection.loaded {
-			state = "geladen"
+			state = "loaded"
 		}
 		s.nextSection = "LOCAL MODELS"
 		s.writeEventLocked("◇", fmt.Sprintf("%s · %s · %s", selection.provider, selection.name, state))
@@ -911,7 +911,7 @@ func (s *Session) recordLocalModelsLocked(models []cluster.ModelCapability, prov
 	for key, previous := range s.localModels {
 		if _, ok := current[key]; !ok {
 			s.nextSection = "LOCAL MODELS"
-			s.writeEventLocked("◇", fmt.Sprintf("%s · %s nicht mehr verfügbar", previous.provider, previous.name))
+			s.writeEventLocked("◇", fmt.Sprintf("%s · %s no longer available", previous.provider, previous.name))
 		}
 	}
 	s.localModels = current
@@ -1144,20 +1144,20 @@ func panelSection(label string, width int) string {
 func nodeGPURows(node PoolNode, line func(string) string) []string {
 	suffix := ""
 	if !node.Connected {
-		suffix = " · zuletzt gemeldet"
+		suffix = " · last reported"
 	}
 	if len(node.GPUs) == 0 {
-		return []string{"  |    System-GPU · Zero-GPU" + suffix}
+		return []string{"  |    System GPU · Zero-GPU" + suffix}
 	}
 	rows := []string{}
 	for index, gpu := range node.GPUs {
 		if index == 8 {
-			rows = append(rows, "  |    "+line(fmt.Sprintf("… %d weitere System-GPUs", len(node.GPUs)-index)))
+			rows = append(rows, "  |    "+line(fmt.Sprintf("… %d additional system GPUs", len(node.GPUs)-index)))
 			break
 		}
-		parts := []string{fmt.Sprintf("System-GPU %d", index+1), cleanTerminalLabel(gpu.Name, 50), fmt.Sprintf("%d%%", gpu.Utilization)}
+		parts := []string{fmt.Sprintf("System GPU %d", index+1), cleanTerminalLabel(gpu.Name, 50), fmt.Sprintf("%d%%", gpu.Utilization)}
 		if gpu.MemoryTotal > 0 {
-			parts = append(parts, humanBytes(gpu.MemoryFree)+"/"+humanBytes(gpu.MemoryTotal)+" frei")
+			parts = append(parts, humanBytes(gpu.MemoryFree)+"/"+humanBytes(gpu.MemoryTotal)+" free")
 		}
 		if gpu.Temperature > 0 {
 			parts = append(parts, fmt.Sprintf("%d°C", gpu.Temperature))
@@ -1170,10 +1170,10 @@ func nodeGPURows(node PoolNode, line func(string) string) []string {
 func nodeModelRows(node PoolNode, line func(string) string) []string {
 	suffix := ""
 	if !node.Connected {
-		suffix = " · zuletzt gemeldet"
+		suffix = " · last reported"
 	}
 	if len(node.Models) == 0 {
-		return []string{"  |    Worker-Modelle · keine gemeldet" + suffix}
+		return []string{"  |    Worker models · none reported" + suffix}
 	}
 	models := append([]cluster.ModelCapability(nil), node.Models...)
 	sort.Slice(models, func(i, j int) bool {
@@ -1188,14 +1188,14 @@ func nodeModelRows(node PoolNode, line func(string) string) []string {
 	rows := []string{}
 	for index, model := range models {
 		if index == 12 {
-			rows = append(rows, "  |    "+line(fmt.Sprintf("… %d weitere Worker-Modelle", len(models)-index)))
+			rows = append(rows, "  |    "+line(fmt.Sprintf("… %d additional worker models", len(models)-index)))
 			break
 		}
-		state := "bereit · nicht geladen"
+		state := "ready · not loaded"
 		if model.Loaded {
-			state = "geladen"
+			state = "loaded"
 		}
-		parts := []string{"Worker-Modell", cleanTerminalLabel(model.Name, 70), state}
+		parts := []string{"Worker model", cleanTerminalLabel(model.Name, 70), state}
 		if model.Provider != "" {
 			parts = append(parts, cleanTerminalLabel(model.Provider, 30))
 		}
@@ -1216,9 +1216,9 @@ func nodeModelRows(node PoolNode, line func(string) string) []string {
 
 func colorModelLoadState(value string, loaded bool) string {
 	if loaded {
-		return colorDelimitedModelState(value, "geladen", ansiGreen)
+		return colorDelimitedModelState(value, "loaded", ansiGreen)
 	}
-	for _, state := range []string{"bereit · nicht geladen", "bereit"} {
+	for _, state := range []string{"ready · not loaded", "ready"} {
 		if colored := colorDelimitedModelState(value, state, ansiDim); colored != value {
 			return colored
 		}
@@ -1247,24 +1247,24 @@ func localModelPanelRow(value string, loaded bool) string {
 func (s *Session) panelStatusLocked() string {
 	if s.observing {
 		if !s.observedOnline {
-			return "◇ Offline · Dienst offline · erneuter Verbindungsversuch"
+			return "◇ Offline · service offline · retrying connection"
 		}
 		state := "Idle"
 		if s.observed.ActiveJobs > 0 || s.observed.BusyEndpoints > 0 {
 			state = "Working"
 		}
-		return fmt.Sprintf("◇ %s · Dienst %s · Warteschlange %d · Adapter %d/%d belegt · Jobs %d · Fehler %d", state, s.observed.Version,
+		return fmt.Sprintf("◇ %s · service %s · queue %d · adapters %d/%d busy · jobs %d · errors %d", state, s.observed.Version,
 			s.observed.Queued, s.observed.BusyEndpoints, s.observed.ActiveEndpoints, s.observed.JobsTotal, s.observed.JobsFailed)
 	}
 	if s.status == "" {
-		return "◇ Starte…"
+		return "◇ Starting…"
 	}
 	status := s.status
 	if len(s.jobs) > 0 {
 		status, _ = s.visibleJobStatusLocked(70)
 	}
 	slots := max(1, s.slots)
-	return fmt.Sprintf("◇ %s %s · %d/%d Jobs · %d%% · %s", status, compactDuration(time.Since(s.statusSince)),
+	return fmt.Sprintf("◇ %s %s · %d/%d jobs · %d%% · %s", status, compactDuration(time.Since(s.statusSince)),
 		len(s.jobs), slots, min(100, len(s.jobs)*100/slots), nodeLabel(s.node, s.nodeID, false))
 }
 
@@ -1309,7 +1309,7 @@ func (s *Session) renderPanelLocked() {
 		panelSection("SERVICE", width),
 	}
 	if len(s.serviceLines) == 0 {
-		rows = append(rows, "  | ·  Dienststatus wird geladen…")
+		rows = append(rows, "  | ·  Loading service status…")
 	} else {
 		for _, value := range s.serviceLines {
 			rows = append(rows, "  | ·  "+line(value))
@@ -1319,7 +1319,7 @@ func (s *Session) renderPanelLocked() {
 	rows = append(rows, panelSection("CONNECTION", width))
 	connection := s.connectionLine
 	if connection == "" {
-		connection = "Verbindung wird geprüft…"
+		connection = "Checking connection…"
 	}
 	rows = append(rows, "  | ·  "+line(connection))
 	rows[len(rows)-1] = colorPanelConnection(rows[len(rows)-1])
@@ -1327,9 +1327,9 @@ func (s *Session) renderPanelLocked() {
 	if s.relayHost != "" {
 		rows = append(rows, panelSection("RELAY / NODES", width))
 		if s.poolError {
-			rows = append(rows, "  | ◇  "+line("Relay "+s.relayHost+" · Poolstatus nicht abrufbar"))
+			rows = append(rows, "  | ◇  "+line("Relay "+s.relayHost+" · pool status unavailable"))
 		} else if !s.poolKnown {
-			rows = append(rows, "  | ◇  "+line("Relay "+s.relayHost+" · Poolstatus wird geladen…"))
+			rows = append(rows, "  | ◇  "+line("Relay "+s.relayHost+" · loading pool status…"))
 		} else {
 			nodes := s.orderedPoolNodesLocked()
 			online := 0
@@ -1338,13 +1338,13 @@ func (s *Session) renderPanelLocked() {
 					online++
 				}
 			}
-			rows = append(rows, "  | "+ansiCyan+"◇"+ansiReset+"  "+line(fmt.Sprintf("Relay %s · %d/%d Worker online", s.relayHost, online, len(nodes))))
+			rows = append(rows, "  | "+ansiCyan+"◇"+ansiReset+"  "+line(fmt.Sprintf("Relay %s · %d/%d workers online", s.relayHost, online, len(nodes))))
 			if len(nodes) == 0 {
-				rows = append(rows, "  | ·  Keine Worker verbunden")
+				rows = append(rows, "  | ·  No workers connected")
 			}
 			for index, node := range nodes {
 				if index == maximumVisiblePoolNodes {
-					rows = append(rows, "  | ·  "+line(fmt.Sprintf("%d weitere Nodes im Dashboard", len(nodes)-index)))
+					rows = append(rows, "  | ·  "+line(fmt.Sprintf("%d additional nodes in the dashboard", len(nodes)-index)))
 					break
 				}
 				state := "offline"
@@ -1356,14 +1356,14 @@ func (s *Session) renderPanelLocked() {
 				}
 				self := ""
 				if node.ID != "" && node.ID == s.nodeID {
-					self = " · dieser PC"
+					self = " · this PC"
 				}
 				visibility := s.nodeDetails[nodeDetailKey(node)]
-				detailState := "Details aus"
+				detailState := "details off"
 				if visibility.gpus || visibility.models {
-					detailState = "Details an"
+					detailState = "details on"
 				}
-				rows = append(rows, "  | ·  "+colorPanelState(line(fmt.Sprintf("[%d] %s · %s · %d/%d Jobs%s · %s", index+1, nodeLabel(node.Name, node.ID, false), state, node.Running, max(1, node.Slots), self, detailState)), state))
+				rows = append(rows, "  | ·  "+colorPanelState(line(fmt.Sprintf("[%d] %s · %s · %d/%d jobs%s · %s", index+1, nodeLabel(node.Name, node.ID, false), state, node.Running, max(1, node.Slots), self, detailState)), state))
 				if visibility.gpus {
 					rows = append(rows, nodeGPURows(node, line)...)
 				}
@@ -1377,7 +1377,7 @@ func (s *Session) renderPanelLocked() {
 	rows = append(rows, panelSection("ADAPTER ENDPOINTS", width))
 	rows = gap(rows)
 	if len(s.adapterSelections) == 0 {
-		rows = append(rows, "  | ·  Keine verbundenen AI-Endpoints")
+		rows = append(rows, "  | ·  No connected AI endpoints")
 	} else {
 		ids := make([]int, 0, len(s.adapterSelections))
 		for id := range s.adapterSelections {
@@ -1409,24 +1409,24 @@ func (s *Session) renderPanelLocked() {
 			}
 			parts := []string{fmt.Sprintf("Endpoint %d", id)}
 			if selection.model != "" {
-				parts = append(parts, "Modell: "+selection.model)
+				parts = append(parts, "model: "+selection.model)
 			} else {
-				parts = append(parts, "Modell unbekannt")
+				parts = append(parts, "model unknown")
 			}
 			if selection.reasoning != "" {
-				parts = append(parts, "Denkstufe: "+selection.reasoning)
+				parts = append(parts, "reasoning: "+selection.reasoning)
 			}
 			parts = append(parts, adapterStateLabel(selection.state))
 			label := line(strings.Join(parts, " · "))
 			if selection.model == "" {
-				label = strings.Replace(label, "Modell unbekannt", ansiDim+"Modell unbekannt"+ansiReset, 1)
+				label = strings.Replace(label, "model unknown", ansiDim+"model unknown"+ansiReset, 1)
 			}
 			rows = append(rows, "  | "+ansiCyan+"◇"+ansiReset+"  "+colorPanelState(label, adapterStateLabel(selection.state)))
 		}
 	}
 	for _, provider := range s.localProviders {
 		rows = gap(rows)
-		rows = append(rows, panelSection("[Lokal · "+provider+"]", width))
+		rows = append(rows, panelSection("[Local · "+provider+"]", width))
 		models := []localModelSelection{}
 		anyLoaded := false
 		for _, model := range s.localModels {
@@ -1442,15 +1442,15 @@ func (s *Session) renderPanelLocked() {
 			return strings.ToLower(models[i].name) < strings.ToLower(models[j].name)
 		})
 		if len(models) == 0 {
-			rows = append(rows, "  | "+ansiDim+"◇  erreichbar · kein Modell geladen"+ansiReset)
+			rows = append(rows, "  | "+ansiDim+"◇  available · no model loaded"+ansiReset)
 		} else {
 			if !anyLoaded {
-				rows = append(rows, "  | "+ansiDim+"◇  erreichbar · kein Modell geladen"+ansiReset)
+				rows = append(rows, "  | "+ansiDim+"◇  available · no model loaded"+ansiReset)
 			}
 			for _, model := range models {
-				state := "bereit · nicht geladen"
+				state := "ready · not loaded"
 				if model.loaded {
-					state = "geladen"
+					state = "loaded"
 				}
 				rows = append(rows, localModelPanelRow(line(model.name+" · "+state), model.loaded))
 			}
@@ -1466,12 +1466,12 @@ func (s *Session) renderPanelLocked() {
 			}
 		}
 		if len(models) == 0 {
-			rows = append(rows, "  | "+ansiDim+"◇  erreichbar · Modellstatus unbekannt"+ansiReset)
+			rows = append(rows, "  | "+ansiDim+"◇  available · model status unknown"+ansiReset)
 			continue
 		}
 		sort.Slice(models, func(i, j int) bool { return strings.ToLower(models[i].Name) < strings.ToLower(models[j].Name) })
 		for _, model := range models {
-			rows = append(rows, "  | "+ansiPurple+"◇"+ansiReset+"  "+line(model.Name+" · per API verfügbar"))
+			rows = append(rows, "  | "+ansiPurple+"◇"+ansiReset+"  "+line(model.Name+" · available via API"))
 		}
 	}
 	if s.observing && len(s.observed.ResourcePacks) > 0 {
@@ -1487,7 +1487,7 @@ func (s *Session) renderPanelLocked() {
 			if pack.Quarantined {
 				name += " · quarantined"
 			}
-			detail := fmt.Sprintf("%s · %s · %d Endpunkt(e)", pack.ID, empty(pack.Kind, "resource-pack"), len(pack.Endpoints))
+			detail := fmt.Sprintf("%s · %s · %d endpoint(s)", pack.ID, empty(pack.Kind, "resource-pack"), len(pack.Endpoints))
 			rows = append(rows, "  | "+ansiOrange+"◆"+ansiReset+"  "+line(name+" · "+detail))
 		}
 	}
@@ -1512,7 +1512,7 @@ func (s *Session) renderPanelLocked() {
 				indicators = compactIndicatorLabel(observedCapabilities)
 			}
 			statusDetails = append(statusDetails, "  | "+indicators)
-			statusDetails = append(statusDetails, "  | "+colorGPUPercent(fmt.Sprintf("GPU · %s · %d%%", empty(s.observed.GPU, "unbekannt"), s.observed.GPUUtilization), s.observed.GPUUtilization))
+			statusDetails = append(statusDetails, "  | "+colorGPUPercent(fmt.Sprintf("GPU · %s · %d%%", empty(s.observed.GPU, "unknown"), s.observed.GPUUtilization), s.observed.GPUUtilization))
 		}
 	} else {
 		indicators := indicatorLabel(s.capabilities)
@@ -1563,13 +1563,13 @@ func (s *Session) renderPanelLocked() {
 	}
 	if len(rows) > maxLiveRows {
 		hidden := len(rows) - maxLiveRows + 1
-		rows = append(rows[:maxLiveRows-1], fmt.Sprintf("  | … %d weitere Live-Zeilen", hidden))
+		rows = append(rows[:maxLiveRows-1], fmt.Sprintf("  | … %d additional live rows", hidden))
 	}
 	rows = append(rows, panelSection("STATUS", width), status)
 	rows = append(rows, statusDetails...)
 	rows = gap(rows)
 	availableHistory := max(1, height-len(rows)-2-commandReserve)
-	rows = append(rows, panelSection(fmt.Sprintf("HISTORY · Sitzung · %d Ereignisse", s.historyTotal), width))
+	rows = append(rows, panelSection(fmt.Sprintf("HISTORY · session · %d events", s.historyTotal), width))
 	historyRows := []string{}
 	// Newest first keeps the current event next to live state. Details remain
 	// directly below their parent event so the hierarchy is never inverted.
@@ -1594,7 +1594,7 @@ func (s *Session) renderPanelLocked() {
 		historyRows = append(historyRows, block...)
 	}
 	if len(historyRows) == 0 {
-		historyRows = append(historyRows, "  | ·  Noch keine Ereignisse")
+		historyRows = append(historyRows, "  | ·  No events yet")
 	}
 	rows = append(rows, historyRows...)
 	rows = append(rows, panelBorder(width))
@@ -1898,8 +1898,8 @@ func colorGPUPercent(value string, utilization int) string {
 	value = strings.Replace(value, percentage, color+percentage+ansiReset, 1)
 	if strings.Contains(value, "GPU aktiv") {
 		value = strings.Replace(value, "GPU aktiv", color+"GPU aktiv"+ansiReset, 1)
-	} else if strings.Contains(value, "GPU bereit") {
-		value = strings.Replace(value, "GPU bereit", ansiDim+"GPU bereit"+ansiReset, 1)
+	} else if strings.Contains(value, "GPU ready") {
+		value = strings.Replace(value, "GPU ready", ansiDim+"GPU ready"+ansiReset, 1)
 	} else if strings.Contains(value, "Zero-GPU") {
 		value = strings.Replace(value, "Zero-GPU", ansiDim+"Zero-GPU"+ansiReset, 1)
 	}
@@ -2102,20 +2102,20 @@ func capabilityLabel(capability cluster.Capabilities) string {
 			maximumUtilization = max(maximumUtilization, candidate.Utilization)
 			bestFree = max(bestFree, candidate.MemoryFree)
 		}
-		state := "GPU bereit"
+		state := "GPU ready"
 		if maximumUtilization > 0 {
 			state = "GPU aktiv"
 		}
 		if len(capability.GPUs) == 1 {
-			parts = append(parts, fmt.Sprintf("%s · %s · %d%% · %s VRAM frei", cleanTerminalLabel(gpu.Name, 40), state, maximumUtilization, humanBytes(bestFree)))
+			parts = append(parts, fmt.Sprintf("%s · %s · %d%% · %s VRAM free", cleanTerminalLabel(gpu.Name, 40), state, maximumUtilization, humanBytes(bestFree)))
 		} else {
-			parts = append(parts, fmt.Sprintf("%d GPUs · %s · max %d%% · beste GPU %s VRAM frei", len(capability.GPUs), state, maximumUtilization, humanBytes(bestFree)))
+			parts = append(parts, fmt.Sprintf("%d GPUs · %s · max %d%% · best GPU %s VRAM free", len(capability.GPUs), state, maximumUtilization, humanBytes(bestFree)))
 		}
 	} else {
 		parts = append(parts, "Zero-GPU")
 	}
 	if capability.MemoryTotal > 0 {
-		parts = append(parts, humanBytes(capability.MemoryFree)+" RAM frei")
+		parts = append(parts, humanBytes(capability.MemoryFree)+" RAM free")
 	}
 	return strings.Join(parts, " · ")
 }
