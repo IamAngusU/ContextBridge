@@ -18,15 +18,59 @@
 
 <p align="center"><a href="#get-running">Install</a> · <a href="#connect-your-devices">Connect devices</a> · <a href="#just-prompt-the-pool">Prompt the pool</a> · <a href="#send-work-from-your-app">Send a job</a> · <a href="#measured-overhead">Benchmarks</a> · <a href="#uninstall">Uninstall</a> · <a href="docs/README.md">Docs</a></p>
 
-ContextBridge lets an app on your laptop, VPS or shared hosting send AI jobs to a pool of resources you control. It selects a compatible worker, applies configured policies, tracks the job and validates returned artifacts. **Keep your runtimes. Connect your resources.**
+ContextBridge turns the AI resources you already have into one controlled pool.
+
+Once a machine, runtime or model API joins the pool, it stops being another one-off integration. Your apps can send work to CB and either let it choose a compatible resource or tell it exactly what may be used.
+
+At the simple end, you just prompt the pool. At the other end, you can constrain providers, models, worker groups, hardware requirements, egress, cost and other execution details.
+
+```text
+website / app / CLI / MCP
+          |
+          |  "do this"
+          v
+    ContextBridge
+          |
+          +-- gaming PC
+          +-- old workstation
+          +-- laptop
+          +-- VPS
+          +-- Ollama
+          +-- llama.cpp
+          +-- model API
+          +-- adapter
+```
+
+**No, this is not an Ollama wrapper with a WebSocket attached.**
+
+Ollama is one possible resource. So is llama.cpp. So is an OpenAI-compatible model API. Machines are resources too. If a useful new runtime, router or API appears tomorrow, CB should not need to replace it. Ideally, it becomes another capability in the pool.
+
+The relay authenticates and queues jobs, applies configured policy, filters incompatible workers and ranks the remaining resources using current capacity and capability evidence. It records what actually handled the work. Workers connect outbound, so the machines doing the work do not need public inbound ports.
+
+## Weird shit works.
+
+CB is developed against a deliberately messy setup, not a clean two-node demo that has never seen a router reboot.
+
+My development pool has included a gaming PC, three older workstations, a TERRA mini PC, a Samsung laptop, Kali and Ubuntu systems, multiple Linux VPSes, local model runtimes and remote model APIs.
+
+Several ordinary shared-hosting sites, with no GPU and no useful local AI compute of their own, already submit work into the same pool over HTTPS.
+
+I test the annoying parts too: Wi-Fi disappearing at the router instead of a polite process shutdown, real connection loss and reconnects, partial and complete outages, malformed provider responses and mixed CB versions during development.
+
+The point is not to pretend distributed systems never fail. It is to know **where** they failed and avoid making things worse by guessing. An uncertain post-dispatch state is not silently replayed just because retrying would look prettier in a demo.
 
 | Your setup | What CB adds |
 | --- | --- |
-| Website on shared hosting, model on your PC | A PHP/HTTPS request reaches your pool; the worker dials out. |
-| Several machines, different capabilities | Route by requirements and available capacity, with an explanation. |
-| Multiple apps sharing the pool | Separate producer credentials instead of shared admin secrets. |
+| Website on shared hosting, model on your PC | The site submits a job over HTTPS; the worker connects outbound and does the work elsewhere. |
+| A random collection of PCs, servers and laptops | They become one capability-aware pool instead of separate integrations. |
+| Local models plus remote model APIs | Both can sit behind the same job boundary. |
+| Multiple apps sharing the same resources | Each app gets its own scoped producer credential instead of a shared admin secret. |
+| You just want something done | Send the task and let CB choose a compatible resource. |
+| You care exactly where and how it runs | Add provider, model, group, hardware, egress, cost and other supported requirements. |
 
-Connect **Ollama**, managed **llama.cpp**, **OpenAI-compatible model APIs** and optional external adapters. Get durable jobs, configurable cost/egress boundaries, optional E2EE and free [conformance checks](docs/compatibility.md). No ContextBridge cloud account is required for self-hosting.
+Connect **Ollama**, managed **llama.cpp**, **OpenAI-compatible model APIs** and optional external adapters. Get durable jobs, routing explanations, schedules, deterministic pipelines, bounded multi-step planning, MCP, configurable cost and egress boundaries, optional E2EE and free [conformance checks](docs/compatibility.md).
+
+No ContextBridge cloud account is required for self-hosting.
 
 ## Get running
 
@@ -142,9 +186,9 @@ The answer comes back to the same terminal. For the shortest round-trip check:
 
 ```console
 $ contextbridge cluster chat --provider ollama --model auto --artifacts off --prompt "Reply exactly with CB-OK"
-  → angefragt: ollama · Modell auto
+  → requested: ollama · model auto
 ai  › CB-OK
-  ↳ verwendet: ollama · qwen2.5:latest
+  ↳ used: ollama · qwen2.5:latest
   ✓ 1.8s · <worker-id>
 ```
 
