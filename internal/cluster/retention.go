@@ -172,7 +172,7 @@ func (s *Store) PruneRetention(now time.Time, policy RetentionPolicy) (Retention
 			return err
 		}
 		result.Events = removedEvents
-		removedRuns, err := prunePipelineRuns(tx.Bucket(bucketPipelineRuns), cutoff, policy.MaxTerminalPipelineRuns)
+		removedRuns, err := prunePipelineRuns(tx, cutoff, policy.MaxTerminalPipelineRuns)
 		if err != nil {
 			return err
 		}
@@ -281,7 +281,8 @@ func pruneEvents(bucket *bolt.Bucket, cutoff time.Time, limit int) (int, error) 
 	return removed, nil
 }
 
-func prunePipelineRuns(bucket *bolt.Bucket, cutoff time.Time, limit int) (int, error) {
+func prunePipelineRuns(tx *bolt.Tx, cutoff time.Time, limit int) (int, error) {
+	bucket := tx.Bucket(bucketPipelineRuns)
 	selected := &retentionHeap{}
 	heap.Init(selected)
 	if err := bucket.ForEach(func(key, value []byte) error {
@@ -327,6 +328,11 @@ func prunePipelineRuns(bucket *bolt.Bucket, cutoff time.Time, limit int) (int, e
 		}
 		if err := cursor.Delete(); err != nil {
 			return removed, err
+		}
+		if events := tx.Bucket(bucketPipelineEvents); events != nil && events.Bucket([]byte(run.ID)) != nil {
+			if err := events.DeleteBucket([]byte(run.ID)); err != nil {
+				return removed, err
+			}
 		}
 		removed++
 	}

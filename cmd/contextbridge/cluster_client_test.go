@@ -165,6 +165,43 @@ func TestClusterEventsRejectsUnsafePollingAndLimits(t *testing.T) {
 	}
 }
 
+func TestClusterEventsPipelineFlagUsesPipelineRunEndpoint(t *testing.T) {
+	var seen atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/cluster/pipeline-runs/run-events-cli/events" || r.URL.Query().Get("after") != "2" {
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		seen.Store(true)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(cluster.JobEventPage{After: 2, Next: 3, Events: []cluster.JobEvent{{
+			Schema: cluster.JobEventSchemaV1, RunID: "run-events-cli", Sequence: 3,
+			Type: "pipeline.completed", Source: "relay", Authority: "authoritative",
+		}}})
+	}))
+	defer server.Close()
+
+	configPath := filepath.Join(t.TempDir(), "config.yml")
+	if err := config.Default(configPath); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Cluster.Relay.PublicURL = ""
+	cfg.Cluster.Worker.RelayURL = server.URL
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := clusterEventsCommand([]string{"run-events-cli", "--pipeline", "--config", configPath, "--token", "producer-events-token", "--after", "2", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	if !seen.Load() {
+		t.Fatal("pipeline event endpoint was not called")
+	}
+}
+
 func TestClusterRouteExplainSupportsPreviewAndDurableJobDecision(t *testing.T) {
 	var previewSeen atomic.Bool
 	var jobSeen atomic.Bool

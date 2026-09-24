@@ -16,6 +16,11 @@
   `cluster events JOB_ID` exposes human, JSON and reconnect-safe follow modes.
   Worker progress is separately marked advisory, strips semantic text/detail,
   cannot create terminal state, and is capped at 64 observations per job.
+- Extended the same authoritative cursor contract to pipelines. Run and step
+  transitions commit atomically with their owning state, step events retain
+  stable run/step/child-job identities, producer ownership is enforced, and
+  `cluster events RUN_ID --pipeline --follow` survives reconnects without
+  deriving state from logs.
 - Added `contextbridge integrate openai|mcp`: it emits redacted, exact
   application connection settings, can create a new non-overwriting private
   OpenAI-compatible environment file, and generates a ready-to-paste MCP stdio

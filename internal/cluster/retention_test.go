@@ -127,6 +127,18 @@ func TestRetentionPrunesOnlyDetailedTerminalHistoryAndKeepsLifetimeTotals(t *tes
 	if got := pipelineRunIDs(retainedRuns); !reflect.DeepEqual(got, []string{"run-newest", "run-second", "run-active", "run-unknown"}) {
 		t.Fatalf("retained pipeline runs = %v", got)
 	}
+	for _, id := range []string{"run-old", "run-third"} {
+		page, err := store.ListPipelineEvents(id, 0, 10)
+		if err != nil || len(page.Events) != 0 {
+			t.Fatalf("pruned pipeline %s retained event history: %#v err=%v", id, page, err)
+		}
+	}
+	for _, id := range []string{"run-newest", "run-second"} {
+		page, err := store.ListPipelineEvents(id, 0, 10)
+		if err != nil || len(page.Events) == 0 {
+			t.Fatalf("retained pipeline %s lost event history: %#v err=%v", id, page, err)
+		}
+	}
 
 	again, err := store.PruneRetention(now, policy)
 	if err != nil {

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"runtime/debug"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -99,6 +100,34 @@ func (r *Relay) handlePipelineRunStatus(w http.ResponseWriter, req *http.Request
 		return
 	}
 	writeJSON(w, http.StatusOK, run)
+}
+
+func (r *Relay) handlePipelineRunEvents(w http.ResponseWriter, req *http.Request) {
+	run, err := r.store.GetPipelineRun(req.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, errors.New("pipeline run not found"))
+		return
+	}
+	if record, ok := tokenRecord(req.Context()); ok && record.Role == "producer" && run.OwnerSubject != record.Subject {
+		writeError(w, http.StatusForbidden, errors.New("pipeline run belongs to another producer"))
+		return
+	}
+	after := uint64(0)
+	if raw := strings.TrimSpace(req.URL.Query().Get("after")); raw != "" {
+		value, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, errors.New("after must be an unsigned event sequence"))
+			return
+		}
+		after = value
+	}
+	page, err := r.store.ListPipelineEvents(run.ID, after, queryLimit(req, 100, 500))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, page)
 }
 
 func (r *Relay) executePipeline(parent context.Context, run PipelineRun, pipeline Pipeline) {

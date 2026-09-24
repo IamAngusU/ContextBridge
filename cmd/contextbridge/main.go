@@ -1439,12 +1439,13 @@ func clusterEventsCommand(args []string) error {
 	limit := flags.Int("limit", 100, "events per page; 1-500")
 	asJSON := flags.Bool("json", false, "print the versioned event page as JSON")
 	follow := flags.Bool("follow", false, "poll until a terminal lifecycle event is observed")
+	pipeline := flags.Bool("pipeline", false, "read a pipeline-run event stream instead of a job stream")
 	poll := flags.Duration("poll", 500*time.Millisecond, "follow polling interval; 100ms-30s")
 	if err := parseInterspersedFlags(flags, args); err != nil {
 		return err
 	}
 	if flags.NArg() != 1 || strings.TrimSpace(flags.Arg(0)) == "" {
-		return errors.New("usage: contextbridge cluster events JOB_ID [--after N] [--limit N] [--json] [--follow]")
+		return errors.New("usage: contextbridge cluster events JOB_OR_RUN_ID [--pipeline] [--after N] [--limit N] [--json] [--follow]")
 	}
 	if *limit < 1 || *limit > 500 {
 		return errors.New("--limit must be between 1 and 500")
@@ -1463,7 +1464,11 @@ func clusterEventsCommand(args []string) error {
 	cursor := *after
 	for {
 		var page cluster.JobEventPage
-		target := fmt.Sprintf("%s/v1/cluster/jobs/%s/events?after=%d&limit=%d", clusterBaseURL(cfg), url.PathEscape(jobID), cursor, *limit)
+		kind := "jobs"
+		if *pipeline {
+			kind = "pipeline-runs"
+		}
+		target := fmt.Sprintf("%s/v1/cluster/%s/%s/events?after=%d&limit=%d", clusterBaseURL(cfg), kind, url.PathEscape(jobID), cursor, *limit)
 		if err := clusterGET(context.Background(), target, *token, &page); err != nil {
 			return err
 		}
@@ -1491,7 +1496,7 @@ func clusterEventsCommand(args []string) error {
 		}
 		terminal := false
 		for _, event := range page.Events {
-			if terminalJobEvent(event.Type) {
+			if terminalExecutionEvent(event.Type) {
 				terminal = true
 			}
 		}
@@ -1505,9 +1510,9 @@ func clusterEventsCommand(args []string) error {
 	}
 }
 
-func terminalJobEvent(eventType string) bool {
+func terminalExecutionEvent(eventType string) bool {
 	switch eventType {
-	case "job.completed", "job.failed", "job.cancelled", "job.ambiguous":
+	case "job.completed", "job.failed", "job.cancelled", "job.ambiguous", "pipeline.completed", "pipeline.failed", "pipeline.cancelled":
 		return true
 	default:
 		return false

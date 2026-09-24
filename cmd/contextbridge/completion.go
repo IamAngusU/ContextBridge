@@ -93,7 +93,7 @@ $script:ContextBridgeOptions = @{
     'pair' = @('--config','--relay','--identity','--name')
     'worker' = @('--config','--relay','--identity','--name','--slots','--providers','--models','--tasks','--groups','--no-updates','--topmost')
     'cluster status' = @('--config','--json')
-	'cluster events' = @('--config','--token','--after','--limit','--json','--follow','--poll')
+	'cluster events' = @('--config','--token','--after','--limit','--json','--follow','--pipeline','--poll')
 	'cluster node' = @('drain','resume','--config','--token','--json')
 	'cluster protocol' = @('--config','--token','--json')
 	'cluster conformance' = @('relay','worker','--config','--token','--node','--json')
@@ -208,7 +208,7 @@ _contextbridge_complete() {
     --reasoning) candidates="instant medium high xhigh pro max" ;;
     --mode) candidates="local relay worker all" ;;
     --role) candidates="producer observer" ;;
-    --wait|--e2ee|--stream|--json|--follow|--show-token|--check|--live|--no-open|--topmost|--image|--new-session|--new-session-per-job|--foreground-new-session|--run|--dry-run|--keep-artifacts|--no-updates|--discover|--force|--relay-only|--require-artifact|--require-evidence) boolean_previous=1 ;;
+    --wait|--e2ee|--stream|--json|--follow|--pipeline|--show-token|--check|--live|--no-open|--topmost|--image|--new-session|--new-session-per-job|--foreground-new-session|--run|--dry-run|--keep-artifacts|--no-updates|--discover|--force|--relay-only|--require-artifact|--require-evidence) boolean_previous=1 ;;
   esac
   if [ -n "${candidates:-}" ]; then
     COMPREPLY=( $(compgen -W "$candidates" -- "$current") )
@@ -227,7 +227,7 @@ _contextbridge_complete() {
       "route explain") candidates="--config --file --job --token --json" ;;
       "cluster submit") candidates="--config --file --token --wait --e2ee --stream --artifacts --idempotency-key" ;;
       "cluster status") candidates="--config --json" ;;
-	  "cluster events") candidates="--config --token --after --limit --json --follow --poll" ;;
+	  "cluster events") candidates="--config --token --after --limit --json --follow --pipeline --poll" ;;
 	  "cluster node") candidates="drain resume --config --token --json" ;;
 	  "cluster protocol") candidates="--config --token --json" ;;
 	  "cluster conformance") candidates="relay worker --config --token --node --json" ;;
@@ -389,7 +389,7 @@ case "$words[2]" in
     fi
     case "$words[3]" in
       status) _arguments "${config[@]}" '--json[Print machine-readable JSON]' ;;
-	  events) _arguments "${config[@]}" '--token[Producer, observer, or admin token]:token:' '--after[Resume after this event sequence]:sequence:' '--limit[Events per page, 1-500]:count:' '--json[Print versioned event pages as JSON]' '--follow[Poll until a terminal event is observed]' '--poll[Follow polling interval]:duration:' '1:job ID:' ;;
+	  events) _arguments "${config[@]}" '--token[Producer, observer, or admin token]:token:' '--after[Resume after this event sequence]:sequence:' '--limit[Events per page, 1-500]:count:' '--json[Print versioned event pages as JSON]' '--follow[Poll until a terminal event is observed]' '--pipeline[Read a pipeline-run stream]' '--poll[Follow polling interval]:duration:' '1:job or run ID:' ;;
 	  node)
 		if (( CURRENT == 4 )); then
 		  _values 'node action' drain resume

@@ -470,6 +470,7 @@ func (r *Relay) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/cluster/pipelines", r.authorize("admin", "observer", "producer")(r.handlePipelines))
 	mux.HandleFunc("POST /v1/cluster/pipelines/{name}/run", r.authorize("admin", "producer")(r.handlePipelineRun))
 	mux.HandleFunc("GET /v1/cluster/pipeline-runs/{id}", r.authorize("admin", "observer", "producer")(r.handlePipelineRunStatus))
+	mux.HandleFunc("GET /v1/cluster/pipeline-runs/{id}/events", r.authorize("admin", "observer", "producer")(r.handlePipelineRunEvents))
 	return secureHeaders(mux)
 }
 

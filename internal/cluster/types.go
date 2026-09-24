@@ -447,7 +447,8 @@ const JobEventSchemaV1 = "contextbridge.event.v1"
 // and can never create terminal job state.
 type JobEvent struct {
 	Schema    string            `json:"schema"`
-	JobID     string            `json:"job_id"`
+	JobID     string            `json:"job_id,omitempty"`
+	RunID     string            `json:"run_id,omitempty"`
 	Sequence  uint64            `json:"seq"`
 	Type      string            `json:"type"`
 	Source    string            `json:"source"`

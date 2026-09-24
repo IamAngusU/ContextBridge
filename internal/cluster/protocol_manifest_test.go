@@ -43,6 +43,9 @@ func TestProtocolManifestIsDeterministicAndNamesPublicBoundaries(t *testing.T) {
 	if !containsString(first.Features, "authoritative_job_events_v1") {
 		t.Fatalf("authoritative job event feature is not advertised: %#v", first.Features)
 	}
+	if !containsString(first.Features, "authoritative_pipeline_events_v1") {
+		t.Fatalf("authoritative pipeline event feature is not advertised: %#v", first.Features)
+	}
 }
 
 func containsString(values []string, wanted string) bool {

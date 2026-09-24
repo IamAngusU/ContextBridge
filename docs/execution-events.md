@@ -6,6 +6,13 @@ ContextBridge exposes a versioned, bounded per-job lifecycle history:
 GET /v1/cluster/jobs/JOB_ID/events?after=SEQUENCE&limit=100
 ```
 
+Pipeline runs expose the same cursor contract, including stable step and child
+job identities:
+
+```text
+GET /v1/cluster/pipeline-runs/RUN_ID/events?after=SEQUENCE&limit=100
+```
+
 The endpoint accepts administrator and observer credentials. A producer may
 read only events for its own job. Responses use `contextbridge.event.v1` and a
 relay-assigned monotonic sequence per job:
@@ -44,6 +51,9 @@ contextbridge cluster events JOB_ID --after 0 --limit 100 --json
 
 # Continue from the cursor until CB commits a terminal lifecycle event.
 contextbridge cluster events JOB_ID --after 12 --follow
+
+# Follow the durable lifecycle of a whole pipeline and all of its steps.
+contextbridge cluster events RUN_ID --pipeline --follow
 ```
 
 `--follow` is bounded polling, not an invented streaming claim. Each request
@@ -68,14 +78,34 @@ state nor event commits. Current event types are:
 - `job.ambiguous`
 - `execution.progress` (`authority=advisory`, `source=worker`)
 
+Pipeline streams use these relay-authored authoritative types:
+
+- `pipeline.started`
+- `pipeline.step.queued`
+- `pipeline.step.started`
+- `pipeline.step.completed`
+- `pipeline.step.failed`
+- `pipeline.step.cancelled`
+- `pipeline.step.ambiguous`
+- `pipeline.completed`
+- `pipeline.failed`
+- `pipeline.cancelled`
+
+Every step event carries the durable pipeline `run_id`, configured `step_id`
+and actual child `job_id`. The event is committed in the same transaction as
+the corresponding run or child-job state. This lets an application reconnect
+without inventing progress from presentation logs or losing the relationship
+between a pipeline step and the job that executed it.
+
 `source=relay` and `authority=authoritative` mean CB owns and persisted that
 orchestration transition. They do not mean that CB can prove arbitrary claims
 inside a model, runtime or tool.
 
-The most recent 256 execution events per job are retained while the job is
-retained. `gap=true` tells a reconnecting client that its cursor predates the
-oldest retained event. The terminal Job record and validated result remain the
-ultimate source of truth.
+The most recent 256 execution events per job or pipeline run are retained while
+that record is retained. Pipeline-event storage is removed with its terminal
+run by the same retention transaction. `gap=true` tells a reconnecting client
+that its cursor predates the oldest retained event. The terminal Job or
+PipelineRun record and validated results remain the ultimate source of truth.
 
 Worker `Job.Progress` is an advisory observation. Its sequence, phase, percent
 and busy bit are persisted as `execution.progress`, but its text and detail are

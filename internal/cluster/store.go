@@ -33,6 +33,7 @@ var (
 	bucketAssignments         = []byte("assignments")
 	bucketEvents              = []byte("events")
 	bucketJobEvents           = []byte("job_events_v1")
+	bucketPipelineEvents      = []byte("pipeline_events_v1")
 	bucketPipelineRuns        = []byte("pipeline_runs")
 	bucketSessionPlacements   = []byte("session_placements_v1")
 	bucketAdapterSessionLocks = []byte("adapter_session_locks_v1")
@@ -52,7 +53,7 @@ func requiredStoreBuckets() [][]byte {
 	return [][]byte{
 		bucketJobs, bucketJobIndex, bucketJobOwnerIndex, bucketStoreMeta,
 		bucketQueue, bucketNodes, bucketTokens, bucketPairings, bucketPairCodes,
-		bucketAssignments, bucketEvents, bucketJobEvents, bucketPipelineRuns, bucketSessionPlacements,
+		bucketAssignments, bucketEvents, bucketJobEvents, bucketPipelineEvents, bucketPipelineRuns, bucketSessionPlacements,
 		bucketAdapterSessionLocks, bucketJobIdempotency, bucketJobIdempotencyByJob,
 		bucketHistoricalTotals,
 	}
@@ -829,7 +830,10 @@ func (s *Store) createJob(request SubmitRequest, maxQueued, maxOwner int, idempo
 		if err := appendAuthoritativeJobEventTx(tx, s, job, "job.accepted"); err != nil {
 			return err
 		}
-		return appendAuthoritativeJobEventTx(tx, s, job, "job.queued")
+		if err := appendAuthoritativeJobEventTx(tx, s, job, "job.queued"); err != nil {
+			return err
+		}
+		return appendPipelineStepEventTx(tx, s, job, "pipeline.step.queued")
 	})
 	return job, replayed, err
 }
@@ -1109,6 +1113,9 @@ func (s *Store) consumeReservationAdmitted(id, secret string, sealed *SealedEnve
 			return err
 		}
 		if err := appendAuthoritativeJobEventTx(tx, s, job, "job.queued"); err != nil {
+			return err
+		}
+		if err := appendPipelineStepEventTx(tx, s, job, "pipeline.step.queued"); err != nil {
 			return err
 		}
 		return tx.Bucket(bucketAssignments).Delete([]byte(id))
@@ -1735,7 +1742,10 @@ func (s *Store) markRunning(id, nodeID string, attempt int, fence *AssignmentFen
 		if err := putJSON(tx.Bucket(bucketJobs), id, job); err != nil {
 			return err
 		}
-		return appendAuthoritativeJobEventTx(tx, s, job, "execution.started")
+		if err := appendAuthoritativeJobEventTx(tx, s, job, "execution.started"); err != nil {
+			return err
+		}
+		return appendPipelineStepEventTx(tx, s, job, "pipeline.step.started")
 	})
 	return job, err
 }
@@ -1813,7 +1823,10 @@ func (s *Store) CancelJob(id string) (Job, error) {
 		if err := putJSON(tx.Bucket(bucketJobs), id, job); err != nil {
 			return err
 		}
-		return appendAuthoritativeJobEventTx(tx, s, job, "job.cancelled")
+		if err := appendAuthoritativeJobEventTx(tx, s, job, "job.cancelled"); err != nil {
+			return err
+		}
+		return appendPipelineStepEventTx(tx, s, job, "pipeline.step.cancelled")
 	})
 	return job, err
 }
@@ -1981,7 +1994,14 @@ func (s *Store) completeJobWithFailure(id, nodeID string, attempt int, fence *As
 		if job.Status == JobFailed {
 			eventType = "job.failed"
 		}
-		return appendAuthoritativeJobEventTx(tx, s, job, eventType)
+		if err := appendAuthoritativeJobEventTx(tx, s, job, eventType); err != nil {
+			return err
+		}
+		stepType := "pipeline.step.completed"
+		if job.Status == JobFailed {
+			stepType = "pipeline.step.failed"
+		}
+		return appendPipelineStepEventTx(tx, s, job, stepType)
 	})
 	return job, err
 }
@@ -2112,6 +2132,9 @@ func (s *Store) RequeueNode(nodeID, reason string) ([]Job, error) {
 			if err := appendAuthoritativeJobEventTx(tx, s, change.job, "job.ambiguous"); err != nil {
 				return err
 			}
+			if err := appendPipelineStepEventTx(tx, s, change.job, "pipeline.step.ambiguous"); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
@@ -2185,6 +2208,9 @@ func (s *Store) RecoverRelayRestart(reason string) ([]Job, error) {
 			if err := appendAuthoritativeJobEventTx(tx, s, change.job, "job.ambiguous"); err != nil {
 				return err
 			}
+			if err := appendPipelineStepEventTx(tx, s, change.job, "pipeline.step.ambiguous"); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
@@ -2252,6 +2278,13 @@ func (s *Store) RecoverStaleJobs(now time.Time, sealedWait, execution time.Durat
 				return err
 			}
 			if err := appendAuthoritativeJobEventTx(tx, s, item.job, item.eventType); err != nil {
+				return err
+			}
+			stepType := "pipeline.step.failed"
+			if item.eventType == "job.ambiguous" {
+				stepType = "pipeline.step.ambiguous"
+			}
+			if err := appendPipelineStepEventTx(tx, s, item.job, stepType); err != nil {
 				return err
 			}
 		}
@@ -2620,7 +2653,7 @@ func appendAdvisoryJobProgressEventTx(tx *bolt.Tx, store *Store, job Job, progre
 			Percent: progress.Percent, Busy: progress.Busy,
 		},
 	}
-	if err := appendJobEventTx(tx, store, event); err != nil {
+	if err := appendExecutionEventTx(tx, store, bucketJobEvents, job.ID, event); err != nil {
 		return err
 	}
 	encodedCount := make([]byte, 8)
@@ -2629,8 +2662,46 @@ func appendAdvisoryJobProgressEventTx(tx *bolt.Tx, store *Store, job Job, progre
 }
 
 func appendJobEventTx(tx *bolt.Tx, store *Store, event JobEvent) error {
-	root := tx.Bucket(bucketJobEvents)
-	bucket, err := root.CreateBucketIfNotExists([]byte(event.JobID))
+	return appendExecutionEventTx(tx, store, bucketJobEvents, event.JobID, event)
+}
+
+func appendPipelineEventTx(tx *bolt.Tx, store *Store, run PipelineRun, eventType string) error {
+	switch eventType {
+	case "pipeline.started", "pipeline.completed", "pipeline.failed", "pipeline.cancelled":
+	default:
+		return fmt.Errorf("unsupported authoritative pipeline event %q", eventType)
+	}
+	timestamp := run.CreatedAt
+	if !run.FinishedAt.IsZero() {
+		timestamp = run.FinishedAt
+	}
+	event := JobEvent{
+		Schema: JobEventSchemaV1, RunID: run.ID, Type: eventType,
+		Source: "relay", Authority: "authoritative", Time: timestamp,
+	}
+	return appendExecutionEventTx(tx, store, bucketPipelineEvents, run.ID, event)
+}
+
+func appendPipelineStepEventTx(tx *bolt.Tx, store *Store, job Job, eventType string) error {
+	if job.ParentID == "" || job.Step == "" {
+		return nil
+	}
+	switch eventType {
+	case "pipeline.step.queued", "pipeline.step.started", "pipeline.step.completed", "pipeline.step.failed", "pipeline.step.cancelled", "pipeline.step.ambiguous":
+	default:
+		return fmt.Errorf("unsupported authoritative pipeline step event %q", eventType)
+	}
+	event := JobEvent{
+		Schema: JobEventSchemaV1, RunID: job.ParentID, JobID: job.ID, Type: eventType,
+		Source: "relay", Authority: "authoritative", Time: job.UpdatedAt,
+		Attempt: job.Attempt, NodeID: job.AssignedNode, StepID: job.Step,
+	}
+	return appendExecutionEventTx(tx, store, bucketPipelineEvents, job.ParentID, event)
+}
+
+func appendExecutionEventTx(tx *bolt.Tx, store *Store, rootName []byte, scopeID string, event JobEvent) error {
+	root := tx.Bucket(rootName)
+	bucket, err := root.CreateBucketIfNotExists([]byte(scopeID))
 	if err != nil {
 		return err
 	}
@@ -2668,16 +2739,24 @@ func appendJobEventTx(tx *bolt.Tx, store *Store, event JobEvent) error {
 }
 
 func (s *Store) ListJobEvents(jobID string, after uint64, limit int) (JobEventPage, error) {
+	return s.listExecutionEvents(bucketJobEvents, jobID, after, limit)
+}
+
+func (s *Store) ListPipelineEvents(runID string, after uint64, limit int) (JobEventPage, error) {
+	return s.listExecutionEvents(bucketPipelineEvents, runID, after, limit)
+}
+
+func (s *Store) listExecutionEvents(rootName []byte, scopeID string, after uint64, limit int) (JobEventPage, error) {
 	page := JobEventPage{Events: []JobEvent{}, After: after, Next: after}
-	if !validJobID(jobID) {
-		return page, errors.New("invalid job id")
+	if !validJobID(scopeID) {
+		return page, errors.New("invalid execution id")
 	}
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
 	err := s.db.View(func(tx *bolt.Tx) error {
-		root := tx.Bucket(bucketJobEvents)
-		bucket := root.Bucket([]byte(jobID))
+		root := tx.Bucket(rootName)
+		bucket := root.Bucket([]byte(scopeID))
 		if bucket == nil {
 			return nil
 		}
@@ -2779,7 +2858,34 @@ func (s *Store) SavePipelineRun(run PipelineRun) error {
 			return err
 		}
 	}
-	return s.db.Update(func(tx *bolt.Tx) error { return putJSON(tx.Bucket(bucketPipelineRuns), run.ID, run) })
+	return s.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketPipelineRuns)
+		var previous PipelineRun
+		previousErr := getJSON(bucket, run.ID, &previous)
+		existed := previousErr == nil
+		if previousErr != nil && !errors.Is(previousErr, os.ErrNotExist) {
+			return fmt.Errorf("read previous pipeline run: %w", previousErr)
+		}
+		if err := putJSON(bucket, run.ID, run); err != nil {
+			return err
+		}
+		if !existed && run.Status == "running" {
+			return appendPipelineEventTx(tx, s, run, "pipeline.started")
+		}
+		if existed && previous.Status == run.Status {
+			return nil
+		}
+		switch run.Status {
+		case "completed":
+			return appendPipelineEventTx(tx, s, run, "pipeline.completed")
+		case "failed":
+			return appendPipelineEventTx(tx, s, run, "pipeline.failed")
+		case "cancelled":
+			return appendPipelineEventTx(tx, s, run, "pipeline.cancelled")
+		default:
+			return nil
+		}
+	})
 }
 
 // CreatePipelineRunAdmitted atomically counts active runs and persists the new
@@ -2807,7 +2913,10 @@ func (s *Store) CreatePipelineRunAdmitted(run PipelineRun, maxGlobal, maxOwner i
 		if maxOwner > 0 && owned >= maxOwner {
 			return ErrOwnerPipelineCapacity
 		}
-		return putJSON(bucket, run.ID, run)
+		if err := putJSON(bucket, run.ID, run); err != nil {
+			return err
+		}
+		return appendPipelineEventTx(tx, s, run, "pipeline.started")
 	})
 }
 
@@ -2880,6 +2989,9 @@ func (s *Store) FailActivePipelineRuns(reason string) (int, error) {
 		}
 		for key, run := range updates {
 			if err := putJSON(bucket, key, run); err != nil {
+				return err
+			}
+			if err := appendPipelineEventTx(tx, s, run, "pipeline.failed"); err != nil {
 				return err
 			}
 		}
