@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"time"
@@ -101,6 +102,7 @@ func (r *Relay) handlePipelineRunStatus(w http.ResponseWriter, req *http.Request
 }
 
 func (r *Relay) executePipeline(parent context.Context, run PipelineRun, pipeline Pipeline) {
+	defer r.recoverPipelinePanic(&run)
 	runtimeLimit := r.cfg.MaxPipelineRuntime
 	if pipeline.MaxRuntimeSeconds > 0 {
 		runtimeLimit = time.Duration(pipeline.MaxRuntimeSeconds) * time.Second
@@ -196,6 +198,17 @@ func (r *Relay) executePipeline(parent context.Context, run PipelineRun, pipelin
 	if err := r.store.AddEvent(Event{Kind: "pipeline.completed", Message: "Pipeline " + run.Pipeline + " completed", JobID: run.ID}); err != nil {
 		r.logger.Printf("pipeline %s completed but its event could not be saved: %v", run.ID, err)
 	}
+}
+
+func (r *Relay) recoverPipelinePanic(run *PipelineRun) {
+	if recover() == nil {
+		return
+	}
+	// Never include the recovered value: it may contain provider-controlled or
+	// tenant-sensitive content. The local stack identifies the code path while
+	// the durable record exposes only the bounded state transition.
+	r.logger.Printf("pipeline %s recovered an internal panic:\n%s", run.ID, debug.Stack())
+	r.failPipeline(run, errors.New("pipeline panicked; execution state is ambiguous; explicit resubmission required"))
 }
 
 func clonePipeline(pipeline Pipeline) Pipeline {

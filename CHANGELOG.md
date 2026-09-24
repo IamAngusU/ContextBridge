@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Isolated panics at worker-job, pipeline, schedule, inbox, and terminal-event
+  boundaries so one malformed work item cannot terminate the whole process.
+  Ambiguous execution remains terminal and is never silently replayed.
+- Made the bounded OpenAI-compatible SSE behavior explicit through the
+  `X-ContextBridge-Stream-Mode: final-result` response header and integration
+  documentation; native token-delta streaming is not claimed.
+
 ## v0.7.1 - 2026-09-22
 
 - Standardized `cluster chat`, console, and worker terminal output on clear

@@ -148,6 +148,7 @@ func (s *Server) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("X-ContextBridge-Stream-Mode", "final-result")
 		chunk := map[string]interface{}{"id": responseID, "object": "chat.completion.chunk", "created": created, "model": model, "choices": []map[string]interface{}{{"index": 0, "delta": map[string]string{"role": "assistant", "content": content}, "finish_reason": finish}}}
 		raw, _ := json.Marshal(chunk)
 		_, _ = fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", raw)

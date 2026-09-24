@@ -688,6 +688,7 @@ func (s *Server) scheduleReadiness(job Job) string {
 }
 
 func (s *Server) executeSchedule(ctx context.Context, id string, job Job) {
+	defer s.recoverSchedulePanic(id, job.ID)
 	item, ok := s.schedules.get(id)
 	if !ok {
 		return

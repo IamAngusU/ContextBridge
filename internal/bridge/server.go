@@ -1012,6 +1012,7 @@ func (s *Server) watchInbox(ctx context.Context) {
 				}
 				go func() {
 					defer func() { <-s.inboxSlots }()
+					defer s.recoverInboxPanic(processing)
 					s.processInboxFile(ctx, processing)
 				}()
 			}

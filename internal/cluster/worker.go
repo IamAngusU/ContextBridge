@@ -73,6 +73,24 @@ type Worker struct {
 	hardwareAt time.Time
 }
 
+var errWorkerExecutionPanicked = errors.New("worker execution panicked; execution state is ambiguous; explicit resubmission required")
+
+type workerExecutionFunc func() (json.RawMessage, *SealedEnvelope, Usage, *ExecutionMetadata, error)
+
+// safelyExecuteWorker is the work-item panic boundary. A panic after a model,
+// API, or adapter request may have produced side effects, so it is terminal and
+// deliberately classified as ambiguous rather than retried.
+func safelyExecuteWorker(run workerExecutionFunc) (result json.RawMessage, sealed *SealedEnvelope, usage Usage, execution *ExecutionMetadata, err error) {
+	defer func() {
+		if recover() == nil {
+			return
+		}
+		result, sealed, usage, execution = nil, nil, Usage{}, nil
+		err = errWorkerExecutionPanicked
+	}()
+	return run()
+}
+
 func (w *Worker) Idle() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -149,6 +167,13 @@ type WorkerEvent struct {
 }
 
 type WorkerReporter func(WorkerEvent)
+
+func isolateWorkerReporter(report WorkerReporter) WorkerReporter {
+	return func(event WorkerEvent) {
+		defer func() { _ = recover() }()
+		report(event)
+	}
+}
 
 func LoadWorker(cfg WorkerConfig) (*Worker, error) {
 	cfg.RelayURL = strings.TrimSpace(cfg.RelayURL)
@@ -330,6 +355,7 @@ func (w *Worker) RunWithEvents(ctx context.Context, report WorkerReporter) error
 	if report == nil {
 		report = func(WorkerEvent) {}
 	}
+	report = isolateWorkerReporter(report)
 	backoff := time.Second
 	attempt := 0
 	for ctx.Err() == nil {
@@ -509,9 +535,11 @@ func (w *Worker) connect(ctx context.Context, report WorkerReporter) error {
 			_ = write(WireMessage{Type: "started", JobID: job.ID, Attempt: job.Attempt})
 			provider, profile, model, reasoning := jobRequestLabels(job)
 			report(WorkerEvent{Kind: WorkerJobStarted, NodeName: node.Name, JobID: job.ID, Task: job.Requirements.Task, Provider: provider, Profile: profile, Model: model, Reasoning: reasoning})
-			result, sealed, usage, execution, runErr := w.execute(jobCtx, job, func(progress JobProgress) {
-				_ = write(WireMessage{Type: "progress", JobID: job.ID, Attempt: job.Attempt, Progress: &progress})
-				report(WorkerEvent{Kind: WorkerJobProgress, NodeName: node.Name, JobID: job.ID, Task: job.Requirements.Task, Phase: progress.Phase, Percent: progress.Percent, Detail: progress.Detail, Sequence: progress.Sequence, Text: progress.Text})
+			result, sealed, usage, execution, runErr := safelyExecuteWorker(func() (json.RawMessage, *SealedEnvelope, Usage, *ExecutionMetadata, error) {
+				return w.execute(jobCtx, job, func(progress JobProgress) {
+					_ = write(WireMessage{Type: "progress", JobID: job.ID, Attempt: job.Attempt, Progress: &progress})
+					report(WorkerEvent{Kind: WorkerJobProgress, NodeName: node.Name, JobID: job.ID, Task: job.Requirements.Task, Phase: progress.Phase, Percent: progress.Percent, Detail: progress.Detail, Sequence: progress.Sequence, Text: progress.Text})
+				})
 			})
 			errorText := ""
 			failureCode := ""

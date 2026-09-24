@@ -60,6 +60,9 @@ func workerFailureCode(err error) string {
 	if err == nil {
 		return ""
 	}
+	if errors.Is(err, errWorkerExecutionPanicked) {
+		return FailureExecutionStateAmbiguous
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return FailureWorkerExecutionTimeout
 	}

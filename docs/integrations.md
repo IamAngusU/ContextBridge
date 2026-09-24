@@ -44,6 +44,12 @@ to an arbitrary provider. The surface accepts bounded text/JSON requests and
 one validated image input where the selected route proves support. It is a
 compatibility boundary, not a claim to implement every OpenAI API feature.
 
+`stream: true` currently returns one bounded final-result SSE chunk followed
+by `[DONE]` after the routed job completes; it does not expose incremental
+provider token deltas. Such responses carry
+`X-ContextBridge-Stream-Mode: final-result` so clients can detect the exact
+contract instead of mistaking buffered completion for native token streaming.
+
 ## MCP stdio
 
 Start the bounded MCP server:

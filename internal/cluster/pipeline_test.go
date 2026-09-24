@@ -1,9 +1,13 @@
 package cluster
 
 import (
+	"bytes"
 	"encoding/json"
+	"log"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRenderPipelineInputIsBoundedToDeclaredValues(t *testing.T) {
@@ -17,6 +21,42 @@ func TestRenderPipelineInputIsBoundedToDeclaredValues(t *testing.T) {
 	}
 	if _, err := renderPipelineInput(`run $(dangerous)`, values); err == nil {
 		t.Fatal("non-JSON template must fail")
+	}
+}
+
+func TestPipelinePanicBoundaryPersistsAmbiguousFailure(t *testing.T) {
+	var logs bytes.Buffer
+	relay, err := NewRelay(RelayConfig{Database: filepath.Join(t.TempDir(), "relay.db"), AdminToken: "admin_pipeline_panic_012345678901234567890123"}, log.New(&logs, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+	run := PipelineRun{ID: "run-panic", Pipeline: "test", Status: "running", CreatedAt: time.Now().UTC()}
+	if err := relay.store.SavePipelineRun(run); err != nil {
+		t.Fatal(err)
+	}
+	const secret = "PIPELINE-PANIC-VALUE-MUST-NOT-PERSIST"
+	func() {
+		defer relay.recoverPipelinePanic(&run)
+		panic(secret)
+	}()
+	stored, err := relay.store.GetPipelineRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != "failed" || !strings.Contains(stored.Error, "execution state is ambiguous") || strings.Contains(stored.Error, secret) {
+		t.Fatalf("panic did not become a bounded terminal record: %#v", stored)
+	}
+	if strings.Contains(logs.String(), secret) || !strings.Contains(logs.String(), "recovered an internal panic") {
+		t.Fatalf("panic log was unsafe or missing: %q", logs.String())
+	}
+
+	control := PipelineRun{ID: "run-control", Pipeline: "test", Status: "running", CreatedAt: time.Now().UTC()}
+	func() {
+		defer relay.recoverPipelinePanic(&control)
+	}()
+	if control.Status != "running" || control.Error != "" {
+		t.Fatalf("non-panicking pipeline was changed: %#v", control)
 	}
 }
 

@@ -69,7 +69,7 @@ func TestOpenAICompatibilityAPIListsRoutesAndCompletes(t *testing.T) {
 	stream := authorizedRequest(t, http.MethodPost, httpServer.URL+"/openai/v1/chat/completions", cfg.Server.Token, streamBody)
 	defer stream.Body.Close()
 	streamRaw, _ := io.ReadAll(stream.Body)
-	if stream.StatusCode != http.StatusOK || stream.Header.Get("Content-Type") != "text/event-stream" || !bytes.Contains(streamRaw, []byte("data: [DONE]")) {
+	if stream.StatusCode != http.StatusOK || stream.Header.Get("Content-Type") != "text/event-stream" || stream.Header.Get("X-ContextBridge-Stream-Mode") != "final-result" || !bytes.Contains(streamRaw, []byte("data: [DONE]")) {
 		t.Fatalf("bounded SSE response failed: HTTP %d %q %s", stream.StatusCode, stream.Header.Get("Content-Type"), streamRaw)
 	}
 }

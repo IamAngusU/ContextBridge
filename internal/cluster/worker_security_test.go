@@ -89,6 +89,59 @@ func TestSealedWorkerFailureExposesOnlyStableRelayMetadata(t *testing.T) {
 	}
 }
 
+func TestWorkerExecutionPanicFailsClosedWithoutLeakingPanicValue(t *testing.T) {
+	const secret = "PANIC-VALUE-MUST-NOT-CROSS-RELAY"
+	result, sealed, usage, execution, err := safelyExecuteWorker(func() (json.RawMessage, *SealedEnvelope, Usage, *ExecutionMetadata, error) {
+		panic(secret)
+	})
+	if !errors.Is(err, errWorkerExecutionPanicked) {
+		t.Fatalf("panic returned %v", err)
+	}
+	if result != nil || sealed != nil || execution != nil || usage != (Usage{}) {
+		t.Fatalf("panic retained an apparent result: result=%s sealed=%v usage=%#v execution=%#v", result, sealed, usage, execution)
+	}
+	plainText, plainCode := relayVisibleWorkerFailure(Job{}, err)
+	if plainCode != FailureExecutionStateAmbiguous || strings.Contains(plainText, secret) {
+		t.Fatalf("plaintext panic classification was unsafe: error=%q code=%q", plainText, plainCode)
+	}
+	sealedText, sealedCode := relayVisibleWorkerFailure(Job{SealedPayload: &SealedEnvelope{Algorithm: sealedAlgorithm}}, err)
+	if sealedCode != FailureExecutionStateAmbiguous || sealedText != sealedJobFailureMessage(FailureExecutionStateAmbiguous) || strings.Contains(sealedText, secret) {
+		t.Fatalf("sealed panic classification was unsafe: error=%q code=%q", sealedText, sealedCode)
+	}
+}
+
+func TestWorkerExecutionNilPanicStillFailsClosed(t *testing.T) {
+	_, _, _, _, err := safelyExecuteWorker(func() (json.RawMessage, *SealedEnvelope, Usage, *ExecutionMetadata, error) {
+		panic(nil)
+	})
+	if !errors.Is(err, errWorkerExecutionPanicked) {
+		t.Fatalf("nil panic escaped the work-item boundary: %v", err)
+	}
+}
+
+func TestWorkerExecutionPanicBoundaryPreservesNormalResult(t *testing.T) {
+	wantResult := json.RawMessage(`{"ok":true}`)
+	wantSealed := &SealedEnvelope{Algorithm: sealedAlgorithm}
+	wantUsage := Usage{ComputeMS: 42}
+	wantExecution := &ExecutionMetadata{AdapterEndpointID: 7}
+	result, sealed, usage, execution, err := safelyExecuteWorker(func() (json.RawMessage, *SealedEnvelope, Usage, *ExecutionMetadata, error) {
+		return wantResult, wantSealed, wantUsage, wantExecution, nil
+	})
+	if err != nil || !bytes.Equal(result, wantResult) || sealed != wantSealed || usage != wantUsage || execution != wantExecution {
+		t.Fatalf("normal result changed: result=%s sealed=%#v usage=%#v execution=%#v err=%v", result, sealed, usage, execution, err)
+	}
+}
+
+func TestWorkerReporterPanicIsIsolated(t *testing.T) {
+	reporter := isolateWorkerReporter(func(WorkerEvent) { panic("terminal-renderer-bug") })
+	reporter(WorkerEvent{Kind: WorkerJobStarted, JobID: "job-one"})
+	called := false
+	isolateWorkerReporter(func(event WorkerEvent) { called = event.JobID == "job-two" })(WorkerEvent{JobID: "job-two"})
+	if !called {
+		t.Fatal("ordinary worker reporter event was lost")
+	}
+}
+
 func TestPairWorkerRejectsUnsafePollingIntervals(t *testing.T) {
 	for _, interval := range []int{-1, 0, 61, int(^uint(0) >> 1)} {
 		t.Run(strings.ReplaceAll(time.Duration(interval).String(), "-", "negative"), func(t *testing.T) {
