@@ -368,7 +368,7 @@ HOME="$sender_only/home" \
   CONTEXTBRIDGE_TEST_CALLS="$sender_only/calls" \
   sh "$root/install.sh" > "$sender_only/out"
 grep -F -- 'Sender-only mode does not need a local model provider.' "$sender_only/out" >/dev/null
-grep -F -- "cluster configure --config $sender_only/config.yml --mode client --relay-url https://relay.example.test/contextbridge --name auto" "$sender_only/calls" >/dev/null
+grep -Fqx -- "cluster configure --config $sender_only/config.yml --mode client --relay-url https://relay.example.test/contextbridge" "$sender_only/calls"
 if grep -F -- 'pair --config' "$sender_only/calls" >/dev/null; then
   echo "sender-only installer attempted worker pairing" >&2
   exit 1

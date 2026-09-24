@@ -387,8 +387,10 @@ if { [ "$cluster_mode" = "worker" ] || [ "$cluster_mode" = "client" ]; } && [ -z
   echo "A relay URL is required for $cluster_mode mode. Set CONTEXTBRIDGE_RELAY_URL for an unattended install." >&2
   exit 1
 fi
-if [ -n "$relay_url" ]; then
+if [ -n "$relay_url" ] && { [ "$cluster_mode" = "worker" ] || [ "$cluster_mode" = "all" ]; }; then
   "$INSTALL_DIR/contextbridge" cluster configure --config "$config" --mode "$cluster_mode" --relay-url "$relay_url" --name "$worker_name"
+elif [ -n "$relay_url" ]; then
+  "$INSTALL_DIR/contextbridge" cluster configure --config "$config" --mode "$cluster_mode" --relay-url "$relay_url"
 elif [ -n "$public_url" ]; then
   "$INSTALL_DIR/contextbridge" cluster configure --config "$config" --mode "$cluster_mode" --listen auto --public-url "$public_url" --name "$worker_name"
 elif [ "$cluster_mode" = "relay" ] || [ "$cluster_mode" = "all" ]; then
