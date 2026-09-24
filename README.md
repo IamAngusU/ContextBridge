@@ -365,7 +365,7 @@ For `route explain`, use a native cluster job such as [examples/cluster-job.json
 | --- | --- |
 | Connect an MCP client | `contextbridge mcp serve` · [Integrations](docs/integrations.md) |
 | Inspect schedules | `contextbridge schedule list` · [Automation](docs/automation.md) |
-| Read a completed job's receipt | `contextbridge cluster receipt show JOB_ID` |
+| Export or verify execution evidence | `contextbridge cluster receipt show JOB_ID` · [Execution receipts](docs/execution-receipts.md) |
 | Plan bounded multi-step work | [Agents and approval boundaries](docs/bounded-agent.md) |
 | Check for an update without installing it | `contextbridge update check` |
 

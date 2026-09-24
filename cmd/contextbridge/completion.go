@@ -96,7 +96,7 @@ $script:ContextBridgeOptions = @{
 	'cluster selftest' = @('--config','--providers','--local-model','--run','--dry-run','--image','--image-profile','--artifacts','--keep-artifacts','--timeout','--job-timeout','--poll')
     'cluster route' = @('explain','--config','--file','--job','--token','--json')
 	'cluster contract' = @('validate','--config','--file','--token','--json')
-	'cluster receipt' = @('show','export','verify','--config','--token','--out','--file')
+	'cluster receipt' = @('show','export','verify','keygen','--config','--token','--out','--file','--signing-key','--trust-key','--offline','--private-out','--public-out','--key-id','--issuer')
     'route explain' = @('--config','--file','--job','--token','--json')
 	'selftest' = @('--config','--providers','--local-model','--run','--dry-run','--image','--image-profile','--artifacts','--keep-artifacts','--timeout','--job-timeout','--poll')
     'cluster configure' = @('--config','--mode','--relay-url','--public-url','--name','--listen')
@@ -216,7 +216,7 @@ _contextbridge_complete() {
 	  "cluster selftest") candidates="--config --providers --local-model --run --dry-run --image --image-profile --artifacts --keep-artifacts --timeout --job-timeout --poll" ;;
       "cluster route") candidates="--config --file --job --token --json" ;;
 	  "cluster contract") candidates="validate --config --file --token --json" ;;
-	  "cluster receipt") candidates="show export verify --config --token --out --file" ;;
+	  "cluster receipt") candidates="show export verify keygen --config --token --out --file --signing-key --trust-key --offline --private-out --public-out --key-id --issuer" ;;
       "route explain") candidates="--config --file --job --token --json" ;;
       "cluster submit") candidates="--config --file --token --wait --e2ee --stream --artifacts --idempotency-key" ;;
       "cluster status") candidates="--config --json" ;;
@@ -257,7 +257,7 @@ _contextbridge_complete() {
   elif [[ "$option_key" == "cluster agent" && "$COMP_CWORD" -eq 3 ]]; then
     candidates="plan run auto"
 	elif [[ "$option_key" == "cluster receipt" && "$COMP_CWORD" -eq 3 ]]; then
-	  candidates="show export verify"
+	  candidates="show export verify keygen"
   elif [ "$COMP_CWORD" -eq 1 ]; then
     candidates="init serve run stop uninstall console submit schedule result review health dashboard status doctor hardware models resources pull runtime mcp benchmark verification relay pair worker cluster route selftest update completion version help"
   elif [ "$COMP_CWORD" -eq 2 ]; then
@@ -401,10 +401,10 @@ case "$words[2]" in
 		;;
 	  receipt)
 		if (( CURRENT == 4 )); then
-		  _values 'receipt action' show export verify
+		  _values 'receipt action' show export verify keygen
 		  return
 		fi
-		_arguments "${config[@]}" '--token[Producer, observer, or admin token]:token:' '--out[New receipt JSON file]:receipt file:_files' '--file[Receipt JSON file]:receipt file:_files' '*:job ID:'
+		_arguments "${config[@]}" '--token[Producer, observer, or admin token]:token:' '--out[New receipt JSON file]:receipt file:_files' '--file[Receipt JSON file]:receipt file:_files' '--signing-key[Operator receipt-signing private key]:key file:_files' '--trust-key[Explicitly trusted receipt public key]:key file:_files' '--offline[Verify a signed receipt without relay access]' '--private-out[New private receipt-signing key]:key file:_files' '--public-out[New public receipt trust key]:key file:_files' '--key-id[Signer key identifier]:ID:' '--issuer[Signer issuer name]:name:' '*:job ID:'
 		;;
       configure) _arguments "${config[@]}" '--mode[Cluster mode]:mode:(local relay worker all)' '--relay-url[Public relay URL]:URL:' '--public-url[Public HTTPS relay URL]:URL:' '--name[Worker node name]:name:' '--listen[Relay listen address]:address:' ;;
 	  dashboard) _arguments "${config[@]}" '--no-open[Print URL without opening a page viewer]' ;;

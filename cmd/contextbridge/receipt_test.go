@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -204,6 +206,165 @@ func TestExecutionReceiptRejectsUnverifiableTransferredBytes(t *testing.T) {
 				t.Fatal("unverifiable transferred bytes received a verified execution receipt")
 			}
 		})
+	}
+}
+
+func TestSignedExecutionReceiptBindsExactEvidenceAndExplicitTrustKey(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signingKey := receiptSigningKey{
+		Schema: receiptSigningKeySchema, KeyID: "operator-2026", Issuer: "Example Operator", Algorithm: receiptSignatureAlgorithm,
+		PrivateKey: base64.StdEncoding.EncodeToString(privateKey),
+	}
+	trustKey := receiptTrustKey{
+		Schema: receiptTrustKeySchema, KeyID: signingKey.KeyID, Issuer: signingKey.Issuer, Algorithm: receiptSignatureAlgorithm,
+		PublicKey: base64.StdEncoding.EncodeToString(publicKey),
+	}
+	unsigned, err := buildExecutionReceipt(receiptTestJob(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed, err := signExecutionReceipt(unsigned, signingKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if signed.Schema != executionReceiptSignedSchema || signed.Signature == nil {
+		t.Fatalf("signed receipt shape = %#v", signed)
+	}
+	if err := validateExecutionReceiptChecksum(signed); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyExecutionReceiptSignature(signed, trustKey); err != nil {
+		t.Fatal(err)
+	}
+
+	mutated := signed
+	mutated.Evidence.JobID = "job-attacker-recomputed-checksum"
+	mutated.Checksum, err = executionReceiptChecksum(mutated.Schema, mutated.Evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateExecutionReceiptChecksum(mutated); err != nil {
+		t.Fatalf("attacker-recomputed checksum should remain only an integrity check: %v", err)
+	}
+	if err := verifyExecutionReceiptSignature(mutated, trustKey); err == nil || !strings.Contains(err.Error(), "signature") {
+		t.Fatalf("signature copied to different job evidence was accepted: %v", err)
+	}
+
+	wrongTrust := trustKey
+	wrongTrust.KeyID = "different-key"
+	if err := verifyExecutionReceiptSignature(signed, wrongTrust); err == nil || !strings.Contains(err.Error(), "explicitly trusted") {
+		t.Fatalf("different explicit trust identity was accepted: %v", err)
+	}
+}
+
+func TestReceiptSchemasKeepUnsignedAndSignedClaimsSeparate(t *testing.T) {
+	receipt, err := buildExecutionReceipt(receiptTestJob(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt.Signature = &executionReceiptSignature{Algorithm: receiptSignatureAlgorithm, KeyID: "key", Issuer: "Issuer", Value: "value"}
+	raw, _ := json.Marshal(receipt)
+	if _, err := decodeExecutionReceipt(raw); err == nil || !strings.Contains(err.Error(), "v1") {
+		t.Fatalf("v1 receipt smuggled a signature: %v", err)
+	}
+	receipt.Signature = nil
+	receipt.Schema = executionReceiptSignedSchema
+	raw, _ = json.Marshal(receipt)
+	if _, err := decodeExecutionReceipt(raw); err == nil || !strings.Contains(err.Error(), "missing") {
+		t.Fatalf("v2 receipt omitted its signature: %v", err)
+	}
+}
+
+func TestSignedReceiptDoesNotExposeSealedPayloadOrResult(t *testing.T) {
+	job := receiptTestJob(t)
+	job.Payload = nil
+	job.Result = nil
+	job.SealedPayload = &cluster.SealedEnvelope{Algorithm: "x25519-aes-256-gcm", EphemeralPublic: "payload-public-secret", Nonce: "payload-nonce-secret", Ciphertext: "payload-ciphertext-secret"}
+	job.SealedResult = &cluster.SealedEnvelope{Algorithm: "x25519-aes-256-gcm", Nonce: "result-nonce-secret", Ciphertext: "result-ciphertext-secret"}
+	receipt, err := buildExecutionReceipt(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"payload-public-secret", "payload-nonce-secret", "payload-ciphertext-secret", "result-nonce-secret", "result-ciphertext-secret"} {
+		if bytes.Contains(raw, []byte(secret)) {
+			t.Fatalf("sealed receipt exposed %q: %s", secret, raw)
+		}
+	}
+	if receipt.Evidence.Payload.Mode != "sealed" || receipt.Evidence.Result.Mode != "sealed" || receipt.Evidence.Payload.SHA256 == "" || receipt.Evidence.Result.SHA256 == "" {
+		t.Fatalf("sealed envelope digests were not retained: %#v", receipt.Evidence)
+	}
+}
+
+func TestClusterReceiptSignedExportVerifiesOfflineAfterRelayIsGone(t *testing.T) {
+	job := receiptTestJob(t)
+	var reads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reads.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(job)
+	}))
+
+	directory := t.TempDir()
+	configPath := filepath.Join(directory, "config.yml")
+	if err := config.Default(configPath); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Cluster.Relay.PublicURL = server.URL
+	cfg.Cluster.ClientToken = "receipt-token"
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	privatePath := filepath.Join(directory, "receipt-private.json")
+	publicPath := filepath.Join(directory, "receipt-public.json")
+	if err := clusterReceiptKeygenCommand([]string{"--private-out", privatePath, "--public-out", publicPath, "--key-id", "relay-2026", "--issuer", "Example Relay"}); err != nil {
+		t.Fatal(err)
+	}
+	receiptPath := filepath.Join(directory, "signed-receipt.json")
+	if err := clusterReceiptExportCommand([]string{"--config", configPath, "--signing-key", privatePath, "--out", receiptPath, job.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if reads.Load() != 1 {
+		t.Fatalf("signed export read relay %d times, want one", reads.Load())
+	}
+	if err := clusterReceiptVerifyCommand([]string{"--config", configPath, "--file", receiptPath, "--trust-key", publicPath}); err != nil {
+		t.Fatal(err)
+	}
+	if reads.Load() != 2 {
+		t.Fatalf("online signed verification read relay %d times, want two total", reads.Load())
+	}
+	server.Close()
+	if err := clusterReceiptVerifyCommand([]string{"--file", receiptPath, "--trust-key", publicPath, "--offline"}); err != nil {
+		t.Fatal(err)
+	}
+	if reads.Load() != 2 {
+		t.Fatal("offline verification contacted the retired relay")
+	}
+	if err := clusterReceiptVerifyCommand([]string{"--file", receiptPath, "--offline"}); err == nil || !strings.Contains(err.Error(), "--trust-key") {
+		t.Fatalf("signed receipt trusted an embedded identity: %v", err)
+	}
+
+	unsigned, err := buildExecutionReceipt(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsignedRaw, _ := json.Marshal(unsigned)
+	unsignedPath := filepath.Join(directory, "unsigned-receipt.json")
+	if err := os.WriteFile(unsignedPath, unsignedRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := clusterReceiptVerifyCommand([]string{"--file", unsignedPath, "--offline"}); err == nil || !strings.Contains(err.Error(), "cannot be authenticated offline") {
+		t.Fatalf("unsigned checksum was presented as offline authenticity: %v", err)
 	}
 }
 

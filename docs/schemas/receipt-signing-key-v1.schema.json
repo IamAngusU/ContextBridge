@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/IamAngusU/ContextBridge/blob/main/docs/schemas/receipt-signing-key-v1.schema.json",
+  "title": "ContextBridge execution-receipt signing key v1",
+  "description": "Secret operator key. Do not publish or include in evidence bundles.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "key_id", "issuer", "algorithm", "private_key"],
+  "properties": {
+    "schema": { "const": "contextbridge.receipt-signing-key.v1" },
+    "key_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+    "issuer": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "algorithm": { "const": "ed25519" },
+    "private_key": { "type": "string", "contentEncoding": "base64" }
+  }
+}
