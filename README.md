@@ -101,6 +101,28 @@ Your local relay queues the request, your worker runs a compatible installed mod
 
 Commands use the installer-created configuration automatically. For a custom installation, append `--config /path/to/config.yml`. Read [install.ps1](install.ps1) / [install.sh](install.sh) before executing them, or use the [release archives](https://github.com/IamAngusU/ContextBridge/releases/latest).
 
+### Connect an app without reading YAML
+
+If an app accepts an OpenAI-compatible base URL, let CB generate a private,
+ready-to-load environment file:
+
+```sh
+contextbridge integrate openai --write-env .contextbridge.env
+```
+
+Point the app at that file, or run `contextbridge integrate openai` to see the
+non-secret settings. Existing files are never overwritten and the token is
+hidden unless you explicitly request `--show-token`. For an MCP client:
+
+```sh
+contextbridge integrate mcp --json
+```
+
+Copy the emitted server entry into the client's MCP configuration. See
+[Application integrations](docs/integrations.md) for the native job API, PHP,
+shared hosting and security boundaries. A remote website uses its own scoped
+producer token; do not expose the local service token to browser JavaScript.
+
 > [!TIP]
 > Trying CB does not lock you in. `contextbridge uninstall --dry-run` previews removal without stopping or deleting anything. [Uninstall keeps your configuration and data by default.](#uninstall)
 
@@ -364,6 +386,7 @@ For `route explain`, use a native cluster job such as [examples/cluster-job.json
 
 | Want to… | Command / guide |
 | --- | --- |
+| Connect an OpenAI-compatible app | `contextbridge integrate openai --write-env .contextbridge.env` · [Integrations](docs/integrations.md) |
 | Connect an MCP client | `contextbridge mcp serve` · [Integrations](docs/integrations.md) |
 | Inspect schedules | `contextbridge schedule list` · [Automation](docs/automation.md) |
 | Drain or resume a worker for maintenance | `contextbridge cluster node drain\|resume NODE_ID` · [Pools and placement](docs/pools-and-placement.md) |

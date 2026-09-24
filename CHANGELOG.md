@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added `contextbridge integrate openai|mcp`: it emits redacted, exact
+  application connection settings, can create a new non-overwriting private
+  OpenAI-compatible environment file, and generates a ready-to-paste MCP stdio
+  entry without exposing a bearer token.
 - Added wire-v3 assignment fencing: a stable durable cluster identity,
   monotonically increasing relay process epochs, and exact per-assignment
   generations now bind dispatch, cancellation, progress, completion, and slot

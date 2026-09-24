@@ -9,13 +9,14 @@ import (
 var completionRootCommands = []string{
 	"init", "serve", "run", "stop", "console", "submit", "schedule", "result", "review",
 	"health", "dashboard", "status", "doctor", "hardware", "models", "resources", "uninstall",
-	"pull", "runtime", "mcp", "benchmark", "verification", "relay", "pair", "worker", "cluster", "route", "selftest", "update", "completion", "version", "help",
+	"pull", "runtime", "mcp", "integrate", "benchmark", "verification", "relay", "pair", "worker", "cluster", "route", "selftest", "update", "completion", "version", "help",
 }
 
 var completionSubcommands = map[string][]string{
 	"schedule":     {"add", "list", "show", "pause", "resume", "run", "delete"},
 	"runtime":      {"install"},
 	"mcp":          {"serve"},
+	"integrate":    {"openai", "mcp"},
 	"verification": {"verify"},
 	"cluster":      {"status", "node", "protocol", "conformance", "submit", "chat", "agent", "selftest", "route", "contract", "receipt", "login", "token", "pairing", "configure", "dashboard", "pipeline"},
 	"route":        {"explain"},
@@ -55,6 +56,7 @@ $script:ContextBridgeSubcommands = @{
     schedule = @('add','list','show','pause','resume','run','delete')
     runtime = @('install')
     mcp = @('serve')
+    integrate = @('openai','mcp')
     verification = @('verify')
 	cluster = @('status','node','protocol','conformance','submit','chat','agent','selftest','route','contract','receipt','login','token','pairing','configure','dashboard','pipeline')
     route = @('explain')
@@ -82,6 +84,8 @@ $script:ContextBridgeOptions = @{
     'pull' = @('--config')
     'runtime install' = @('--config')
     'mcp serve' = @('--config')
+    'integrate openai' = @('--config','--json','--show-token','--write-env')
+    'integrate mcp' = @('--config','--json')
     'benchmark' = @('--json','--samples','--warmup','--database-jobs','--idle-duration','--binary')
     'verification verify' = @('--file','--trust-key','--artifact','--require-artifact','--evidence-dir','--require-evidence','--json')
     'relay' = @('--config')
@@ -116,7 +120,7 @@ $script:ContextBridgeValueOptions = @{
     '--role' = @('producer','observer')
 }
 $script:ContextBridgeTakesValue = @(
-	'--config','--install-dir','--file','--job','--artifacts','--artifact','--attach-image','--identity','--job-dir','--token-file','--trust-key','--evidence-dir',
+	'--config','--install-dir','--file','--job','--artifacts','--artifact','--attach-image','--identity','--job-dir','--token-file','--trust-key','--evidence-dir','--write-env',
     '--slots','--endpoint','--relay','--name','--providers','--models','--tasks','--groups',
     '--token','--provider','--group','--model','--profile','--reasoning','--session','--prompt',
 	'--min-artifacts','--min-images','--local-model','--image-profile','--timeout','--job-timeout','--poll','--idempotency-key',
@@ -185,7 +189,7 @@ _contextbridge_complete() {
   if (( COMP_CWORD > 2 )); then
     subcommand="${COMP_WORDS[2]:-}"
     case "$command" in
-      schedule|runtime|mcp|verification|cluster|route|update)
+      schedule|runtime|mcp|integrate|verification|cluster|route|update)
         if [[ -n "$subcommand" && "$subcommand" != -* ]]; then
           option_key="$command $subcommand"
         fi
@@ -194,7 +198,7 @@ _contextbridge_complete() {
   fi
 
   case "$previous" in
-    --config|--file|--artifacts|--artifact|--attach-image|--identity|--job-dir|--token-file|--binary|--trust-key|--evidence-dir)
+    --config|--file|--artifacts|--artifact|--attach-image|--identity|--job-dir|--token-file|--binary|--trust-key|--evidence-dir|--write-env)
       if declare -F _filedir >/dev/null 2>&1; then _filedir; else COMPREPLY=( $(compgen -f -- "$current") ); fi
       return ;;
     --provider) candidates="adapter ollama nuextract jina" ;;
@@ -202,7 +206,7 @@ _contextbridge_complete() {
     --reasoning) candidates="instant medium high xhigh pro max" ;;
     --mode) candidates="local relay worker all" ;;
     --role) candidates="producer observer" ;;
-    --wait|--e2ee|--stream|--json|--no-open|--topmost|--image|--new-session|--new-session-per-job|--foreground-new-session|--run|--dry-run|--keep-artifacts|--no-updates|--discover|--force|--relay-only|--require-artifact|--require-evidence) boolean_previous=1 ;;
+    --wait|--e2ee|--stream|--json|--show-token|--no-open|--topmost|--image|--new-session|--new-session-per-job|--foreground-new-session|--run|--dry-run|--keep-artifacts|--no-updates|--discover|--force|--relay-only|--require-artifact|--require-evidence) boolean_previous=1 ;;
   esac
   if [ -n "${candidates:-}" ]; then
     COMPREPLY=( $(compgen -W "$candidates" -- "$current") )
@@ -231,6 +235,8 @@ _contextbridge_complete() {
       "cluster token") candidates="--config --role --subject" ;;
       "cluster pairing") candidates="--config --approve --deny" ;;
       "mcp serve") candidates="--config" ;;
+      "integrate openai") candidates="--config --json --show-token --write-env" ;;
+      "integrate mcp") candidates="--config --json" ;;
       "verification verify") candidates="--file --trust-key --artifact --require-artifact --evidence-dir --require-evidence --json" ;;
       benchmark) candidates="--json --samples --warmup --database-jobs --idle-duration --binary" ;;
       "schedule add") candidates="--config --file" ;;
@@ -261,12 +267,13 @@ _contextbridge_complete() {
 	elif [[ "$option_key" == "cluster receipt" && "$COMP_CWORD" -eq 3 ]]; then
 	  candidates="show export verify keygen"
   elif [ "$COMP_CWORD" -eq 1 ]; then
-    candidates="init serve run stop uninstall console submit schedule result review health dashboard status doctor hardware models resources pull runtime mcp benchmark verification relay pair worker cluster route selftest update completion version help"
+    candidates="init serve run stop uninstall console submit schedule result review health dashboard status doctor hardware models resources pull runtime mcp integrate benchmark verification relay pair worker cluster route selftest update completion version help"
   elif [ "$COMP_CWORD" -eq 2 ]; then
     case "$command" in
       schedule) candidates="add list show pause resume run delete" ;;
       runtime) candidates="install" ;;
       mcp) candidates="serve" ;;
+      integrate) candidates="openai mcp" ;;
       verification) candidates="verify" ;;
 	  cluster) candidates="status node protocol conformance submit chat agent selftest route contract receipt login token pairing configure dashboard pipeline" ;;
       route) candidates="explain" ;;
@@ -308,6 +315,7 @@ root=(
     'pull:Download a managed model'
     'runtime:Manage local runtimes'
     'mcp:Expose bounded local tools over MCP stdio'
+    'integrate:Generate safe application connection settings'
     'benchmark:Measure bridge-only overhead and resource footprint'
     'verification:Verify signed, time-bounded interoperability statements'
     'relay:Run a relay'
@@ -347,6 +355,17 @@ case "$words[2]" in
       return
     fi
     _arguments "${config[@]}"
+    ;;
+  integrate)
+    if (( CURRENT == 3 )); then
+      _values 'integration target' openai mcp
+      return
+    fi
+    case "$words[3]" in
+      openai) _arguments "${config[@]}" '--json[Print redacted machine-readable connection settings]' '--show-token[Explicitly include the local API token in terminal output]' '--write-env[Create a new private environment file without overwriting]:environment file:_files' ;;
+      mcp) _arguments "${config[@]}" '--json[Print the MCP client configuration as JSON]' ;;
+      *) _arguments '*:argument:' ;;
+    esac
     ;;
   benchmark)
     _arguments '--json[Print machine-readable JSON]' '--samples[Timed samples per operation and concurrency]:count:' '--warmup[Warm-up samples per operation]:count:' '--database-jobs[Jobs used for database growth measurement]:count:' '--idle-duration[Idle relay sampling duration]:duration:' '--binary[Binary whose size is reported]:binary:_files'

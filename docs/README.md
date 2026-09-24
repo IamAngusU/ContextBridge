@@ -32,7 +32,7 @@ described as vendor integrations here.
 - [Bounded agents](bounded-agent.md): manual approval, local-only auto mode,
   and operator-owned authority envelopes.
 - [Application integrations](integrations.md): native jobs, OpenAI-compatible
-  input, MCP, PHP, and the folder inbox.
+  input, one-command connection settings, MCP, PHP, and the folder inbox.
 - [Provider-neutral adapters](adapters.md): out-of-tree endpoint contract.
 - [Hosted Relay readiness](hosted-relay.md): what is and is not ready for a
   managed coordination service.

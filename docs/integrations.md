@@ -29,6 +29,27 @@ separates per-job choices, operator authority and supported file inputs.
 
 ## OpenAI-compatible input
 
+Generate the exact settings for the current installation without printing its
+secret:
+
+```sh
+contextbridge integrate openai
+```
+
+For an application that reads OpenAI-style environment variables, create a
+new private file in one step:
+
+```sh
+contextbridge integrate openai --write-env .contextbridge.env
+```
+
+The command refuses to overwrite an existing file. It writes
+`OPENAI_BASE_URL`, `OPENAI_API_KEY` and `OPENAI_MODEL`; the file is excluded by
+the repository's default `.gitignore`. File mode `0600` is requested where the
+platform supports Unix permissions. Keep the file private and load it only
+into the intended local application. Use `--show-token` only for an explicit
+copy operation; normal terminal and JSON output remain redacted.
+
 The local service exposes authenticated endpoints for clients that can change a
 base URL:
 
@@ -57,6 +78,16 @@ and `stream_mode_unavailable` **before submitting a job**. Requiring
 discovering the mismatch only after remote work has already executed.
 
 ## MCP stdio
+
+Generate a ready-to-paste generic MCP client entry with the exact executable
+and configuration paths:
+
+```sh
+contextbridge integrate mcp --json
+```
+
+This output contains no ContextBridge bearer token. The MCP client launches
+the bounded stdio process itself.
 
 Start the bounded MCP server:
 

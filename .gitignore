@@ -6,4 +6,5 @@
 /data/
 /inbox/
 /config.yml
+.contextbridge.env
 *.log
