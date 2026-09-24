@@ -165,6 +165,10 @@ relay administrator token or the new producer token:
 contextbridge integrate relay \
   --subject my-server-app \
   --lifetime-hours 720 \
+  --max-queued-jobs 8 \
+  --max-jobs-per-hour 120 \
+  --providers ollama \
+  --egress local_only \
   --write-env ./contextbridge-producer.env
 ```
 
@@ -174,6 +178,17 @@ channel and keep it outside the web root. `--groups private,gpu` can restrict
 the token to operator-defined scheduling groups; `--lifetime-hours 0` is an
 explicit non-expiring choice rather than the default. The command's terminal
 and JSON metadata remain redacted.
+
+Producer governance is part of the issued credential, not a promise made by
+the calling application. `--max-queued-jobs` lowers its concurrent queue
+share; `--max-jobs-per-hour` is a durable, producer-scoped fixed window that
+survives relay restarts; `--providers` is an allowlist; and `--egress
+local_only` prevents the credential from widening a local-only boundary. An
+exact idempotent replay returns its existing job without consuming another
+hourly admission. Current governance deliberately does not claim daily token,
+compute, or cost quotas: unknown provider usage is never treated as zero, and
+those budgets require reservation-grade usage evidence before enforcement can
+be trustworthy.
 
 Minimal dependency-free [Python and Node.js server examples](../examples/server-app/README.md)
 show idempotent submission, persisted job IDs, bounded polling and terminal

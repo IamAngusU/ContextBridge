@@ -86,7 +86,7 @@ $script:ContextBridgeOptions = @{
     'mcp serve' = @('--config')
     'integrate openai' = @('--config','--json','--show-token','--write-env','--check','--live')
     'integrate mcp' = @('--config','--json')
-    'integrate relay' = @('--config','--json','--write-env','--subject','--groups','--lifetime-hours')
+    'integrate relay' = @('--config','--json','--write-env','--subject','--groups','--lifetime-hours','--max-queued-jobs','--max-jobs-per-hour','--providers','--egress')
     'benchmark' = @('--json','--samples','--warmup','--database-jobs','--idle-duration','--binary')
     'verification verify' = @('--file','--trust-key','--artifact','--require-artifact','--evidence-dir','--require-evidence','--json')
     'relay' = @('--config')
@@ -110,7 +110,7 @@ $script:ContextBridgeOptions = @{
     'cluster dashboard' = @('--config','--no-open')
     'cluster pipeline' = @('--config','--name','--file')
     'cluster login' = @('--config','--token-file')
-    'cluster token' = @('--config','--role','--subject')
+    'cluster token' = @('--config','--role','--subject','--groups','--lifetime-hours','--max-queued-jobs','--max-jobs-per-hour','--providers','--egress')
     'cluster pairing' = @('--config','--approve','--deny')
     'update' = @('--config','--force','--json','--managed-service','--relay-only')
 }
@@ -235,12 +235,12 @@ _contextbridge_complete() {
       "cluster dashboard") candidates="--config --no-open" ;;
       "cluster pipeline") candidates="--config --name --file" ;;
       "cluster login") candidates="--config --token-file" ;;
-      "cluster token") candidates="--config --role --subject" ;;
+      "cluster token") candidates="--config --role --subject --groups --lifetime-hours --max-queued-jobs --max-jobs-per-hour --providers --egress" ;;
       "cluster pairing") candidates="--config --approve --deny" ;;
       "mcp serve") candidates="--config" ;;
       "integrate openai") candidates="--config --json --show-token --write-env --check --live" ;;
       "integrate mcp") candidates="--config --json" ;;
-      "integrate relay") candidates="--config --json --write-env --subject --groups --lifetime-hours" ;;
+      "integrate relay") candidates="--config --json --write-env --subject --groups --lifetime-hours --max-queued-jobs --max-jobs-per-hour --providers --egress" ;;
       "verification verify") candidates="--file --trust-key --artifact --require-artifact --evidence-dir --require-evidence --json" ;;
       benchmark) candidates="--json --samples --warmup --database-jobs --idle-duration --binary" ;;
       "schedule add") candidates="--config --file" ;;
@@ -368,7 +368,7 @@ case "$words[2]" in
     case "$words[3]" in
       openai) _arguments "${config[@]}" '--json[Print redacted machine-readable connection settings]' '--show-token[Explicitly include the local API token in terminal output]' '--write-env[Create a new private environment file without overwriting]:environment file:_files' '--check[Verify service, authentication and route without inference]' '--live[Also send one explicit bounded live inference smoke request]' ;;
       mcp) _arguments "${config[@]}" '--json[Print the MCP client configuration as JSON]' ;;
-      relay) _arguments "${config[@]}" '--json[Print redacted credential metadata]' '--write-env[Create a new private producer environment file]:environment file:_files' '--subject[Remote application identity]:identity:' '--groups[Comma-separated scheduling groups]:groups:' '--lifetime-hours[Credential lifetime; 0 never expires]:hours:' ;;
+      relay) _arguments "${config[@]}" '--json[Print redacted credential metadata]' '--write-env[Create a new private producer environment file]:environment file:_files' '--subject[Remote application identity]:identity:' '--groups[Comma-separated scheduling groups]:groups:' '--lifetime-hours[Credential lifetime; 0 never expires]:hours:' '--max-queued-jobs[Producer queued-job limit]:count:' '--max-jobs-per-hour[Durable hourly admission limit]:count:' '--providers[Comma-separated provider allowlist]:providers:' '--egress[Producer egress ceiling]:egress:(local_only)' ;;
       *) _arguments '*:argument:' ;;
     esac
     ;;
@@ -444,7 +444,7 @@ case "$words[2]" in
 	  dashboard) _arguments "${config[@]}" '--no-open[Print URL without opening a page viewer]' ;;
       pipeline) _arguments "${config[@]}" '--name[Pipeline name]:name:' '--file[Pipeline input JSON]:input file:_files' ;;
       login) _arguments "${config[@]}" '--token-file[Producer token file]:token file:_files' ;;
-      token) _arguments "${config[@]}" '--role[Token role]:role:(producer observer)' '--subject[Token label]:label:' ;;
+	  token) _arguments "${config[@]}" '--role[Token role]:role:(producer observer)' '--subject[Token label]:label:' '--groups[Comma-separated scheduling groups]:groups:' '--lifetime-hours[Credential lifetime; 0 never expires]:hours:' '--max-queued-jobs[Producer queued-job limit]:count:' '--max-jobs-per-hour[Durable hourly admission limit]:count:' '--providers[Comma-separated provider allowlist]:providers:' '--egress[Producer egress ceiling]:egress:(local_only)' ;;
       pairing) _arguments "${config[@]}" '--approve[Approve pairing code]:code:' '--deny[Deny pairing code]:code:' ;;
       *) _arguments '*:argument:' ;;
     esac

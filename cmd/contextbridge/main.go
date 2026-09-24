@@ -2091,6 +2091,12 @@ func clusterTokenCommand(args []string) error {
 	path := flags.String("config", defaultConfigPath(), "config path")
 	role := flags.String("role", "producer", "producer or observer")
 	subject := flags.String("subject", "client", "token label")
+	groups := flags.String("groups", "", "comma-separated scheduling groups")
+	lifetimeHours := flags.Int("lifetime-hours", 0, "credential lifetime in hours; 0 never expires")
+	maxQueuedJobs := flags.Int("max-queued-jobs", 0, "producer queued-job limit; 0 uses the relay default")
+	maxJobsPerHour := flags.Int("max-jobs-per-hour", 0, "durable producer admission limit; 0 disables it")
+	providers := flags.String("providers", "", "comma-separated provider allowlist")
+	egress := flags.String("egress", "", "producer egress ceiling: local_only or empty")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -2099,7 +2105,11 @@ func clusterTokenCommand(args []string) error {
 		return err
 	}
 	var output map[string]interface{}
-	if err := clusterPOST(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/tokens", cfg.Cluster.Relay.AdminToken, map[string]interface{}{"role": *role, "subject": *subject}, &output); err != nil {
+	request := map[string]interface{}{
+		"role": *role, "subject": *subject, "groups": splitWorkerList(*groups), "lifetime_hours": *lifetimeHours,
+		"producer_limits": cluster.ProducerLimits{MaxQueuedJobs: *maxQueuedJobs, MaxJobsPerHour: *maxJobsPerHour, Providers: splitWorkerList(*providers), Egress: strings.TrimSpace(*egress)},
+	}
+	if err := clusterPOST(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/tokens", cfg.Cluster.Relay.AdminToken, request, &output); err != nil {
 		return err
 	}
 	return json.NewEncoder(os.Stdout).Encode(output)

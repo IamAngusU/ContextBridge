@@ -20,6 +20,7 @@ const (
 const (
 	AdmissionCodeAdapterSessionBusy    = "adapter.session_busy"
 	AdmissionCodeCapacityOwnerQueue    = "capacity.owner_queue_full"
+	AdmissionCodeCapacityOwnerRate     = "capacity.owner_hourly_jobs_full"
 	AdmissionCodeCapacityOwnerReserve  = "capacity.owner_reservation_full"
 	AdmissionCodeCapacityQueue         = "capacity.queue_full"
 	AdmissionCodeCapacityReservation   = "capacity.reservation_full"
@@ -59,6 +60,7 @@ const (
 
 var stableAdmissionErrorCodes = []string{
 	AdmissionCodeAdapterSessionBusy,
+	AdmissionCodeCapacityOwnerRate,
 	AdmissionCodeCapacityOwnerQueue,
 	AdmissionCodeCapacityOwnerReserve,
 	AdmissionCodeCapacityQueue,
@@ -239,6 +241,8 @@ func admissionStoreErrorCode(err error) string {
 		return AdmissionCodeCapacityQueue
 	case errors.Is(err, ErrOwnerQueueCapacity):
 		return AdmissionCodeCapacityOwnerQueue
+	case errors.Is(err, ErrOwnerRateCapacity):
+		return AdmissionCodeCapacityOwnerRate
 	case errors.Is(err, ErrReservationCapacity):
 		return AdmissionCodeCapacityReservation
 	case errors.Is(err, ErrOwnerReservationCapacity):

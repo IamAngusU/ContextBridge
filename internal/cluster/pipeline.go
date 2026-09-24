@@ -63,7 +63,7 @@ func (r *Relay) handlePipelineRun(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("pipeline input must be valid JSON"))
 		return
 	}
-	run := PipelineRun{ID: randomID("run"), Pipeline: name, TenantID: pipeline.TenantID, Status: "running", Input: input, CreatedAt: time.Now().UTC()}
+	run := PipelineRun{ID: randomID("run"), Pipeline: name, TenantID: pipeline.TenantID, ProducerLimits: r.producerLimits(record), Status: "running", Input: input, CreatedAt: time.Now().UTC()}
 	run.OwnerSubject = record.Subject
 	if !r.beginAdmission() {
 		writeError(w, http.StatusServiceUnavailable, errors.New("relay is stopping"))
@@ -173,7 +173,7 @@ func (r *Relay) executePipeline(parent context.Context, run PipelineRun, pipelin
 				r.failPipeline(&run, errors.New("relay is stopping"))
 				return
 			}
-			job, err := r.store.CreateJobAdmitted(SubmitRequest{
+			job, err := r.store.CreateJobAdmittedGoverned(SubmitRequest{
 				OwnerSubject:   run.OwnerSubject,
 				TenantID:       run.TenantID,
 				Source:         "pipeline:" + run.Pipeline,
@@ -184,7 +184,7 @@ func (r *Relay) executePipeline(parent context.Context, run PipelineRun, pipelin
 				Pipeline:       run.Pipeline,
 				Step:           step.Name,
 				ParentID:       run.ID,
-			}, r.cfg.MaxQueuedJobs, r.ownerQueueLimit())
+			}, r.cfg.MaxQueuedJobs, run.ProducerLimits)
 			r.endAdmission()
 			if err != nil {
 				r.failPipeline(&run, err)

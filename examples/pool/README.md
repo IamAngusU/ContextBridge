@@ -23,7 +23,7 @@ Follow [device pairing and token setup](../../README.md#connect-your-devices).
 On the running relay host, issue a separate credential for this application:
 
 ```sh
-contextbridge cluster token --role producer --subject my-web-app
+contextbridge cluster token --role producer --subject my-web-app --max-queued-jobs 8 --max-jobs-per-hour 120
 ```
 
 Keep the returned token server-side. Workers pair separately; they do not need

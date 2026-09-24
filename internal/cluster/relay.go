@@ -932,17 +932,18 @@ func (r *Relay) handleSubmit(w http.ResponseWriter, req *http.Request) {
 	}
 	var job Job
 	var replayed bool
+	limits := r.producerLimits(record)
 	if input.AssignmentID != "" {
 		if idempotencyKey != "" {
-			job, replayed, err = r.store.ConsumeReservationAdmittedIdempotentWithPolicy(input.AssignmentID, input.AssignmentSecret, input.Sealed, input.Source, input.TenantID, input.OwnerSubject, input.Priority, input.MaxAttempts, r.cfg.MaxQueuedJobs, r.ownerQueueLimit(), idempotencyKey, requestHash, input.PolicyDecision)
+			job, replayed, err = r.store.ConsumeReservationAdmittedIdempotentGovernedWithPolicy(input.AssignmentID, input.AssignmentSecret, input.Sealed, input.Source, input.TenantID, input.OwnerSubject, input.Priority, input.MaxAttempts, r.cfg.MaxQueuedJobs, limits, idempotencyKey, requestHash, input.PolicyDecision)
 		} else {
-			job, err = r.store.ConsumeReservationAdmittedWithPolicy(input.AssignmentID, input.AssignmentSecret, input.Sealed, input.Source, input.TenantID, input.OwnerSubject, input.Priority, input.MaxAttempts, r.cfg.MaxQueuedJobs, input.PolicyDecision, r.ownerQueueLimit())
+			job, err = r.store.ConsumeReservationAdmittedGovernedWithPolicy(input.AssignmentID, input.AssignmentSecret, input.Sealed, input.Source, input.TenantID, input.OwnerSubject, input.Priority, input.MaxAttempts, r.cfg.MaxQueuedJobs, limits, input.PolicyDecision)
 		}
 	} else {
 		if idempotencyKey != "" {
-			job, replayed, err = r.store.CreateJobAdmittedIdempotent(input, r.cfg.MaxQueuedJobs, r.ownerQueueLimit(), idempotencyKey, requestHash)
+			job, replayed, err = r.store.CreateJobAdmittedIdempotentGoverned(input, r.cfg.MaxQueuedJobs, limits, idempotencyKey, requestHash)
 		} else {
-			job, err = r.store.CreateJobAdmitted(input, r.cfg.MaxQueuedJobs, r.ownerQueueLimit())
+			job, err = r.store.CreateJobAdmittedGoverned(input, r.cfg.MaxQueuedJobs, limits)
 		}
 	}
 	r.endAdmission()
@@ -950,7 +951,7 @@ func (r *Relay) handleSubmit(w http.ResponseWriter, req *http.Request) {
 		status := http.StatusUnprocessableEntity
 		if errors.Is(err, ErrQueueFull) {
 			status = http.StatusServiceUnavailable
-		} else if errors.Is(err, ErrOwnerQueueCapacity) {
+		} else if errors.Is(err, ErrOwnerQueueCapacity) || errors.Is(err, ErrOwnerRateCapacity) {
 			status = http.StatusTooManyRequests
 		} else if errors.Is(err, ErrReservationOwnerMismatch) {
 			status = http.StatusForbidden
@@ -1178,10 +1179,11 @@ func (r *Relay) handleReserve(w http.ResponseWriter, req *http.Request) {
 
 func (r *Relay) handleCreateToken(w http.ResponseWriter, req *http.Request) {
 	var input struct {
-		Role          string   `json:"role"`
-		Subject       string   `json:"subject"`
-		Groups        []string `json:"groups"`
-		LifetimeHours int      `json:"lifetime_hours"`
+		Role           string         `json:"role"`
+		Subject        string         `json:"subject"`
+		Groups         []string       `json:"groups"`
+		LifetimeHours  int            `json:"lifetime_hours"`
+		ProducerLimits ProducerLimits `json:"producer_limits"`
 	}
 	if err := decodeJSON(req.Body, &input, 32<<10); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -1194,7 +1196,7 @@ func (r *Relay) handleCreateToken(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, errors.New("lifetime_hours must be 0 to 87600"))
 		return
 	}
-	token, record, err := r.store.CreateToken(input.Role, input.Subject, input.Groups, time.Duration(input.LifetimeHours)*time.Hour)
+	token, record, err := r.store.CreateTokenWithLimits(input.Role, input.Subject, input.Groups, time.Duration(input.LifetimeHours)*time.Hour, input.ProducerLimits)
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err)
 		return
@@ -1678,6 +1680,15 @@ func (r *Relay) ownerQueueLimit() int {
 		return maxQueuedJobsPerOwner
 	}
 	return r.cfg.MaxQueuedJobs
+}
+
+func (r *Relay) producerLimits(record TokenRecord) ProducerLimits {
+	limits := record.ProducerLimits
+	defaultQueueLimit := r.ownerQueueLimit()
+	if limits.MaxQueuedJobs <= 0 || limits.MaxQueuedJobs > defaultQueueLimit {
+		limits.MaxQueuedJobs = defaultQueueLimit
+	}
+	return limits
 }
 
 func scopeNodeCapabilities(capabilities *Capabilities, record TokenRecord) {
@@ -2172,18 +2183,37 @@ func (r *Relay) signalDispatch() {
 }
 
 func scopeRequirements(requirements *Requirements, record TokenRecord) error {
-	if record.Role != "producer" || len(record.Groups) == 0 {
+	if record.Role != "producer" {
 		return nil
 	}
-	if requirements.Group == "" {
-		if len(record.Groups) == 1 {
-			requirements.Group = record.Groups[0]
-			return nil
+	if len(record.Groups) > 0 {
+		if requirements.Group == "" {
+			if len(record.Groups) == 1 {
+				requirements.Group = record.Groups[0]
+			} else {
+				return errors.New("a group is required for this producer token")
+			}
+		} else if !containsFold(record.Groups, requirements.Group) {
+			return errors.New("producer token is not allowed to use this group")
 		}
-		return errors.New("a group is required for this producer token")
 	}
-	if !containsFold(record.Groups, requirements.Group) {
-		return errors.New("producer token is not allowed to use this group")
+	if len(record.ProducerLimits.Providers) > 0 {
+		if requirements.Provider == "" {
+			if len(record.ProducerLimits.Providers) == 1 {
+				requirements.Provider = record.ProducerLimits.Providers[0]
+			} else {
+				return errors.New("a provider is required for this producer token")
+			}
+		} else if !containsFold(record.ProducerLimits.Providers, requirements.Provider) {
+			return errors.New("producer token is not allowed to use this provider")
+		}
+	}
+	if record.ProducerLimits.Egress == "local_only" {
+		if requirements.Egress == "" {
+			requirements.Egress = "local_only"
+		} else if requirements.Egress != "local_only" {
+			return errors.New("producer token permits only local execution")
+		}
 	}
 	return nil
 }

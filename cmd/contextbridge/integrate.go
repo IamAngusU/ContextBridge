@@ -70,6 +70,10 @@ func integrateCommand(args []string) error {
 	subject := flags.String("subject", "", "remote application identity (relay integration)")
 	groups := flags.String("groups", "", "comma-separated scheduling groups (relay integration)")
 	lifetimeHours := flags.Int("lifetime-hours", 720, "producer credential lifetime in hours; 0 never expires")
+	maxQueuedJobs := flags.Int("max-queued-jobs", 0, "producer queued-job limit; 0 uses the relay default")
+	maxJobsPerHour := flags.Int("max-jobs-per-hour", 0, "durable producer admission limit; 0 disables it")
+	providers := flags.String("providers", "", "comma-separated provider allowlist")
+	egress := flags.String("egress", "", "producer egress ceiling: local_only or empty")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -178,7 +182,8 @@ func integrateCommand(args []string) error {
 		if err != nil {
 			return err
 		}
-		info, err := createRelayIntegrationBundle(context.Background(), cfg, path, *subject, splitIntegrationList(*groups), *lifetimeHours)
+		limits := cluster.ProducerLimits{MaxQueuedJobs: *maxQueuedJobs, MaxJobsPerHour: *maxJobsPerHour, Providers: splitIntegrationList(*providers), Egress: strings.TrimSpace(*egress)}
+		info, err := createRelayIntegrationBundleGoverned(context.Background(), cfg, path, *subject, splitIntegrationList(*groups), *lifetimeHours, limits)
 		if err != nil {
 			return err
 		}
@@ -199,6 +204,10 @@ func integrateCommand(args []string) error {
 }
 
 func createRelayIntegrationBundle(ctx context.Context, cfg config.Config, path, subject string, groups []string, lifetimeHours int) (relayIntegrationInfo, error) {
+	return createRelayIntegrationBundleGoverned(ctx, cfg, path, subject, groups, lifetimeHours, cluster.ProducerLimits{})
+}
+
+func createRelayIntegrationBundleGoverned(ctx context.Context, cfg config.Config, path, subject string, groups []string, lifetimeHours int, limits cluster.ProducerLimits) (relayIntegrationInfo, error) {
 	// #nosec G703 -- path is the operator-selected absolute --write-env target; O_EXCL prevents replacing existing data.
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -218,7 +227,7 @@ func createRelayIntegrationBundle(ctx context.Context, cfg config.Config, path, 
 	}
 	relayURL := clusterBaseURL(cfg)
 	if err := clusterPOST(ctx, relayURL+"/v1/cluster/tokens", cfg.Cluster.Relay.AdminToken, map[string]interface{}{
-		"role": "producer", "subject": subject, "groups": groups, "lifetime_hours": lifetimeHours,
+		"role": "producer", "subject": subject, "groups": groups, "lifetime_hours": lifetimeHours, "producer_limits": limits,
 	}, &output); err != nil {
 		return relayIntegrationInfo{}, fmt.Errorf("issue scoped producer credential: %w", err)
 	}

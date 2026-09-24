@@ -9,6 +9,8 @@ secret:
 contextbridge integrate relay \
   --subject demo-server-app \
   --lifetime-hours 720 \
+  --max-queued-jobs 4 \
+  --max-jobs-per-hour 60 \
   --write-env ./contextbridge-producer.env
 ```
 

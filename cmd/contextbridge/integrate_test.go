@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/IamAngusU/ContextBridge/internal/cluster"
 	"github.com/IamAngusU/ContextBridge/internal/config"
 )
 
@@ -106,6 +107,34 @@ func TestRelayIntegrationCreatesScopedPrivateBundleWithoutTerminalSecret(t *test
 	}
 	if requests != 1 {
 		t.Fatalf("existing output path still caused credential issuance: %d requests", requests)
+	}
+}
+
+func TestRelayIntegrationIssuesDurableProducerGovernance(t *testing.T) {
+	const admin = "admin-token"
+	var issued struct {
+		ProducerLimits cluster.ProducerLimits `json:"producer_limits"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer "+admin {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if err := json.NewDecoder(request.Body).Decode(&issued); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		_, _ = w.Write([]byte(`{"token":"cb_governed_secret","record":{"id":"tok_governed","role":"producer","subject":"bounded-app","created_at":"2026-09-24T00:00:00Z","revoked":false}}`))
+	}))
+	t.Cleanup(server.Close)
+	cfg := config.Config{Cluster: config.Cluster{Relay: config.ClusterRelay{PublicURL: server.URL, AdminToken: admin}}}
+	path := filepath.Join(t.TempDir(), "bounded.env")
+	want := cluster.ProducerLimits{MaxQueuedJobs: 3, MaxJobsPerHour: 25, Providers: []string{"ollama"}, Egress: "local_only"}
+	if _, err := createRelayIntegrationBundleGoverned(context.Background(), cfg, path, "bounded-app", nil, 24, want); err != nil {
+		t.Fatal(err)
+	}
+	if issued.ProducerLimits.MaxQueuedJobs != want.MaxQueuedJobs || issued.ProducerLimits.MaxJobsPerHour != want.MaxJobsPerHour || issued.ProducerLimits.Egress != want.Egress || len(issued.ProducerLimits.Providers) != 1 || issued.ProducerLimits.Providers[0] != "ollama" {
+		t.Fatalf("governance was not sent to the relay: %#v", issued.ProducerLimits)
 	}
 }
 

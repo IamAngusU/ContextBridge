@@ -39,6 +39,7 @@ var (
 	bucketAdapterSessionLocks = []byte("adapter_session_locks_v1")
 	bucketJobIdempotency      = []byte("job_idempotency_v1")
 	bucketJobIdempotencyByJob = []byte("job_idempotency_by_job_v1")
+	bucketProducerRateWindows = []byte("producer_rate_windows_v1")
 	keyJobOwnerIndexVersion   = []byte("job_owner_index_version")
 	jobOwnerIndexVersion      = []byte("1")
 	keyJobContractVersion     = []byte("job_contract_version")
@@ -54,7 +55,7 @@ func requiredStoreBuckets() [][]byte {
 		bucketJobs, bucketJobIndex, bucketJobOwnerIndex, bucketStoreMeta,
 		bucketQueue, bucketNodes, bucketTokens, bucketPairings, bucketPairCodes,
 		bucketAssignments, bucketEvents, bucketJobEvents, bucketPipelineEvents, bucketPipelineRuns, bucketSessionPlacements,
-		bucketAdapterSessionLocks, bucketJobIdempotency, bucketJobIdempotencyByJob,
+		bucketAdapterSessionLocks, bucketJobIdempotency, bucketJobIdempotencyByJob, bucketProducerRateWindows,
 		bucketHistoricalTotals,
 	}
 }
@@ -70,6 +71,7 @@ type Store struct {
 var (
 	ErrQueueFull                   = errors.New("relay queue is full")
 	ErrOwnerQueueCapacity          = errors.New("producer queue capacity is full")
+	ErrOwnerRateCapacity           = errors.New("producer hourly job capacity is full")
 	ErrReservationCapacity         = errors.New("assignment reservation capacity is full")
 	ErrOwnerReservationCapacity    = errors.New("producer assignment reservation capacity is full")
 	ErrReservationOwnerMismatch    = errors.New("assignment belongs to another producer")
@@ -100,6 +102,11 @@ type sessionPlacement struct {
 type jobIdempotencyRecord struct {
 	JobID       string `json:"job_id"`
 	RequestHash string `json:"request_hash"`
+}
+
+type producerRateWindow struct {
+	StartedAt time.Time `json:"started_at"`
+	Count     int       `json:"count"`
 }
 
 // queueEntry is deliberately tiny. Queue admission and fair scheduling must
@@ -306,10 +313,17 @@ func ensureJobContractVersion(tx *bolt.Tx) error {
 }
 
 func (s *Store) CreateToken(role, subject string, groups []string, lifetime time.Duration) (string, TokenRecord, error) {
+	return s.CreateTokenWithLimits(role, subject, groups, lifetime, ProducerLimits{})
+}
+
+func (s *Store) CreateTokenWithLimits(role, subject string, groups []string, lifetime time.Duration, limits ProducerLimits) (string, TokenRecord, error) {
 	if role != "admin" && role != "producer" && role != "node" && role != "observer" {
 		return "", TokenRecord{}, fmt.Errorf("unsupported token role %s", role)
 	}
 	if err := validateTokenIdentity(role, subject, groups); err != nil {
+		return "", TokenRecord{}, err
+	}
+	if err := validateProducerLimits(role, limits); err != nil {
 		return "", TokenRecord{}, err
 	}
 	if lifetime < 0 || lifetime > 10*365*24*time.Hour {
@@ -319,7 +333,7 @@ func (s *Store) CreateToken(role, subject string, groups []string, lifetime time
 	if err != nil {
 		return "", TokenRecord{}, err
 	}
-	record := TokenRecord{ID: randomID("tok"), Role: role, Subject: cleanLabel(subject, 120), Groups: cleanList(groups, 32, 80), CreatedAt: time.Now().UTC()}
+	record := TokenRecord{ID: randomID("tok"), Role: role, Subject: cleanLabel(subject, 120), Groups: cleanList(groups, 32, 80), ProducerLimits: normalizeProducerLimits(limits), CreatedAt: time.Now().UTC()}
 	if lifetime > 0 {
 		record.ExpiresAt = record.CreatedAt.Add(lifetime)
 	}
@@ -327,6 +341,42 @@ func (s *Store) CreateToken(role, subject string, groups []string, lifetime time
 		return putJSON(tx.Bucket(bucketTokens), tokenHash(token), record)
 	})
 	return token, record, err
+}
+
+func validateProducerLimits(role string, limits ProducerLimits) error {
+	if role != "producer" && (limits.MaxQueuedJobs != 0 || limits.MaxJobsPerHour != 0 || len(limits.Providers) != 0 || limits.Egress != "") {
+		return errors.New("producer limits may only be assigned to producer tokens")
+	}
+	if limits.MaxQueuedJobs < 0 || limits.MaxQueuedJobs > maxQueuedJobsPerOwner {
+		return fmt.Errorf("producer_limits.max_queued_jobs must be 0 to %d", maxQueuedJobsPerOwner)
+	}
+	if limits.MaxJobsPerHour < 0 || limits.MaxJobsPerHour > 1_000_000 {
+		return errors.New("producer_limits.max_jobs_per_hour must be 0 to 1000000")
+	}
+	if len(limits.Providers) > 32 {
+		return errors.New("producer_limits.providers accepts at most 32 providers")
+	}
+	seen := map[string]struct{}{}
+	for _, provider := range limits.Providers {
+		if !validRoutingLabel(provider, 80) || strings.Contains(provider, "..") {
+			return errors.New("producer_limits.providers contains an invalid provider")
+		}
+		key := strings.ToLower(provider)
+		if _, exists := seen[key]; exists {
+			return errors.New("producer_limits.providers contains a duplicate provider")
+		}
+		seen[key] = struct{}{}
+	}
+	if limits.Egress != "" && limits.Egress != "local_only" {
+		return errors.New("producer_limits.egress must be empty or local_only")
+	}
+	return nil
+}
+
+func normalizeProducerLimits(limits ProducerLimits) ProducerLimits {
+	limits.Providers = cleanList(limits.Providers, 32, 80)
+	limits.Egress = strings.ToLower(strings.TrimSpace(limits.Egress))
+	return limits
 }
 
 func (s *Store) EnsureToken(token, role, subject string, groups []string) error {
@@ -716,7 +766,7 @@ func (s *Store) SetNodeDraining(id string, draining bool) (Node, error) {
 }
 
 func (s *Store) CreateJob(request SubmitRequest) (Job, error) {
-	job, _, err := s.createJob(request, 0, 0, "", "")
+	job, _, err := s.createJob(request, 0, ProducerLimits{}, "", "")
 	return job, err
 }
 
@@ -728,7 +778,12 @@ func (s *Store) CreateJobAdmitted(request SubmitRequest, maxQueued int, maxOwner
 	if len(maxOwner) > 0 {
 		ownerLimit = maxOwner[0]
 	}
-	job, _, err := s.createJob(request, maxQueued, ownerLimit, "", "")
+	job, _, err := s.createJob(request, maxQueued, ProducerLimits{MaxQueuedJobs: ownerLimit}, "", "")
+	return job, err
+}
+
+func (s *Store) CreateJobAdmittedGoverned(request SubmitRequest, maxQueued int, limits ProducerLimits) (Job, error) {
+	job, _, err := s.createJob(request, maxQueued, limits, "", "")
 	return job, err
 }
 
@@ -736,10 +791,14 @@ func (s *Store) CreateJobAdmitted(request SubmitRequest, maxQueued int, maxOwner
 // key to one admitted request. An exact retry returns the retained job without
 // consuming queue capacity; a different request with the same key fails.
 func (s *Store) CreateJobAdmittedIdempotent(request SubmitRequest, maxQueued, maxOwner int, idempotencyKey, requestHash string) (Job, bool, error) {
-	return s.createJob(request, maxQueued, maxOwner, idempotencyKey, requestHash)
+	return s.createJob(request, maxQueued, ProducerLimits{MaxQueuedJobs: maxOwner}, idempotencyKey, requestHash)
 }
 
-func (s *Store) createJob(request SubmitRequest, maxQueued, maxOwner int, idempotencyKey, requestHash string) (Job, bool, error) {
+func (s *Store) CreateJobAdmittedIdempotentGoverned(request SubmitRequest, maxQueued int, limits ProducerLimits, idempotencyKey, requestHash string) (Job, bool, error) {
+	return s.createJob(request, maxQueued, limits, idempotencyKey, requestHash)
+}
+
+func (s *Store) createJob(request SubmitRequest, maxQueued int, limits ProducerLimits, idempotencyKey, requestHash string) (Job, bool, error) {
 	now := time.Now().UTC()
 	if err := request.PolicyDecision.ValidateAllowed(); err != nil {
 		return Job{}, false, err
@@ -798,7 +857,7 @@ func (s *Store) createJob(request SubmitRequest, maxQueued, maxOwner int, idempo
 		if tx.Bucket(bucketJobs).Get([]byte(job.ID)) != nil {
 			return os.ErrExist
 		}
-		if maxQueued > 0 || maxOwner > 0 {
+		if maxQueued > 0 || limits.MaxQueuedJobs > 0 {
 			queued, owned, err := queueCounts(tx, job.OwnerSubject)
 			if err != nil {
 				return err
@@ -806,9 +865,12 @@ func (s *Store) createJob(request SubmitRequest, maxQueued, maxOwner int, idempo
 			if maxQueued > 0 && queued >= maxQueued {
 				return ErrQueueFull
 			}
-			if maxOwner > 0 && owned >= maxOwner {
+			if limits.MaxQueuedJobs > 0 && owned >= limits.MaxQueuedJobs {
 				return ErrOwnerQueueCapacity
 			}
+		}
+		if err := consumeProducerRateLimitTx(tx, job.OwnerSubject, limits.MaxJobsPerHour, now); err != nil {
+			return err
 		}
 		if err := putJSON(tx.Bucket(bucketJobs), job.ID, job); err != nil {
 			return err
@@ -836,6 +898,32 @@ func (s *Store) createJob(request SubmitRequest, maxQueued, maxOwner int, idempo
 		return appendPipelineStepEventTx(tx, s, job, "pipeline.step.queued")
 	})
 	return job, replayed, err
+}
+
+func consumeProducerRateLimitTx(tx *bolt.Tx, owner string, maximum int, now time.Time) error {
+	if maximum <= 0 {
+		return nil
+	}
+	if owner == "" {
+		return errors.New("producer identity is required for an hourly job limit")
+	}
+	bucket := tx.Bucket(bucketProducerRateWindows)
+	var window producerRateWindow
+	err := getJSON(bucket, owner, &window)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if errors.Is(err, os.ErrNotExist) || window.StartedAt.IsZero() || !now.Before(window.StartedAt.Add(time.Hour)) {
+		window = producerRateWindow{StartedAt: now, Count: 0}
+	} else if now.Before(window.StartedAt) {
+		// A backwards wall clock must not reset or silently widen a durable quota.
+		return ErrOwnerRateCapacity
+	}
+	if window.Count >= maximum {
+		return ErrOwnerRateCapacity
+	}
+	window.Count++
+	return putJSON(bucket, owner, window)
 }
 
 func validJobID(value string) bool {
@@ -986,7 +1074,7 @@ func (s *Store) ConsumeReservationAdmitted(id, secret string, sealed *SealedEnve
 	if len(maxOwner) > 0 {
 		ownerLimit = maxOwner[0]
 	}
-	job, _, err := s.consumeReservationAdmitted(id, secret, sealed, source, tenant, owner, priority, attempts, maxQueued, ownerLimit, "", "", nil)
+	job, _, err := s.consumeReservationAdmitted(id, secret, sealed, source, tenant, owner, priority, attempts, maxQueued, ProducerLimits{MaxQueuedJobs: ownerLimit}, "", "", nil)
 	return job, err
 }
 
@@ -999,7 +1087,12 @@ func (s *Store) ConsumeReservationAdmittedWithPolicy(id, secret string, sealed *
 	if len(maxOwner) > 0 {
 		ownerLimit = maxOwner[0]
 	}
-	job, _, err := s.consumeReservationAdmitted(id, secret, sealed, source, tenant, owner, priority, attempts, maxQueued, ownerLimit, "", "", &policy)
+	job, _, err := s.consumeReservationAdmitted(id, secret, sealed, source, tenant, owner, priority, attempts, maxQueued, ProducerLimits{MaxQueuedJobs: ownerLimit}, "", "", &policy)
+	return job, err
+}
+
+func (s *Store) ConsumeReservationAdmittedGovernedWithPolicy(id, secret string, sealed *SealedEnvelope, source, tenant, owner string, priority, attempts, maxQueued int, limits ProducerLimits, policy PolicyDecision) (Job, error) {
+	job, _, err := s.consumeReservationAdmitted(id, secret, sealed, source, tenant, owner, priority, attempts, maxQueued, limits, "", "", &policy)
 	return job, err
 }
 
@@ -1008,14 +1101,18 @@ func (s *Store) ConsumeReservationAdmittedWithPolicy(id, secret string, sealed *
 // consumed reservation is read, but only when the exact sealed request hash
 // matches the producer-scoped key.
 func (s *Store) ConsumeReservationAdmittedIdempotent(id, secret string, sealed *SealedEnvelope, source, tenant, owner string, priority, attempts, maxQueued, maxOwner int, idempotencyKey, requestHash string) (Job, bool, error) {
-	return s.consumeReservationAdmitted(id, secret, sealed, source, tenant, owner, priority, attempts, maxQueued, maxOwner, idempotencyKey, requestHash, nil)
+	return s.consumeReservationAdmitted(id, secret, sealed, source, tenant, owner, priority, attempts, maxQueued, ProducerLimits{MaxQueuedJobs: maxOwner}, idempotencyKey, requestHash, nil)
 }
 
 func (s *Store) ConsumeReservationAdmittedIdempotentWithPolicy(id, secret string, sealed *SealedEnvelope, source, tenant, owner string, priority, attempts, maxQueued, maxOwner int, idempotencyKey, requestHash string, policy PolicyDecision) (Job, bool, error) {
-	return s.consumeReservationAdmitted(id, secret, sealed, source, tenant, owner, priority, attempts, maxQueued, maxOwner, idempotencyKey, requestHash, &policy)
+	return s.consumeReservationAdmitted(id, secret, sealed, source, tenant, owner, priority, attempts, maxQueued, ProducerLimits{MaxQueuedJobs: maxOwner}, idempotencyKey, requestHash, &policy)
 }
 
-func (s *Store) consumeReservationAdmitted(id, secret string, sealed *SealedEnvelope, source, tenant, owner string, priority, attempts, maxQueued, ownerLimit int, idempotencyKey, requestHash string, expectedPolicy *PolicyDecision) (Job, bool, error) {
+func (s *Store) ConsumeReservationAdmittedIdempotentGovernedWithPolicy(id, secret string, sealed *SealedEnvelope, source, tenant, owner string, priority, attempts, maxQueued int, limits ProducerLimits, idempotencyKey, requestHash string, policy PolicyDecision) (Job, bool, error) {
+	return s.consumeReservationAdmitted(id, secret, sealed, source, tenant, owner, priority, attempts, maxQueued, limits, idempotencyKey, requestHash, &policy)
+}
+
+func (s *Store) consumeReservationAdmitted(id, secret string, sealed *SealedEnvelope, source, tenant, owner string, priority, attempts, maxQueued int, limits ProducerLimits, idempotencyKey, requestHash string, expectedPolicy *PolicyDecision) (Job, bool, error) {
 	var job Job
 	replayed := false
 	owner = cleanLabel(owner, 120)
@@ -1073,7 +1170,7 @@ func (s *Store) consumeReservationAdmitted(id, secret string, sealed *SealedEnve
 		if tx.Bucket(bucketJobs).Get([]byte(saved.Assignment.JobID)) != nil {
 			return os.ErrExist
 		}
-		if maxQueued > 0 || ownerLimit > 0 {
+		if maxQueued > 0 || limits.MaxQueuedJobs > 0 {
 			queued, owned, err := queueCounts(tx, owner)
 			if err != nil {
 				return err
@@ -1081,9 +1178,12 @@ func (s *Store) consumeReservationAdmitted(id, secret string, sealed *SealedEnve
 			if maxQueued > 0 && queued >= maxQueued {
 				return ErrQueueFull
 			}
-			if ownerLimit > 0 && owned >= ownerLimit {
+			if limits.MaxQueuedJobs > 0 && owned >= limits.MaxQueuedJobs {
 				return ErrOwnerQueueCapacity
 			}
+		}
+		if err := consumeProducerRateLimitTx(tx, owner, limits.MaxJobsPerHour, now); err != nil {
+			return err
 		}
 		job = Job{ID: saved.Assignment.JobID, ContractVersion: JobContractV1, OwnerSubject: saved.Assignment.OwnerSubject, Source: cleanLabel(source, 120), TenantID: saved.Assignment.TenantID, Requirements: saved.Assignment.Requirements, PolicyDecision: saved.Assignment.PolicyDecision, SealedPayload: sealed, Status: JobQueued, AssignedNode: saved.Assignment.NodeID, Priority: priority, MaxAttempts: attempts, CreatedAt: now, UpdatedAt: now}
 		if job.MaxAttempts <= 0 {

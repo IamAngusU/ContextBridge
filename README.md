@@ -147,7 +147,7 @@ producer token; do not expose the local service token to browser JavaScript.
 Create that credential directly on the relay without printing its secret:
 
 ```sh
-contextbridge integrate relay --subject my-server-app --write-env ./contextbridge-producer.env
+contextbridge integrate relay --subject my-server-app --max-jobs-per-hour 120 --max-queued-jobs 8 --write-env ./contextbridge-producer.env
 ```
 
 The [minimal Python and Node.js examples](examples/server-app/README.md) use
@@ -236,10 +236,10 @@ contextbridge cluster chat --provider ollama --model auto --artifacts off --prom
 On the running relay host, using its private configuration:
 
 ```sh
-contextbridge cluster token --role producer --subject my-app
+contextbridge cluster token --role producer --subject my-app --max-jobs-per-hour 120 --max-queued-jobs 8
 ```
 
-This prints token JSON. Store it securely; **never give an application the relay admin token**. For a separate CLI client, save the returned JSON as a private **UTF-8** file named `producer-token.json` and transfer it through a secure channel. Do not commit it.
+This prints token JSON. Store it securely; **never give an application the relay admin token**. The optional limits are stored with the credential and enforced durably by the relay. `--providers ollama --egress local_only` can additionally prevent that credential from selecting a remote route. For a separate CLI client, save the returned JSON as a private **UTF-8** file named `producer-token.json` and transfer it through a secure channel. Do not commit it.
 
 On that client, install CB in **client/sender** mode, then point it at the relay and load the credential:
 

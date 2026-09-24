@@ -419,14 +419,26 @@ type PairResponse struct {
 	IntervalSeconds int       `json:"interval_seconds"`
 }
 
+// ProducerLimits are durable, admin-issued boundaries attached to one
+// producer credential. Zero values retain the relay defaults. They are kept
+// deliberately small and enforceable at admission time; usage- or cost-based
+// budgets belong here only once the relay can reserve and prove that usage.
+type ProducerLimits struct {
+	MaxQueuedJobs  int      `json:"max_queued_jobs,omitempty"`
+	MaxJobsPerHour int      `json:"max_jobs_per_hour,omitempty"`
+	Providers      []string `json:"providers,omitempty"`
+	Egress         string   `json:"egress,omitempty"`
+}
+
 type TokenRecord struct {
-	ID        string    `json:"id"`
-	Role      string    `json:"role"`
-	Subject   string    `json:"subject"`
-	Groups    []string  `json:"groups,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	ExpiresAt time.Time `json:"expires_at,omitempty"`
-	Revoked   bool      `json:"revoked"`
+	ID             string         `json:"id"`
+	Role           string         `json:"role"`
+	Subject        string         `json:"subject"`
+	Groups         []string       `json:"groups,omitempty"`
+	ProducerLimits ProducerLimits `json:"producer_limits,omitempty"`
+	CreatedAt      time.Time      `json:"created_at"`
+	ExpiresAt      time.Time      `json:"expires_at,omitempty"`
+	Revoked        bool           `json:"revoked"`
 }
 
 type Event struct {
@@ -530,18 +542,19 @@ type PipelineStep struct {
 }
 
 type PipelineRun struct {
-	ID           string          `json:"id"`
-	Pipeline     string          `json:"pipeline"`
-	OwnerSubject string          `json:"owner_subject,omitempty"`
-	TenantID     string          `json:"tenant_id,omitempty"`
-	Status       string          `json:"status"`
-	Input        json.RawMessage `json:"input"`
-	Output       json.RawMessage `json:"output,omitempty"`
-	Steps        []Job           `json:"steps"`
-	Usage        Usage           `json:"usage"`
-	Error        string          `json:"error,omitempty"`
-	CreatedAt    time.Time       `json:"created_at"`
-	FinishedAt   time.Time       `json:"finished_at,omitempty"`
+	ID             string          `json:"id"`
+	Pipeline       string          `json:"pipeline"`
+	OwnerSubject   string          `json:"owner_subject,omitempty"`
+	TenantID       string          `json:"tenant_id,omitempty"`
+	ProducerLimits ProducerLimits  `json:"producer_limits,omitempty"`
+	Status         string          `json:"status"`
+	Input          json.RawMessage `json:"input"`
+	Output         json.RawMessage `json:"output,omitempty"`
+	Steps          []Job           `json:"steps"`
+	Usage          Usage           `json:"usage"`
+	Error          string          `json:"error,omitempty"`
+	CreatedAt      time.Time       `json:"created_at"`
+	FinishedAt     time.Time       `json:"finished_at,omitempty"`
 }
 
 type Overview struct {
