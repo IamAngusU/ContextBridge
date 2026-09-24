@@ -21,6 +21,10 @@
 - Local result reads are confined with `os.Root`; even a filesystem-level
   symlink planted inside the managed jobs directory cannot make the authenticated
   result endpoint read outside that directory.
+- OpenAI-compatible clients can require native incremental streaming with
+  `X-ContextBridge-Require-Stream-Mode: incremental`. Until a route can prove
+  that capability, ContextBridge rejects the request before job submission
+  instead of silently degrading an execution to buffered final-result SSE.
 
 ## v0.7.3 - 2026-09-24
 

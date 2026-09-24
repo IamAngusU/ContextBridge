@@ -49,6 +49,12 @@ by `[DONE]` after the routed job completes; it does not expose incremental
 provider token deltas. Such responses carry
 `X-ContextBridge-Stream-Mode: final-result` so clients can detect the exact
 contract instead of mistaking buffered completion for native token streaming.
+Clients that cannot accept this compatibility mode can send
+`X-ContextBridge-Require-Stream-Mode: incremental`. Until a selected route can
+prove native ordered deltas, ContextBridge rejects that request with HTTP 409
+and `stream_mode_unavailable` **before submitting a job**. Requiring
+`final-result` is also accepted. This opt-in negotiation prevents a caller from
+discovering the mismatch only after remote work has already executed.
 
 ## MCP stdio
 

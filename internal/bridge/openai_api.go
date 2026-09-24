@@ -38,6 +38,12 @@ type openAIContentPart struct {
 	ImageURL json.RawMessage `json:"image_url,omitempty"`
 }
 
+const (
+	contextBridgeStreamModeHeader        = "X-ContextBridge-Stream-Mode"
+	contextBridgeRequireStreamModeHeader = "X-ContextBridge-Require-Stream-Mode"
+	contextBridgeFinalResultStreamMode   = "final-result"
+)
+
 func (s *Server) handleOpenAIModels(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
@@ -67,6 +73,20 @@ func (s *Server) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	if err := decodeCompatibleJSON(r.Body, &input, maximumJobRequestBytes); err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
 		return
+	}
+	if input.Stream {
+		requiredMode := strings.ToLower(strings.TrimSpace(r.Header.Get(contextBridgeRequireStreamModeHeader)))
+		switch requiredMode {
+		case "", contextBridgeFinalResultStreamMode:
+		case "incremental":
+			w.Header().Set(contextBridgeStreamModeHeader, contextBridgeFinalResultStreamMode)
+			writeOpenAIError(w, http.StatusConflict, "incremental streaming is not available; no job was submitted", "stream_mode_unavailable")
+			return
+		default:
+			w.Header().Set(contextBridgeStreamModeHeader, contextBridgeFinalResultStreamMode)
+			writeOpenAIError(w, http.StatusUnprocessableEntity, "unsupported required stream mode", "unsupported_parameter")
+			return
+		}
 	}
 	if input.N > 1 {
 		writeOpenAIError(w, http.StatusUnprocessableEntity, "ContextBridge currently supports n=1", "unsupported_parameter")
@@ -148,7 +168,7 @@ func (s *Server) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Connection", "keep-alive")
-		w.Header().Set("X-ContextBridge-Stream-Mode", "final-result")
+		w.Header().Set(contextBridgeStreamModeHeader, contextBridgeFinalResultStreamMode)
 		chunk := map[string]interface{}{"id": responseID, "object": "chat.completion.chunk", "created": created, "model": model, "choices": []map[string]interface{}{{"index": 0, "delta": map[string]string{"role": "assistant", "content": content}, "finish_reason": finish}}}
 		raw, _ := json.Marshal(chunk)
 		_, _ = fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", raw)

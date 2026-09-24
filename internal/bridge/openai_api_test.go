@@ -72,6 +72,26 @@ func TestOpenAICompatibilityAPIListsRoutesAndCompletes(t *testing.T) {
 	if stream.StatusCode != http.StatusOK || stream.Header.Get("Content-Type") != "text/event-stream" || stream.Header.Get("X-ContextBridge-Stream-Mode") != "final-result" || !bytes.Contains(streamRaw, []byte("data: [DONE]")) {
 		t.Fatalf("bounded SSE response failed: HTTP %d %q %s", stream.StatusCode, stream.Header.Get("Content-Type"), streamRaw)
 	}
+
+	requiredRequest, err := http.NewRequest(http.MethodPost, httpServer.URL+"/openai/v1/chat/completions", bytes.NewReader(streamBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	requiredRequest.Header.Set("Authorization", "Bearer "+cfg.Server.Token)
+	requiredRequest.Header.Set("Content-Type", "application/json")
+	requiredRequest.Header.Set(contextBridgeRequireStreamModeHeader, "incremental")
+	requiredResponse, err := http.DefaultClient.Do(requiredRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer requiredResponse.Body.Close()
+	requiredRaw, _ := io.ReadAll(requiredResponse.Body)
+	if requiredResponse.StatusCode != http.StatusConflict || requiredResponse.Header.Get(contextBridgeStreamModeHeader) != contextBridgeFinalResultStreamMode || !bytes.Contains(requiredRaw, []byte("stream_mode_unavailable")) {
+		t.Fatalf("required incremental mode did not fail closed: HTTP %d %q %s", requiredResponse.StatusCode, requiredResponse.Header.Get(contextBridgeStreamModeHeader), requiredRaw)
+	}
+	if providerCalls != 2 {
+		t.Fatalf("unavailable required stream mode submitted work: provider calls = %d, want 2", providerCalls)
+	}
 }
 
 func TestOpenAICompatibilityAPIRejectsToolsAndRemoteImages(t *testing.T) {
