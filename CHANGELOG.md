@@ -25,6 +25,12 @@
   current Node 24-based releases. The vulnerability gate is also pinned to a
   Go 1.27-compatible `govulncheck` instead of crashing inside an obsolete
   analyzer.
+- Fixed the parallel worker integration proof's failure cleanup so a missed
+  progress deadline first releases blocked local handlers, cancels the worker,
+  and only then closes its HTTP/WebSocket servers. A slow Windows runner now
+  reports the original bounded assertion instead of hiding it behind a
+  ten-minute `httptest.Server.Close` deadlock; the timing gate was widened to
+  tolerate verified slow-host evidence without becoming unbounded.
 - Added real incremental text output for explicitly reviewed
   `openai_compatible` engines with the `incremental_output` capability. The
   v1 path has no fallback ambiguity, applies direct backpressure and hard

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -25,19 +26,19 @@ func TestWorkerRelayParallelCapacityEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer relay.Close()
-
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	go relay.dispatchLoop(ctx)
 	relayHTTP := httptest.NewServer(relay.Handler())
-	defer relayHTTP.Close()
 
 	var running atomic.Int32
 	var peak atomic.Int32
 	var providerSeen atomic.Bool
 	started := make(chan struct{}, 4)
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseJobs := func() {
+		releaseOnce.Do(func() { close(release) })
+	}
 	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		switch req.URL.Path {
 		case "/v1/status":
@@ -80,7 +81,25 @@ func TestWorkerRelayParallelCapacityEndToEnd(t *testing.T) {
 			http.NotFound(w, req)
 		}
 	}))
-	defer local.Close()
+	var workerDone <-chan struct{}
+	defer func() {
+		// Unblock in-flight local handlers before closing either test server. A
+		// failed assertion must never turn into an httptest.Close deadlock that
+		// hides the original failure for the package-wide timeout.
+		releaseJobs()
+		cancel()
+		if workerDone != nil {
+			select {
+			case <-workerDone:
+			case <-time.After(5 * time.Second):
+			}
+		}
+		local.CloseClientConnections()
+		relayHTTP.CloseClientConnections()
+		local.Close()
+		relayHTTP.Close()
+		relay.Close()
+	}()
 
 	privateKey, publicKey, err := NewIdentity()
 	if err != nil {
@@ -109,9 +128,14 @@ func TestWorkerRelayParallelCapacityEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	go func() { _ = worker.Run(ctx, nil) }()
+	done := make(chan struct{})
+	workerDone = done
+	go func() {
+		defer close(done)
+		_ = worker.Run(ctx, nil)
+	}()
 
-	waitFor(t, 3*time.Second, func() bool {
+	waitFor(t, 15*time.Second, func() bool {
 		node, loadErr := relay.store.GetNode(nodeID)
 		return loadErr == nil && node.Connected
 	}, "worker did not connect")
@@ -132,7 +156,7 @@ func TestWorkerRelayParallelCapacityEndToEnd(t *testing.T) {
 	for count := 0; count < 2; count++ {
 		select {
 		case <-started:
-		case <-time.After(3 * time.Second):
+		case <-time.After(15 * time.Second):
 			t.Fatal("two jobs did not start in parallel")
 		}
 	}
@@ -144,7 +168,7 @@ func TestWorkerRelayParallelCapacityEndToEnd(t *testing.T) {
 	if peak.Load() != 2 {
 		t.Fatalf("peak parallelism = %d, want 2", peak.Load())
 	}
-	waitFor(t, 3*time.Second, func() bool {
+	waitFor(t, 15*time.Second, func() bool {
 		progressing := 0
 		for _, submitted := range jobs {
 			job, getErr := relay.store.GetJob(submitted.ID)
@@ -155,7 +179,7 @@ func TestWorkerRelayParallelCapacityEndToEnd(t *testing.T) {
 		return progressing == 2
 	}, "parallel adapter progress did not reach the relay")
 
-	close(release)
+	releaseJobs()
 	completed := func() bool {
 		for _, submitted := range jobs {
 			job, getErr := relay.store.GetJob(submitted.ID)
