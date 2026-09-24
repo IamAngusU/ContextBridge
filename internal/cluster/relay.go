@@ -402,6 +402,9 @@ func (r *Relay) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", r.handleDashboard)
 	mux.HandleFunc("GET /health", r.handleHealth)
+	mux.HandleFunc("GET /livez", r.handleLiveness)
+	mux.HandleFunc("GET /readyz", r.handleReadiness)
+	mux.HandleFunc("GET /leaderz", r.handleLeadership)
 	mux.HandleFunc("GET /v1/cluster/lifecycle", r.authorize("admin")(r.handleLifecycle))
 	mux.HandleFunc("POST /v1/pair/request", r.rateLimit(12, time.Minute, r.handlePairRequest))
 	mux.HandleFunc("POST /v1/pair/token", r.rateLimit(30, time.Minute, r.handlePairPoll))
@@ -458,6 +461,60 @@ func (r *Relay) Run(ctx context.Context) error {
 
 func (r *Relay) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "service": "contextbridge-relay", "version": r.cfg.Version, "protocol": ProtocolVersion})
+}
+
+// Liveness deliberately proves only that this process can answer HTTP. It
+// does not claim that the durable store is usable or that the relay should
+// receive mutations. Existing /health clients retain their historical shape;
+// HA-aware operators use the explicit endpoints below.
+func (r *Relay) handleLiveness(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"ok": true, "live": true, "service": "contextbridge-relay",
+		"version": r.cfg.Version, "protocol": ProtocolVersion,
+	})
+}
+
+func (r *Relay) readinessError() error {
+	r.admissionMu.RLock()
+	quiescing := r.quiescing
+	r.admissionMu.RUnlock()
+	if quiescing {
+		return errors.New("relay is quiescing")
+	}
+	_, err := r.store.Overview()
+	return err
+}
+
+func (r *Relay) handleReadiness(w http.ResponseWriter, _ *http.Request) {
+	if err := r.readinessError(); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{
+			"ok": false, "ready": false, "leader": true, "mode": "standalone",
+			"service": "contextbridge-relay", "version": r.cfg.Version, "protocol": ProtocolVersion,
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"ok": true, "ready": true, "leader": true, "mode": "standalone",
+		"service": "contextbridge-relay", "version": r.cfg.Version, "protocol": ProtocolVersion,
+	})
+}
+
+// Leadership is a separate contract from process liveness. A reverse proxy
+// may route mutating traffic only when this endpoint is 200 and writable=true.
+// The current public core has one authoritative relay, so it truthfully reports
+// standalone leadership without pretending that consensus already exists.
+func (r *Relay) handleLeadership(w http.ResponseWriter, _ *http.Request) {
+	if err := r.readinessError(); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{
+			"ok": false, "leader": true, "writable": false, "mode": "standalone",
+			"service": "contextbridge-relay", "version": r.cfg.Version, "protocol": ProtocolVersion,
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"ok": true, "leader": true, "writable": true, "mode": "standalone",
+		"service": "contextbridge-relay", "version": r.cfg.Version, "protocol": ProtocolVersion,
+	})
 }
 
 func (r *Relay) handleLifecycle(w http.ResponseWriter, _ *http.Request) {

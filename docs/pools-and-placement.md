@@ -16,6 +16,20 @@ advertise bounded capability evidence.
 The current relay is one durable coordination authority. ContextBridge does
 not claim active multi-relay consensus or transparent cross-relay replication.
 
+It exposes three deliberately separate, content-minimizing probes:
+
+| Endpoint | Meaning |
+| --- | --- |
+| `/livez` | The relay process can answer HTTP. This says nothing about durable writes. |
+| `/readyz` | The durable store is usable and the relay is accepting admissions. |
+| `/leaderz` | This relay is the writable coordination authority. Require HTTP 200 and `writable: true`. |
+
+Today `/leaderz` reports `mode: standalone`; it does not imply quorum or
+automatic failover. Keeping leadership separate from liveness prevents a
+future reverse proxy from sending mutations to a live-but-read-only follower.
+During a controlled stop, liveness remains true while readiness and
+writability fail closed.
+
 ## Selection order
 
 The scheduler first rejects nodes that cannot prove hard requirements such as:

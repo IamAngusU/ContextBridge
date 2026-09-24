@@ -26,6 +26,7 @@ without sending an inference request.
 | --- | --- | --- |
 | Producer job input | `contextbridge.job.v1` | Published JSON Schema plus relay dry-run validation |
 | Relay behavior | `contextbridge.protocol-manifest.v1`, current wire version | Machine-readable protocol manifest and Relay Conformance v1 report |
+| Relay proxy probes | `relay_role_health_v1` | Separate `/livez`, `/readyz`, and `/leaderz`; current mode is explicitly `standalone` |
 | Worker advertisement | `contextbridge.worker-conformance.v1` | Worker Conformance v1 report over live bounded evidence |
 | Planned worker maintenance | `durable_worker_drain_v1`, `node.draining` | Admin-only durable admission state plus assignment-transaction recheck |
 | Out-of-tree adapter | Documented authenticated pull/lease lifecycle | Adapter contract; no standalone adapter certification suite is claimed yet |

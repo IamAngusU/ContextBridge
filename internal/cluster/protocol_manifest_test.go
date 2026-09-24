@@ -37,6 +37,9 @@ func TestProtocolManifestIsDeterministicAndNamesPublicBoundaries(t *testing.T) {
 	if !containsString(first.Features, "durable_worker_drain_v1") || !containsString(first.AdmissionErrorCodes, AdmissionCodeNodeDraining) {
 		t.Fatalf("worker drain contract is not advertised: %#v %#v", first.Features, first.AdmissionErrorCodes)
 	}
+	if !containsString(first.Features, "relay_role_health_v1") {
+		t.Fatalf("relay role health feature is not advertised: %#v", first.Features)
+	}
 }
 
 func containsString(values []string, wanted string) bool {
