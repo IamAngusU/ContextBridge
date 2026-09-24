@@ -494,6 +494,8 @@ func resolveExistingPrefix(path string) (string, error) {
 }
 
 func readSmallRegularFile(path string, limit int64) ([]byte, error) {
+	// #nosec G703 -- callers supply explicit managed paths; Lstat below rejects
+	// symlinks and anything except a bounded regular file before it is opened.
 	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
@@ -501,6 +503,8 @@ func readSmallRegularFile(path string, limit int64) ([]byte, error) {
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > limit {
 		return nil, errors.New("not a bounded regular file")
 	}
+	// #nosec G703 -- the same path was just bounded and validated as a regular,
+	// non-symlink file. Mutating this user-owned path requires the same account.
 	return os.ReadFile(path)
 }
 

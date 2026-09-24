@@ -17,6 +17,12 @@
   race detector it builds and executes the native binary, performs an isolated
   checksum-verified install, validates both LaunchAgents, starts the loopback
   service, and verifies ordinary uninstall preserves configuration.
+- Hardened the cross-platform gate after its first independent fork run:
+  canonical runtime paths are compared correctly on macOS and Windows,
+  slower hosted runners receive bounded but realistic integration deadlines,
+  every new static-analysis exception carries local evidence, native lifecycle
+  assertion failures name the missing invariant, and Actions are pinned to
+  current Node 24-based releases.
 - Added real incremental text output for explicitly reviewed
   `openai_compatible` engines with the `incremental_output` capability. The
   v1 path has no fallback ambiguity, applies direct backpressure and hard

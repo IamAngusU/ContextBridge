@@ -121,8 +121,12 @@ func TestCurrentRuntimeStaysInsideManagedDirectory(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(directory, "current.txt"), []byte(executable+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if current := Current(directory); current != executable {
-		t.Fatalf("current runtime = %q, want %q", current, executable)
+	wantExecutable, err := filepath.EvalSymlinks(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current := Current(directory); current != wantExecutable {
+		t.Fatalf("current runtime = %q, want canonical path %q", current, wantExecutable)
 	}
 
 	outside := filepath.Join(t.TempDir(), "outside-runtime")

@@ -8,6 +8,7 @@ fi
 
 root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/contextbridge-macos-native.XXXXXX")"
+test_root="$(CDPATH= cd -- "$test_root" && pwd -P)"
 service_pid=""
 cleanup() {
   if [[ -n "$service_pid" ]]; then
@@ -17,6 +18,21 @@ cleanup() {
   rm -rf "$test_root"
 }
 trap cleanup EXIT INT TERM
+
+fail() {
+  echo "Native macOS lifecycle proof failed: $*" >&2
+  [[ -f "$test_root/install.out" ]] && { echo "--- install output ---" >&2; cat "$test_root/install.out" >&2; }
+  [[ -f "$test_root/launchctl-calls" ]] && { echo "--- launchctl calls ---" >&2; cat "$test_root/launchctl-calls" >&2; }
+  [[ -f "$test_root/service.err" ]] && { echo "--- service stderr ---" >&2; cat "$test_root/service.err" >&2; }
+  exit 1
+}
+
+require_contains() {
+  needle="$1"
+  file_path="$2"
+  label="$3"
+  grep -F -- "$needle" "$file_path" >/dev/null || fail "$label"
+}
 
 fixture="$test_root/fixture"
 fake_bin="$test_root/fake-bin"
@@ -85,10 +101,10 @@ file "$installed" | grep -Eiq 'arm64|aarch64'
 agent="$home/Library/LaunchAgents/de.angusu.contextbridge.plist"
 update_agent="$home/Library/LaunchAgents/de.angusu.contextbridge.update.plist"
 plutil -lint "$agent" "$update_agent"
-grep -F -- "bootstrap gui/$(id -u) $agent" "$launchctl_calls" >/dev/null
-grep -F -- "bootstrap gui/$(id -u) $update_agent" "$launchctl_calls" >/dev/null
-grep -F -- "$installed" "$agent" >/dev/null
-grep -F -- "$config" "$agent" >/dev/null
+require_contains "bootstrap gui/$(id -u) $agent" "$launchctl_calls" "main LaunchAgent was not bootstrapped"
+require_contains "bootstrap gui/$(id -u) $update_agent" "$launchctl_calls" "update LaunchAgent was not bootstrapped"
+require_contains "$installed" "$agent" "main LaunchAgent does not reference the installed binary"
+require_contains "$config" "$agent" "main LaunchAgent does not reference the installed config"
 
 "$installed" serve --config "$config" > "$test_root/service.out" 2> "$test_root/service.err" &
 service_pid="$!"
@@ -106,13 +122,13 @@ if [[ "$ready" != "1" ]]; then
   exit 1
 fi
 "$installed" status --config "$config" --json > "$test_root/status.json"
-grep -F -- '"status"' "$test_root/status.json" >/dev/null
+require_contains '"status"' "$test_root/status.json" "native status JSON has no status field"
 kill "$service_pid"
 wait "$service_pid" || true
 service_pid=""
 
 "$installed" uninstall --config "$config" --install-dir "$install_dir" --dry-run --yes > "$test_root/uninstall-plan.out"
-grep -F -- 'Configuration and managed data are preserved' "$test_root/uninstall-plan.out" >/dev/null
+require_contains 'Configuration and managed data are preserved' "$test_root/uninstall-plan.out" "uninstall dry-run did not preserve managed data"
 "$installed" uninstall --config "$config" --install-dir "$install_dir" --yes > "$test_root/uninstall.out"
 
 [[ -f "$config" ]]
@@ -121,7 +137,7 @@ grep -F -- 'Configuration and managed data are preserved' "$test_root/uninstall-
 [[ ! -e "$bin_dir/cb" ]]
 [[ ! -e "$agent" ]]
 [[ ! -e "$update_agent" ]]
-grep -F -- "bootout gui/$(id -u) $agent" "$launchctl_calls" >/dev/null
-grep -F -- "bootout gui/$(id -u) $update_agent" "$launchctl_calls" >/dev/null
+require_contains "bootout gui/$(id -u) $agent" "$launchctl_calls" "main LaunchAgent was not booted out"
+require_contains "bootout gui/$(id -u) $update_agent" "$launchctl_calls" "update LaunchAgent was not booted out"
 
 echo "Native macOS arm64 install, service, LaunchAgent, and uninstall lifecycle verified"

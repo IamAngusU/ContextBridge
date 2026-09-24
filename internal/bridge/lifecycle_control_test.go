@@ -183,12 +183,17 @@ func TestLifecycleStopResponseSurvivesRealServerShutdown(t *testing.T) {
 	runDone := make(chan error, 1)
 	go func() { runDone <- server.Run(root) }()
 	base := "http://" + address
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		response, probeErr := http.Get(base + "/health")
 		if probeErr == nil {
 			response.Body.Close()
 			break
+		}
+		select {
+		case runErr := <-runDone:
+			t.Fatalf("real server exited before becoming healthy: %v", runErr)
+		default:
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("real server did not start: %v", probeErr)
@@ -207,7 +212,7 @@ func TestLifecycleStopResponseSurvivesRealServerShutdown(t *testing.T) {
 		if err != nil {
 			t.Fatalf("graceful server shutdown: %v", err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("real server did not exit after confirmed stop")
 	}
 	if _, _, err := server.claimSchedule("new-run-after-stop", time.Now().UTC(), true); !errors.Is(err, errServiceStopping) {

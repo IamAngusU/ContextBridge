@@ -296,7 +296,7 @@ func TestRelayDispatchRotatesPastLargeIncompatibleQueuePrefix(t *testing.T) {
 		t.Fatalf("first 200-candidate page unexpectedly changed routeable job: %#v, %v", queued, err)
 	}
 	relay.dispatch()
-	readContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	readContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_, raw, err := connection.Read(readContext)
 	if err != nil {

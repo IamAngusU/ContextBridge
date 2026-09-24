@@ -121,6 +121,8 @@ func removeUnixCompletions(plan uninstallPlan) {
 		} {
 			raw, err := readSmallRegularFile(path, 256<<10)
 			if err == nil && managedCompletionFile(raw) {
+				// #nosec G703 -- path is a fixed per-user completion location and
+				// readSmallRegularFile rejects symlinks and non-regular files first.
 				_ = os.Remove(path)
 			}
 		}
@@ -206,6 +208,9 @@ func removeManagedCompletionBlock(path string, ownedCommandNames []string) error
 		end++
 	}
 	updated := append(append([]byte{}, raw[:start]...), raw[end:]...)
+	// #nosec G703 -- resolved is the evaluated target of the fixed per-user
+	// shell profile path; readSmallRegularFile already rejected symlinks,
+	// non-regular files, and files beyond the bounded size.
 	info, err := os.Stat(resolved)
 	if err != nil {
 		return err
@@ -231,6 +236,8 @@ func removeManagedCompletionBlock(path string, ownedCommandNames []string) error
 	if err := temporary.Close(); err != nil {
 		return err
 	}
+	// #nosec G703 -- both operands are confined to the already validated
+	// profile directory; the temporary file was created there by os.CreateTemp.
 	return os.Rename(temporaryPath, resolved)
 }
 
