@@ -90,6 +90,10 @@ func TestLifecycleStopRejectsBusyUnlessForceIsExplicit(t *testing.T) {
 	if err := json.Unmarshal(raw, &result); err != nil || !result.OK || !result.Stopping || !result.Forced {
 		t.Fatalf("forced stop confirmation = %s (%v)", raw, err)
 	}
+	deadline := time.Now().Add(time.Second)
+	for stops.Load() != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
 	if stops.Load() != 1 {
 		t.Fatalf("forced stop callback count = %d, want 1", stops.Load())
 	}
