@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.7.3 - 2026-09-24
+
+- Added durable administrator-controlled worker drain/resume state for planned
+  maintenance. Drain survives reconnects and relay restarts, excludes the node
+  at the scheduler and assignment transaction, and never cancels, migrates, or
+  silently replays work that already owns a lease.
+- Added separate content-minimizing `/livez`, `/readyz`, and `/leaderz` probes
+  for reverse proxies and future relay failover. The current role is explicitly
+  `standalone`; quiescing or an unavailable durable store fails readiness and
+  writability closed without pretending that consensus already exists.
+- Advertised both boundaries through the protocol manifest as
+  `durable_worker_drain_v1` and `relay_role_health_v1`.
+
 ## v0.7.2 - 2026-09-24
 
 - Isolated panics at worker-job, pipeline, schedule, inbox, and terminal-event
