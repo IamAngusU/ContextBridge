@@ -175,8 +175,9 @@ func TestProducerAcceptsOnlyRelaySelectedAdapterEndpointInAssignment(t *testing.
 		Attempt: 1, OwnerSubject: "producer-a", ExpiresAt: time.Now().UTC().Add(time.Minute), Requirements: request.Requirements,
 	}, Secret: "assignment-secret"}
 	response.Assignment.Requirements.AdapterEndpointID = 42
+	response.Assignment.Requirements.AdapterPrincipal = "adapter-a"
 	context, err := ValidateAssignmentResponse(request, response, time.Now().UTC())
-	if err != nil || context.Requirements.AdapterEndpointID != 42 {
+	if err != nil || context.Requirements.AdapterEndpointID != 42 || context.Requirements.AdapterPrincipal != "adapter-a" {
 		t.Fatalf("relay-selected adapter endpoint was not authenticated: %#v %v", context, err)
 	}
 	changed := response

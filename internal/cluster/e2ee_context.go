@@ -132,6 +132,9 @@ func ValidateAssignmentResponse(request AssignmentRequest, response AssignmentRe
 	if expectedRequirements.AdapterEndpointID == 0 && strings.EqualFold(expectedRequirements.Provider, "adapter") && assignment.Requirements.AdapterEndpointID > 0 {
 		expectedRequirements.AdapterEndpointID = assignment.Requirements.AdapterEndpointID
 	}
+	if expectedRequirements.AdapterPrincipal == "" && strings.EqualFold(expectedRequirements.Provider, "adapter") {
+		expectedRequirements.AdapterPrincipal = assignment.Requirements.AdapterPrincipal
+	}
 	if strings.EqualFold(expectedRequirements.Provider, "adapter") && assignment.Requirements.AdapterSessionRecovery {
 		expectedRequirements.AdapterSessionRecovery = true
 	}
