@@ -18,7 +18,7 @@ var completionSubcommands = map[string][]string{
 	"mcp":          {"serve"},
 	"integrate":    {"openai", "mcp", "relay"},
 	"verification": {"verify"},
-	"cluster":      {"status", "node", "protocol", "conformance", "submit", "chat", "agent", "selftest", "route", "contract", "receipt", "login", "token", "pairing", "configure", "dashboard", "pipeline"},
+	"cluster":      {"status", "events", "node", "protocol", "conformance", "submit", "chat", "agent", "selftest", "route", "contract", "receipt", "login", "token", "pairing", "configure", "dashboard", "pipeline"},
 	"route":        {"explain"},
 	"update":       {"status", "check", "apply", "enable", "disable", "auto"},
 	"completion":   {"powershell", "bash", "zsh"},
@@ -58,7 +58,7 @@ $script:ContextBridgeSubcommands = @{
     mcp = @('serve')
     integrate = @('openai','mcp','relay')
     verification = @('verify')
-	cluster = @('status','node','protocol','conformance','submit','chat','agent','selftest','route','contract','receipt','login','token','pairing','configure','dashboard','pipeline')
+	cluster = @('status','events','node','protocol','conformance','submit','chat','agent','selftest','route','contract','receipt','login','token','pairing','configure','dashboard','pipeline')
     route = @('explain')
     update = @('status','check','apply','enable','disable','auto')
     completion = @('powershell','bash','zsh')
@@ -93,6 +93,7 @@ $script:ContextBridgeOptions = @{
     'pair' = @('--config','--relay','--identity','--name')
     'worker' = @('--config','--relay','--identity','--name','--slots','--providers','--models','--tasks','--groups','--no-updates','--topmost')
     'cluster status' = @('--config','--json')
+	'cluster events' = @('--config','--token','--after','--limit','--json','--follow','--poll')
 	'cluster node' = @('drain','resume','--config','--token','--json')
 	'cluster protocol' = @('--config','--token','--json')
 	'cluster conformance' = @('relay','worker','--config','--token','--node','--json')
@@ -124,7 +125,7 @@ $script:ContextBridgeTakesValue = @(
 	'--config','--install-dir','--file','--job','--artifacts','--artifact','--attach-image','--identity','--job-dir','--token-file','--trust-key','--evidence-dir','--write-env',
     '--slots','--endpoint','--relay','--name','--providers','--models','--tasks','--groups',
     '--token','--provider','--group','--model','--profile','--reasoning','--session','--prompt',
-	'--min-artifacts','--min-images','--local-model','--image-profile','--timeout','--job-timeout','--poll','--idempotency-key','--subject','--groups','--lifetime-hours',
+	'--min-artifacts','--min-images','--local-model','--image-profile','--timeout','--job-timeout','--poll','--after','--limit','--idempotency-key','--subject','--groups','--lifetime-hours',
     '--mode','--relay-url','--public-url','--listen','--role','--subject','--approve','--deny',
     '--managed-service','--samples','--warmup','--database-jobs','--idle-duration','--binary',
     '--goal','--goal-file','--planner-provider','--planner-profile','--planner-model','--allow-providers',
@@ -207,7 +208,7 @@ _contextbridge_complete() {
     --reasoning) candidates="instant medium high xhigh pro max" ;;
     --mode) candidates="local relay worker all" ;;
     --role) candidates="producer observer" ;;
-    --wait|--e2ee|--stream|--json|--show-token|--check|--live|--no-open|--topmost|--image|--new-session|--new-session-per-job|--foreground-new-session|--run|--dry-run|--keep-artifacts|--no-updates|--discover|--force|--relay-only|--require-artifact|--require-evidence) boolean_previous=1 ;;
+    --wait|--e2ee|--stream|--json|--follow|--show-token|--check|--live|--no-open|--topmost|--image|--new-session|--new-session-per-job|--foreground-new-session|--run|--dry-run|--keep-artifacts|--no-updates|--discover|--force|--relay-only|--require-artifact|--require-evidence) boolean_previous=1 ;;
   esac
   if [ -n "${candidates:-}" ]; then
     COMPREPLY=( $(compgen -W "$candidates" -- "$current") )
@@ -226,6 +227,7 @@ _contextbridge_complete() {
       "route explain") candidates="--config --file --job --token --json" ;;
       "cluster submit") candidates="--config --file --token --wait --e2ee --stream --artifacts --idempotency-key" ;;
       "cluster status") candidates="--config --json" ;;
+	  "cluster events") candidates="--config --token --after --limit --json --follow --poll" ;;
 	  "cluster node") candidates="drain resume --config --token --json" ;;
 	  "cluster protocol") candidates="--config --token --json" ;;
 	  "cluster conformance") candidates="relay worker --config --token --node --json" ;;
@@ -277,7 +279,7 @@ _contextbridge_complete() {
       mcp) candidates="serve" ;;
       integrate) candidates="openai mcp relay" ;;
       verification) candidates="verify" ;;
-	  cluster) candidates="status node protocol conformance submit chat agent selftest route contract receipt login token pairing configure dashboard pipeline" ;;
+	  cluster) candidates="status events node protocol conformance submit chat agent selftest route contract receipt login token pairing configure dashboard pipeline" ;;
       route) candidates="explain" ;;
       update) candidates="status check apply enable disable auto" ;;
       completion) candidates="powershell bash zsh" ;;
@@ -382,11 +384,12 @@ case "$words[2]" in
     ;;
   cluster)
     if (( CURRENT == 3 )); then
-	  _values 'cluster action' status node protocol conformance submit chat agent selftest route contract receipt login token pairing configure dashboard pipeline
+	  _values 'cluster action' status events node protocol conformance submit chat agent selftest route contract receipt login token pairing configure dashboard pipeline
       return
     fi
     case "$words[3]" in
       status) _arguments "${config[@]}" '--json[Print machine-readable JSON]' ;;
+	  events) _arguments "${config[@]}" '--token[Producer, observer, or admin token]:token:' '--after[Resume after this event sequence]:sequence:' '--limit[Events per page, 1-500]:count:' '--json[Print versioned event pages as JSON]' '--follow[Poll until a terminal event is observed]' '--poll[Follow polling interval]:duration:' '1:job ID:' ;;
 	  node)
 		if (( CURRENT == 4 )); then
 		  _values 'node action' drain resume

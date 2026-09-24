@@ -83,6 +83,88 @@ func TestClusterSubmitUsesCompactResponsesForSubmitAndPoll(t *testing.T) {
 	}
 }
 
+func TestClusterEventsSupportsCursorOwnershipTokenAndInterspersedFlags(t *testing.T) {
+	var seen atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/cluster/jobs/job-events-cli/events" || r.URL.Query().Get("after") != "7" || r.URL.Query().Get("limit") != "12" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer producer-events-token" {
+			http.Error(w, "missing token", http.StatusUnauthorized)
+			return
+		}
+		seen.Store(true)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(cluster.JobEventPage{
+			After: 7, Next: 8, OldestRetained: 1, Newest: 8,
+			Events: []cluster.JobEvent{{
+				Schema: cluster.JobEventSchemaV1, JobID: "job-events-cli", Sequence: 8,
+				Type: "job.completed", Source: "relay", Authority: "authoritative",
+			}},
+		})
+	}))
+	defer server.Close()
+
+	temporary := t.TempDir()
+	configPath := filepath.Join(temporary, "config.yml")
+	if err := config.Default(configPath); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Cluster.Relay.PublicURL = ""
+	cfg.Cluster.Worker.RelayURL = server.URL
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := os.CreateTemp(temporary, "events-output-*.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStdout := os.Stdout
+	os.Stdout = stdout
+	defer func() {
+		os.Stdout = oldStdout
+		_ = stdout.Close()
+	}()
+
+	// The documented positional-first form must keep working. Go's flag
+	// package alone would stop parsing at the job ID.
+	if err := clusterEventsCommand([]string{"job-events-cli", "--config", configPath, "--token", "producer-events-token", "--after", "7", "--limit", "12", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	if !seen.Load() {
+		t.Fatal("event endpoint was not called with the requested cursor")
+	}
+	if err := stdout.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(stdout.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var page cluster.JobEventPage
+	if err := json.Unmarshal(raw, &page); err != nil || page.Next != 8 || len(page.Events) != 1 || page.Events[0].Type != "job.completed" {
+		t.Fatalf("event CLI output = %#v err=%v raw=%s", page, err, raw)
+	}
+}
+
+func TestClusterEventsRejectsUnsafePollingAndLimits(t *testing.T) {
+	for _, args := range [][]string{
+		{"job-a", "--limit", "0"},
+		{"job-a", "--limit", "501"},
+		{"job-a", "--poll", "99ms"},
+		{"job-a", "--poll", "31s"},
+	} {
+		if err := clusterEventsCommand(args); err == nil {
+			t.Fatalf("unsafe event options were accepted: %v", args)
+		}
+	}
+}
+
 func TestClusterRouteExplainSupportsPreviewAndDurableJobDecision(t *testing.T) {
 	var previewSeen atomic.Bool
 	var jobSeen atomic.Bool

@@ -439,6 +439,45 @@ type Event struct {
 	Data    map[string]interface{} `json:"data,omitempty"`
 }
 
+const JobEventSchemaV1 = "contextbridge.event.v1"
+
+// JobEvent is a bounded, per-job execution event. Relay-authored lifecycle
+// events are authoritative because they commit in the same Bolt transaction as
+// the corresponding Job state. Worker/tool detail must use authority=advisory
+// and can never create terminal job state.
+type JobEvent struct {
+	Schema    string            `json:"schema"`
+	JobID     string            `json:"job_id"`
+	Sequence  uint64            `json:"seq"`
+	Type      string            `json:"type"`
+	Source    string            `json:"source"`
+	Authority string            `json:"authority"`
+	Time      time.Time         `json:"ts"`
+	Attempt   int               `json:"attempt,omitempty"`
+	NodeID    string            `json:"node_id,omitempty"`
+	StepID    string            `json:"step_id,omitempty"`
+	Progress  *JobEventProgress `json:"progress,omitempty"`
+}
+
+// JobEventProgress contains only coordination metadata. Worker-supplied text
+// and detail are deliberately excluded from the event plane so reconnect and
+// observability do not become a second content-retention channel.
+type JobEventProgress struct {
+	ReportedSequence uint64 `json:"reported_seq"`
+	Phase            string `json:"phase,omitempty"`
+	Percent          int    `json:"percent,omitempty"`
+	Busy             bool   `json:"busy,omitempty"`
+}
+
+type JobEventPage struct {
+	Events         []JobEvent `json:"events"`
+	After          uint64     `json:"after"`
+	Next           uint64     `json:"next"`
+	OldestRetained uint64     `json:"oldest_retained,omitempty"`
+	Newest         uint64     `json:"newest,omitempty"`
+	Gap            bool       `json:"gap"`
+}
+
 type WireMessage struct {
 	Version      int                `json:"version"`
 	Type         string             `json:"type"`

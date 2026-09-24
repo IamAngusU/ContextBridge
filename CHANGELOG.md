@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Added the first authoritative execution-event plane: relay-owned job
+  lifecycle events commit atomically with admission, assignment, execution
+  start, retry, cancellation, terminal completion and ambiguous failure.
+  Producer-scoped cursor reads are bounded, retained per job, report replay
+  gaps explicitly and expose coordination-safe lifecycle for E2EE jobs.
+  `cluster events JOB_ID` exposes human, JSON and reconnect-safe follow modes.
+  Worker progress is separately marked advisory, strips semantic text/detail,
+  cannot create terminal state, and is capped at 64 observations per job.
 - Added `contextbridge integrate openai|mcp`: it emits redacted, exact
   application connection settings, can create a new non-overwriting private
   OpenAI-compatible environment file, and generates a ready-to-paste MCP stdio

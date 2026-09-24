@@ -164,7 +164,7 @@ Usage:
   contextbridge pair [--config path] [--relay URL] [--identity path] [--name NAME]
   contextbridge worker [--config path] [--relay URL] [--identity path] [--name NAME] [--slots N] [--providers LIST] [--models LIST] [--tasks LIST] [--topmost]
   contextbridge selftest [options]
-	contextbridge cluster status|node|protocol|conformance|submit|chat|agent|selftest|route|contract|receipt|login|token|pairing [options]
+	contextbridge cluster status|events|node|protocol|conformance|submit|chat|agent|selftest|route|contract|receipt|login|token|pairing [options]
 	contextbridge cluster agent auto [--policy NAME] --goal TEXT [options]
 	contextbridge cluster agent plan --goal TEXT --out PLAN.json [options]
 	contextbridge cluster agent run --plan PLAN.json --approve sha256:HASH [options]
@@ -1387,11 +1387,13 @@ func freeLocalAddress() (string, error) {
 
 func clusterCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: contextbridge cluster status|node|protocol|conformance|submit|chat|agent|selftest|route|contract|receipt|login|token|pairing")
+		return errors.New("usage: contextbridge cluster status|events|node|protocol|conformance|submit|chat|agent|selftest|route|contract|receipt|login|token|pairing")
 	}
 	switch args[0] {
 	case "status":
 		return clusterStatusCommand(args[1:])
+	case "events":
+		return clusterEventsCommand(args[1:])
 	case "node":
 		return clusterNodeCommand(args[1:])
 	case "protocol":
@@ -1426,6 +1428,89 @@ func clusterCommand(args []string) error {
 		return clusterPipelineCommand(args[1:])
 	default:
 		return fmt.Errorf("unknown cluster command %s", args[0])
+	}
+}
+
+func clusterEventsCommand(args []string) error {
+	flags := flag.NewFlagSet("cluster events", flag.ContinueOnError)
+	path := flags.String("config", defaultConfigPath(), "config path")
+	token := flags.String("token", "", "producer, observer, or admin token; defaults to the configured client token")
+	after := flags.Uint64("after", 0, "return events after this sequence")
+	limit := flags.Int("limit", 100, "events per page; 1-500")
+	asJSON := flags.Bool("json", false, "print the versioned event page as JSON")
+	follow := flags.Bool("follow", false, "poll until a terminal lifecycle event is observed")
+	poll := flags.Duration("poll", 500*time.Millisecond, "follow polling interval; 100ms-30s")
+	if err := parseInterspersedFlags(flags, args); err != nil {
+		return err
+	}
+	if flags.NArg() != 1 || strings.TrimSpace(flags.Arg(0)) == "" {
+		return errors.New("usage: contextbridge cluster events JOB_ID [--after N] [--limit N] [--json] [--follow]")
+	}
+	if *limit < 1 || *limit > 500 {
+		return errors.New("--limit must be between 1 and 500")
+	}
+	if *poll < 100*time.Millisecond || *poll > 30*time.Second {
+		return errors.New("--poll must be between 100ms and 30s")
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	if *token == "" {
+		*token = clusterClientToken(cfg, "")
+	}
+	jobID := strings.TrimSpace(flags.Arg(0))
+	cursor := *after
+	for {
+		var page cluster.JobEventPage
+		target := fmt.Sprintf("%s/v1/cluster/jobs/%s/events?after=%d&limit=%d", clusterBaseURL(cfg), url.PathEscape(jobID), cursor, *limit)
+		if err := clusterGET(context.Background(), target, *token, &page); err != nil {
+			return err
+		}
+		if *asJSON {
+			if err := json.NewEncoder(os.Stdout).Encode(page); err != nil {
+				return err
+			}
+		} else {
+			if page.Gap {
+				fmt.Fprintf(os.Stderr, "Warning: event history before sequence %d is no longer retained; resume from %d.\n", page.OldestRetained, page.OldestRetained)
+			}
+			for _, event := range page.Events {
+				fmt.Printf("%6d  %s  %-20s", event.Sequence, event.Time.UTC().Format(time.RFC3339), event.Type)
+				if event.Attempt > 0 {
+					fmt.Printf("  attempt %d", event.Attempt)
+				}
+				if event.NodeID != "" {
+					fmt.Printf("  node %s", event.NodeID)
+				}
+				if event.StepID != "" {
+					fmt.Printf("  step %s", event.StepID)
+				}
+				fmt.Printf("  [%s]\n", event.Authority)
+			}
+		}
+		terminal := false
+		for _, event := range page.Events {
+			if terminalJobEvent(event.Type) {
+				terminal = true
+			}
+		}
+		if page.Next > cursor {
+			cursor = page.Next
+		}
+		if !*follow || terminal {
+			return nil
+		}
+		time.Sleep(*poll)
+	}
+}
+
+func terminalJobEvent(eventType string) bool {
+	switch eventType {
+	case "job.completed", "job.failed", "job.cancelled", "job.ambiguous":
+		return true
+	default:
+		return false
 	}
 }
 

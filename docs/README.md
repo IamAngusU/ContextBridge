@@ -16,6 +16,8 @@ described as vendor integrations here.
   accepted HA architecture, replicated-state boundary, alternatives, and proof
   gates; the implementation is not yet claimed.
 - [Automation](automation.md): schedules, pipelines, and verified follow-ups.
+- [Authoritative execution events](execution-events.md): atomic per-job
+  lifecycle, replay cursors, retention gaps, ownership and authority classes.
 - [Portable resources](portable-resources.md): hot-plug packs identified by a
   stable manifest rather than a drive letter.
 - [Limits and performance](limits-and-performance.md): exact byte/count

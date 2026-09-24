@@ -35,6 +35,7 @@ func CurrentProtocolManifest(configuredJobBytes int64) ProtocolManifest {
 		JobContractVersions: []string{JobContractV1},
 		Features: []string{
 			"assignment_fencing_v1",
+			"authoritative_job_events_v1",
 			"content_minimizing_execution_receipts",
 			"durable_execution_policy_v1",
 			"durable_worker_drain_v1",

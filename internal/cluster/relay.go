@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -459,6 +460,7 @@ func (r *Relay) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/cluster/jobs", r.authorize("admin", "producer")(r.handleSubmit))
 	mux.HandleFunc("POST /v1/cluster/contracts/validate", r.authorize("admin", "producer")(r.handleContractValidate))
 	mux.HandleFunc("GET /v1/cluster/jobs/{id}", r.authorize("admin", "observer", "producer")(r.handleJob))
+	mux.HandleFunc("GET /v1/cluster/jobs/{id}/events", r.authorize("admin", "observer", "producer")(r.handleJobEvents))
 	mux.HandleFunc("GET /v1/cluster/jobs/{id}/route", r.authorize("admin", "observer", "producer")(r.handleJobRoute))
 	mux.HandleFunc("DELETE /v1/cluster/jobs/{id}", r.authorize("admin", "producer")(r.handleCancel))
 	mux.HandleFunc("POST /v1/cluster/assign", r.authorize("admin", "producer")(r.handleReserve))
@@ -744,6 +746,34 @@ func (r *Relay) handleJob(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, jobResponse(job, req.URL.Query().Get("compact") == "1"))
+}
+
+func (r *Relay) handleJobEvents(w http.ResponseWriter, req *http.Request) {
+	job, err := r.store.GetJob(req.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, errors.New("job not found"))
+		return
+	}
+	if !canReadJob(req.Context(), job) {
+		writeError(w, http.StatusForbidden, errors.New("job belongs to another producer"))
+		return
+	}
+	after := uint64(0)
+	if raw := strings.TrimSpace(req.URL.Query().Get("after")); raw != "" {
+		value, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, errors.New("after must be an unsigned event sequence"))
+			return
+		}
+		after = value
+	}
+	page, err := r.store.ListJobEvents(job.ID, after, queryLimit(req, 100, 500))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, page)
 }
 
 func (r *Relay) handleJobRoute(w http.ResponseWriter, req *http.Request) {

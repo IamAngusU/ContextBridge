@@ -392,6 +392,11 @@ func deleteJobIndexes(tx *bolt.Tx, job Job) error {
 			}
 		}
 	}
+	if events := tx.Bucket(bucketJobEvents); events != nil && events.Bucket([]byte(job.ID)) != nil {
+		if err := events.DeleteBucket([]byte(job.ID)); err != nil {
+			return err
+		}
+	}
 	return deleteQueueEntry(tx.Bucket(bucketQueue), job.ID)
 }
 

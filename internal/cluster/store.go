@@ -32,6 +32,7 @@ var (
 	bucketPairCodes           = []byte("pair_codes")
 	bucketAssignments         = []byte("assignments")
 	bucketEvents              = []byte("events")
+	bucketJobEvents           = []byte("job_events_v1")
 	bucketPipelineRuns        = []byte("pipeline_runs")
 	bucketSessionPlacements   = []byte("session_placements_v1")
 	bucketAdapterSessionLocks = []byte("adapter_session_locks_v1")
@@ -51,7 +52,7 @@ func requiredStoreBuckets() [][]byte {
 	return [][]byte{
 		bucketJobs, bucketJobIndex, bucketJobOwnerIndex, bucketStoreMeta,
 		bucketQueue, bucketNodes, bucketTokens, bucketPairings, bucketPairCodes,
-		bucketAssignments, bucketEvents, bucketPipelineRuns, bucketSessionPlacements,
+		bucketAssignments, bucketEvents, bucketJobEvents, bucketPipelineRuns, bucketSessionPlacements,
 		bucketAdapterSessionLocks, bucketJobIdempotency, bucketJobIdempotencyByJob,
 		bucketHistoricalTotals,
 	}
@@ -62,6 +63,7 @@ const maximumPendingPairings = 1000
 type Store struct {
 	db                      *bolt.DB
 	savePipelineRunTestHook func(PipelineRun) error
+	saveJobEventTestHook    func(JobEvent) error
 }
 
 var (
@@ -820,9 +822,14 @@ func (s *Store) createJob(request SubmitRequest, maxQueued, maxOwner int, idempo
 			return err
 		}
 		if idempotencyKey != "" {
-			return saveIdempotentJobTx(tx, job.OwnerSubject, idempotencyKey, requestHash, job.ID)
+			if err := saveIdempotentJobTx(tx, job.OwnerSubject, idempotencyKey, requestHash, job.ID); err != nil {
+				return err
+			}
 		}
-		return nil
+		if err := appendAuthoritativeJobEventTx(tx, s, job, "job.accepted"); err != nil {
+			return err
+		}
+		return appendAuthoritativeJobEventTx(tx, s, job, "job.queued")
 	})
 	return job, replayed, err
 }
@@ -1097,6 +1104,12 @@ func (s *Store) consumeReservationAdmitted(id, secret string, sealed *SealedEnve
 			if err := saveIdempotentJobTx(tx, owner, idempotencyKey, requestHash, job.ID); err != nil {
 				return err
 			}
+		}
+		if err := appendAuthoritativeJobEventTx(tx, s, job, "job.accepted"); err != nil {
+			return err
+		}
+		if err := appendAuthoritativeJobEventTx(tx, s, job, "job.queued"); err != nil {
+			return err
 		}
 		return tx.Bucket(bucketAssignments).Delete([]byte(id))
 	})
@@ -1683,7 +1696,15 @@ func (s *Store) assignJob(id, nodeID string, adapter *adapterAssignment, decisio
 		if err := putJSON(tx.Bucket(bucketJobs), id, job); err != nil {
 			return err
 		}
-		return deleteQueueEntry(tx.Bucket(bucketQueue), id)
+		if err := deleteQueueEntry(tx.Bucket(bucketQueue), id); err != nil {
+			return err
+		}
+		if job.RoutingDecision != nil {
+			if err := appendAuthoritativeJobEventTx(tx, s, job, "route.selected"); err != nil {
+				return err
+			}
+		}
+		return appendAuthoritativeJobEventTx(tx, s, job, "worker.assigned")
 	})
 	return job, err
 }
@@ -1711,7 +1732,10 @@ func (s *Store) markRunning(id, nodeID string, attempt int, fence *AssignmentFen
 		job.Status = JobRunning
 		job.StartedAt = time.Now().UTC()
 		job.UpdatedAt = job.StartedAt
-		return putJSON(tx.Bucket(bucketJobs), id, job)
+		if err := putJSON(tx.Bucket(bucketJobs), id, job); err != nil {
+			return err
+		}
+		return appendAuthoritativeJobEventTx(tx, s, job, "execution.started")
 	})
 	return job, err
 }
@@ -1751,7 +1775,10 @@ func (s *Store) updateJobProgress(id, nodeID string, attempt int, fence *Assignm
 		copy := progress
 		job.Progress = &copy
 		job.UpdatedAt = progress.UpdatedAt
-		return putJSON(tx.Bucket(bucketJobs), id, job)
+		if err := putJSON(tx.Bucket(bucketJobs), id, job); err != nil {
+			return err
+		}
+		return appendAdvisoryJobProgressEventTx(tx, s, job, progress)
 	})
 	return job, err
 }
@@ -1783,7 +1810,10 @@ func (s *Store) CancelJob(id string) (Job, error) {
 		if err := deleteQueueEntry(tx.Bucket(bucketQueue), id); err != nil {
 			return err
 		}
-		return putJSON(tx.Bucket(bucketJobs), id, job)
+		if err := putJSON(tx.Bucket(bucketJobs), id, job); err != nil {
+			return err
+		}
+		return appendAuthoritativeJobEventTx(tx, s, job, "job.cancelled")
 	})
 	return job, err
 }
@@ -1857,7 +1887,13 @@ func (s *Store) completeJobWithFailure(id, nodeID string, attempt int, fence *As
 			if err := putJSON(tx.Bucket(bucketJobs), id, job); err != nil {
 				return err
 			}
-			return putQueueEntry(tx.Bucket(bucketQueue), job)
+			if err := putQueueEntry(tx.Bucket(bucketQueue), job); err != nil {
+				return err
+			}
+			if err := appendAuthoritativeJobEventTx(tx, s, job, "job.retrying"); err != nil {
+				return err
+			}
+			return appendAuthoritativeJobEventTx(tx, s, job, "job.queued")
 		}
 		completionError := validateWorkerResult(job, result, sealed, jobError)
 		var executedAdapterEndpointID int
@@ -1941,7 +1977,11 @@ func (s *Store) completeJobWithFailure(id, nodeID string, attempt int, fence *As
 				_ = putJSON(tx.Bucket(bucketNodes), node.ID, node)
 			}
 		}
-		return nil
+		eventType := "job.completed"
+		if job.Status == JobFailed {
+			eventType = "job.failed"
+		}
+		return appendAuthoritativeJobEventTx(tx, s, job, eventType)
 	})
 	return job, err
 }
@@ -2069,6 +2109,9 @@ func (s *Store) RequeueNode(nodeID, reason string) ([]Job, error) {
 			if err := bucket.Put(change.key, encoded); err != nil {
 				return err
 			}
+			if err := appendAuthoritativeJobEventTx(tx, s, change.job, "job.ambiguous"); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
@@ -2139,6 +2182,9 @@ func (s *Store) RecoverRelayRestart(reason string) ([]Job, error) {
 			if err := jobs.Put(change.key, encoded); err != nil {
 				return err
 			}
+			if err := appendAuthoritativeJobEventTx(tx, s, change.job, "job.ambiguous"); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
@@ -2156,8 +2202,9 @@ func (s *Store) RecoverStaleJobs(now time.Time, sealedWait, execution time.Durat
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		jobs := tx.Bucket(bucketJobs)
 		type change struct {
-			key []byte
-			job Job
+			key       []byte
+			job       Job
+			eventType string
 		}
 		changes := []change{}
 		if err := jobs.ForEach(func(key, value []byte) error {
@@ -2186,7 +2233,11 @@ func (s *Store) RecoverStaleJobs(now time.Time, sealedWait, execution time.Durat
 					return err
 				}
 			}
-			changes = append(changes, change{key: append([]byte(nil), key...), job: job})
+			eventType := "job.failed"
+			if staleExecution {
+				eventType = "job.ambiguous"
+			}
+			changes = append(changes, change{key: append([]byte(nil), key...), job: job, eventType: eventType})
 			updated = append(updated, job)
 			return nil
 		}); err != nil {
@@ -2198,6 +2249,9 @@ func (s *Store) RecoverStaleJobs(now time.Time, sealedWait, execution time.Durat
 				return err
 			}
 			if err := jobs.Put(item.key, raw); err != nil {
+				return err
+			}
+			if err := appendAuthoritativeJobEventTx(tx, s, item.job, item.eventType); err != nil {
 				return err
 			}
 		}
@@ -2506,6 +2560,153 @@ func (s *Store) AddEvent(event Event) error {
 		key := fmt.Sprintf("%020d:%s", event.Time.UnixNano(), event.ID)
 		return putJSON(tx.Bucket(bucketEvents), key, event)
 	})
+}
+
+const (
+	maximumRetainedJobEvents            = 256
+	maximumAdvisoryProgressEventsPerJob = 64
+)
+
+var (
+	keyJobEventSequence      = []byte("_sequence")
+	keyJobProgressEventCount = []byte("_progress_count")
+	jobEventPrefix           = byte('e')
+)
+
+func jobEventKey(sequence uint64) []byte {
+	key := make([]byte, 9)
+	key[0] = jobEventPrefix
+	binary.BigEndian.PutUint64(key[1:], sequence)
+	return key
+}
+
+func appendAuthoritativeJobEventTx(tx *bolt.Tx, store *Store, job Job, eventType string) error {
+	switch eventType {
+	case "job.accepted", "job.queued", "route.selected", "worker.assigned", "execution.started", "job.retrying", "job.completed", "job.failed", "job.cancelled", "job.ambiguous":
+	default:
+		return fmt.Errorf("unsupported authoritative job event %q", eventType)
+	}
+	timestamp := job.UpdatedAt
+	if timestamp.IsZero() {
+		timestamp = time.Now().UTC()
+	}
+	event := JobEvent{
+		Schema: JobEventSchemaV1, JobID: job.ID, Type: eventType,
+		Source: "relay", Authority: "authoritative", Time: timestamp, Attempt: job.Attempt,
+		NodeID: job.AssignedNode, StepID: job.Step,
+	}
+	return appendJobEventTx(tx, store, event)
+}
+
+func appendAdvisoryJobProgressEventTx(tx *bolt.Tx, store *Store, job Job, progress JobProgress) error {
+	root := tx.Bucket(bucketJobEvents)
+	bucket, err := root.CreateBucketIfNotExists([]byte(job.ID))
+	if err != nil {
+		return err
+	}
+	count := uint64(0)
+	if raw := bucket.Get(keyJobProgressEventCount); len(raw) == 8 {
+		count = binary.BigEndian.Uint64(raw)
+	}
+	if count >= maximumAdvisoryProgressEventsPerJob {
+		return nil
+	}
+	event := JobEvent{
+		Schema: JobEventSchemaV1, JobID: job.ID, Type: "execution.progress",
+		Source: "worker", Authority: "advisory", Time: progress.UpdatedAt,
+		Attempt: job.Attempt, NodeID: job.AssignedNode, StepID: job.Step,
+		Progress: &JobEventProgress{
+			ReportedSequence: progress.Sequence, Phase: progress.Phase,
+			Percent: progress.Percent, Busy: progress.Busy,
+		},
+	}
+	if err := appendJobEventTx(tx, store, event); err != nil {
+		return err
+	}
+	encodedCount := make([]byte, 8)
+	binary.BigEndian.PutUint64(encodedCount, count+1)
+	return bucket.Put(keyJobProgressEventCount, encodedCount)
+}
+
+func appendJobEventTx(tx *bolt.Tx, store *Store, event JobEvent) error {
+	root := tx.Bucket(bucketJobEvents)
+	bucket, err := root.CreateBucketIfNotExists([]byte(event.JobID))
+	if err != nil {
+		return err
+	}
+	sequence := uint64(0)
+	if raw := bucket.Get(keyJobEventSequence); len(raw) == 8 {
+		sequence = binary.BigEndian.Uint64(raw)
+	}
+	if sequence == ^uint64(0) {
+		return errors.New("job event sequence exhausted")
+	}
+	sequence++
+	event.Sequence = sequence
+	if event.Time.IsZero() {
+		event.Time = time.Now().UTC()
+	}
+	if store != nil && store.saveJobEventTestHook != nil {
+		if err := store.saveJobEventTestHook(event); err != nil {
+			return err
+		}
+	}
+	if err := putJSON(bucket, string(jobEventKey(sequence)), event); err != nil {
+		return err
+	}
+	encodedSequence := make([]byte, 8)
+	binary.BigEndian.PutUint64(encodedSequence, sequence)
+	if err := bucket.Put(keyJobEventSequence, encodedSequence); err != nil {
+		return err
+	}
+	if sequence > maximumRetainedJobEvents {
+		if err := bucket.Delete(jobEventKey(sequence - maximumRetainedJobEvents)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) ListJobEvents(jobID string, after uint64, limit int) (JobEventPage, error) {
+	page := JobEventPage{Events: []JobEvent{}, After: after, Next: after}
+	if !validJobID(jobID) {
+		return page, errors.New("invalid job id")
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	err := s.db.View(func(tx *bolt.Tx) error {
+		root := tx.Bucket(bucketJobEvents)
+		bucket := root.Bucket([]byte(jobID))
+		if bucket == nil {
+			return nil
+		}
+		if raw := bucket.Get(keyJobEventSequence); len(raw) == 8 {
+			page.Newest = binary.BigEndian.Uint64(raw)
+		}
+		cursor := bucket.Cursor()
+		first, _ := cursor.Seek(jobEventKey(1))
+		if len(first) == 9 && first[0] == jobEventPrefix {
+			page.OldestRetained = binary.BigEndian.Uint64(first[1:])
+			page.Gap = after != ^uint64(0) && after+1 < page.OldestRetained
+		}
+		if after == ^uint64(0) {
+			return nil
+		}
+		for key, value := cursor.Seek(jobEventKey(after + 1)); key != nil && len(page.Events) < limit; key, value = cursor.Next() {
+			if len(key) != 9 || key[0] != jobEventPrefix {
+				continue
+			}
+			var event JobEvent
+			if err := json.Unmarshal(value, &event); err != nil {
+				return err
+			}
+			page.Events = append(page.Events, event)
+			page.Next = event.Sequence
+		}
+		return nil
+	})
+	return page, err
 }
 
 func (s *Store) ListEvents(limit int) ([]Event, error) {
