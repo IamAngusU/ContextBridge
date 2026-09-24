@@ -45,6 +45,16 @@ var (
 	keyRelayEpoch             = []byte("relay_epoch_v1")
 )
 
+func requiredStoreBuckets() [][]byte {
+	return [][]byte{
+		bucketJobs, bucketJobIndex, bucketJobOwnerIndex, bucketStoreMeta,
+		bucketQueue, bucketNodes, bucketTokens, bucketPairings, bucketPairCodes,
+		bucketAssignments, bucketEvents, bucketPipelineRuns, bucketSessionPlacements,
+		bucketAdapterSessionLocks, bucketJobIdempotency, bucketJobIdempotencyByJob,
+		bucketHistoricalTotals,
+	}
+}
+
 const maximumPendingPairings = 1000
 
 type Store struct {
@@ -107,7 +117,7 @@ func OpenStore(path string) (*Store, error) {
 		return nil, err
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, name := range [][]byte{bucketJobs, bucketJobIndex, bucketJobOwnerIndex, bucketStoreMeta, bucketQueue, bucketNodes, bucketTokens, bucketPairings, bucketPairCodes, bucketAssignments, bucketEvents, bucketPipelineRuns, bucketSessionPlacements, bucketAdapterSessionLocks, bucketJobIdempotency, bucketJobIdempotencyByJob, bucketHistoricalTotals} {
+		for _, name := range requiredStoreBuckets() {
 			if _, createErr := tx.CreateBucketIfNotExists(name); createErr != nil {
 				return createErr
 			}
@@ -128,6 +138,21 @@ func OpenStore(path string) (*Store, error) {
 }
 
 func (s *Store) Close() error { return s.db.Close() }
+
+// Ready performs a constant-cost durable-store probe. Health endpoints must
+// not deserialize jobs, nodes, results, or other attacker-influenced records:
+// their cost should remain independent of queue and history size. A Bolt view
+// also fails after Close, which preserves the fail-closed readiness contract.
+func (s *Store) Ready() error {
+	return s.db.View(func(tx *bolt.Tx) error {
+		for _, name := range requiredStoreBuckets() {
+			if tx.Bucket(name) == nil {
+				return fmt.Errorf("required store bucket %q is missing", name)
+			}
+		}
+		return nil
+	})
+}
 
 // AcquireRelayAuthority returns the stable identity of this durable store and
 // advances its process epoch in the same transaction. Gaps are harmless (a

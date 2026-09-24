@@ -704,18 +704,17 @@ func dashboardCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	base := baseURL(cfg) + "/"
+	base := localDashboardTarget(cfg)
 	if *noOpen {
 		fmt.Println(base)
 		fmt.Println("Open the dashboard and enter the pairing token from your config.")
 		return nil
 	}
-	dashboardURL := base + "#token=" + url.QueryEscape(cfg.Server.Token)
-	if err := openAdapter(dashboardURL); err != nil {
+	if err := openAdapter(base); err != nil {
 		fmt.Println(base)
 		return fmt.Errorf("could not open the default adapter: %w", err)
 	}
-	fmt.Println("Opened the local ContextBridge dashboard.")
+	fmt.Println("Opened the local ContextBridge dashboard. Enter the pairing token from your config.")
 	return nil
 }
 
@@ -1606,12 +1605,18 @@ func clusterDashboardCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	target := clusterBaseURL(cfg) + "/dashboard/#token=" + url.QueryEscape(cfg.Cluster.Relay.AdminToken)
+	target := clusterDashboardTarget(cfg)
 	if *noOpen {
 		fmt.Println(target)
+		fmt.Println("Open the dashboard and enter the relay admin token from your config.")
 		return nil
 	}
-	return openAdapter(target)
+	if err := openAdapter(target); err != nil {
+		fmt.Println(target)
+		return fmt.Errorf("could not open the cluster dashboard: %w", err)
+	}
+	fmt.Println("Opened the cluster dashboard. Enter the relay admin token from your config.")
+	return nil
 }
 
 func clusterPipelineCommand(args []string) error {
@@ -2178,6 +2183,14 @@ func openAdapter(target string) error {
 		command = exec.Command("xdg-open", target)
 	}
 	return command.Start()
+}
+
+func localDashboardTarget(cfg config.Config) string {
+	return baseURL(cfg) + "/"
+}
+
+func clusterDashboardTarget(cfg config.Config) string {
+	return clusterBaseURL(cfg) + "/dashboard/"
 }
 
 func submit(configPath string, job bridge.Job) (bridge.Submission, error) {

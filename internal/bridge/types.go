@@ -30,10 +30,15 @@ type Job struct {
 	// ContextBridgeAdapterEndpointID is worker/relay routing metadata. Cluster jobs
 	// use it to keep the local lease on the exact adapter endpoint whose telemetry
 	// satisfied the requested profile/model/reasoning.
-	ContextBridgeAdapterEndpointID int    `json:"contextbridge_adapter_endpoint_id,omitempty"`
-	AdapterProfile                 string `json:"adapter_profile,omitempty"`
-	Model                          string `json:"model,omitempty"`
-	Reasoning                      string `json:"reasoning,omitempty"`
+	ContextBridgeAdapterEndpointID int `json:"contextbridge_adapter_endpoint_id,omitempty"`
+	// ContextBridgeEgress and ContextBridgeProviderClassification are written by
+	// the authenticated cluster worker, not trusted from the producer payload.
+	// They bind name-based admission to the endpoint resolved on this machine.
+	ContextBridgeEgress                 string `json:"contextbridge_egress,omitempty"`
+	ContextBridgeProviderClassification string `json:"contextbridge_provider_classification,omitempty"`
+	AdapterProfile                      string `json:"adapter_profile,omitempty"`
+	Model                               string `json:"model,omitempty"`
+	Reasoning                           string `json:"reasoning,omitempty"`
 	// MaxCostUSD is an authenticated cluster upper bound. It is enforced only
 	// by engines with an operator-reviewed reservation calculation; an unknown
 	// provider price fails closed instead of being treated as zero.

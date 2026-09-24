@@ -75,6 +75,13 @@ func (p *Processor) Process(ctx context.Context, job Job) Output {
 					continue
 				}
 			}
+			if err == nil {
+				err = validateResolvedEngineEgress(job, engine)
+			}
+			if err != nil {
+				lastProviderError = strings.TrimSpace(err.Error())
+				continue
+			}
 			switch engine.Type {
 			case "ollama":
 				output, err = p.ollama(ctx, job, route, engine, provider)
@@ -107,6 +114,38 @@ func (p *Processor) Process(ctx context.Context, job Job) Output {
 		return Output{Mode: "decision", Decision: &decision, Provider: decision.Provider, Model: decision.Model}
 	}
 	return OutputError(outputMode(job.Output), "contextbridge", "fallback", failure, 0)
+}
+
+func validateResolvedEngineEgress(job Job, engine config.Engine) error {
+	classification := strings.ToLower(strings.TrimSpace(job.ContextBridgeProviderClassification))
+	localOnly := strings.EqualFold(job.ContextBridgeEgress, "local_only")
+	// Adapter execution intentionally crosses the local process boundary to an
+	// attached external provider. It has no engine URL to inspect, so bind its
+	// semantic class explicitly rather than treating an empty URL as local.
+	if engine.Type == "adapter" {
+		if localOnly || classification == "local" {
+			return errors.New("adapter execution violates the authenticated local execution boundary")
+		}
+		return nil
+	}
+	endpoint := strings.TrimSpace(engineURL(engine))
+	if endpoint == "" {
+		return nil
+	}
+	remote, err := config.ProviderURLIsRemote(endpoint)
+	if err != nil {
+		return fmt.Errorf("execution endpoint rejected: %w", err)
+	}
+	if localOnly && remote {
+		return errors.New("execution endpoint violates authenticated local-only egress")
+	}
+	if classification == "local" && remote {
+		return errors.New("resolved endpoint is remote but the authenticated provider classification is local")
+	}
+	if classification == "remote" && !remote {
+		return errors.New("resolved endpoint is local but the authenticated provider classification is remote")
+	}
+	return nil
 }
 
 func (p *Processor) ollama(parent context.Context, job Job, route config.Route, engine config.Engine, provider string) (Output, error) {

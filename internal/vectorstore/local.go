@@ -76,9 +76,8 @@ func (s *Local) Upsert(ctx context.Context, tenant string, documents []Document,
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.data[tenant] == nil {
-		s.data[tenant] = map[string]record{}
-	}
+	// Validate the complete request before constructing a candidate. A rejected
+	// later document must never leave earlier documents visible in memory.
 	for index, document := range documents {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -86,12 +85,34 @@ func (s *Local) Upsert(ctx context.Context, tenant string, documents []Document,
 		if document.ID == "" || len(vectors[index]) == 0 {
 			return errors.New("documents require IDs and vectors")
 		}
-		if _, exists := s.data[tenant][document.ID]; !exists && s.countLocked() >= s.max {
+	}
+	candidate := make(map[string]map[string]record, len(s.data)+1)
+	for name, records := range s.data {
+		candidate[name] = records
+	}
+	tenantRecords := make(map[string]record, len(s.data[tenant])+len(documents))
+	for id, item := range s.data[tenant] {
+		tenantRecords[id] = item
+	}
+	candidate[tenant] = tenantRecords
+	count := s.countLocked()
+	for index, document := range documents {
+		if _, exists := tenantRecords[document.ID]; !exists {
+			count++
+		}
+		if count > s.max {
 			return errors.New("local vector store reached max_documents")
 		}
-		s.data[tenant][document.ID] = record{Document: document, Vector: append([]float32(nil), vectors[index]...)}
+		tenantRecords[document.ID] = record{Document: document, Vector: append([]float32(nil), vectors[index]...)}
 	}
-	return s.persistLocked()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := s.persistDataLocked(candidate); err != nil {
+		return err
+	}
+	s.data = candidate
+	return nil
 }
 
 func (s *Local) Search(ctx context.Context, tenant string, vector []float32, limit int) ([]Match, error) {
@@ -138,7 +159,11 @@ func (s *Local) countLocked() int {
 }
 
 func (s *Local) persistLocked() error {
-	raw, err := json.Marshal(s.data)
+	return s.persistDataLocked(s.data)
+}
+
+func (s *Local) persistDataLocked(data map[string]map[string]record) error {
+	raw, err := json.Marshal(data)
 	if err != nil {
 		return err
 	}

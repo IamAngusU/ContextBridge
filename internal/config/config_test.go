@@ -43,6 +43,24 @@ func TestDefaultConfigLoads(t *testing.T) {
 	}
 }
 
+func TestPortableResourceEngineRejectsCredentialInheritance(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := Default(path); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Engines["portable-secret"] = Engine{
+		Type: "openai_compatible", ResourcePack: "portable.test", Endpoint: "api",
+		Model: "model", Capabilities: []string{"text"}, APIKey: "must-not-move",
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "resource_pack cannot be combined") {
+		t.Fatalf("credential-bearing portable engine was accepted: %v", err)
+	}
+}
+
 func TestTerminalStyleIsSelectableAndValidated(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yml")
 	if err := Default(path); err != nil {

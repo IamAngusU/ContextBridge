@@ -481,6 +481,9 @@ func (c Config) Validate() error {
 			if engine.Endpoint == "" || !safeNamePattern.MatchString(engine.Endpoint) || strings.Contains(engine.Endpoint, "..") {
 				return fmt.Errorf("engine %s endpoint is required with resource_pack", name)
 			}
+			if strings.TrimSpace(engine.APIKey) != "" || strings.TrimSpace(engine.APIKeyFile) != "" || strings.TrimSpace(engine.ResolvedAPIKey) != "" {
+				return fmt.Errorf("engine %s resource_pack cannot be combined with api credentials", name)
+			}
 		}
 		if engine.Type == "openai_compatible" {
 			if strings.TrimSpace(engine.APIKey) != "" && strings.TrimSpace(engine.APIKeyFile) != "" {
@@ -1123,6 +1126,13 @@ func validateProviderURL(value string) (bool, error) {
 		return false, errors.New("url must use HTTPS unless it is loopback HTTP")
 	}
 	return !loopback, nil
+}
+
+// ProviderURLIsRemote classifies a resolved execution endpoint using the same
+// fail-closed URL rules as configuration validation. HTTP is accepted only for
+// loopback; any non-loopback endpoint must use HTTPS.
+func ProviderURLIsRemote(value string) (bool, error) {
+	return validateProviderURL(value)
 }
 
 func validateLoopbackListen(value string) error {

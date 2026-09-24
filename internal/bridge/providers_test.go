@@ -19,6 +19,43 @@ func TestDecisionModelComesFromTrustedProviderConfig(t *testing.T) {
 	}
 }
 
+func TestResolvedEngineEgressMustMatchAuthenticatedBoundary(t *testing.T) {
+	remote := config.Engine{Type: "ollama", URL: "https://203.0.113.10:11434"}
+	if err := validateResolvedEngineEgress(Job{ContextBridgeEgress: "local_only", ContextBridgeProviderClassification: "local"}, remote); err == nil {
+		t.Fatal("remote Ollama endpoint escaped a local-only execution boundary")
+	}
+	if err := validateResolvedEngineEgress(Job{ContextBridgeProviderClassification: "remote"}, config.Engine{Type: "ollama", URL: "http://127.0.0.1:11434"}); err == nil {
+		t.Fatal("local endpoint was accepted as an authenticated remote provider")
+	}
+	if err := validateResolvedEngineEgress(Job{ContextBridgeEgress: "remote_allowed", ContextBridgeProviderClassification: "remote"}, remote); err != nil {
+		t.Fatalf("explicit remote endpoint was rejected: %v", err)
+	}
+	if err := validateResolvedEngineEgress(Job{}, config.Engine{Type: "ollama", URL: "http://198.51.100.2:11434"}); err == nil {
+		t.Fatal("plaintext remote provider endpoint was accepted")
+	}
+	if err := validateResolvedEngineEgress(Job{ContextBridgeEgress: "local_only", ContextBridgeProviderClassification: "remote"}, config.Engine{Type: "adapter"}); err == nil {
+		t.Fatal("URL-less adapter escaped a local-only boundary")
+	}
+	if err := validateResolvedEngineEgress(Job{ContextBridgeProviderClassification: "local"}, config.Engine{Type: "llama_cpp", Listen: "198.51.100.3:8080"}); err == nil {
+		t.Fatal("llama.cpp listen fallback escaped endpoint classification")
+	}
+}
+
+func TestOllamaHostCannotTurnLocalClassIntoRemoteEgress(t *testing.T) {
+	t.Setenv("OLLAMA_HOST", "https://203.0.113.20:11434")
+	cfg := config.Config{
+		Routes:    map[string]config.Route{"default": {Provider: "ollama", Model: "test"}},
+		Providers: config.Providers{Ollama: config.OllamaProvider{Timeout: 1}},
+	}
+	output := NewProcessor(cfg, nil).Process(context.Background(), Job{
+		Prompt: "must never leave this machine", Output: OutputSpec{Mode: "text"},
+		ContextBridgeEgress: "local_only", ContextBridgeProviderClassification: "local",
+	})
+	if output.Error != "providers_unavailable" {
+		t.Fatalf("remote OLLAMA_HOST was not rejected before provider execution: %#v", output)
+	}
+}
+
 func TestJobCanSelectConfiguredRouteFallback(t *testing.T) {
 	primaryCalls := 0
 	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

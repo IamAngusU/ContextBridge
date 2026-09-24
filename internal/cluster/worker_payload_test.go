@@ -47,6 +47,24 @@ func TestPrepareLocalPayloadMakesCostBudgetAuthoritative(t *testing.T) {
 	}
 }
 
+func TestLocalExecutionBoundaryReplacesProducerEgressClaims(t *testing.T) {
+	raw, err := prepareLocalPayload([]byte(`{"prompt":"hello","contextbridge_egress":"remote_allowed","contextbridge_provider_classification":"remote"}`), Requirements{Provider: "ollama"}, "local-job")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err = bindLocalExecutionBoundary(raw, "local_only", "local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["contextbridge_egress"] != "local_only" || payload["contextbridge_provider_classification"] != "local" {
+		t.Fatalf("producer egress claim survived worker binding: %#v", payload)
+	}
+}
+
 func TestAdapterSessionBindingIsScopedToAuthenticatedProducer(t *testing.T) {
 	forged := []byte(`{"prompt":"hello","contextbridge_session_key":"forged"}`)
 	var first, second, followup map[string]interface{}

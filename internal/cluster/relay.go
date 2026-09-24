@@ -506,8 +506,7 @@ func (r *Relay) readinessError() error {
 	if quiescing {
 		return errors.New("relay is quiescing")
 	}
-	_, err := r.store.Overview()
-	return err
+	return r.store.Ready()
 }
 
 func (r *Relay) handleReadiness(w http.ResponseWriter, _ *http.Request) {

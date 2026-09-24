@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -21,6 +22,14 @@ func discoverResourcePacks(cfg config.Config) []resourcepacks.Pack {
 func resolveResourceEngine(engine config.Engine, packs []resourcepacks.Pack) (config.Engine, error) {
 	if strings.TrimSpace(engine.ResourcePack) == "" {
 		return engine, nil
+	}
+	// A portable pack chooses an endpoint discovered from removable or otherwise
+	// external media. Never forward a credential configured for a different
+	// operator-reviewed origin to that endpoint. Credential-bearing portable
+	// engines need a future origin-bound credential contract, not an implicit
+	// inheritance rule.
+	if strings.TrimSpace(engine.APIKey) != "" || strings.TrimSpace(engine.APIKeyFile) != "" || strings.TrimSpace(engine.ResolvedAPIKey) != "" {
+		return engine, errors.New("portable resource engines cannot inherit api credentials")
 	}
 	endpoint, ok := resourcepacks.Resolve(packs, engine.ResourcePack, engine.Endpoint, engine.Type)
 	if !ok {

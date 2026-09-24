@@ -731,6 +731,10 @@ func (w *Worker) execute(ctx context.Context, job Job, emitProgress func(JobProg
 	if err != nil {
 		return nil, nil, Usage{}, nil, err
 	}
+	payload, err = bindLocalExecutionBoundary(payload, requirements.Egress, job.PolicyDecision.ProviderClassification)
+	if err != nil {
+		return nil, nil, Usage{}, nil, err
+	}
 	if localRoute != "" {
 		payload, err = bindLocalRoute(payload, localRoute)
 		if err != nil {
@@ -1014,6 +1018,8 @@ func prepareLocalPayload(payload []byte, requirements Requirements, localJobID s
 	// them back below.
 	delete(job, "contextbridge_adapter_endpoint_id")
 	delete(job, "contextbridge_session_key")
+	delete(job, "contextbridge_egress")
+	delete(job, "contextbridge_provider_classification")
 	session := canonicalSessionID(requirements.SessionID)
 	rawSession, _ := json.Marshal(session)
 	job["session_id"] = rawSession
@@ -1099,6 +1105,24 @@ func prepareLocalPayload(payload []byte, requirements Requirements, localJobID s
 		sum := sha256.Sum256([]byte(producer + "\x00" + logicalTenant))
 		tenantKey, _ := json.Marshal(fmt.Sprintf("cbt:%x", sum[:]))
 		job["tenant_id"] = tenantKey
+	}
+	return json.Marshal(job)
+}
+
+func bindLocalExecutionBoundary(payload []byte, egress, classification string) ([]byte, error) {
+	var job map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &job); err != nil || job == nil {
+		return nil, errors.New("job payload must be a JSON object")
+	}
+	delete(job, "contextbridge_egress")
+	delete(job, "contextbridge_provider_classification")
+	if value := strings.TrimSpace(egress); value != "" {
+		raw, _ := json.Marshal(value)
+		job["contextbridge_egress"] = raw
+	}
+	if value := strings.TrimSpace(classification); value != "" {
+		raw, _ := json.Marshal(value)
+		job["contextbridge_provider_classification"] = raw
 	}
 	return json.Marshal(job)
 }
