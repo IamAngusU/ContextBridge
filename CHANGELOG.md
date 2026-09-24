@@ -22,7 +22,9 @@
   slower hosted runners receive bounded but realistic integration deadlines,
   every new static-analysis exception carries local evidence, native lifecycle
   assertion failures name the missing invariant, and Actions are pinned to
-  current Node 24-based releases.
+  current Node 24-based releases. The vulnerability gate is also pinned to a
+  Go 1.27-compatible `govulncheck` instead of crashing inside an obsolete
+  analyzer.
 - Added real incremental text output for explicitly reviewed
   `openai_compatible` engines with the `incremental_output` capability. The
   v1 path has no fallback ambiguity, applies direct backpressure and hard

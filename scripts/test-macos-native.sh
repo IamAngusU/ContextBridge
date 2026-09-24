@@ -122,7 +122,7 @@ if [[ "$ready" != "1" ]]; then
   exit 1
 fi
 "$installed" status --config "$config" --json > "$test_root/status.json"
-require_contains '"status"' "$test_root/status.json" "native status JSON has no status field"
+require_contains '"version"' "$test_root/status.json" "native status JSON has no version field"
 kill "$service_pid"
 wait "$service_pid" || true
 service_pid=""
