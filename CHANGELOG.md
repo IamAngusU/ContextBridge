@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.7.2 - 2026-09-24
 
 - Isolated panics at worker-job, pipeline, schedule, inbox, and terminal-event
   boundaries so one malformed work item cannot terminate the whole process.
@@ -8,6 +8,18 @@
 - Made the bounded OpenAI-compatible SSE behavior explicit through the
   `X-ContextBridge-Stream-Mode: final-result` response header and integration
   documentation; native token-delta streaming is not claimed.
+- Added independently verifiable, Ed25519-signed offline execution receipts
+  bound to the exact stored job/result evidence instead of trusting an online
+  relay comparison alone.
+- Made configured `max_attempts` operative only for structured, proven
+  pre-execution worker refusals; post-start and ambiguous failures stay
+  terminal.
+- Enforced bounded-agent cost authority as an aggregate run budget and bound
+  approvals to the effective execution configuration.
+- Kept the worker's local bearer token on validated loopback URLs and reduced
+  sealed provider failures to stable relay-visible codes.
+- Preserved the exact local stop response during asynchronous shutdown and
+  covered the callback handoff without relying on timing sleeps.
 
 ## v0.7.1 - 2026-09-22
 
