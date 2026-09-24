@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 
+	"github.com/IamAngusU/ContextBridge/internal/cluster"
 	"github.com/IamAngusU/ContextBridge/internal/config"
 )
 
@@ -84,6 +86,78 @@ func TestAgentPlanRejectsUnsafeShape(t *testing.T) {
 	plan.Steps[0].Instruction = strings.Repeat("x", agentMaximumInstruction+1)
 	if err := validateAgentPlan(plan); err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("oversized instruction was not rejected: %v", err)
+	}
+}
+
+func TestAgentAggregateCostBudgetConsumesPlannerAndStepReservations(t *testing.T) {
+	cfg := config.Config{
+		Engines: map[string]config.Engine{"deepseek": {
+			Type: "openai_compatible", Remote: true, Model: "deepseek-v4.1",
+			Costing: config.EngineCosting{Mode: "upper_bound"},
+		}},
+	}
+	policy, err := newAgentPolicy("deepseek", "", 2, 120, 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.MaxCostUSD = 1
+	budget, err := newAgentRunBudget(cfg, policy, agentPlannerEvidence{Provider: "deepseek", ReservedCostUSD: .2})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first := agentRequirements(cfg, policy, "deepseek", "")
+	if err := budget.authorize("deepseek", &first); err != nil || math.Abs(first.MaxCostUSD-.8) > 1e-9 {
+		t.Fatalf("first step did not receive the post-planner remainder: %#v %v", first, err)
+	}
+	if err := budget.consume("deepseek", cluster.Usage{ReservedCostUSD: .6}); err != nil {
+		t.Fatal(err)
+	}
+	second := agentRequirements(cfg, policy, "deepseek", "")
+	if err := budget.authorize("deepseek", &second); err != nil || math.Abs(second.MaxCostUSD-.2) > 1e-9 {
+		t.Fatalf("second step received duplicated authority: %#v %v", second, err)
+	}
+	if err := budget.consume("deepseek", cluster.Usage{ReservedCostUSD: .6}); err == nil || !strings.Contains(err.Error(), "remaining aggregate authority") {
+		t.Fatalf("aggregate over-reservation was accepted: %v", err)
+	}
+	if math.Abs(budget.remaining-.2) > 1e-9 {
+		t.Fatalf("rejected reservation mutated remaining authority: %.9f", budget.remaining)
+	}
+}
+
+func TestAgentAggregateCostBudgetLeavesUnknownCostOptInUnchanged(t *testing.T) {
+	cfg := config.Config{Engines: map[string]config.Engine{"remote-unknown": {Type: "openai_compatible", Remote: true, Model: "unknown"}}}
+	policy, err := newAgentPolicy("remote-unknown", "", 1, 120, 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.AllowUnknownCost = true
+	budget, err := newAgentRunBudget(cfg, policy, agentPlannerEvidence{Provider: "remote-unknown"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requirements := agentRequirements(cfg, policy, "remote-unknown", "")
+	if err := budget.authorize("remote-unknown", &requirements); err != nil || requirements.MaxCostUSD != 0 {
+		t.Fatalf("unknown-cost opt-in gained a fake numeric budget: %#v %v", requirements, err)
+	}
+}
+
+func TestAgentAggregateCostBudgetDoesNotInventAuthorityForManualPlans(t *testing.T) {
+	cfg := config.Config{Engines: map[string]config.Engine{"deepseek": {
+		Type: "openai_compatible", Remote: true, Model: "deepseek-v4.1",
+		Costing: config.EngineCosting{Mode: "upper_bound"},
+	}}}
+	policy, err := newAgentPolicy("deepseek", "", 1, 120, 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	budget, err := newAgentRunBudget(cfg, policy, agentPlannerEvidence{Provider: "deepseek", ReservedCostUSD: .2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requirements := agentRequirements(cfg, policy, "deepseek", "")
+	if err := budget.authorize("deepseek", &requirements); err != nil || requirements.MaxCostUSD != 0 {
+		t.Fatalf("manual plan gained numeric authority: %#v %v", requirements, err)
 	}
 }
 

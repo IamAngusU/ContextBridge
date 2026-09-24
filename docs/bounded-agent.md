@@ -105,6 +105,11 @@ change cannot inherit stale authority.
 - Plans are text-only and contain one to six steps.
 - Automatic local plans contain at most three steps.
 - Every step uses `max_attempts: 1`.
+- A named authority's `max_cost_usd` is one aggregate reservation budget for
+  the planner and all cost-bounded remote steps. Each completed reservation is
+  subtracted permanently before the next job is submitted; it is not a
+  reusable per-job allowance. Unknown-cost remote targets still require the
+  separate explicit `allow_unknown_cost` authority.
 - Prior output is carried as untrusted submitted content, not promoted into
   trusted instructions.
 - There is no arbitrary shell, filesystem, URL-fetch, plugin, or tool loop.

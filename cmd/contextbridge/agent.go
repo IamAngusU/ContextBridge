@@ -27,7 +27,7 @@ import (
 )
 
 const (
-	agentPlanVersion          = 5
+	agentPlanVersion          = 6
 	agentBindingVersion       = 1
 	agentBindingScope         = "full-effective-config-v1"
 	agentAuthorizationManual  = "manual_hash"
@@ -100,13 +100,14 @@ type agentPolicy struct {
 }
 
 type agentPlannerEvidence struct {
-	Provider   string `json:"provider"`
-	Profile    string `json:"profile,omitempty"`
-	Model      string `json:"model,omitempty"`
-	JobID      string `json:"job_id"`
-	NodeID     string `json:"node_id,omitempty"`
-	CostStatus string `json:"cost_status"`
-	CostSource string `json:"cost_source,omitempty"`
+	Provider        string  `json:"provider"`
+	Profile         string  `json:"profile,omitempty"`
+	Model           string  `json:"model,omitempty"`
+	JobID           string  `json:"job_id"`
+	NodeID          string  `json:"node_id,omitempty"`
+	CostStatus      string  `json:"cost_status"`
+	CostSource      string  `json:"cost_source,omitempty"`
+	ReservedCostUSD float64 `json:"reserved_cost_usd,omitempty"`
 }
 
 type agentStep struct {
@@ -314,7 +315,7 @@ func clusterAgentPlanOrAutoCommand(args []string, automatic bool) error {
 		Version: agentPlanVersion, AuthorizationMode: agentAuthorizationManual,
 		Goal: strings.TrimSpace(*goal), Summary: proposal.Summary, Policy: policy, Steps: proposal.Steps,
 		Binding:  binding,
-		Evidence: agentPlannerEvidence{Provider: planner, Profile: profile, Model: submission.Output.Model, JobID: job.ID, NodeID: job.AssignedNode, CostStatus: agentCostStatus(job.Usage), CostSource: job.Usage.CostSource},
+		Evidence: agentPlannerEvidence{Provider: planner, Profile: profile, Model: submission.Output.Model, JobID: job.ID, NodeID: job.AssignedNode, CostStatus: agentCostStatus(job.Usage), CostSource: job.Usage.CostSource, ReservedCostUSD: job.Usage.ReservedCostUSD},
 	}
 	if automatic {
 		plan.AuthorizationMode = agentAuthorizationLocal
@@ -449,6 +450,10 @@ func executeAgentPlan(plan agentPlan, digest string, cfg config.Config, token st
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(plan.Policy.MaxRuntimeSeconds)*time.Second)
 	defer cancel()
 
+	budget, err := newAgentRunBudget(cfg, plan.Policy, plan.Evidence)
+	if err != nil {
+		return err
+	}
 	previous := ""
 	knownCost, knownCostJobs, unknownCost := 0.0, 0, 0
 	for index, step := range plan.Steps {
@@ -469,6 +474,10 @@ func executeAgentPlan(plan agentPlan, digest string, cfg config.Config, token st
 			return err
 		}
 		requirements := agentRequirements(cfg, plan.Policy, step.Provider, step.Profile)
+		if err := budget.authorize(step.Provider, &requirements); err != nil {
+			stepCancel()
+			return fmt.Errorf("agent step %s: %w", step.ID, err)
+		}
 		requirements.SessionID = "agent-" + strings.TrimPrefix(digest, "sha256:")[:12] + "-" + step.ID
 		if step.Provider == "adapter" {
 			requirements.AdapterFreshSession = true
@@ -486,6 +495,9 @@ func executeAgentPlan(plan agentPlan, digest string, cfg config.Config, token st
 		}
 		if submission.Output.Truncated {
 			return fmt.Errorf("agent step %s exceeded its output limit; partial text is not passed to another step", step.ID)
+		}
+		if err := budget.consume(step.Provider, job.Usage); err != nil {
+			return fmt.Errorf("agent step %s: %w", step.ID, err)
 		}
 		previous = submission.Output.Text
 		fmt.Printf("%s › %s\n", step.ID, previous)
@@ -670,6 +682,70 @@ func agentRequirements(cfg config.Config, policy agentPolicy, provider, profile 
 	return requirements
 }
 
+type agentRunBudget struct {
+	cfg       config.Config
+	remaining float64
+	enforced  bool
+}
+
+func newAgentRunBudget(cfg config.Config, policy agentPolicy, planner agentPlannerEvidence) (*agentRunBudget, error) {
+	budget := &agentRunBudget{cfg: cfg, remaining: policy.MaxCostUSD, enforced: policy.MaxCostUSD > 0}
+	// Manual hash-approved plans do not grant a numeric agent authority. Their
+	// individual jobs retain the existing relay/provider policy boundary.
+	if policy.MaxCostUSD <= 0 {
+		return budget, nil
+	}
+	classification, costBounded := agentProviderPolicy(cfg, planner.Provider)
+	if classification != "remote" || !costBounded {
+		return budget, nil
+	}
+	if err := budget.consumeReservation(planner.ReservedCostUSD); err != nil {
+		return nil, fmt.Errorf("agent planner cost reservation: %w", err)
+	}
+	return budget, nil
+}
+
+func (b *agentRunBudget) authorize(provider string, requirements *cluster.Requirements) error {
+	if !b.enforced {
+		return nil
+	}
+	classification, costBounded := agentProviderPolicy(b.cfg, provider)
+	if classification != "remote" || !costBounded {
+		return nil
+	}
+	if b.remaining <= 0 {
+		return errors.New("aggregate cost budget exhausted before submission")
+	}
+	requirements.MaxCostUSD = b.remaining
+	return nil
+}
+
+func (b *agentRunBudget) consume(provider string, usage cluster.Usage) error {
+	if !b.enforced {
+		return nil
+	}
+	classification, costBounded := agentProviderPolicy(b.cfg, provider)
+	if classification != "remote" || !costBounded {
+		return nil
+	}
+	return b.consumeReservation(usage.ReservedCostUSD)
+}
+
+func (b *agentRunBudget) consumeReservation(reserved float64) error {
+	if math.IsNaN(reserved) || math.IsInf(reserved, 0) || reserved < 0 {
+		return errors.New("provider returned an invalid cost reservation")
+	}
+	const costEpsilon = 1e-9
+	if reserved-b.remaining > costEpsilon {
+		return fmt.Errorf("reserved upper bound $%.6f exceeds remaining aggregate authority $%.6f", reserved, b.remaining)
+	}
+	b.remaining -= reserved
+	if b.remaining < 0 && b.remaining >= -costEpsilon {
+		b.remaining = 0
+	}
+	return nil
+}
+
 func splitAgentAllowlist(value string) []string {
 	seen := map[string]bool{}
 	items := []string{}
@@ -812,6 +888,9 @@ func validateAgentPlan(plan agentPlan) error {
 	}
 	if !agentStepIDPattern.MatchString(plan.Evidence.Provider) || strings.TrimSpace(plan.Evidence.JobID) == "" || len(plan.Evidence.JobID) > 128 || len(plan.Evidence.NodeID) > 128 || len(plan.Evidence.Model) > 200 || len(plan.Evidence.CostSource) > 200 {
 		return errors.New("agent planner evidence is missing or invalid")
+	}
+	if math.IsNaN(plan.Evidence.ReservedCostUSD) || math.IsInf(plan.Evidence.ReservedCostUSD, 0) || plan.Evidence.ReservedCostUSD < 0 || plan.Policy.MaxCostUSD > 0 && plan.Evidence.ReservedCostUSD-plan.Policy.MaxCostUSD > 1e-9 {
+		return errors.New("agent planner cost reservation is invalid or exceeds the aggregate run budget")
 	}
 	switch plan.Evidence.CostStatus {
 	case cluster.CostUnknown, cluster.CostEstimated, cluster.CostUpperBound, cluster.CostActual, cluster.CostPartial:
@@ -1141,7 +1220,7 @@ func printAgentPlan(plan agentPlan, digest string) {
 	if plan.Policy.AuthorityName != "" {
 		fmt.Fprintf(os.Stderr, "  project policy · %s · tenant %s · group %s · egress %s\n", plan.Policy.AuthorityName, emptyLabel(plan.Policy.TenantID, "none"), emptyLabel(plan.Policy.Group, "any"), plan.Policy.Egress)
 		if plan.Policy.MaxCostUSD > 0 {
-			fmt.Fprintf(os.Stderr, "  cost boundary · $%.6f per cost-bounded remote job\n", plan.Policy.MaxCostUSD)
+			fmt.Fprintf(os.Stderr, "  cost boundary · $%.6f aggregate across planner and all cost-bounded remote steps\n", plan.Policy.MaxCostUSD)
 		} else if plan.Policy.AllowUnknownCost {
 			fmt.Fprintln(os.Stderr, "  cost boundary · unknown-cost remote targets explicitly allowed")
 		}

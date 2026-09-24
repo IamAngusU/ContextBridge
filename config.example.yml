@@ -153,7 +153,9 @@ cluster:
     max_pipeline_steps: 24
     max_pipeline_runtime_seconds: 1800
     # Optional named project authority envelopes are disabled unless the owner
-    # adds and explicitly enables them. See docs/bounded-agent.md.
+    # adds and explicitly enables them. An authority's max_cost_usd is one
+    # aggregate reservation ceiling across its planner and remote agent steps,
+    # not a fresh allowance for every job. See docs/bounded-agent.md.
     agent_authorities: {}
     execution:
       enabled: false
