@@ -614,6 +614,10 @@ func (c Config) Validate() error {
 		for _, capability := range engine.Capabilities {
 			switch strings.ToLower(strings.TrimSpace(capability)) {
 			case "text", "vision", "embedding":
+			case "incremental_output":
+				if engine.Type != "openai_compatible" {
+					return fmt.Errorf("engine %s incremental_output is supported only by openai_compatible engines", name)
+				}
 			default:
 				return fmt.Errorf("engine %s has unsupported capability %s", name, capability)
 			}

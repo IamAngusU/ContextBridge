@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Added real incremental text output for explicitly reviewed
+  `openai_compatible` engines with the `incremental_output` capability. The
+  v1 path has no fallback ambiguity, applies direct backpressure and hard
+  event/byte bounds, requires `[DONE]`, reconstructs and validates the final
+  text, and keeps every unproven/E2EE/cluster path in honest `final-result`
+  mode.
 - Added the first authoritative execution-event plane: relay-owned job
   lifecycle events commit atomically with admission, assignment, execution
   start, retry, cancellation, terminal completion and ambiguous failure.

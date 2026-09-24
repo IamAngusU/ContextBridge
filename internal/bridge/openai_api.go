@@ -42,6 +42,7 @@ const (
 	contextBridgeStreamModeHeader        = "X-ContextBridge-Stream-Mode"
 	contextBridgeRequireStreamModeHeader = "X-ContextBridge-Require-Stream-Mode"
 	contextBridgeFinalResultStreamMode   = "final-result"
+	contextBridgeIncrementalStreamMode   = "incremental"
 )
 
 func (s *Server) handleOpenAIModels(w http.ResponseWriter, r *http.Request) {
@@ -74,15 +75,10 @@ func (s *Server) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
 		return
 	}
+	requiredMode := ""
 	if input.Stream {
-		requiredMode := strings.ToLower(strings.TrimSpace(r.Header.Get(contextBridgeRequireStreamModeHeader)))
-		switch requiredMode {
-		case "", contextBridgeFinalResultStreamMode:
-		case "incremental":
-			w.Header().Set(contextBridgeStreamModeHeader, contextBridgeFinalResultStreamMode)
-			writeOpenAIError(w, http.StatusConflict, "incremental streaming is not available; no job was submitted", "stream_mode_unavailable")
-			return
-		default:
+		requiredMode = strings.ToLower(strings.TrimSpace(r.Header.Get(contextBridgeRequireStreamModeHeader)))
+		if requiredMode != "" && requiredMode != contextBridgeFinalResultStreamMode && requiredMode != contextBridgeIncrementalStreamMode {
 			w.Header().Set(contextBridgeStreamModeHeader, contextBridgeFinalResultStreamMode)
 			writeOpenAIError(w, http.StatusUnprocessableEntity, "unsupported required stream mode", "unsupported_parameter")
 			return
@@ -141,6 +137,72 @@ func (s *Server) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusUnprocessableEntity, err.Error(), "invalid_request_error")
 		return
 	}
+	responseID := "chatcmpl-" + job.ID
+	created := time.Now().Unix()
+	model := strings.TrimSpace(input.Model)
+	if model == "" {
+		model = "contextbridge:" + route
+	}
+	incremental := input.Stream && requiredMode != contextBridgeFinalResultStreamMode && s.SupportsIncremental(job)
+	flusher, canFlush := w.(http.Flusher)
+	if incremental && !canFlush {
+		incremental = false
+	}
+	if input.Stream && requiredMode == contextBridgeIncrementalStreamMode && !incremental {
+		w.Header().Set(contextBridgeStreamModeHeader, contextBridgeFinalResultStreamMode)
+		writeOpenAIError(w, http.StatusConflict, "incremental streaming is not available for the selected route; no job was submitted", "stream_mode_unavailable")
+		return
+	}
+	if incremental {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set(contextBridgeStreamModeHeader, contextBridgeIncrementalStreamMode)
+		started := false
+		writeChunk := func(delta map[string]string, finish interface{}) error {
+			chunk := map[string]interface{}{
+				"id": responseID, "object": "chat.completion.chunk", "created": created, "model": model,
+				"choices": []map[string]interface{}{{"index": 0, "delta": delta, "finish_reason": finish}},
+			}
+			raw, _ := json.Marshal(chunk)
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", raw); err != nil {
+				return err
+			}
+			flusher.Flush()
+			return nil
+		}
+		output, err := s.ProcessIncremental(r.Context(), job, func(text string) error {
+			if !started {
+				if err := writeChunk(map[string]string{"role": "assistant"}, nil); err != nil {
+					return err
+				}
+				started = true
+			}
+			return writeChunk(map[string]string{"content": text}, nil)
+		})
+		if err != nil {
+			if !started {
+				writeOpenAIError(w, http.StatusServiceUnavailable, err.Error(), "server_error")
+			}
+			return
+		}
+		if output.Error != "" {
+			if !started {
+				writeOpenAIError(w, http.StatusBadGateway, output.Error, "provider_error")
+			}
+			return
+		}
+		finish := "stop"
+		if output.Truncated {
+			finish = "length"
+		}
+		if err := writeChunk(map[string]string{}, finish); err != nil {
+			return
+		}
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+		return
+	}
 	output, err := s.Process(r.Context(), job)
 	if err != nil {
 		writeOpenAIError(w, http.StatusServiceUnavailable, err.Error(), "server_error")
@@ -157,12 +219,6 @@ func (s *Server) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	finish := "stop"
 	if output.Truncated {
 		finish = "length"
-	}
-	responseID := "chatcmpl-" + job.ID
-	created := time.Now().Unix()
-	model := strings.TrimSpace(input.Model)
-	if model == "" {
-		model = "contextbridge:" + route
 	}
 	if input.Stream {
 		w.Header().Set("Content-Type", "text/event-stream")

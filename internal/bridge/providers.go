@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/IamAngusU/ContextBridge/internal/config"
 	"github.com/IamAngusU/ContextBridge/internal/modelregistry"
@@ -37,6 +39,59 @@ var providerHTTPClient = &http.Client{CheckRedirect: func(_ *http.Request, _ []*
 
 func NewProcessor(cfg config.Config, store *Store) *Processor {
 	return &Processor{cfg: cfg, store: store, reservedCostUSD: map[string]float64{}}
+}
+
+// SupportsIncremental reports a deliberately narrow, operator-proven path.
+// A fallback chain cannot safely continue after any bytes reached the caller,
+// so v1 native streaming requires one explicit OpenAI-compatible engine.
+func (p *Processor) SupportsIncremental(job Job) bool {
+	route := p.cfg.Route(job.Route)
+	if outputMode(job.Output) != "text" || job.ImageBase64 != "" || len(route.Fallback) != 0 || strings.TrimSpace(job.Provider) != "" {
+		return false
+	}
+	engine, ok := p.cfg.Engine(route.Provider)
+	if !ok || engine.Type != "openai_compatible" || !containsFolded(engine.Capabilities, "incremental_output") {
+		return false
+	}
+	if engine.ResourcePack != "" {
+		var err error
+		engine, err = resolveResourceEngine(engine, discoverResourcePacks(p.cfg))
+		if err != nil {
+			return false
+		}
+	}
+	return validateResolvedEngineEgress(job, engine) == nil
+}
+
+// ProcessIncremental emits ordered, normalized text fragments with direct
+// downstream backpressure. The returned Output remains the final authority.
+// Callers must check SupportsIncremental before invoking this method.
+func (p *Processor) ProcessIncremental(ctx context.Context, job Job, emit func(string) error) Output {
+	if !p.SupportsIncremental(job) || emit == nil {
+		return OutputError(outputMode(job.Output), "contextbridge", "fallback", "incremental_stream_unavailable", 0)
+	}
+	route := p.cfg.Route(job.Route)
+	engine, _ := p.cfg.Engine(route.Provider)
+	if engine.ResourcePack != "" {
+		var err error
+		engine, err = resolveResourceEngine(engine, discoverResourcePacks(p.cfg))
+		if err != nil {
+			return OutputError("text", "contextbridge", "fallback", "providers_unavailable", 0)
+		}
+	}
+	output, err := p.openAICompatibleIncremental(ctx, job, route, engine, route.Provider, emit)
+	if err != nil {
+		failure := "providers_unavailable"
+		diagnostic := strings.TrimSpace(err.Error())
+		if strings.HasPrefix(diagnostic, "cost_budget_exceeded:") || strings.HasPrefix(diagnostic, "cost_budget_unverifiable:") {
+			failure = diagnostic
+		}
+		return OutputError("text", route.Provider, engine.Model, failure, 0)
+	}
+	if output.CostStatus == "" {
+		output.CostStatus = "unknown"
+	}
+	return output
 }
 
 func (p *Processor) Process(ctx context.Context, job Job) Output {
@@ -344,6 +399,217 @@ func (p *Processor) openAICompatible(parent context.Context, job Job, route conf
 		return Output{}, errors.New(output.Error)
 	}
 	return output, nil
+}
+
+func (p *Processor) openAICompatibleIncremental(parent context.Context, job Job, route config.Route, engine config.Engine, provider string, emit func(string) error) (Output, error) {
+	started := time.Now()
+	timeout := time.Duration(engine.TimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 120 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	model := strings.TrimSpace(engine.Model)
+	if model == "" {
+		return Output{}, errors.New("openai-compatible provider has no configured model")
+	}
+	if requested := strings.TrimSpace(route.Model); requested != "" && !strings.EqualFold(requested, model) {
+		return Output{}, fmt.Errorf("openai-compatible route model %q does not match configured model %q", requested, model)
+	}
+	if requested := strings.TrimSpace(job.Model); requested != "" && !strings.EqualFold(requested, model) {
+		return Output{}, fmt.Errorf("openai-compatible job model %q does not match configured model %q", requested, model)
+	}
+	if job.ImageBase64 != "" {
+		return Output{}, errors.New("incremental image input is not enabled")
+	}
+	trusted := trustedPrompt(job)
+	reservedCost, reservationErr := providerCostReservation(engine, trusted, false)
+	if reservationErr != nil {
+		return Output{}, reservationErr
+	}
+	if job.MaxCostUSD > 0 {
+		if reservedCost <= 0 {
+			return Output{}, errors.New("cost_budget_unverifiable: provider route has no complete reviewed cost upper-bound reservation")
+		}
+		if reservedCost > job.MaxCostUSD {
+			return Output{}, fmt.Errorf("cost_budget_exceeded: reserved upper bound %.6f USD exceeds job budget %.6f USD", reservedCost, job.MaxCostUSD)
+		}
+	}
+	releaseBudget := func() {}
+	if engine.MinimumBalanceUSD > 0 {
+		var reserveErr error
+		releaseBudget, reserveErr = p.reserveProviderBudget(ctx, engine, reservedCost)
+		if reserveErr != nil {
+			return Output{}, reserveErr
+		}
+		defer releaseBudget()
+	}
+	payload := map[string]interface{}{
+		"model":          model,
+		"messages":       []map[string]interface{}{{"role": "user", "content": []map[string]interface{}{{"type": "text", "text": trusted}}}},
+		"stream":         true,
+		"stream_options": map[string]bool{"include_usage": true},
+	}
+	if engine.MaxOutputTokens > 0 {
+		payload["max_tokens"] = engine.MaxOutputTokens
+	}
+	if effort := strings.ToLower(strings.TrimSpace(engine.ReasoningEffort)); effort != "" {
+		payload["reasoning_effort"] = effort
+	}
+	raw, _ := json.Marshal(payload)
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(engine.URL, "/")+"/chat/completions", bytes.NewReader(raw))
+	if err != nil {
+		return Output{}, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "text/event-stream")
+	applyOpenAIEngineAuth(request, engine)
+	response, err := providerHTTPClient.Do(request)
+	if err != nil {
+		return Output{}, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		return Output{}, fmt.Errorf("openai-compatible provider returned %s: %s", response.Status, strings.TrimSpace(string(body)))
+	}
+	if contentType := strings.ToLower(response.Header.Get("Content-Type")); !strings.Contains(contentType, "text/event-stream") {
+		return Output{}, errors.New("openai-compatible provider did not return text/event-stream")
+	}
+	limit := outputLimit(job.Output)
+	var accepted strings.Builder
+	pendingWhitespace := ""
+	events := 0
+	done := false
+	var usage struct {
+		PromptTokens          uint64 `json:"prompt_tokens"`
+		CompletionTokens      uint64 `json:"completion_tokens"`
+		TotalTokens           uint64 `json:"total_tokens"`
+		PromptCacheHitTokens  uint64 `json:"prompt_cache_hit_tokens"`
+		PromptCacheMissTokens uint64 `json:"prompt_cache_miss_tokens"`
+	}
+	err = scanOpenAISSE(response.Body, func(data []byte) error {
+		if bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
+			if done {
+				return errors.New("incremental provider emitted duplicate [DONE]")
+			}
+			done = true
+			return nil
+		}
+		if done {
+			return errors.New("incremental provider emitted data after [DONE]")
+		}
+		events++
+		if events > 4096 {
+			return errors.New("incremental provider exceeded 4096 events")
+		}
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content json.RawMessage `json:"content"`
+				} `json:"delta"`
+			} `json:"choices"`
+			Usage *struct {
+				PromptTokens          uint64 `json:"prompt_tokens"`
+				CompletionTokens      uint64 `json:"completion_tokens"`
+				TotalTokens           uint64 `json:"total_tokens"`
+				PromptCacheHitTokens  uint64 `json:"prompt_cache_hit_tokens"`
+				PromptCacheMissTokens uint64 `json:"prompt_cache_miss_tokens"`
+			} `json:"usage"`
+		}
+		if err := json.Unmarshal(data, &chunk); err != nil {
+			return errors.New("incremental provider returned invalid JSON event")
+		}
+		if chunk.Usage != nil {
+			usage.PromptTokens = chunk.Usage.PromptTokens
+			usage.CompletionTokens = chunk.Usage.CompletionTokens
+			usage.TotalTokens = chunk.Usage.TotalTokens
+			usage.PromptCacheHitTokens = chunk.Usage.PromptCacheHitTokens
+			usage.PromptCacheMissTokens = chunk.Usage.PromptCacheMissTokens
+		}
+		if len(chunk.Choices) == 0 || len(chunk.Choices[0].Delta.Content) == 0 || string(chunk.Choices[0].Delta.Content) == "null" {
+			return nil
+		}
+		delta := openAIMessageText(chunk.Choices[0].Delta.Content)
+		if delta == "" {
+			return nil
+		}
+		combined := pendingWhitespace + delta
+		if accepted.Len() == 0 {
+			combined = strings.TrimLeftFunc(combined, unicode.IsSpace)
+		}
+		visible := strings.TrimRightFunc(combined, unicode.IsSpace)
+		pendingWhitespace = combined[len(visible):]
+		if len(pendingWhitespace) > 64<<10 {
+			return errors.New("incremental provider emitted excessive trailing whitespace")
+		}
+		if visible == "" {
+			return nil
+		}
+		if len(visible) > limit-accepted.Len() {
+			return fmt.Errorf("incremental provider output exceeds %d bytes", limit)
+		}
+		if err := emit(visible); err != nil {
+			return err
+		}
+		_, _ = accepted.WriteString(visible)
+		return nil
+	})
+	if err != nil {
+		return Output{}, err
+	}
+	if !done {
+		return Output{}, errors.New("incremental provider ended without [DONE]")
+	}
+	output := NormalizeOutput([]byte(accepted.String()), job.Output, provider, model, time.Since(started))
+	if output.Error != "" {
+		return Output{}, errors.New(output.Error)
+	}
+	if output.Text != accepted.String() {
+		return Output{}, errors.New("incremental output did not reconstruct the validated final text")
+	}
+	output.InputTokens, output.OutputTokens, output.TotalTokens = usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens
+	output.ReservedCostUSD = reservedCost
+	applyProviderCost(&output, engine, usage.PromptTokens, usage.PromptCacheHitTokens, usage.PromptCacheMissTokens, usage.CompletionTokens)
+	return output, nil
+}
+
+func scanOpenAISSE(reader io.Reader, consume func([]byte) error) error {
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 64<<10), 1<<20)
+	data := make([]byte, 0, 4096)
+	flush := func() error {
+		if len(data) == 0 {
+			return nil
+		}
+		copyData := append([]byte(nil), data...)
+		data = data[:0]
+		return consume(copyData)
+	}
+	for scanner.Scan() {
+		line := bytes.TrimSuffix(scanner.Bytes(), []byte{'\r'})
+		if len(line) == 0 {
+			if err := flush(); err != nil {
+				return err
+			}
+			continue
+		}
+		if bytes.HasPrefix(line, []byte("data:")) {
+			fragment := bytes.TrimPrefix(line, []byte("data:"))
+			fragment = bytes.TrimPrefix(fragment, []byte(" "))
+			if len(data)+len(fragment)+1 > 1<<20 {
+				return errors.New("incremental provider event exceeds 1 MiB")
+			}
+			if len(data) > 0 {
+				data = append(data, '\n')
+			}
+			data = append(data, fragment...)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	return flush()
 }
 
 func (p *Processor) openAICompatibleEmbedding(ctx context.Context, job Job, engine config.Engine, provider, model string, started time.Time) (Output, error) {

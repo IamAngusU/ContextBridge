@@ -82,17 +82,44 @@ to an arbitrary provider. The surface accepts bounded text/JSON requests and
 one validated image input where the selected route proves support. It is a
 compatibility boundary, not a claim to implement every OpenAI API feature.
 
-`stream: true` currently returns one bounded final-result SSE chunk followed
-by `[DONE]` after the routed job completes; it does not expose incremental
-provider token deltas. Such responses carry
-`X-ContextBridge-Stream-Mode: final-result` so clients can detect the exact
-contract instead of mistaking buffered completion for native token streaming.
+`stream: true` returns one bounded final-result SSE chunk followed by `[DONE]`
+unless the selected route proves the narrow native contract described below.
+Buffered responses carry `X-ContextBridge-Stream-Mode: final-result` so clients
+can detect the exact contract instead of mistaking completion for token
+streaming.
 Clients that cannot accept this compatibility mode can send
-`X-ContextBridge-Require-Stream-Mode: incremental`. Until a selected route can
-prove native ordered deltas, ContextBridge rejects that request with HTTP 409
-and `stream_mode_unavailable` **before submitting a job**. Requiring
-`final-result` is also accepted. This opt-in negotiation prevents a caller from
-discovering the mismatch only after remote work has already executed.
+`X-ContextBridge-Require-Stream-Mode: incremental`. ContextBridge rejects that
+request with HTTP 409 and `stream_mode_unavailable` **before submitting a job**
+unless every v1 condition holds:
+
+- the route has exactly one provider and no fallback chain;
+- its engine is `openai_compatible` and explicitly declares
+  `incremental_output` in `capabilities`;
+- the requested result is plain text without image input; and
+- the HTTP writer can flush incremental SSE events.
+
+Example operator opt-in after independently verifying the endpoint's native
+SSE behavior:
+
+```yaml
+engines:
+  reviewed_streaming_api:
+    type: openai_compatible
+    url: https://provider.example/v1
+    remote: true
+    model: reviewed-model
+    api_key_file: ./secrets/provider.key
+    capabilities: [text, incremental_output]
+```
+
+Native responses carry `X-ContextBridge-Stream-Mode: incremental`. CB applies
+direct downstream backpressure, caps an event at 1 MiB, caps a response at
+4096 events and the configured output limit, requires exactly one provider
+`[DONE]`, and validates the reconstructed final text before saving it as the
+authoritative result. Disconnect/error after partial output closes the stream
+without a false `[DONE]`. Requiring `final-result` always keeps the buffered
+mode. Fallback, JSON, vision, adapters, cluster transport and E2EE remain
+truthfully final-result-only in this first slice.
 
 ## MCP stdio
 

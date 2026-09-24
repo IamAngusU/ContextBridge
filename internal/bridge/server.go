@@ -274,6 +274,39 @@ func (s *Server) Process(ctx context.Context, job Job) (Output, error) {
 	return output, nil
 }
 
+func (s *Server) SupportsIncremental(job Job) bool {
+	return s.processor.SupportsIncremental(job)
+}
+
+// ProcessIncremental shares the ordinary admission, persistence and
+// accounting path. Provider fragments are observations; the normalized Output
+// saved after the stream closes remains the terminal authority.
+func (s *Server) ProcessIncremental(ctx context.Context, job Job, emit func(string) error) (Output, error) {
+	releaseAccounting, err := s.beginJobAccounting(ctx)
+	if err != nil {
+		return Output{}, err
+	}
+	defer releaseAccounting()
+	prepareJob(&job)
+	job.routeProvider = s.cfg.Route(job.Route).Provider
+	if routeTask := strings.TrimSpace(s.cfg.Route(job.Route).Task); routeTask != "" {
+		job.Task = routeTask
+	}
+	applyTaskOutput(&job, s.cfg.Route(job.Route).Task)
+	if !s.processor.SupportsIncremental(job) {
+		return Output{}, errors.New("incremental stream is not available for this route")
+	}
+	if err := s.store.SaveJob(job); err != nil {
+		return Output{}, err
+	}
+	output := s.processor.ProcessIncremental(ctx, job, emit)
+	if err := s.store.SaveOutput(job.ID, output); err != nil {
+		s.logger.Printf("output %s could not be stored: %v", job.ID, err)
+	}
+	s.store.RecordCompleted(job, output)
+	return output, nil
+}
+
 type scheduledExecutionContextKey struct{}
 
 func withScheduledExecution(ctx context.Context) context.Context {

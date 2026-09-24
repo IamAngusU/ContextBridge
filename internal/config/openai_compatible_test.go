@@ -52,6 +52,24 @@ func TestOpenAICompatibleRemoteRequiresExplicitEgressAndSecret(t *testing.T) {
 	}
 }
 
+func TestIncrementalOutputCapabilityIsExplicitAndEngineScoped(t *testing.T) {
+	cfg := validOpenAICompatibleConfig(t)
+	engine := cfg.Engines["deepseek"]
+	engine.Capabilities = []string{"text", "incremental_output"}
+	cfg.Engines["deepseek"] = engine
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("reviewed OpenAI-compatible incremental output was rejected: %v", err)
+	}
+	engine.Type = "ollama"
+	engine.URL = "http://127.0.0.1:11434"
+	engine.Remote = false
+	engine.APIKey = ""
+	cfg.Engines["deepseek"] = engine
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "only by openai_compatible") {
+		t.Fatalf("unsupported incremental engine was accepted: %v", err)
+	}
+}
+
 func TestOpenAICompatibleSecretIsNotInPublicConfigJSON(t *testing.T) {
 	cfg := validOpenAICompatibleConfig(t)
 	engine := cfg.Engines["deepseek"]

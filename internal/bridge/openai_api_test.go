@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/IamAngusU/ContextBridge/internal/config"
@@ -91,6 +93,93 @@ func TestOpenAICompatibilityAPIListsRoutesAndCompletes(t *testing.T) {
 	}
 	if providerCalls != 2 {
 		t.Fatalf("unavailable required stream mode submitted work: provider calls = %d, want 2", providerCalls)
+	}
+}
+
+func TestOpenAICompatibilityNativeIncrementalArrivesBeforeProviderCompletion(t *testing.T) {
+	releaseProvider := make(chan struct{})
+	defer func() {
+		select {
+		case <-releaseProvider:
+		default:
+			close(releaseProvider)
+		}
+	}()
+	var providerCompleted atomic.Bool
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		var payload struct {
+			Stream bool `json:"stream"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil || !payload.Stream || request.Header.Get("Accept") != "text/event-stream" {
+			http.Error(w, "native stream not requested", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"  STREAM-\"}}]}\n\n")
+		w.(http.Flusher).Flush()
+		<-releaseProvider
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"OK  \"}}]}\n\n")
+		_, _ = io.WriteString(w, "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		providerCompleted.Store(true)
+	}))
+	defer provider.Close()
+	directory := t.TempDir()
+	cfg := config.Config{
+		Version: 1, Server: config.Server{Listen: "127.0.0.1:32145", Token: "test-token-that-is-long-enough"},
+		Storage: config.Storage{Directory: directory, Inbox: directory},
+		Routes:  map[string]config.Route{"default": {Provider: "remote", TimeoutSeconds: 5}},
+		Engines: map[string]config.Engine{"remote": {
+			Type: "openai_compatible", URL: provider.URL + "/v1", Model: "mock-model",
+			Capabilities: []string{"text", "incremental_output"}, TimeoutSeconds: 5,
+		}},
+	}
+	server, err := NewServer(cfg, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	body := []byte(`{"model":"contextbridge:default","messages":[{"role":"user","content":"stream"}],"stream":true}`)
+	request, err := http.NewRequest(http.MethodPost, httpServer.URL+"/openai/v1/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+cfg.Server.Token)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(contextBridgeRequireStreamModeHeader, contextBridgeIncrementalStreamMode)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK || response.Header.Get(contextBridgeStreamModeHeader) != contextBridgeIncrementalStreamMode {
+		raw, _ := io.ReadAll(response.Body)
+		t.Fatalf("native stream was not negotiated: HTTP %d mode=%q %s", response.StatusCode, response.Header.Get(contextBridgeStreamModeHeader), raw)
+	}
+	reader := bufio.NewReader(response.Body)
+	prefix := ""
+	for !strings.Contains(prefix, "STREAM-") {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatalf("first native delta was not readable: %v (%s)", err, prefix)
+		}
+		prefix += line
+	}
+	if providerCompleted.Load() {
+		t.Fatal("first client delta arrived only after provider completion")
+	}
+	close(releaseProvider)
+	rest, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream := prefix + string(rest)
+	if !strings.Contains(stream, `"content":"STREAM-"`) || !strings.Contains(stream, `"content":"OK"`) || strings.Count(stream, "data: [DONE]") != 1 {
+		t.Fatalf("native stream did not preserve ordered normalized deltas: %s", stream)
+	}
+	if !providerCompleted.Load() {
+		t.Fatal("provider did not finish after stream release")
 	}
 }
 
