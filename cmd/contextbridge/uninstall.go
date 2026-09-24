@@ -289,10 +289,12 @@ func validInstallDirectory(path string) bool {
 	if runtime.GOOS == "windows" {
 		binary += ".exe"
 	}
+	// #nosec G703 -- absolute is rejected when broad/dangerous; this read proves installer ownership.
 	info, err := os.Lstat(binary)
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return false
 	}
+	// #nosec G703 -- the marker is read only inside the same bounded candidate installation directory.
 	marker, err := os.Lstat(filepath.Join(absolute, "config.example.yml"))
 	return err == nil && marker.Mode().IsRegular() && marker.Mode()&os.ModeSymlink == 0
 }

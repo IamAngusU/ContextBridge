@@ -113,6 +113,7 @@ func writeSBOM(binary, version, rawEpoch, output string) error {
 	sort.Strings(dependencies)
 	document.Dependencies = []bomDependency{{Ref: mainRef, DependsOn: dependencies}}
 
+	// #nosec G703 -- output is the operator-selected release staging path; O_EXCL prevents replacement.
 	file, err := os.OpenFile(output, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
@@ -123,10 +124,12 @@ func writeSBOM(binary, version, rawEpoch, output string) error {
 	encodeErr := encoder.Encode(document)
 	closeErr := file.Close()
 	if encodeErr != nil {
+		// #nosec G703 -- cleanup targets the exact file created above after a failed encode.
 		_ = os.Remove(output)
 		return encodeErr
 	}
 	if closeErr != nil {
+		// #nosec G703 -- cleanup targets the exact file created above after a failed close.
 		_ = os.Remove(output)
 		return closeErr
 	}

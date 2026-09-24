@@ -92,6 +92,7 @@ func normalizedMode(path string, entry os.FileInfo) os.FileMode {
 func walkArchive(root string, visit func(path, relative string, entry os.FileInfo) error) error {
 	// filepath.Walk traverses each directory in lexical order, which is part of
 	// the byte-for-byte archive contract.
+	// #nosec G703 -- root is a validated release staging directory and symlinks are rejected below.
 	return filepath.Walk(root, func(path string, entry os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			return walkErr

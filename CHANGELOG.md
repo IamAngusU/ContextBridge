@@ -7,6 +7,8 @@
   systems.
 - Added locale-independent regression coverage for request, model, reasoning,
   route, status-panel, node, GPU, and model-state labels.
+- Moved the declared, CI, security, race, and release-build toolchain from the
+  unsupported Go 1.25 line to the maintained Go 1.27 line.
 
 ## v0.7.0 - 2026-09-21
 

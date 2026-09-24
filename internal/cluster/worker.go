@@ -1369,6 +1369,7 @@ func saveIdentity(path string, identity WorkerIdentity) error {
 	if err := validateWorkerIdentity(identity); err != nil {
 		return fmt.Errorf("refuse invalid worker identity: %w", err)
 	}
+	// #nosec G117 -- the private key is intentionally persisted in the worker identity file below with mode 0600.
 	raw, err := json.MarshalIndent(identity, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode worker identity: %w", err)
