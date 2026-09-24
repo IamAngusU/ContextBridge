@@ -16,6 +16,9 @@
   event/byte bounds, requires `[DONE]`, reconstructs and validates the final
   text, and keeps every unproven/E2EE/cluster path in honest `final-result`
   mode.
+- Marked every compatibility SSE response explicitly non-resumable so a client
+  cannot mistake a fresh request for continuation or replay of an interrupted
+  execution.
 - Added the first authoritative execution-event plane: relay-owned job
   lifecycle events commit atomically with admission, assignment, execution
   start, retry, cancellation, terminal completion and ambiguous failure.

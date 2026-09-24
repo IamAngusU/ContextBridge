@@ -112,7 +112,10 @@ engines:
     capabilities: [text, incremental_output]
 ```
 
-Native responses carry `X-ContextBridge-Stream-Mode: incremental`. CB applies
+Native responses carry `X-ContextBridge-Stream-Mode: incremental`. Every SSE
+response also carries `X-ContextBridge-Stream-Resume: unsupported`: a dropped
+connection is never silently resumed or replayed as fresh deltas, and a new
+HTTP request is a new execution. CB applies
 direct downstream backpressure, caps an event at 1 MiB, caps a response at
 4096 events and the configured output limit, requires exactly one provider
 `[DONE]`, and validates the reconstructed final text before saving it as the

@@ -41,8 +41,10 @@ type openAIContentPart struct {
 const (
 	contextBridgeStreamModeHeader        = "X-ContextBridge-Stream-Mode"
 	contextBridgeRequireStreamModeHeader = "X-ContextBridge-Require-Stream-Mode"
+	contextBridgeStreamResumeHeader      = "X-ContextBridge-Stream-Resume"
 	contextBridgeFinalResultStreamMode   = "final-result"
 	contextBridgeIncrementalStreamMode   = "incremental"
+	contextBridgeStreamResumeUnsupported = "unsupported"
 )
 
 func (s *Server) handleOpenAIModels(w http.ResponseWriter, r *http.Request) {
@@ -77,6 +79,10 @@ func (s *Server) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	}
 	requiredMode := ""
 	if input.Stream {
+		// The first native slice is deliberately non-resumable. Advertising that
+		// before any route/error decision prevents a reconnect from being
+		// mistaken for continuation of the prior execution.
+		w.Header().Set(contextBridgeStreamResumeHeader, contextBridgeStreamResumeUnsupported)
 		requiredMode = strings.ToLower(strings.TrimSpace(r.Header.Get(contextBridgeRequireStreamModeHeader)))
 		if requiredMode != "" && requiredMode != contextBridgeFinalResultStreamMode && requiredMode != contextBridgeIncrementalStreamMode {
 			w.Header().Set(contextBridgeStreamModeHeader, contextBridgeFinalResultStreamMode)

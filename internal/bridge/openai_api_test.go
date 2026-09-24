@@ -71,7 +71,7 @@ func TestOpenAICompatibilityAPIListsRoutesAndCompletes(t *testing.T) {
 	stream := authorizedRequest(t, http.MethodPost, httpServer.URL+"/openai/v1/chat/completions", cfg.Server.Token, streamBody)
 	defer stream.Body.Close()
 	streamRaw, _ := io.ReadAll(stream.Body)
-	if stream.StatusCode != http.StatusOK || stream.Header.Get("Content-Type") != "text/event-stream" || stream.Header.Get("X-ContextBridge-Stream-Mode") != "final-result" || !bytes.Contains(streamRaw, []byte("data: [DONE]")) {
+	if stream.StatusCode != http.StatusOK || stream.Header.Get("Content-Type") != "text/event-stream" || stream.Header.Get(contextBridgeStreamModeHeader) != contextBridgeFinalResultStreamMode || stream.Header.Get(contextBridgeStreamResumeHeader) != contextBridgeStreamResumeUnsupported || !bytes.Contains(streamRaw, []byte("data: [DONE]")) {
 		t.Fatalf("bounded SSE response failed: HTTP %d %q %s", stream.StatusCode, stream.Header.Get("Content-Type"), streamRaw)
 	}
 
@@ -88,7 +88,7 @@ func TestOpenAICompatibilityAPIListsRoutesAndCompletes(t *testing.T) {
 	}
 	defer requiredResponse.Body.Close()
 	requiredRaw, _ := io.ReadAll(requiredResponse.Body)
-	if requiredResponse.StatusCode != http.StatusConflict || requiredResponse.Header.Get(contextBridgeStreamModeHeader) != contextBridgeFinalResultStreamMode || !bytes.Contains(requiredRaw, []byte("stream_mode_unavailable")) {
+	if requiredResponse.StatusCode != http.StatusConflict || requiredResponse.Header.Get(contextBridgeStreamModeHeader) != contextBridgeFinalResultStreamMode || requiredResponse.Header.Get(contextBridgeStreamResumeHeader) != contextBridgeStreamResumeUnsupported || !bytes.Contains(requiredRaw, []byte("stream_mode_unavailable")) {
 		t.Fatalf("required incremental mode did not fail closed: HTTP %d %q %s", requiredResponse.StatusCode, requiredResponse.Header.Get(contextBridgeStreamModeHeader), requiredRaw)
 	}
 	if providerCalls != 2 {
@@ -153,7 +153,7 @@ func TestOpenAICompatibilityNativeIncrementalArrivesBeforeProviderCompletion(t *
 		t.Fatal(err)
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK || response.Header.Get(contextBridgeStreamModeHeader) != contextBridgeIncrementalStreamMode {
+	if response.StatusCode != http.StatusOK || response.Header.Get(contextBridgeStreamModeHeader) != contextBridgeIncrementalStreamMode || response.Header.Get(contextBridgeStreamResumeHeader) != contextBridgeStreamResumeUnsupported {
 		raw, _ := io.ReadAll(response.Body)
 		t.Fatalf("native stream was not negotiated: HTTP %d mode=%q %s", response.StatusCode, response.Header.Get(contextBridgeStreamModeHeader), raw)
 	}
