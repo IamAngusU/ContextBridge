@@ -157,7 +157,7 @@ Usage:
   contextbridge pull [--config path] MODEL
   contextbridge runtime install [--config path] llama.cpp
   contextbridge mcp serve [--config path]
-  contextbridge integrate openai|mcp [--config path] [--json]
+  contextbridge integrate openai|mcp|relay [--config path] [--json]
   contextbridge benchmark [--json] [--samples N] [--warmup N] [--database-jobs N] [--idle-duration D] [--binary path]
   contextbridge verification verify --file STATEMENT.json --trust-key KEY.json [--artifact FILE] [--require-artifact] [--evidence-dir DIR] [--require-evidence] [--json]
   contextbridge relay [--config path]

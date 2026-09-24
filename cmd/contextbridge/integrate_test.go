@@ -1,6 +1,10 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +12,102 @@ import (
 
 	"github.com/IamAngusU/ContextBridge/internal/config"
 )
+
+func TestOpenAIIntegrationCheckSeparatesPreflightFromExplicitLiveInference(t *testing.T) {
+	const token = "private-local-token"
+	liveCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer "+token {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		switch request.URL.Path {
+		case "/openai/v1/models":
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"contextbridge:default"}]}`))
+		case "/openai/v1/chat/completions":
+			liveCalls++
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"CONTEXTBRIDGE-INTEGRATION-OK"}}]}`))
+		default:
+			http.NotFound(w, request)
+		}
+	}))
+	t.Cleanup(server.Close)
+	info := openAIIntegrationInfo{BaseURL: server.URL + "/openai/v1", Model: "contextbridge:default"}
+
+	report, err := checkOpenAIIntegration(context.Background(), server.Client(), info, token, false)
+	if err != nil || !report.Reachable || !report.Authenticated || !report.ModelAvailable || report.LiveRequested || liveCalls != 0 {
+		t.Fatalf("non-executing check = %#v, live calls=%d, err=%v", report, liveCalls, err)
+	}
+	report, err = checkOpenAIIntegration(context.Background(), server.Client(), info, token, true)
+	if err != nil || !report.LiveRequested || !report.LiveSucceeded || liveCalls != 1 {
+		t.Fatalf("explicit live check = %#v, live calls=%d, err=%v", report, liveCalls, err)
+	}
+}
+
+func TestOpenAIIntegrationCheckFailsClosedOnAuthenticationAndModelMismatch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer expected" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"contextbridge:other"}]}`))
+	}))
+	t.Cleanup(server.Close)
+	info := openAIIntegrationInfo{BaseURL: server.URL, Model: "contextbridge:default"}
+	if _, err := checkOpenAIIntegration(context.Background(), server.Client(), info, "wrong", false); err == nil || !strings.Contains(err.Error(), "authentication/model") {
+		t.Fatalf("bad token did not fail at the authentication boundary: %v", err)
+	}
+	if _, err := checkOpenAIIntegration(context.Background(), server.Client(), info, "expected", false); err == nil || !strings.Contains(err.Error(), "not advertised") {
+		t.Fatalf("missing model did not fail closed: %v", err)
+	}
+}
+
+func TestRelayIntegrationCreatesScopedPrivateBundleWithoutTerminalSecret(t *testing.T) {
+	const admin = "admin-token"
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requests++
+		if request.URL.Path != "/v1/cluster/tokens" || request.Header.Get("Authorization") != "Bearer "+admin {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`{"token":"cb_scoped_producer_secret","record":{"id":"tok_test","role":"producer","subject":"website-a","created_at":"2026-09-24T00:00:00Z","expires_at":"2026-10-24T00:00:00Z","revoked":false}}`))
+	}))
+	t.Cleanup(server.Close)
+	cfg := config.Config{Cluster: config.Cluster{Relay: config.ClusterRelay{PublicURL: server.URL, AdminToken: admin}}}
+	path := filepath.Join(t.TempDir(), "producer.env")
+	info, err := createRelayIntegrationBundle(context.Background(), cfg, path, "website-a", []string{"private"}, 720)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Subject != "website-a" || info.TokenID != "tok_test" || info.RelayURL != server.URL || info.OutputPath != path {
+		t.Fatalf("unexpected redacted relay integration metadata: %#v", info)
+	}
+	encoded, err := json.Marshal(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "cb_scoped_producer_secret") {
+		t.Fatal("redacted relay metadata exposed the producer token")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(raw)
+	if !strings.Contains(content, "CONTEXTBRIDGE_RELAY_URL="+server.URL) || !strings.Contains(content, "CONTEXTBRIDGE_PRODUCER_TOKEN=cb_scoped_producer_secret") {
+		t.Fatalf("producer bundle is incomplete: %q", content)
+	}
+	if err := os.WriteFile(path, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := createRelayIntegrationBundle(context.Background(), cfg, path, "website-b", nil, 720); err == nil {
+		t.Fatal("relay integration overwrote an existing credential file")
+	}
+	if requests != 1 {
+		t.Fatalf("existing output path still caused credential issuance: %d requests", requests)
+	}
+}
 
 func TestOpenAIIntegrationIsRedactedAndWritesPrivateEnvWithoutOverwrite(t *testing.T) {
 	cfg := config.Config{

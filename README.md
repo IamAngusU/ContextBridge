@@ -118,10 +118,23 @@ hidden unless you explicitly request `--show-token`. For an MCP client:
 contextbridge integrate mcp --json
 ```
 
+Before opening the app, `contextbridge integrate openai --check` verifies the
+service, local credential and selected route without inference. Add `--live`
+only when you intentionally want one bounded real model request.
+
 Copy the emitted server entry into the client's MCP configuration. See
 [Application integrations](docs/integrations.md) for the native job API, PHP,
 shared hosting and security boundaries. A remote website uses its own scoped
 producer token; do not expose the local service token to browser JavaScript.
+Create that credential directly on the relay without printing its secret:
+
+```sh
+contextbridge integrate relay --subject my-server-app --write-env ./contextbridge-producer.env
+```
+
+The [minimal Python and Node.js examples](examples/server-app/README.md) use
+only their standard runtimes and demonstrate durable submit, bounded polling
+and terminal-result handling.
 
 > [!TIP]
 > Trying CB does not lock you in. `contextbridge uninstall --dry-run` previews removal without stopping or deleting anything. [Uninstall keeps your configuration and data by default.](#uninstall)

@@ -7,4 +7,5 @@
 /inbox/
 /config.yml
 .contextbridge.env
+contextbridge-producer.env
 *.log

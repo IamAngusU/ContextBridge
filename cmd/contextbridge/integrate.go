@@ -1,15 +1,21 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/IamAngusU/ContextBridge/internal/cluster"
 	"github.com/IamAngusU/ContextBridge/internal/config"
 )
 
@@ -28,9 +34,30 @@ type mcpIntegrationInfo struct {
 	Config     map[string]interface{} `json:"config"`
 }
 
+type openAIIntegrationCheck struct {
+	Kind           string `json:"kind"`
+	Reachable      bool   `json:"reachable"`
+	Authenticated  bool   `json:"authenticated"`
+	ModelAvailable bool   `json:"model_available"`
+	LiveRequested  bool   `json:"live_requested"`
+	LiveSucceeded  bool   `json:"live_succeeded,omitempty"`
+	ElapsedMS      int64  `json:"elapsed_ms"`
+}
+
+type relayIntegrationInfo struct {
+	Kind       string    `json:"kind"`
+	RelayURL   string    `json:"relay_url"`
+	Subject    string    `json:"subject"`
+	TokenID    string    `json:"token_id"`
+	ExpiresAt  time.Time `json:"expires_at,omitempty"`
+	OutputPath string    `json:"output_path"`
+}
+
+const maximumIntegrationResponseBytes = 1 << 20
+
 func integrateCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: contextbridge integrate openai|mcp [--config path] [--json]")
+		return errors.New("usage: contextbridge integrate openai|mcp|relay [--config path] [--json]")
 	}
 	target := strings.ToLower(strings.TrimSpace(args[0]))
 	flags := flag.NewFlagSet("integrate "+target, flag.ContinueOnError)
@@ -38,6 +65,11 @@ func integrateCommand(args []string) error {
 	jsonOutput := flags.Bool("json", false, "print machine-readable JSON")
 	showToken := flags.Bool("show-token", false, "include the local API token in terminal output")
 	writeEnv := flags.String("write-env", "", "write a new mode-0600 OpenAI-compatible .env file")
+	check := flags.Bool("check", false, "verify reachability, authentication, and the configured model without inference")
+	live := flags.Bool("live", false, "also send one explicit bounded live inference smoke request")
+	subject := flags.String("subject", "", "remote application identity (relay integration)")
+	groups := flags.String("groups", "", "comma-separated scheduling groups (relay integration)")
+	lifetimeHours := flags.Int("lifetime-hours", 720, "producer credential lifetime in hours; 0 never expires")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -49,6 +81,9 @@ func integrateCommand(args []string) error {
 	}
 	if *showToken && strings.TrimSpace(*writeEnv) != "" {
 		return errors.New("--show-token is unnecessary with --write-env and cannot be combined with it")
+	}
+	if (*check || *live) && (strings.TrimSpace(*writeEnv) != "" || *showToken) {
+		return errors.New("--check/--live cannot be combined with secret output modes")
 	}
 	absoluteConfig, err := filepath.Abs(*configPath)
 	if err != nil {
@@ -64,6 +99,27 @@ func integrateCommand(args []string) error {
 		info, err := buildOpenAIIntegration(cfg, absoluteConfig, *showToken)
 		if err != nil {
 			return err
+		}
+		if *check || *live {
+			if *live {
+				fmt.Fprintln(os.Stderr, "Live integration smoke explicitly requested; the configured route may use compute, network egress, or paid API credit.")
+			}
+			report, err := checkOpenAIIntegration(context.Background(), http.DefaultClient, info, cfg.Server.Token, *live)
+			if err != nil {
+				return err
+			}
+			if *jsonOutput {
+				return writeIntegrationJSON(report)
+			}
+			fmt.Println("OpenAI-compatible integration check")
+			fmt.Printf("Reachable       %t\n", report.Reachable)
+			fmt.Printf("Authenticated   %t\n", report.Authenticated)
+			fmt.Printf("Model available %t\n", report.ModelAvailable)
+			if report.LiveRequested {
+				fmt.Printf("Live smoke      %t\n", report.LiveSucceeded)
+			}
+			fmt.Printf("Elapsed         %d ms\n", report.ElapsedMS)
+			return nil
 		}
 		if strings.TrimSpace(*writeEnv) != "" {
 			path, err := filepath.Abs(*writeEnv)
@@ -105,9 +161,183 @@ func integrateCommand(args []string) error {
 			fmt.Println("Add this MCP server entry to your MCP client:")
 		}
 		return writeIntegrationJSON(info.Config)
+	case "relay":
+		if *showToken || *check || *live {
+			return errors.New("--show-token, --check, and --live are not available for relay integration")
+		}
+		if strings.TrimSpace(*subject) == "" {
+			return errors.New("--subject is required for a relay application credential")
+		}
+		if strings.TrimSpace(*writeEnv) == "" {
+			return errors.New("--write-env is required so the producer token never enters terminal output")
+		}
+		if *lifetimeHours < 0 || *lifetimeHours > 10*365*24 {
+			return errors.New("--lifetime-hours must be between 0 and 87600")
+		}
+		path, err := filepath.Abs(*writeEnv)
+		if err != nil {
+			return err
+		}
+		info, err := createRelayIntegrationBundle(context.Background(), cfg, path, *subject, splitIntegrationList(*groups), *lifetimeHours)
+		if err != nil {
+			return err
+		}
+		if *jsonOutput {
+			return writeIntegrationJSON(info)
+		}
+		fmt.Printf("Created private producer integration file %s\n", info.OutputPath)
+		fmt.Printf("Relay application %s · token %s", info.Subject, info.TokenID)
+		if !info.ExpiresAt.IsZero() {
+			fmt.Printf(" · expires %s", info.ExpiresAt.Format(time.RFC3339))
+		}
+		fmt.Println()
+		fmt.Println("Transfer the file through a secure channel and load it only into the intended server-side application.")
+		return nil
 	default:
-		return fmt.Errorf("unsupported integration %q; use openai or mcp", target)
+		return fmt.Errorf("unsupported integration %q; use openai, mcp, or relay", target)
 	}
+}
+
+func createRelayIntegrationBundle(ctx context.Context, cfg config.Config, path, subject string, groups []string, lifetimeHours int) (relayIntegrationInfo, error) {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return relayIntegrationInfo{}, fmt.Errorf("reserve integration file without overwriting existing data: %w", err)
+	}
+	remove := true
+	defer func() {
+		_ = file.Close()
+		if remove {
+			_ = os.Remove(path)
+		}
+	}()
+	var output struct {
+		Token  string              `json:"token"`
+		Record cluster.TokenRecord `json:"record"`
+	}
+	relayURL := clusterBaseURL(cfg)
+	if err := clusterPOST(ctx, relayURL+"/v1/cluster/tokens", cfg.Cluster.Relay.AdminToken, map[string]interface{}{
+		"role": "producer", "subject": subject, "groups": groups, "lifetime_hours": lifetimeHours,
+	}, &output); err != nil {
+		return relayIntegrationInfo{}, fmt.Errorf("issue scoped producer credential: %w", err)
+	}
+	for _, value := range []string{relayURL, output.Token} {
+		if strings.TrimSpace(value) == "" || strings.ContainsAny(value, "\r\n\x00") {
+			return relayIntegrationInfo{}, errors.New("relay returned an empty or unsafe integration value; the credential may need operator revocation")
+		}
+	}
+	content := fmt.Sprintf("CONTEXTBRIDGE_RELAY_URL=%s\nCONTEXTBRIDGE_PRODUCER_TOKEN=%s\n", relayURL, output.Token)
+	if _, err := file.WriteString(content); err != nil {
+		return relayIntegrationInfo{}, fmt.Errorf("write producer integration file; the issued credential may need operator revocation: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		return relayIntegrationInfo{}, fmt.Errorf("sync producer integration file; the issued credential may need operator revocation: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return relayIntegrationInfo{}, fmt.Errorf("close producer integration file; the issued credential may need operator revocation: %w", err)
+	}
+	remove = false
+	return relayIntegrationInfo{Kind: "contextbridge-relay-producer", RelayURL: relayURL, Subject: output.Record.Subject, TokenID: output.Record.ID, ExpiresAt: output.Record.ExpiresAt, OutputPath: path}, nil
+}
+
+func splitIntegrationList(value string) []string {
+	parts := strings.Split(value, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			result = append(result, part)
+		}
+	}
+	return result
+}
+
+func checkOpenAIIntegration(ctx context.Context, client *http.Client, info openAIIntegrationInfo, token string, live bool) (openAIIntegrationCheck, error) {
+	started := time.Now()
+	report := openAIIntegrationCheck{Kind: "openai-compatible-check", LiveRequested: live}
+	if client == nil {
+		client = http.DefaultClient
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(info.BaseURL, "/")+"/models", nil)
+	if err != nil {
+		return report, fmt.Errorf("integration endpoint: %w", err)
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	response, err := client.Do(request)
+	if err != nil {
+		return report, fmt.Errorf("local service unreachable: %w", err)
+	}
+	report.Reachable = true
+	var models struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := decodeIntegrationResponse(response, &models); err != nil {
+		return report, fmt.Errorf("local service authentication/model check: %w", err)
+	}
+	report.Authenticated = true
+	for _, model := range models.Data {
+		if model.ID == info.Model {
+			report.ModelAvailable = true
+			break
+		}
+	}
+	if !report.ModelAvailable {
+		return report, fmt.Errorf("configured model %q is not advertised by the local service", info.Model)
+	}
+	if live {
+		body, err := json.Marshal(map[string]interface{}{
+			"model":      info.Model,
+			"messages":   []map[string]string{{"role": "user", "content": "Reply exactly with CONTEXTBRIDGE-INTEGRATION-OK and nothing else."}},
+			"max_tokens": 64,
+		})
+		if err != nil {
+			return report, err
+		}
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(info.BaseURL, "/")+"/chat/completions", bytes.NewReader(body))
+		if err != nil {
+			return report, err
+		}
+		request.Header.Set("Authorization", "Bearer "+token)
+		request.Header.Set("Content-Type", "application/json")
+		response, err := client.Do(request)
+		if err != nil {
+			return report, fmt.Errorf("live integration smoke: %w", err)
+		}
+		var completion struct {
+			Choices []struct {
+				Message struct {
+					Content string `json:"content"`
+				} `json:"message"`
+			} `json:"choices"`
+		}
+		if err := decodeIntegrationResponse(response, &completion); err != nil {
+			return report, fmt.Errorf("live integration smoke: %w", err)
+		}
+		report.LiveSucceeded = len(completion.Choices) == 1 && strings.TrimSpace(completion.Choices[0].Message.Content) == "CONTEXTBRIDGE-INTEGRATION-OK"
+		if !report.LiveSucceeded {
+			return report, errors.New("live integration smoke returned a non-matching bounded response")
+		}
+	}
+	report.ElapsedMS = time.Since(started).Milliseconds()
+	return report, nil
+}
+
+func decodeIntegrationResponse(response *http.Response, output interface{}) error {
+	defer response.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(response.Body, maximumIntegrationResponseBytes+1))
+	if err != nil {
+		return err
+	}
+	if len(raw) > maximumIntegrationResponseBytes {
+		return errors.New("response exceeds the integration-check limit")
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return fmt.Errorf("HTTP %d", response.StatusCode)
+	}
+	if err := json.Unmarshal(raw, output); err != nil {
+		return fmt.Errorf("invalid JSON response: %w", err)
+	}
+	return nil
 }
 
 func buildOpenAIIntegration(cfg config.Config, configPath string, showToken bool) (openAIIntegrationInfo, error) {

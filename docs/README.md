@@ -25,6 +25,8 @@ described as vendor integrations here.
 
 - [Send a pool job and keep control](../examples/pool/README.md): shared-hosting
   PHP, real text/JSON requests, per-job choices, operator policy and file limits.
+- [Minimal Python and Node.js clients](../examples/server-app/README.md):
+  scoped producer setup, idempotent submit, bounded poll and terminal result.
 - [Compatibility boundaries](compatibility.md): versioned job, relay, worker,
   adapter, and resource-pack claims plus commands for collecting evidence.
 - [Verification](verification.md): free self-run conformance and the signed,

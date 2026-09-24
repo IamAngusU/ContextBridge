@@ -5,7 +5,12 @@
 - Added `contextbridge integrate openai|mcp`: it emits redacted, exact
   application connection settings, can create a new non-overwriting private
   OpenAI-compatible environment file, and generates a ready-to-paste MCP stdio
-  entry without exposing a bearer token.
+  entry without exposing a bearer token. Its non-executing OpenAI preflight
+  distinguishes reachability, authentication and route advertisement; a real
+  bounded inference smoke request requires an explicit `--live` flag. Relay
+  operators can create a scoped, expiring producer environment file without
+  exposing either administrator or producer secrets in terminal output, and
+  dependency-free Python/Node examples cover the durable server-app flow.
 - Added wire-v3 assignment fencing: a stable durable cluster identity,
   monotonically increasing relay process epochs, and exact per-assignment
   generations now bind dispatch, cancellation, progress, completion, and slot

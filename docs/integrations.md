@@ -50,6 +50,23 @@ platform supports Unix permissions. Keep the file private and load it only
 into the intended local application. Use `--show-token` only for an explicit
 copy operation; normal terminal and JSON output remain redacted.
 
+Verify the local service, credential and configured route without sending an
+inference request:
+
+```sh
+contextbridge integrate openai --check
+```
+
+An actual model call is separate and explicit because it may consume local
+compute, network egress or paid API credit:
+
+```sh
+contextbridge integrate openai --live
+```
+
+The live check uses one bounded exact-reply prompt and fails when the response
+does not match. Neither check prints the credential.
+
 The local service exposes authenticated endpoints for clients that can change a
 base URL:
 
@@ -110,6 +127,27 @@ status is scrubbed of bearer tokens, credential-shaped fields, and opaque
 session-routing keys before it crosses the MCP boundary.
 
 ## PHP and shared hosting
+
+On the relay host, create a scoped producer file without printing either the
+relay administrator token or the new producer token:
+
+```sh
+contextbridge integrate relay \
+  --subject my-server-app \
+  --lifetime-hours 720 \
+  --write-env ./contextbridge-producer.env
+```
+
+The destination file must not already exist. It contains only the public relay
+URL and the new app-specific producer token. Transfer it through a secure
+channel and keep it outside the web root. `--groups private,gpu` can restrict
+the token to operator-defined scheduling groups; `--lifetime-hours 0` is an
+explicit non-expiring choice rather than the default. The command's terminal
+and JSON metadata remain redacted.
+
+Minimal dependency-free [Python and Node.js server examples](../examples/server-app/README.md)
+show idempotent submission, persisted job IDs, bounded polling and terminal
+result handling. They are server-side examples, not browser/mobile clients.
 
 [ContextBridgeClient.php](../examples/php/ContextBridgeClient.php) requires
 PHP 8.1+, the cURL extension and outbound HTTPS with working certificate trust.

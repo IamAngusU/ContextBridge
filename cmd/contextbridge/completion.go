@@ -16,7 +16,7 @@ var completionSubcommands = map[string][]string{
 	"schedule":     {"add", "list", "show", "pause", "resume", "run", "delete"},
 	"runtime":      {"install"},
 	"mcp":          {"serve"},
-	"integrate":    {"openai", "mcp"},
+	"integrate":    {"openai", "mcp", "relay"},
 	"verification": {"verify"},
 	"cluster":      {"status", "node", "protocol", "conformance", "submit", "chat", "agent", "selftest", "route", "contract", "receipt", "login", "token", "pairing", "configure", "dashboard", "pipeline"},
 	"route":        {"explain"},
@@ -56,7 +56,7 @@ $script:ContextBridgeSubcommands = @{
     schedule = @('add','list','show','pause','resume','run','delete')
     runtime = @('install')
     mcp = @('serve')
-    integrate = @('openai','mcp')
+    integrate = @('openai','mcp','relay')
     verification = @('verify')
 	cluster = @('status','node','protocol','conformance','submit','chat','agent','selftest','route','contract','receipt','login','token','pairing','configure','dashboard','pipeline')
     route = @('explain')
@@ -84,8 +84,9 @@ $script:ContextBridgeOptions = @{
     'pull' = @('--config')
     'runtime install' = @('--config')
     'mcp serve' = @('--config')
-    'integrate openai' = @('--config','--json','--show-token','--write-env')
+    'integrate openai' = @('--config','--json','--show-token','--write-env','--check','--live')
     'integrate mcp' = @('--config','--json')
+    'integrate relay' = @('--config','--json','--write-env','--subject','--groups','--lifetime-hours')
     'benchmark' = @('--json','--samples','--warmup','--database-jobs','--idle-duration','--binary')
     'verification verify' = @('--file','--trust-key','--artifact','--require-artifact','--evidence-dir','--require-evidence','--json')
     'relay' = @('--config')
@@ -123,7 +124,7 @@ $script:ContextBridgeTakesValue = @(
 	'--config','--install-dir','--file','--job','--artifacts','--artifact','--attach-image','--identity','--job-dir','--token-file','--trust-key','--evidence-dir','--write-env',
     '--slots','--endpoint','--relay','--name','--providers','--models','--tasks','--groups',
     '--token','--provider','--group','--model','--profile','--reasoning','--session','--prompt',
-	'--min-artifacts','--min-images','--local-model','--image-profile','--timeout','--job-timeout','--poll','--idempotency-key',
+	'--min-artifacts','--min-images','--local-model','--image-profile','--timeout','--job-timeout','--poll','--idempotency-key','--subject','--groups','--lifetime-hours',
     '--mode','--relay-url','--public-url','--listen','--role','--subject','--approve','--deny',
     '--managed-service','--samples','--warmup','--database-jobs','--idle-duration','--binary',
     '--goal','--goal-file','--planner-provider','--planner-profile','--planner-model','--allow-providers',
@@ -206,7 +207,7 @@ _contextbridge_complete() {
     --reasoning) candidates="instant medium high xhigh pro max" ;;
     --mode) candidates="local relay worker all" ;;
     --role) candidates="producer observer" ;;
-    --wait|--e2ee|--stream|--json|--show-token|--no-open|--topmost|--image|--new-session|--new-session-per-job|--foreground-new-session|--run|--dry-run|--keep-artifacts|--no-updates|--discover|--force|--relay-only|--require-artifact|--require-evidence) boolean_previous=1 ;;
+    --wait|--e2ee|--stream|--json|--show-token|--check|--live|--no-open|--topmost|--image|--new-session|--new-session-per-job|--foreground-new-session|--run|--dry-run|--keep-artifacts|--no-updates|--discover|--force|--relay-only|--require-artifact|--require-evidence) boolean_previous=1 ;;
   esac
   if [ -n "${candidates:-}" ]; then
     COMPREPLY=( $(compgen -W "$candidates" -- "$current") )
@@ -235,8 +236,9 @@ _contextbridge_complete() {
       "cluster token") candidates="--config --role --subject" ;;
       "cluster pairing") candidates="--config --approve --deny" ;;
       "mcp serve") candidates="--config" ;;
-      "integrate openai") candidates="--config --json --show-token --write-env" ;;
+      "integrate openai") candidates="--config --json --show-token --write-env --check --live" ;;
       "integrate mcp") candidates="--config --json" ;;
+      "integrate relay") candidates="--config --json --write-env --subject --groups --lifetime-hours" ;;
       "verification verify") candidates="--file --trust-key --artifact --require-artifact --evidence-dir --require-evidence --json" ;;
       benchmark) candidates="--json --samples --warmup --database-jobs --idle-duration --binary" ;;
       "schedule add") candidates="--config --file" ;;
@@ -273,7 +275,7 @@ _contextbridge_complete() {
       schedule) candidates="add list show pause resume run delete" ;;
       runtime) candidates="install" ;;
       mcp) candidates="serve" ;;
-      integrate) candidates="openai mcp" ;;
+      integrate) candidates="openai mcp relay" ;;
       verification) candidates="verify" ;;
 	  cluster) candidates="status node protocol conformance submit chat agent selftest route contract receipt login token pairing configure dashboard pipeline" ;;
       route) candidates="explain" ;;
@@ -358,12 +360,13 @@ case "$words[2]" in
     ;;
   integrate)
     if (( CURRENT == 3 )); then
-      _values 'integration target' openai mcp
+      _values 'integration target' openai mcp relay
       return
     fi
     case "$words[3]" in
-      openai) _arguments "${config[@]}" '--json[Print redacted machine-readable connection settings]' '--show-token[Explicitly include the local API token in terminal output]' '--write-env[Create a new private environment file without overwriting]:environment file:_files' ;;
+      openai) _arguments "${config[@]}" '--json[Print redacted machine-readable connection settings]' '--show-token[Explicitly include the local API token in terminal output]' '--write-env[Create a new private environment file without overwriting]:environment file:_files' '--check[Verify service, authentication and route without inference]' '--live[Also send one explicit bounded live inference smoke request]' ;;
       mcp) _arguments "${config[@]}" '--json[Print the MCP client configuration as JSON]' ;;
+      relay) _arguments "${config[@]}" '--json[Print redacted credential metadata]' '--write-env[Create a new private producer environment file]:environment file:_files' '--subject[Remote application identity]:identity:' '--groups[Comma-separated scheduling groups]:groups:' '--lifetime-hours[Credential lifetime; 0 never expires]:hours:' ;;
       *) _arguments '*:argument:' ;;
     esac
     ;;
