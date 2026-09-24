@@ -20,18 +20,19 @@ func TestPublicCoreDistributionSurfaceIsExplicit(t *testing.T) {
 	}
 	root := filepath.Clean(filepath.Join(filepath.Dir(source), "..", ".."))
 	allowedDirectories := map[string]bool{
-		".buildcheck":  true, // local ignored release verification output
-		".git":         true,
-		".github":      true,
-		".tmp-metrics": true, // local ignored benchmark output
-		"assets":       true,
-		"cmd":          true,
-		"deploy":       true,
-		"docs":         true,
-		"examples":     true,
-		"internal":     true,
-		"LICENSES":     true,
-		"scripts":      true,
+		".buildcheck":       true, // local ignored release verification output
+		".git":              true,
+		".github":           true,
+		".tmp-metrics":      true, // local ignored benchmark output
+		"assets":            true,
+		"cmd":               true,
+		"deploy":            true,
+		"docs":              true,
+		"examples":          true,
+		"internal":          true,
+		"LICENSES":          true,
+		"release-artifacts": true, // local ignored output created by build-release.ps1
+		"scripts":           true,
 	}
 	allowedFiles := map[string]bool{
 		".editorconfig":            true,
@@ -128,7 +129,7 @@ func TestPublicCoreDoesNotNamePrivateProviderAdapters(t *testing.T) {
 		}
 		if entry.IsDir() {
 			switch entry.Name() {
-			case ".git", ".buildcheck", ".tmp-metrics", "vendor":
+			case ".git", ".buildcheck", ".tmp-metrics", "release-artifacts", "vendor":
 				if path != root {
 					return filepath.SkipDir
 				}

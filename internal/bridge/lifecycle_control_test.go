@@ -195,6 +195,9 @@ func TestLifecycleStopResponseSurvivesRealServerShutdown(t *testing.T) {
 	if response.StatusCode != http.StatusOK || !bytes.Contains(raw, []byte(`"stopping":true`)) {
 		t.Fatalf("real shutdown response = %d %s", response.StatusCode, raw)
 	}
+	if response.ContentLength != int64(len(raw)) || !response.Close {
+		t.Fatalf("stop response framing = length %d/%d close=%v", response.ContentLength, len(raw), response.Close)
+	}
 	select {
 	case err := <-runDone:
 		if err != nil {

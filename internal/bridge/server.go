@@ -193,11 +193,9 @@ func (s *Server) Run(ctx context.Context) error {
 	// #nosec G118 -- shutdown must derive a fresh grace context after the parent context has been cancelled.
 	go func() {
 		<-ctx.Done()
-		// An accepted local stop has already closed admission and waited for its
-		// response handler to leave net/http. Closing remaining keep-alive
-		// connections directly avoids a Shutdown polling race in which an idle
-		// connection can otherwise consume the entire grace period. External
-		// cancellation still receives the normal graceful shutdown path below.
+		// The stop response carries an exact Content-Length and closes its own
+		// connection after the handler returns. The accepted-stop path can then
+		// close other keep-alive connections without waiting out the grace period.
 		if s.lifecycleStopAccepted() {
 			shutdownDone <- httpServer.Close()
 			return
@@ -390,10 +388,16 @@ func (s *Server) handleSystemStop(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true, "stopping": true, "forced": request.Force})
-	// Push the confirmation into the connection before arranging process
-	// cancellation. This lets the client receive the complete JSON response
-	// even though the accepted stop closes remaining keep-alive connections.
+	payload, _ := json.Marshal(map[string]bool{"ok": true, "stopping": true, "forced": request.Force})
+	payload = append(payload, '\n')
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+	w.Header().Set("Connection", "close")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(payload)
+	// Push the exact-length confirmation into the connection before arranging
+	// process cancellation. Unlike a chunked body, it needs no later terminator.
 	_ = http.NewResponseController(w).Flush()
 	// Wait until net/http has observed ServeHTTP returning and has cancelled
 	// this request context before cancelling the process root. Cancelling here,
