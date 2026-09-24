@@ -1492,7 +1492,8 @@ func postJSON(ctx context.Context, client *http.Client, target, token string, in
 }
 
 func saveIdentity(path string, identity WorkerIdentity) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+	directory := filepath.Dir(path)
+	if err := os.MkdirAll(directory, 0700); err != nil {
 		return err
 	}
 	if err := validateWorkerIdentity(identity); err != nil {
@@ -1503,7 +1504,35 @@ func saveIdentity(path string, identity WorkerIdentity) error {
 	if err != nil {
 		return fmt.Errorf("encode worker identity: %w", err)
 	}
-	return os.WriteFile(path, raw, 0600)
+	temporary, err := os.CreateTemp(directory, ".contextbridge-worker-identity-*")
+	if err != nil {
+		return fmt.Errorf("create temporary worker identity: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = temporary.Close()
+			_ = os.Remove(temporaryPath)
+		}
+	}()
+	if err := temporary.Chmod(0600); err != nil {
+		return fmt.Errorf("protect temporary worker identity: %w", err)
+	}
+	if _, err := temporary.Write(raw); err != nil {
+		return fmt.Errorf("write temporary worker identity: %w", err)
+	}
+	if err := temporary.Sync(); err != nil {
+		return fmt.Errorf("flush temporary worker identity: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("close temporary worker identity: %w", err)
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return fmt.Errorf("replace worker identity: %w", err)
+	}
+	committed = true
+	return nil
 }
 
 // ValidateRelayURL enforces the worker trust boundary. Remote relays require

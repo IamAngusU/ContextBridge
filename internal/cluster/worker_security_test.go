@@ -199,6 +199,71 @@ func TestLoadWorkerRejectsOversizedAndInconsistentIdentity(t *testing.T) {
 	}
 }
 
+func TestSaveIdentityAtomicallyReplacesExistingFile(t *testing.T) {
+	privateKey, publicKey, err := NewIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	identityFile := filepath.Join(directory, "identity.json")
+	identity := WorkerIdentity{
+		NodeID: "node-safe", NodeToken: "cb_node_0123456789012345678901234567890123456789",
+		PrivateKey: privateKey, PublicKey: publicKey, RelayURL: "http://127.0.0.1:32150",
+	}
+	if err := saveIdentity(identityFile, identity); err != nil {
+		t.Fatal(err)
+	}
+	identity.ClusterID = "cluster_safe"
+	identity.HighestRelayEpoch = 9
+	if err := saveIdentity(identityFile, identity); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := readBoundedRegularFile(identityFile, maximumWorkerIdentityBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored WorkerIdentity
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.ClusterID != identity.ClusterID || stored.HighestRelayEpoch != identity.HighestRelayEpoch {
+		t.Fatalf("replacement lost relay authority: %#v", stored)
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "identity.json" {
+		t.Fatalf("identity save left temporary files behind: %v", entries)
+	}
+}
+
+func TestSaveIdentityCleansTemporaryFileWhenReplacementFails(t *testing.T) {
+	privateKey, publicKey, err := NewIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	targetDirectory := filepath.Join(directory, "identity.json")
+	if err := os.Mkdir(targetDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	identity := WorkerIdentity{
+		NodeID: "node-safe", NodeToken: "cb_node_0123456789012345678901234567890123456789",
+		PrivateKey: privateKey, PublicKey: publicKey, RelayURL: "http://127.0.0.1:32150",
+	}
+	if err := saveIdentity(targetDirectory, identity); err == nil {
+		t.Fatal("identity replacement unexpectedly replaced a directory")
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "identity.json" || !entries[0].IsDir() {
+		t.Fatalf("failed identity save left temporary files behind: %v", entries)
+	}
+}
+
 func TestLoadWorkerRejectsUnsafeDirectNumericConfiguration(t *testing.T) {
 	privateKey, publicKey, err := NewIdentity()
 	if err != nil {

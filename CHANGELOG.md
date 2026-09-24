@@ -12,6 +12,9 @@
   single-writer FSM with explicit replicated-state, membership, migration,
   snapshot, dependency, and failure-proof boundaries. No Raft dependency or
   HA support claim is included yet.
+- Worker identity and accepted relay epochs are now flushed to a temporary
+  same-directory file and atomically replaced. A failed replacement cleans up
+  its temporary file instead of risking a partially written durable fence.
 
 ## v0.7.3 - 2026-09-24
 
