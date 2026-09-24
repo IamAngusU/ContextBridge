@@ -18,19 +18,26 @@ func (s *Server) handleJobResult(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "job result not found"})
 		return
 	}
-	path := filepath.Join(s.store.dir, "jobs", jobStorageStem(id)+".result.json")
-	// #nosec G703 -- the route validates the ID and storageID constrains the final filename.
-	file, err := os.Open(path)
+	jobsDir := filepath.Join(s.store.dir, "jobs")
+	root, err := os.OpenRoot(jobsDir)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "job result not found"})
+		return
+	}
+	defer root.Close()
+	name := jobStorageStem(id) + ".result.json"
+	file, err := root.Open(name)
 	if err != nil {
 		// Read-only compatibility for records created before collision-free
 		// job/result stems were introduced. New writes never use this layout.
-		legacy := filepath.Join(s.store.dir, "jobs", storageID(id)+".result.json")
-		file, err = os.Open(legacy)
+		// os.Root also refuses a legacy symlink that escapes the managed jobs
+		// directory, even if the local filesystem was modified after the write.
+		name = storageID(id) + ".result.json"
+		file, err = root.Open(name)
 		if err != nil {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "job result not found"})
 			return
 		}
-		path = legacy
 	}
 	defer file.Close()
 	info, err := file.Stat()
@@ -40,5 +47,5 @@ func (s *Server) handleJobResult(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	http.ServeContent(w, r, filepath.Base(path), info.ModTime(), file)
+	http.ServeContent(w, r, filepath.Base(name), info.ModTime(), file)
 }

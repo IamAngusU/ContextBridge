@@ -1953,7 +1953,10 @@ func validateAssignmentFence(job Job, reported *AssignmentFence) error {
 		}
 		return ErrAssignmentFenceMismatch
 	}
-	if reported == nil || !job.AssignmentFence.Valid() || !reported.Valid() || !job.AssignmentFence.Equal(*reported) || reported.Generation != uint64(job.Attempt) {
+	// Persisted state is not trusted merely because ordinary writers only create
+	// positive attempts. Reject a corrupt negative/zero attempt before converting
+	// it to uint64; otherwise -1 can alias math.MaxUint64 and match a forged fence.
+	if job.Attempt <= 0 || reported == nil || !job.AssignmentFence.Valid() || !reported.Valid() || !job.AssignmentFence.Equal(*reported) || reported.Generation != uint64(job.Attempt) {
 		return ErrAssignmentFenceMismatch
 	}
 	return nil

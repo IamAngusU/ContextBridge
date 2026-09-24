@@ -15,6 +15,12 @@
 - Worker identity and accepted relay epochs are now flushed to a temporary
   same-directory file and atomically replaced. A failed replacement cleans up
   its temporary file instead of risking a partially written durable fence.
+- Assignment-fence validation now rejects corrupt non-positive persisted
+  attempts before any signed-to-unsigned conversion, preventing a negative
+  attempt from aliasing a very large generation.
+- Local result reads are confined with `os.Root`; even a filesystem-level
+  symlink planted inside the managed jobs directory cannot make the authenticated
+  result endpoint read outside that directory.
 
 ## v0.7.3 - 2026-09-24
 

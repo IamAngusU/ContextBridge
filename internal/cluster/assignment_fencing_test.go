@@ -155,6 +155,20 @@ func TestAssignmentGenerationOverflowFailsWithoutMutation(t *testing.T) {
 	}
 }
 
+func TestAssignmentFenceRejectsNonPositivePersistedAttempt(t *testing.T) {
+	for _, attempt := range []int{0, -1} {
+		generation := uint64(1)
+		if attempt < 0 {
+			generation = math.MaxUint64
+		}
+		fence := &AssignmentFence{ClusterID: "cluster_test", RelayEpoch: 7, Generation: generation}
+		job := Job{ID: "corrupt-attempt", Attempt: attempt, AssignmentFence: fence}
+		if err := validateAssignmentFence(job, fence); !errors.Is(err, ErrAssignmentFenceMismatch) {
+			t.Fatalf("attempt %d returned %v, want ErrAssignmentFenceMismatch", attempt, err)
+		}
+	}
+}
+
 func TestWorkerPersistsAndRejectsOlderRelayAuthority(t *testing.T) {
 	privateKey, publicKey, err := NewIdentity()
 	if err != nil {
