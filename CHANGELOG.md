@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Added wire-v3 assignment fencing: a stable durable cluster identity,
+  monotonically increasing relay process epochs, and exact per-assignment
+  generations now bind dispatch, cancellation, progress, completion, and slot
+  release. Workers persist the highest accepted epoch and reject older or
+  foreign relay authority before model execution. This is a pre-consensus
+  safety primitive; it does not claim multi-relay failover or Raft consensus.
+
 ## v0.7.3 - 2026-09-24
 
 - Added durable administrator-controlled worker drain/resume state for planned

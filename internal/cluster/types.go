@@ -15,7 +15,10 @@ func nonNegativeDurationMilliseconds(value time.Duration) uint64 {
 	return uint64(value / time.Millisecond) // #nosec G115 -- value is positive and time.Duration cannot exceed int64.
 }
 
-const ProtocolVersion = 2
+// ProtocolVersion 3 makes relay authority and assignment fences mandatory on
+// the worker wire. Mixed v2/v3 peers fail the existing exact-version handshake
+// instead of silently running without stale-leader protection.
+const ProtocolVersion = 3
 
 // JobContractV1 names the stable producer-to-relay job boundary. An omitted
 // version is normalized to V1 for clients written before contracts became
@@ -260,26 +263,55 @@ type SealedEnvelope struct {
 	Ciphertext      string `json:"ciphertext"`
 }
 
+// RelayAuthority identifies one durable relay store and one monotonically
+// increasing process epoch within that store. It is intentionally independent
+// from network addresses so proxy and DNS changes do not create a new cluster.
+type RelayAuthority struct {
+	ClusterID string `json:"cluster_id"`
+	Epoch     uint64 `json:"epoch"`
+}
+
+func (authority RelayAuthority) Valid() bool {
+	return validRoutingLabel(authority.ClusterID, 120) && authority.Epoch > 0
+}
+
+// AssignmentFence binds every worker-side effect and reply to the relay
+// authority and exact durable assignment generation that created it.
+type AssignmentFence struct {
+	ClusterID  string `json:"cluster_id"`
+	RelayEpoch uint64 `json:"relay_epoch"`
+	Generation uint64 `json:"generation"`
+}
+
+func (fence AssignmentFence) Valid() bool {
+	return validRoutingLabel(fence.ClusterID, 120) && fence.RelayEpoch > 0 && fence.Generation > 0
+}
+
+func (fence AssignmentFence) Equal(other AssignmentFence) bool {
+	return fence == other
+}
+
 type Job struct {
-	ID              string          `json:"id"`
-	ContractVersion string          `json:"contract_version"`
-	OwnerSubject    string          `json:"owner_subject,omitempty"`
-	TenantID        string          `json:"tenant_id,omitempty"`
-	Source          string          `json:"source,omitempty"`
-	Pipeline        string          `json:"pipeline,omitempty"`
-	Step            string          `json:"step,omitempty"`
-	ParentID        string          `json:"parent_id,omitempty"`
-	Requirements    Requirements    `json:"requirements"`
-	PolicyDecision  PolicyDecision  `json:"policy_decision"`
-	Payload         json.RawMessage `json:"payload,omitempty"`
-	SealedPayload   *SealedEnvelope `json:"sealed_payload,omitempty"`
-	Result          json.RawMessage `json:"result,omitempty"`
-	SealedResult    *SealedEnvelope `json:"sealed_result,omitempty"`
-	Status          string          `json:"status"`
-	Priority        int             `json:"priority"`
-	Attempt         int             `json:"attempt"`
-	MaxAttempts     int             `json:"max_attempts"`
-	AssignedNode    string          `json:"assigned_node,omitempty"`
+	ID              string           `json:"id"`
+	ContractVersion string           `json:"contract_version"`
+	OwnerSubject    string           `json:"owner_subject,omitempty"`
+	TenantID        string           `json:"tenant_id,omitempty"`
+	Source          string           `json:"source,omitempty"`
+	Pipeline        string           `json:"pipeline,omitempty"`
+	Step            string           `json:"step,omitempty"`
+	ParentID        string           `json:"parent_id,omitempty"`
+	Requirements    Requirements     `json:"requirements"`
+	PolicyDecision  PolicyDecision   `json:"policy_decision"`
+	Payload         json.RawMessage  `json:"payload,omitempty"`
+	SealedPayload   *SealedEnvelope  `json:"sealed_payload,omitempty"`
+	Result          json.RawMessage  `json:"result,omitempty"`
+	SealedResult    *SealedEnvelope  `json:"sealed_result,omitempty"`
+	Status          string           `json:"status"`
+	Priority        int              `json:"priority"`
+	Attempt         int              `json:"attempt"`
+	MaxAttempts     int              `json:"max_attempts"`
+	AssignedNode    string           `json:"assigned_node,omitempty"`
+	AssignmentFence *AssignmentFence `json:"assignment_fence,omitempty"`
 	// RoutingDecision is the bounded, point-in-time evidence used for the
 	// durable assignment. It intentionally excludes full node telemetry and is
 	// absent until a queued job is actually placed.
@@ -409,9 +441,11 @@ type WireMessage struct {
 	RequestID    string             `json:"request_id,omitempty"`
 	Node         *Node              `json:"node,omitempty"`
 	Capabilities *Capabilities      `json:"capabilities,omitempty"`
+	Authority    *RelayAuthority    `json:"authority,omitempty"`
 	Job          *Job               `json:"job,omitempty"`
 	JobID        string             `json:"job_id,omitempty"`
 	Attempt      int                `json:"attempt,omitempty"`
+	Fence        *AssignmentFence   `json:"assignment_fence,omitempty"`
 	Result       json.RawMessage    `json:"result,omitempty"`
 	SealedResult *SealedEnvelope    `json:"sealed_result,omitempty"`
 	Usage        Usage              `json:"usage,omitempty"`

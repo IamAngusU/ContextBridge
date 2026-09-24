@@ -108,7 +108,7 @@ func runRelayConformance(ctx context.Context, baseURL, token string) (relayConfo
 		fmt.Sprintf("%s · wire v%d", cleanConformanceDetail(manifest.Schema), manifest.WireProtocolVersion))
 	add("contract.version", containsExact(manifest.JobContractVersions, cluster.JobContractV1),
 		strings.Join(manifest.JobContractVersions, ", "))
-	requiredFeatures := []string{"durable_execution_policy_v1", "job_contract_dry_run", "stable_runtime_failure_codes", "worker_conformance_report_v1"}
+	requiredFeatures := []string{"assignment_fencing_v1", "durable_execution_policy_v1", "job_contract_dry_run", "stable_runtime_failure_codes", "worker_conformance_report_v1"}
 	missingFeatures := missingExact(manifest.Features, requiredFeatures)
 	add("protocol.features", len(missingFeatures) == 0, missingDetail(missingFeatures))
 	catalogsValid := sortedUniqueNonEmpty(manifest.AdmissionErrorCodes) && sortedUniqueNonEmpty(manifest.RuntimeFailureCodes) &&

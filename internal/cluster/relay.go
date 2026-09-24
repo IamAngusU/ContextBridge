@@ -67,6 +67,7 @@ const (
 type Relay struct {
 	cfg             RelayConfig
 	store           *Store
+	authority       RelayAuthority
 	logger          *log.Logger
 	mu              sync.RWMutex
 	workers         map[string]*workerConnection
@@ -177,6 +178,7 @@ type workerReservation struct {
 	storeTerminal   bool
 	dispatchStarted bool
 	attempt         int
+	fence           *AssignmentFence
 }
 
 func newWorkerConnection(conn *websocket.Conn, capacity int) *workerConnection {
@@ -212,7 +214,7 @@ func (w *workerConnection) markStoreTerminal(jobID string) bool {
 	return exists && reservation.dispatchStarted
 }
 
-func (w *workerConnection) beginDispatch(jobID string, attempt int) bool {
+func (w *workerConnection) beginDispatch(jobID string, attempt int, fences ...*AssignmentFence) bool {
 	w.stateMu.Lock()
 	defer w.stateMu.Unlock()
 	reservation, exists := w.inFlight[jobID]
@@ -221,15 +223,33 @@ func (w *workerConnection) beginDispatch(jobID string, attempt int) bool {
 	}
 	reservation.dispatchStarted = true
 	reservation.attempt = attempt
+	if len(fences) > 0 && fences[0] != nil {
+		copy := *fences[0]
+		reservation.fence = &copy
+	}
 	w.inFlight[jobID] = reservation
 	return true
 }
 
-func (w *workerConnection) matchesDispatch(jobID string, attempt int) bool {
+func (w *workerConnection) matchesDispatch(jobID string, attempt int, fences ...*AssignmentFence) bool {
 	w.stateMu.Lock()
 	defer w.stateMu.Unlock()
 	reservation, exists := w.inFlight[jobID]
-	return exists && reservation.dispatchStarted && attempt > 0 && reservation.attempt == attempt
+	if !exists || !reservation.dispatchStarted || attempt <= 0 || reservation.attempt != attempt {
+		return false
+	}
+	var reported *AssignmentFence
+	if len(fences) > 0 {
+		reported = fences[0]
+	}
+	return assignmentFencePointersEqual(reservation.fence, reported)
+}
+
+func assignmentFencePointersEqual(left, right *AssignmentFence) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.Equal(*right)
 }
 
 func (w *workerConnection) release(jobID string) {
@@ -333,6 +353,11 @@ func NewRelay(cfg RelayConfig, logger *log.Logger) (*Relay, error) {
 	if err != nil {
 		return nil, err
 	}
+	authority, err := store.AcquireRelayAuthority()
+	if err != nil {
+		store.Close()
+		return nil, fmt.Errorf("acquire relay authority: %w", err)
+	}
 	if err := store.EnsureToken(cfg.AdminToken, "admin", "relay-admin", nil); err != nil {
 		store.Close()
 		return nil, err
@@ -353,7 +378,7 @@ func NewRelay(cfg RelayConfig, logger *log.Logger) (*Relay, error) {
 	if logger == nil {
 		logger = log.Default()
 	}
-	return &Relay{cfg: cfg, store: store, logger: logger, workers: map[string]*workerConnection{}, rate: map[string]*rateWindow{}, wake: make(chan struct{}, 1), nextRetention: now.Add(cfg.RetentionSweep), lastOwner: map[int]string{}}, nil
+	return &Relay{cfg: cfg, store: store, authority: authority, logger: logger, workers: map[string]*workerConnection{}, rate: map[string]*rateWindow{}, wake: make(chan struct{}, 1), nextRetention: now.Add(cfg.RetentionSweep), lastOwner: map[int]string{}}, nil
 }
 
 func applyRetentionDefaults(cfg *RelayConfig) error {
@@ -507,12 +532,14 @@ func (r *Relay) handleLeadership(w http.ResponseWriter, _ *http.Request) {
 	if err := r.readinessError(); err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{
 			"ok": false, "leader": true, "writable": false, "mode": "standalone",
+			"cluster_id": r.authority.ClusterID, "leader_epoch": r.authority.Epoch,
 			"service": "contextbridge-relay", "version": r.cfg.Version, "protocol": ProtocolVersion,
 		})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"ok": true, "leader": true, "writable": true, "mode": "standalone",
+		"cluster_id": r.authority.ClusterID, "leader_epoch": r.authority.Epoch,
 		"service": "contextbridge-relay", "version": r.cfg.Version, "protocol": ProtocolVersion,
 	})
 }
@@ -786,7 +813,7 @@ func (r *Relay) handleCancel(w http.ResponseWriter, req *http.Request) {
 		// dispatched. Only a live reservation proves there is worker execution
 		// to cancel; otherwise a phantom cancel could poison the worker's bounded
 		// cancel-before-dispatch cache.
-		r.cancelWorkerExecution(job.AssignedNode, job.ID)
+		r.cancelWorkerExecution(job)
 	} else {
 		// No dispatch can still be running: either this was only an encrypted
 		// queue binding, or markStoreTerminal won the pre-dispatch race and made
@@ -796,7 +823,8 @@ func (r *Relay) handleCancel(w http.ResponseWriter, req *http.Request) {
 	writeJSON(w, http.StatusOK, job)
 }
 
-func (r *Relay) cancelWorkerExecution(nodeID, jobID string) {
+func (r *Relay) cancelWorkerExecution(job Job) {
+	nodeID, jobID := job.AssignedNode, job.ID
 	if nodeID == "" || jobID == "" {
 		return
 	}
@@ -808,7 +836,7 @@ func (r *Relay) cancelWorkerExecution(nodeID, jobID string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	message := WireMessage{Version: ProtocolVersion, Type: "cancel", JobID: jobID}
+	message := WireMessage{Version: ProtocolVersion, Type: "cancel", JobID: jobID, Attempt: job.Attempt, Fence: job.AssignmentFence}
 	if err := worker.write(ctx, mustJSON(message)); err != nil {
 		r.logger.Printf("worker cancellation for %s could not be delivered: %v", jobID, err)
 	}
@@ -1159,14 +1187,23 @@ func (r *Relay) handleWorker(w http.ResponseWriter, req *http.Request) {
 	}
 	worker := newWorkerConnection(conn, node.Capabilities.MaxConcurrent)
 	r.mu.Lock()
-	if previous := r.workers[node.ID]; previous != nil {
-		delete(r.workers, node.ID)
-		previous.conn.Close(websocket.StatusPolicyViolation, "replaced by a newer connection")
-		_, _ = r.store.RequeueNode(node.ID, "worker connection replaced")
-	}
+	previous := r.workers[node.ID]
 	r.workers[node.ID] = worker
 	r.mu.Unlock()
+	if previous != nil {
+		// Do not wait for a close handshake from an unresponsive superseded peer;
+		// the new connection must receive its authority fence before dispatch.
+		previous.conn.CloseNow()
+		_, _ = r.store.RequeueNode(node.ID, "worker connection replaced")
+	}
 	defer r.disconnectNode(node.ID, worker)
+	authority := r.authority
+	authorityCtx, cancelAuthority := context.WithTimeout(ctx, 10*time.Second)
+	err = worker.write(authorityCtx, mustJSON(WireMessage{Version: ProtocolVersion, Type: "authority", Authority: &authority}))
+	cancelAuthority()
+	if err != nil {
+		return
+	}
 	_ = r.store.AddEvent(Event{Kind: "node.online", Message: node.Name + " connected", NodeID: node.ID})
 	r.signalDispatch()
 	for {
@@ -1209,21 +1246,21 @@ func (r *Relay) handleWorker(w http.ResponseWriter, req *http.Request) {
 			}
 			_ = r.store.UpsertNode(node)
 		case "started":
-			_, _ = r.store.MarkRunning(message.JobID, node.ID, message.Attempt)
+			_, _ = r.store.MarkRunningFenced(message.JobID, node.ID, message.Attempt, message.Fence)
 		case "progress":
 			if message.Progress != nil {
-				_, _ = r.store.UpdateJobProgress(message.JobID, node.ID, message.Attempt, *message.Progress)
+				_, _ = r.store.UpdateJobProgressFenced(message.JobID, node.ID, message.Attempt, message.Fence, *message.Progress)
 			}
 		case "result":
 			usage := priceUsage(message.Usage, r.cfg.Pricing)
-			job, completeErr := r.store.CompleteJobWithFailure(message.JobID, node.ID, message.Attempt, message.Result, message.SealedResult, usage, message.Error, message.FailureCode, message.Execution)
+			job, completeErr := r.store.CompleteJobWithFailureFenced(message.JobID, node.ID, message.Attempt, message.Fence, message.Result, message.SealedResult, usage, message.Error, message.FailureCode, message.Execution)
 			// Only the current assignment generation may release the worker slot.
 			// A final job can still receive its matching late result after a producer
 			// cancellation or relay timeout. That matching result proves execution
 			// really ended, so the slot is safe to release even though the store
 			// rejects the state transition. The timeout itself is not such proof.
 			final := job.Status == JobCompleted || job.Status == JobFailed || job.Status == JobCancelled
-			executionEnded := completeErr == nil || (final && job.AssignedNode == node.ID && job.Attempt == message.Attempt) || worker.matchesDispatch(message.JobID, message.Attempt)
+			executionEnded := completeErr == nil || (final && job.AssignedNode == node.ID && job.Attempt == message.Attempt && assignmentFencePointersEqual(job.AssignmentFence, message.Fence)) || worker.matchesDispatch(message.JobID, message.Attempt, message.Fence)
 			if executionEnded {
 				_, _ = r.store.ReleaseAdapterSessionJobLock(message.JobID)
 				worker.release(message.JobID)
@@ -1357,9 +1394,9 @@ func (r *Relay) dispatch() {
 			decision.SelectedNodeName = candidate.Node.Name
 			boundRoutingDecision(&decision)
 			if strings.EqualFold(queued.Requirements.Provider, "adapter") {
-				job, assignErr = r.store.AssignAdapterJobWithDecision(queued.ID, candidate.Node.ID, adapterEndpointID, adapterSessionRecovery, decision)
+				job, assignErr = r.store.AssignAdapterJobFencedWithDecision(queued.ID, candidate.Node.ID, adapterEndpointID, adapterSessionRecovery, decision, r.authority)
 			} else {
-				job, assignErr = r.store.AssignJobWithDecision(queued.ID, candidate.Node.ID, decision)
+				job, assignErr = r.store.AssignJobFencedWithDecision(queued.ID, candidate.Node.ID, decision, r.authority)
 			}
 			if assignErr != nil {
 				worker.release(queued.ID)
@@ -1374,7 +1411,7 @@ func (r *Relay) dispatch() {
 			// durable assignment. In that case markStoreTerminal records the win
 			// without emitting a phantom cancel, and this gate ensures the already
 			// cancelled job is never written to the worker afterward.
-			if !worker.beginDispatch(job.ID, job.Attempt) {
+			if !worker.beginDispatch(job.ID, job.Attempt, job.AssignmentFence) {
 				worker.release(job.ID)
 				r.endAdmission()
 				break
@@ -1433,7 +1470,7 @@ func (r *Relay) runMaintenance(now time.Time) {
 				// an expired encrypted queue binding. Best-effort cancellation bounds
 				// hung provider work; the slot remains occupied until the matching
 				// result or connection teardown proves execution has actually ended.
-				r.cancelWorkerExecution(job.AssignedNode, job.ID)
+				r.cancelWorkerExecution(job)
 			} else {
 				_, _ = r.store.ReleaseAdapterSessionJobLock(job.ID)
 			}

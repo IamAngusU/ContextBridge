@@ -30,6 +30,16 @@ future reverse proxy from sending mutations to a live-but-read-only follower.
 During a controlled stop, liveness remains true while readiness and
 writability fail closed.
 
+The writable relay also owns a durable authority fence. Its `cluster_id`
+remains stable for the lifetime of the relay database, while `leader_epoch`
+increases on every relay process start. Each dispatch adds the exact epoch and
+assignment generation to the durable job. Wire-v3 workers persist the highest
+accepted epoch, reject an older or foreign authority before execution, and
+echo the exact fence on starts, progress, results, and cancellation handling.
+The relay rejects a missing or stale fence and does not let it release a newer
+slot. This is a single-relay safety primitive, not a claim of replicated
+consensus or automatic failover.
+
 ## Selection order
 
 The scheduler first rejects nodes that cannot prove hard requirements such as:

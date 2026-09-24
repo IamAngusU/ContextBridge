@@ -29,6 +29,7 @@ func TestRelayRoleHealthSeparatesLiveReadyAndWritable(t *testing.T) {
 	})
 	assertRelayRoleHealth(t, server.URL+"/leaderz", http.StatusOK, map[string]interface{}{
 		"ok": true, "leader": true, "writable": true, "mode": "standalone",
+		"cluster_id": relay.authority.ClusterID, "leader_epoch": float64(relay.authority.Epoch),
 	})
 
 	if !relay.QuiesceForStop(true) {
@@ -42,6 +43,7 @@ func TestRelayRoleHealthSeparatesLiveReadyAndWritable(t *testing.T) {
 	})
 	assertRelayRoleHealth(t, server.URL+"/leaderz", http.StatusServiceUnavailable, map[string]interface{}{
 		"ok": false, "leader": true, "writable": false, "mode": "standalone",
+		"cluster_id": relay.authority.ClusterID, "leader_epoch": float64(relay.authority.Epoch),
 	})
 }
 
@@ -68,6 +70,7 @@ func TestRelayRoleHealthFailsClosedWhenStoreIsUnavailable(t *testing.T) {
 	})
 	assertRelayRoleHealth(t, server.URL+"/leaderz", http.StatusServiceUnavailable, map[string]interface{}{
 		"ok": false, "leader": true, "writable": false, "mode": "standalone",
+		"cluster_id": relay.authority.ClusterID, "leader_epoch": float64(relay.authority.Epoch),
 	})
 }
 

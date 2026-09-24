@@ -52,6 +52,7 @@ func TestWorkerHeartbeatRetainsTokenScopeAndProtocolCapacity(t *testing.T) {
 	if err := conn.Write(context.Background(), websocket.MessageText, mustJSON(WireMessage{Version: ProtocolVersion, Type: "hello", Node: &hello})); err != nil {
 		t.Fatal(err)
 	}
+	readTestAuthority(t, conn)
 	waitFor(t, 2*time.Second, func() bool {
 		node, loadErr := relay.store.GetNode(pairing.NodeID)
 		return loadErr == nil && node.Connected && node.Capabilities.MaxConcurrent == MaximumWorkerConcurrency && len(node.Capabilities.Groups) == 1 && node.Capabilities.Groups[0] == "trusted"
@@ -269,6 +270,7 @@ func TestRelayDispatchRotatesPastLargeIncompatibleQueuePrefix(t *testing.T) {
 	if err := connection.Write(context.Background(), websocket.MessageText, mustJSON(WireMessage{Version: ProtocolVersion, Type: "hello", Node: &node})); err != nil {
 		t.Fatal(err)
 	}
+	readTestAuthority(t, connection)
 	waitFor(t, 2*time.Second, func() bool {
 		saved, loadErr := relay.store.GetNode(nodeID)
 		return loadErr == nil && saved.Connected

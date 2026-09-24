@@ -53,24 +53,41 @@ type WorkerConfig struct {
 }
 
 type WorkerIdentity struct {
-	NodeID     string `json:"node_id"`
-	NodeToken  string `json:"node_token"`
-	PrivateKey string `json:"private_key"`
-	PublicKey  string `json:"public_key"`
-	RelayURL   string `json:"relay_url"`
+	NodeID            string `json:"node_id"`
+	NodeToken         string `json:"node_token"`
+	PrivateKey        string `json:"private_key"`
+	PublicKey         string `json:"public_key"`
+	RelayURL          string `json:"relay_url"`
+	ClusterID         string `json:"cluster_id,omitempty"`
+	HighestRelayEpoch uint64 `json:"highest_relay_epoch,omitempty"`
 }
 
 type Worker struct {
-	cfg        WorkerConfig
-	identity   WorkerIdentity
-	client     *http.Client
-	sem        chan struct{}
-	mu         sync.Mutex
-	running    int
-	quiescing  bool
-	hardwareMu sync.Mutex
-	hardware   systeminfo.Snapshot
-	hardwareAt time.Time
+	cfg         WorkerConfig
+	identity    WorkerIdentity
+	client      *http.Client
+	sem         chan struct{}
+	mu          sync.Mutex
+	running     int
+	quiescing   bool
+	hardwareMu  sync.Mutex
+	hardware    systeminfo.Snapshot
+	hardwareAt  time.Time
+	authorityMu sync.Mutex
+	clusterID   string
+	relayEpoch  uint64
+}
+
+type activeWorkerJob struct {
+	cancel  context.CancelFunc
+	attempt int
+	fence   AssignmentFence
+}
+
+type pendingWorkerCancel struct {
+	recordedAt time.Time
+	attempt    int
+	fence      AssignmentFence
 }
 
 var errWorkerExecutionPanicked = errors.New("worker execution panicked; execution state is ambiguous; explicit resubmission required")
@@ -127,6 +144,53 @@ func (w *Worker) beginJob() bool {
 	}
 	w.running++
 	return true
+}
+
+func (w *Worker) acceptRelayAuthority(authority RelayAuthority) error {
+	if !authority.Valid() {
+		return errors.New("relay sent invalid authority metadata")
+	}
+	w.authorityMu.Lock()
+	defer w.authorityMu.Unlock()
+	if w.clusterID != "" && w.clusterID != authority.ClusterID {
+		return errors.New("relay cluster identity changed; pair this worker again")
+	}
+	if authority.Epoch < w.relayEpoch {
+		return errors.New("relay authority epoch is older than the worker's durable fence")
+	}
+	if w.clusterID == authority.ClusterID && w.relayEpoch == authority.Epoch {
+		return nil
+	}
+	updated := w.identity
+	updated.ClusterID = authority.ClusterID
+	updated.HighestRelayEpoch = authority.Epoch
+	if err := saveIdentity(w.cfg.IdentityFile, updated); err != nil {
+		return fmt.Errorf("persist relay authority fence: %w", err)
+	}
+	w.clusterID = authority.ClusterID
+	w.relayEpoch = authority.Epoch
+	return nil
+}
+
+func (w *Worker) validateJobFence(job Job) error {
+	if job.Attempt <= 0 || job.AssignmentFence == nil || !job.AssignmentFence.Valid() || job.AssignmentFence.Generation != uint64(job.Attempt) {
+		return errors.New("job is missing a valid assignment fence")
+	}
+	w.authorityMu.Lock()
+	defer w.authorityMu.Unlock()
+	if w.clusterID == "" || w.relayEpoch == 0 || job.AssignmentFence.ClusterID != w.clusterID || job.AssignmentFence.RelayEpoch != w.relayEpoch {
+		return errors.New("job assignment fence does not match the accepted relay authority")
+	}
+	return nil
+}
+
+func (w *Worker) currentFenceMatches(attempt int, fence *AssignmentFence) bool {
+	if attempt <= 0 || fence == nil || !fence.Valid() || fence.Generation != uint64(attempt) {
+		return false
+	}
+	w.authorityMu.Lock()
+	defer w.authorityMu.Unlock()
+	return fence.ClusterID == w.clusterID && fence.RelayEpoch == w.relayEpoch
 }
 
 const (
@@ -230,7 +294,7 @@ func LoadWorker(cfg WorkerConfig) (*Worker, error) {
 	if cfg.RequestTimeout == 0 {
 		cfg.RequestTimeout = 10 * time.Minute
 	}
-	return &Worker{cfg: cfg, identity: identity, client: &http.Client{Timeout: cfg.RequestTimeout}, sem: make(chan struct{}, cfg.MaxConcurrent)}, nil
+	return &Worker{cfg: cfg, identity: identity, client: &http.Client{Timeout: cfg.RequestTimeout}, sem: make(chan struct{}, cfg.MaxConcurrent), clusterID: identity.ClusterID, relayEpoch: identity.HighestRelayEpoch}, nil
 }
 
 func PairWorker(ctx context.Context, relayURL, name, identityFile string, groups []string, output func(PairResponse)) error {
@@ -428,12 +492,12 @@ func (w *Worker) connect(ctx context.Context, report WorkerReporter) error {
 	}()
 	var writeMu sync.Mutex
 	var activeMu sync.Mutex
-	activeJobs := map[string]context.CancelFunc{}
+	activeJobs := map[string]activeWorkerJob{}
 	// A cancellation can win the relay write race immediately before the
 	// corresponding job frame. Remember a small, bounded set so that frame is
 	// acknowledged but never executed. The relay is authenticated, nevertheless
 	// keeping this bounded prevents a broken peer from growing memory forever.
-	pendingCancels := map[string]time.Time{}
+	pendingCancels := map[string]pendingWorkerCancel{}
 	const maximumPendingCancels = 256
 	write := func(message WireMessage) error {
 		writeMu.Lock()
@@ -442,6 +506,20 @@ func (w *Worker) connect(ctx context.Context, report WorkerReporter) error {
 		return conn.Write(connectionCtx, websocket.MessageText, mustJSON(message))
 	}
 	if err := write(WireMessage{Type: "hello", Node: &node}); err != nil {
+		return err
+	}
+	_, authorityRaw, err := conn.Read(connectionCtx)
+	if err != nil {
+		return err
+	}
+	if len(authorityRaw) > maximumWorkerControlBytes {
+		return errors.New("relay authority frame exceeds its protocol limit")
+	}
+	var authorityMessage WireMessage
+	if json.Unmarshal(authorityRaw, &authorityMessage) != nil || authorityMessage.Version != ProtocolVersion || authorityMessage.Type != "authority" || authorityMessage.Authority == nil {
+		return errors.New("relay did not provide valid authority metadata")
+	}
+	if err := w.acceptRelayAuthority(*authorityMessage.Authority); err != nil {
 		return err
 	}
 	report(WorkerEvent{Kind: WorkerConnected, NodeID: node.ID, NodeName: node.Name, Slots: capabilities.MaxConcurrent, Capabilities: capabilities})
@@ -473,22 +551,25 @@ func (w *Worker) connect(ctx context.Context, report WorkerReporter) error {
 			continue
 		}
 		if message.Type == "cancel" {
+			if !w.currentFenceMatches(message.Attempt, message.Fence) {
+				continue
+			}
 			activeMu.Lock()
-			cancelJob := activeJobs[message.JobID]
-			if cancelJob == nil && message.JobID != "" {
+			activeJob, active := activeJobs[message.JobID]
+			if (!active || activeJob.attempt != message.Attempt || !activeJob.fence.Equal(*message.Fence)) && message.JobID != "" {
 				now := time.Now()
-				for jobID, recordedAt := range pendingCancels {
-					if now.Sub(recordedAt) > time.Minute {
+				for jobID, pending := range pendingCancels {
+					if now.Sub(pending.recordedAt) > time.Minute {
 						delete(pendingCancels, jobID)
 					}
 				}
 				if len(pendingCancels) < maximumPendingCancels {
-					pendingCancels[message.JobID] = now
+					pendingCancels[message.JobID] = pendingWorkerCancel{recordedAt: now, attempt: message.Attempt, fence: *message.Fence}
 				}
 			}
 			activeMu.Unlock()
-			if cancelJob != nil {
-				cancelJob()
+			if active && activeJob.attempt == message.Attempt && activeJob.fence.Equal(*message.Fence) {
+				activeJob.cancel()
 			}
 			continue
 		}
@@ -496,15 +577,19 @@ func (w *Worker) connect(ctx context.Context, report WorkerReporter) error {
 			continue
 		}
 		job := *message.Job
+		if err := w.validateJobFence(job); err != nil {
+			return err
+		}
 		select {
 		case w.sem <- struct{}{}:
 		default:
-			_ = write(WireMessage{Type: "result", JobID: job.ID, Attempt: job.Attempt, Error: "worker capacity exceeded", FailureCode: FailureWorkerCapacity})
+			_ = write(WireMessage{Type: "result", JobID: job.ID, Attempt: job.Attempt, Fence: job.AssignmentFence, Error: "worker capacity exceeded", FailureCode: FailureWorkerCapacity})
 			continue
 		}
 		jobCtx, cancelJob := context.WithCancel(connectionCtx)
 		activeMu.Lock()
-		_, cancelledBeforeDispatch := pendingCancels[job.ID]
+		pendingCancel, hasPendingCancel := pendingCancels[job.ID]
+		cancelledBeforeDispatch := hasPendingCancel && pendingCancel.attempt == job.Attempt && pendingCancel.fence.Equal(*job.AssignmentFence)
 		delete(pendingCancels, job.ID)
 		if _, duplicate := activeJobs[job.ID]; duplicate {
 			activeMu.Unlock()
@@ -512,7 +597,7 @@ func (w *Worker) connect(ctx context.Context, report WorkerReporter) error {
 			<-w.sem
 			continue
 		}
-		activeJobs[job.ID] = cancelJob
+		activeJobs[job.ID] = activeWorkerJob{cancel: cancelJob, attempt: job.Attempt, fence: *job.AssignmentFence}
 		activeMu.Unlock()
 		if !w.beginJob() {
 			cancelJob()
@@ -520,7 +605,7 @@ func (w *Worker) connect(ctx context.Context, report WorkerReporter) error {
 			delete(activeJobs, job.ID)
 			activeMu.Unlock()
 			<-w.sem
-			_ = write(WireMessage{Type: "result", JobID: job.ID, Attempt: job.Attempt, Error: "worker is stopping", FailureCode: FailureWorkerStopping})
+			_ = write(WireMessage{Type: "result", JobID: job.ID, Attempt: job.Attempt, Fence: job.AssignmentFence, Error: "worker is stopping", FailureCode: FailureWorkerStopping})
 			continue
 		}
 		if cancelledBeforeDispatch {
@@ -537,12 +622,12 @@ func (w *Worker) connect(ctx context.Context, report WorkerReporter) error {
 				<-w.sem
 				w.changeRunning(-1)
 			}()
-			_ = write(WireMessage{Type: "started", JobID: job.ID, Attempt: job.Attempt})
+			_ = write(WireMessage{Type: "started", JobID: job.ID, Attempt: job.Attempt, Fence: job.AssignmentFence})
 			provider, profile, model, reasoning := jobRequestLabels(job)
 			report(WorkerEvent{Kind: WorkerJobStarted, NodeName: node.Name, JobID: job.ID, Task: job.Requirements.Task, Provider: provider, Profile: profile, Model: model, Reasoning: reasoning})
 			result, sealed, usage, execution, runErr := safelyExecuteWorker(func() (json.RawMessage, *SealedEnvelope, Usage, *ExecutionMetadata, error) {
 				return w.execute(jobCtx, job, func(progress JobProgress) {
-					_ = write(WireMessage{Type: "progress", JobID: job.ID, Attempt: job.Attempt, Progress: &progress})
+					_ = write(WireMessage{Type: "progress", JobID: job.ID, Attempt: job.Attempt, Fence: job.AssignmentFence, Progress: &progress})
 					report(WorkerEvent{Kind: WorkerJobProgress, NodeName: node.Name, JobID: job.ID, Task: job.Requirements.Task, Phase: progress.Phase, Percent: progress.Percent, Detail: progress.Detail, Sequence: progress.Sequence, Text: progress.Text})
 				})
 			})
@@ -559,7 +644,7 @@ func (w *Worker) connect(ctx context.Context, report WorkerReporter) error {
 				reportedProvider, reportedModel, reportedReasoning := localResultSelection(result)
 				report(WorkerEvent{Kind: WorkerJobCompleted, NodeName: node.Name, JobID: job.ID, Task: job.Requirements.Task, ComputeMS: usage.ComputeMS, ReportedProvider: reportedProvider, ReportedModel: reportedModel, ReportedReasoning: reportedReasoning})
 			}
-			_ = write(WireMessage{Type: "result", JobID: job.ID, Attempt: job.Attempt, Result: result, SealedResult: sealed, Usage: usage, Execution: execution, Error: errorText, FailureCode: failureCode})
+			_ = write(WireMessage{Type: "result", JobID: job.ID, Attempt: job.Attempt, Fence: job.AssignmentFence, Result: result, SealedResult: sealed, Usage: usage, Execution: execution, Error: errorText, FailureCode: failureCode})
 		}(job, jobCtx, cancelJob)
 	}
 }
@@ -1532,6 +1617,12 @@ func validateWorkerIdentity(identity WorkerIdentity) error {
 		if err := ValidateRelayURL(identity.RelayURL); err != nil {
 			return fmt.Errorf("saved relay URL: %w", err)
 		}
+	}
+	if (identity.ClusterID == "") != (identity.HighestRelayEpoch == 0) {
+		return errors.New("saved relay authority fence is incomplete")
+	}
+	if identity.ClusterID != "" && !(RelayAuthority{ClusterID: identity.ClusterID, Epoch: identity.HighestRelayEpoch}).Valid() {
+		return errors.New("saved relay authority fence is invalid")
 	}
 	return nil
 }

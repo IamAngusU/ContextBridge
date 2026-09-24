@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base32"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -40,6 +41,8 @@ var (
 	jobOwnerIndexVersion      = []byte("1")
 	keyJobContractVersion     = []byte("job_contract_version")
 	jobContractVersion        = []byte("1")
+	keyClusterID              = []byte("cluster_id_v1")
+	keyRelayEpoch             = []byte("relay_epoch_v1")
 )
 
 const maximumPendingPairings = 1000
@@ -61,6 +64,7 @@ var (
 	ErrOwnerPipelineCapacity       = errors.New("producer active pipeline capacity is full")
 	ErrNodePublicKeyMismatch       = errors.New("node public key differs from paired identity")
 	ErrNodeDraining                = errors.New("node is draining")
+	ErrAssignmentFenceMismatch     = errors.New("assignment fence does not match the current durable assignment")
 	ErrAdapterSessionBusy          = errors.New("adapter session already has an active job or reservation")
 	ErrIdempotencyConflict         = errors.New("idempotency key was already used for a different request")
 )
@@ -124,6 +128,51 @@ func OpenStore(path string) (*Store, error) {
 }
 
 func (s *Store) Close() error { return s.db.Close() }
+
+// AcquireRelayAuthority returns the stable identity of this durable store and
+// advances its process epoch in the same transaction. Gaps are harmless (a
+// later startup step may fail), while reuse or wraparound would make stale
+// leadership indistinguishable and therefore fails closed.
+func (s *Store) AcquireRelayAuthority() (RelayAuthority, error) {
+	var authority RelayAuthority
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		meta := tx.Bucket(bucketStoreMeta)
+		clusterID := string(meta.Get(keyClusterID))
+		if clusterID == "" {
+			generated, err := randomToken("cluster_")
+			if err != nil {
+				return fmt.Errorf("generate cluster identity: %w", err)
+			}
+			clusterID = generated
+			if err := meta.Put(keyClusterID, []byte(clusterID)); err != nil {
+				return err
+			}
+		}
+		if !validRoutingLabel(clusterID, 120) {
+			return errors.New("durable cluster identity is invalid")
+		}
+		rawEpoch := meta.Get(keyRelayEpoch)
+		var previous uint64
+		if len(rawEpoch) != 0 {
+			if len(rawEpoch) != 8 {
+				return errors.New("durable relay epoch is invalid")
+			}
+			previous = binary.BigEndian.Uint64(rawEpoch)
+		}
+		if previous == ^uint64(0) {
+			return errors.New("durable relay epoch is exhausted")
+		}
+		next := previous + 1
+		encoded := make([]byte, 8)
+		binary.BigEndian.PutUint64(encoded, next)
+		if err := meta.Put(keyRelayEpoch, encoded); err != nil {
+			return err
+		}
+		authority = RelayAuthority{ClusterID: clusterID, Epoch: next}
+		return nil
+	})
+	return authority, err
+}
 
 // ensureJobContractVersion upgrades retained pre-contract records exactly
 // once. Empty means the compatibility baseline (V1); an explicit unknown
@@ -1425,11 +1474,18 @@ func (s *Store) AssignJob(id, nodeID string, selectedAdapterEndpoint ...int) (Jo
 	if len(selectedAdapterEndpoint) == 1 {
 		selection = &adapterAssignment{EndpointID: selectedAdapterEndpoint[0]}
 	}
-	return s.assignJob(id, nodeID, selection, nil)
+	return s.assignJob(id, nodeID, selection, nil, nil)
 }
 
 func (s *Store) AssignJobWithDecision(id, nodeID string, decision RoutingDecision) (Job, error) {
-	return s.assignJob(id, nodeID, nil, &decision)
+	return s.assignJob(id, nodeID, nil, &decision, nil)
+}
+
+func (s *Store) AssignJobFencedWithDecision(id, nodeID string, decision RoutingDecision, authority RelayAuthority) (Job, error) {
+	if !authority.Valid() {
+		return Job{}, errors.New("valid relay authority is required for fenced assignment")
+	}
+	return s.assignJob(id, nodeID, nil, &decision, &authority)
 }
 
 type adapterAssignment struct {
@@ -1438,14 +1494,21 @@ type adapterAssignment struct {
 }
 
 func (s *Store) AssignAdapterJob(id, nodeID string, endpointID int, sessionRecovery bool) (Job, error) {
-	return s.assignJob(id, nodeID, &adapterAssignment{EndpointID: endpointID, SessionRecovery: sessionRecovery}, nil)
+	return s.assignJob(id, nodeID, &adapterAssignment{EndpointID: endpointID, SessionRecovery: sessionRecovery}, nil, nil)
 }
 
 func (s *Store) AssignAdapterJobWithDecision(id, nodeID string, endpointID int, sessionRecovery bool, decision RoutingDecision) (Job, error) {
-	return s.assignJob(id, nodeID, &adapterAssignment{EndpointID: endpointID, SessionRecovery: sessionRecovery}, &decision)
+	return s.assignJob(id, nodeID, &adapterAssignment{EndpointID: endpointID, SessionRecovery: sessionRecovery}, &decision, nil)
 }
 
-func (s *Store) assignJob(id, nodeID string, adapter *adapterAssignment, decision *RoutingDecision) (Job, error) {
+func (s *Store) AssignAdapterJobFencedWithDecision(id, nodeID string, endpointID int, sessionRecovery bool, decision RoutingDecision, authority RelayAuthority) (Job, error) {
+	if !authority.Valid() {
+		return Job{}, errors.New("valid relay authority is required for fenced assignment")
+	}
+	return s.assignJob(id, nodeID, &adapterAssignment{EndpointID: endpointID, SessionRecovery: sessionRecovery}, &decision, &authority)
+}
+
+func (s *Store) assignJob(id, nodeID string, adapter *adapterAssignment, decision *RoutingDecision, authority *RelayAuthority) (Job, error) {
 	var job Job
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		if err := getJSON(tx.Bucket(bucketJobs), id, &job); err != nil {
@@ -1489,6 +1552,14 @@ func (s *Store) assignJob(id, nodeID string, adapter *adapterAssignment, decisio
 		job.Status = JobAssigned
 		job.AssignedNode = nodeID
 		job.Attempt++
+		if job.Attempt <= 0 {
+			return errors.New("assignment generation overflow")
+		}
+		if authority != nil {
+			job.AssignmentFence = &AssignmentFence{ClusterID: authority.ClusterID, RelayEpoch: authority.Epoch, Generation: uint64(job.Attempt)}
+		} else {
+			job.AssignmentFence = nil
+		}
 		job.Progress = nil
 		job.AssignedAt = time.Now().UTC()
 		job.UpdatedAt = job.AssignedAt
@@ -1528,6 +1599,14 @@ func (s *Store) assignJob(id, nodeID string, adapter *adapterAssignment, decisio
 }
 
 func (s *Store) MarkRunning(id, nodeID string, attempt int) (Job, error) {
+	return s.markRunning(id, nodeID, attempt, nil)
+}
+
+func (s *Store) MarkRunningFenced(id, nodeID string, attempt int, fence *AssignmentFence) (Job, error) {
+	return s.markRunning(id, nodeID, attempt, fence)
+}
+
+func (s *Store) markRunning(id, nodeID string, attempt int, fence *AssignmentFence) (Job, error) {
 	var job Job
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		if err := getJSON(tx.Bucket(bucketJobs), id, &job); err != nil {
@@ -1535,6 +1614,9 @@ func (s *Store) MarkRunning(id, nodeID string, attempt int) (Job, error) {
 		}
 		if job.Status != JobAssigned || job.AssignedNode != nodeID || attempt <= 0 || job.Attempt != attempt {
 			return errors.New("job is not assigned to this node and attempt")
+		}
+		if err := validateAssignmentFence(job, fence); err != nil {
+			return err
 		}
 		job.Status = JobRunning
 		job.StartedAt = time.Now().UTC()
@@ -1545,6 +1627,14 @@ func (s *Store) MarkRunning(id, nodeID string, attempt int) (Job, error) {
 }
 
 func (s *Store) UpdateJobProgress(id, nodeID string, attempt int, progress JobProgress) (Job, error) {
+	return s.updateJobProgress(id, nodeID, attempt, nil, progress)
+}
+
+func (s *Store) UpdateJobProgressFenced(id, nodeID string, attempt int, fence *AssignmentFence, progress JobProgress) (Job, error) {
+	return s.updateJobProgress(id, nodeID, attempt, fence, progress)
+}
+
+func (s *Store) updateJobProgress(id, nodeID string, attempt int, fence *AssignmentFence, progress JobProgress) (Job, error) {
 	var job Job
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		if err := getJSON(tx.Bucket(bucketJobs), id, &job); err != nil {
@@ -1552,6 +1642,9 @@ func (s *Store) UpdateJobProgress(id, nodeID string, attempt int, progress JobPr
 		}
 		if (job.Status != JobAssigned && job.Status != JobRunning) || job.AssignedNode != nodeID || attempt <= 0 || job.Attempt != attempt {
 			return errors.New("job is not running on this node and attempt")
+		}
+		if err := validateAssignmentFence(job, fence); err != nil {
+			return err
 		}
 		if job.SealedPayload != nil {
 			return errors.New("plaintext progress is disabled for encrypted jobs")
@@ -1594,13 +1687,21 @@ func (s *Store) CancelJob(id string) (Job, error) {
 }
 
 func (s *Store) CompleteJob(id, nodeID string, attempt int, result json.RawMessage, sealed *SealedEnvelope, usage Usage, jobError string, execution ...*ExecutionMetadata) (Job, error) {
-	return s.CompleteJobWithFailure(id, nodeID, attempt, result, sealed, usage, jobError, "", execution...)
+	return s.completeJobWithFailure(id, nodeID, attempt, nil, result, sealed, usage, jobError, "", execution...)
 }
 
 // CompleteJobWithFailure persists a bounded stable failure class while
 // retaining the existing diagnostic text. Unknown worker-supplied classes are
 // never trusted as new API identifiers; they collapse to a reviewed fallback.
 func (s *Store) CompleteJobWithFailure(id, nodeID string, attempt int, result json.RawMessage, sealed *SealedEnvelope, usage Usage, jobError, failureCode string, execution ...*ExecutionMetadata) (Job, error) {
+	return s.completeJobWithFailure(id, nodeID, attempt, nil, result, sealed, usage, jobError, failureCode, execution...)
+}
+
+func (s *Store) CompleteJobWithFailureFenced(id, nodeID string, attempt int, fence *AssignmentFence, result json.RawMessage, sealed *SealedEnvelope, usage Usage, jobError, failureCode string, execution ...*ExecutionMetadata) (Job, error) {
+	return s.completeJobWithFailure(id, nodeID, attempt, fence, result, sealed, usage, jobError, failureCode, execution...)
+}
+
+func (s *Store) completeJobWithFailure(id, nodeID string, attempt int, fence *AssignmentFence, result json.RawMessage, sealed *SealedEnvelope, usage Usage, jobError, failureCode string, execution ...*ExecutionMetadata) (Job, error) {
 	var job Job
 	if len(execution) > 1 {
 		return Job{}, errors.New("only one execution metadata record may be reported")
@@ -1617,6 +1718,9 @@ func (s *Store) CompleteJobWithFailure(id, nodeID string, attempt int, result js
 		}
 		if attempt <= 0 || job.Attempt != attempt {
 			return errors.New("job result belongs to a stale assignment attempt")
+		}
+		if err := validateAssignmentFence(job, fence); err != nil {
+			return err
 		}
 		// Treat the worker as a protocol peer, not as the E2EE trust boundary.
 		// Even an old or modified worker must not persist provider-controlled
@@ -1636,6 +1740,7 @@ func (s *Store) CompleteJobWithFailure(id, nodeID string, attempt int, result js
 			job.Usage = Usage{}
 			job.Progress = nil
 			job.RoutingDecision = nil
+			job.AssignmentFence = nil
 			job.ExecutedAdapterEndpointID = 0
 			job.EphemeralAdapterEndpoint = false
 			job.AssignedAt = time.Time{}
@@ -1737,6 +1842,19 @@ func (s *Store) CompleteJobWithFailure(id, nodeID string, attempt int, result js
 		return nil
 	})
 	return job, err
+}
+
+func validateAssignmentFence(job Job, reported *AssignmentFence) error {
+	if job.AssignmentFence == nil {
+		if reported == nil {
+			return nil
+		}
+		return ErrAssignmentFenceMismatch
+	}
+	if reported == nil || !job.AssignmentFence.Valid() || !reported.Valid() || !job.AssignmentFence.Equal(*reported) || reported.Generation != uint64(job.Attempt) {
+		return ErrAssignmentFenceMismatch
+	}
+	return nil
 }
 
 // preExecutionRetryAllowed recognizes only worker refusals emitted before the

@@ -16,6 +16,21 @@ import (
 	"github.com/coder/websocket"
 )
 
+func readTestAuthority(t *testing.T, connection *websocket.Conn) RelayAuthority {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, raw, err := connection.Read(ctx)
+	if err != nil {
+		t.Fatalf("read relay authority: %v", err)
+	}
+	var message WireMessage
+	if json.Unmarshal(raw, &message) != nil || message.Version != ProtocolVersion || message.Type != "authority" || message.Authority == nil || !message.Authority.Valid() {
+		t.Fatalf("invalid relay authority frame: %s", raw)
+	}
+	return *message.Authority
+}
+
 func TestRateLimitClientKeyTrustsOnlyLoopbackProxy(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "http://relay.test/v1/pair/request", nil)
 	request.RemoteAddr = "127.0.0.1:43210"
@@ -334,6 +349,7 @@ func TestRelayDispatchAndEncryptedRoundTrip(t *testing.T) {
 	if err := conn.Write(context.Background(), websocket.MessageText, mustJSON(WireMessage{Version: ProtocolVersion, Type: "hello", Node: &node})); err != nil {
 		t.Fatal(err)
 	}
+	readTestAuthority(t, conn)
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		saved, _ := relay.store.GetNode(node.ID)
@@ -387,7 +403,7 @@ func TestRelayDispatchAndEncryptedRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := conn.Write(ctx, websocket.MessageText, mustJSON(WireMessage{Version: ProtocolVersion, Type: "result", JobID: wire.Job.ID, Attempt: wire.Job.Attempt, SealedResult: sealedResult, Usage: Usage{InputTokens: 4, OutputTokens: 2}})); err != nil {
+	if err := conn.Write(ctx, websocket.MessageText, mustJSON(WireMessage{Version: ProtocolVersion, Type: "result", JobID: wire.Job.ID, Attempt: wire.Job.Attempt, Fence: wire.Job.AssignmentFence, SealedResult: sealedResult, Usage: Usage{InputTokens: 4, OutputTokens: 2}})); err != nil {
 		t.Fatal(err)
 	}
 	deadline = time.Now().Add(3 * time.Second)
@@ -434,6 +450,7 @@ func TestNewWorkerConnectionSurvivesReplacedConnectionCleanup(t *testing.T) {
 		if writeErr := conn.Write(context.Background(), websocket.MessageText, mustJSON(WireMessage{Version: ProtocolVersion, Type: "hello", Node: &node})); writeErr != nil {
 			t.Fatal(writeErr)
 		}
+		readTestAuthority(t, conn)
 		return conn
 	}
 
@@ -487,6 +504,7 @@ func TestRelayCancellationDoesNotSendPhantomCancelForQueuedSealedBinding(t *test
 	if err := connection.Write(context.Background(), websocket.MessageText, mustJSON(WireMessage{Version: ProtocolVersion, Type: "hello", Node: &node})); err != nil {
 		t.Fatal(err)
 	}
+	readTestAuthority(t, connection)
 	waitFor(t, 2*time.Second, func() bool {
 		saved, loadErr := relay.store.GetNode(nodeID)
 		return loadErr == nil && saved.Connected

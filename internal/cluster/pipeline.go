@@ -282,7 +282,7 @@ func (r *Relay) cancelTimedOutPipelineJob(id string, timeoutErr error) (Job, err
 		// slot reserved until its matching result or disconnect while removing it
 		// from future stale-record scans, exactly like the public cancel endpoint.
 		if r.markWorkerReservationTerminal(cancelled.AssignedNode, cancelled.ID) {
-			r.cancelWorkerExecution(cancelled.AssignedNode, cancelled.ID)
+			r.cancelWorkerExecution(cancelled)
 		}
 		_ = r.store.AddEvent(Event{Kind: "job.cancelled", Message: "Pipeline step timed out", JobID: id})
 		return cancelled, timeoutErr
