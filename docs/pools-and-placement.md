@@ -32,6 +32,24 @@ evidence. `contextbridge route explain --file JOB.json` previews the decision
 without submitting provider work. The selected job stores rejection reasons
 and additive score components so placement is inspectable later.
 
+## Draining a worker
+
+Before maintenance or a planned shutdown, an administrator can stop new work
+from entering one worker without cancelling work that already owns a lease:
+
+```sh
+contextbridge cluster node drain NODE_ID --config ./config.yml
+contextbridge cluster status --config ./config.yml
+# after maintenance
+contextbridge cluster node resume NODE_ID --config ./config.yml
+```
+
+Drain state is durable at the relay and survives worker reconnects and relay
+restarts. The scheduler exposes `worker_draining` in route explanations. The
+assignment transaction rechecks the flag, so a dispatcher holding a stale
+pre-drain snapshot cannot assign a job after the drain transition commits.
+Draining does not migrate, cancel, or silently replay active work.
+
 ## Reservations and ambiguous loss
 
 A relay reservation names one worker and one lease. The worker validates the

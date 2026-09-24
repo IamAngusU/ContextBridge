@@ -461,6 +461,60 @@ func TestNodesWithSameDisplayNameRemainDistinct(t *testing.T) {
 	}
 }
 
+func TestNodeDrainIsDurableAndLinearizesAssignment(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "cluster.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	node := Node{ID: "node-maintenance", Name: "Maintenance PC", Connected: true, State: "online", LastSeen: time.Now().UTC(), Capabilities: Capabilities{MaxConcurrent: 2}}
+	if err := store.UpsertNode(node); err != nil {
+		t.Fatal(err)
+	}
+	active, err := store.CreateJob(SubmitRequest{Requirements: Requirements{Task: "generation"}, Payload: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	active, err = store.AssignJob(active.ID, node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	drained, err := store.SetNodeDraining(node.ID, true)
+	if err != nil || !drained.Draining || drained.State != "draining" {
+		t.Fatalf("node did not enter durable drain: %#v, %v", drained, err)
+	}
+	if _, err := store.CompleteJob(active.ID, node.ID, active.Attempt, json.RawMessage(`{}`), nil, Usage{}, ""); err != nil {
+		t.Fatalf("drain interrupted an existing assignment: %v", err)
+	}
+	queued, err := store.CreateJob(SubmitRequest{Requirements: Requirements{Task: "generation"}, Payload: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AssignJob(queued.ID, node.ID); !errors.Is(err, ErrNodeDraining) {
+		t.Fatalf("post-drain assignment returned %v, want ErrNodeDraining", err)
+	}
+	reservation := Assignment{ID: "assignment-draining", JobID: "job-draining", NodeID: node.ID, Attempt: 1, OwnerSubject: "producer-a", ExpiresAt: time.Now().UTC().Add(time.Minute), Requirements: Requirements{Task: "generation"}}
+	if err := store.CreateReservationAdmitted(reservation, "reservation-secret", "producer-a", 10, 10); !errors.Is(err, ErrNodeDraining) {
+		t.Fatalf("post-drain E2EE reservation returned %v, want ErrNodeDraining", err)
+	}
+	// A worker heartbeat does not own this operator-controlled field.
+	node.Capabilities.Running = 0
+	if err := store.UpsertNode(node); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := store.GetNode(node.ID)
+	if err != nil || !persisted.Draining || persisted.State != "draining" {
+		t.Fatalf("heartbeat cleared drain state: %#v, %v", persisted, err)
+	}
+	resumed, err := store.SetNodeDraining(node.ID, false)
+	if err != nil || resumed.Draining || resumed.State != "online" {
+		t.Fatalf("node did not resume: %#v, %v", resumed, err)
+	}
+	if _, err := store.AssignJob(queued.ID, node.ID); err != nil {
+		t.Fatalf("resumed node rejected assignment: %v", err)
+	}
+}
+
 func TestStorePersistsQueueAndOneTimePairing(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cluster.db")
 	store, err := OpenStore(path)

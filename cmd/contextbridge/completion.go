@@ -17,7 +17,7 @@ var completionSubcommands = map[string][]string{
 	"runtime":      {"install"},
 	"mcp":          {"serve"},
 	"verification": {"verify"},
-	"cluster":      {"status", "protocol", "conformance", "submit", "chat", "agent", "selftest", "route", "contract", "receipt", "login", "token", "pairing", "configure", "dashboard", "pipeline"},
+	"cluster":      {"status", "node", "protocol", "conformance", "submit", "chat", "agent", "selftest", "route", "contract", "receipt", "login", "token", "pairing", "configure", "dashboard", "pipeline"},
 	"route":        {"explain"},
 	"update":       {"status", "check", "apply", "enable", "disable", "auto"},
 	"completion":   {"powershell", "bash", "zsh"},
@@ -56,7 +56,7 @@ $script:ContextBridgeSubcommands = @{
     runtime = @('install')
     mcp = @('serve')
     verification = @('verify')
-    cluster = @('status','protocol','conformance','submit','chat','agent','selftest','route','contract','receipt','login','token','pairing','configure','dashboard','pipeline')
+	cluster = @('status','node','protocol','conformance','submit','chat','agent','selftest','route','contract','receipt','login','token','pairing','configure','dashboard','pipeline')
     route = @('explain')
     update = @('status','check','apply','enable','disable','auto')
     completion = @('powershell','bash','zsh')
@@ -88,6 +88,7 @@ $script:ContextBridgeOptions = @{
     'pair' = @('--config','--relay','--identity','--name')
     'worker' = @('--config','--relay','--identity','--name','--slots','--providers','--models','--tasks','--groups','--no-updates','--topmost')
     'cluster status' = @('--config','--json')
+	'cluster node' = @('drain','resume','--config','--token','--json')
 	'cluster protocol' = @('--config','--token','--json')
 	'cluster conformance' = @('relay','worker','--config','--token','--node','--json')
     'cluster submit' = @('--config','--file','--token','--wait','--e2ee','--stream','--artifacts','--idempotency-key')
@@ -220,6 +221,7 @@ _contextbridge_complete() {
       "route explain") candidates="--config --file --job --token --json" ;;
       "cluster submit") candidates="--config --file --token --wait --e2ee --stream --artifacts --idempotency-key" ;;
       "cluster status") candidates="--config --json" ;;
+	  "cluster node") candidates="drain resume --config --token --json" ;;
 	  "cluster protocol") candidates="--config --token --json" ;;
 	  "cluster conformance") candidates="relay worker --config --token --node --json" ;;
       "cluster configure") candidates="--config --mode --relay-url --public-url --name --listen" ;;
@@ -266,7 +268,7 @@ _contextbridge_complete() {
       runtime) candidates="install" ;;
       mcp) candidates="serve" ;;
       verification) candidates="verify" ;;
-	  cluster) candidates="status protocol conformance submit chat agent selftest route contract receipt login token pairing configure dashboard pipeline" ;;
+	  cluster) candidates="status node protocol conformance submit chat agent selftest route contract receipt login token pairing configure dashboard pipeline" ;;
       route) candidates="explain" ;;
       update) candidates="status check apply enable disable auto" ;;
       completion) candidates="powershell bash zsh" ;;
@@ -358,11 +360,18 @@ case "$words[2]" in
     ;;
   cluster)
     if (( CURRENT == 3 )); then
-	  _values 'cluster action' status protocol conformance submit chat agent selftest route contract receipt login token pairing configure dashboard pipeline
+	  _values 'cluster action' status node protocol conformance submit chat agent selftest route contract receipt login token pairing configure dashboard pipeline
       return
     fi
     case "$words[3]" in
       status) _arguments "${config[@]}" '--json[Print machine-readable JSON]' ;;
+	  node)
+		if (( CURRENT == 4 )); then
+		  _values 'node action' drain resume
+		  return
+		fi
+		_arguments "${config[@]}" '--token[Relay admin token]:token:' '--json[Print machine-readable node state]' '*:node ID:'
+		;;
 	  protocol) _arguments "${config[@]}" '--token[Producer, observer, or admin token]:token:' '--json[Print machine-readable protocol manifest]' ;;
 	  conformance)
 		if (( CURRENT == 4 )); then

@@ -83,6 +83,52 @@ func TestCreateTokenRejectsLifetimeBeforeDurationConversion(t *testing.T) {
 	}
 }
 
+func TestNodeDrainEndpointRequiresAdminAndPreservesConnection(t *testing.T) {
+	admin := "admin_012345678901234567890123456789012345"
+	relay, err := NewRelay(RelayConfig{Database: filepath.Join(t.TempDir(), "relay.db"), AdminToken: admin}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+	node := Node{ID: "node-drain-api", Name: "Drain API", Connected: true, State: "online", LastSeen: time.Now().UTC(), Capabilities: Capabilities{Running: 1, MaxConcurrent: 2}}
+	if err := relay.store.UpsertNode(node); err != nil {
+		t.Fatal(err)
+	}
+	producer, _, err := relay.store.CreateToken("producer", "producer-a", nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/cluster/nodes/"+node.ID+"/drain", strings.NewReader(`{}`))
+	request.Header.Set("Authorization", "Bearer "+producer)
+	response := httptest.NewRecorder()
+	relay.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("producer drained node with status %d", response.Code)
+	}
+	request = httptest.NewRequest(http.MethodPost, "/v1/cluster/nodes/"+node.ID+"/drain", strings.NewReader(`{}`))
+	request.Header.Set("Authorization", "Bearer "+admin)
+	response = httptest.NewRecorder()
+	relay.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("admin drain returned %d: %s", response.Code, response.Body.String())
+	}
+	var drained Node
+	if err := json.Unmarshal(response.Body.Bytes(), &drained); err != nil || !drained.Draining || !drained.Connected || drained.Capabilities.Running != 1 {
+		t.Fatalf("drain mutated live execution state: %#v, %v", drained, err)
+	}
+	request = httptest.NewRequest(http.MethodPost, "/v1/cluster/nodes/"+node.ID+"/resume", strings.NewReader(`{}`))
+	request.Header.Set("Authorization", "Bearer "+admin)
+	response = httptest.NewRecorder()
+	relay.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("admin resume returned %d: %s", response.Code, response.Body.String())
+	}
+	var resumed Node
+	if err := json.Unmarshal(response.Body.Bytes(), &resumed); err != nil || resumed.Draining || !resumed.Connected {
+		t.Fatalf("resume did not restore admission: %#v, %v", resumed, err)
+	}
+}
+
 func TestWorkerConnectionRejectsDuplicateReservation(t *testing.T) {
 	worker := newWorkerConnection(nil, 2)
 	if !worker.reserve("job-one") {

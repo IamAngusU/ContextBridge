@@ -410,6 +410,7 @@ func (r *Relay) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/cluster/overview", r.authorize("admin", "observer", "producer")(r.handleOverview))
 	mux.HandleFunc("GET /v1/cluster/protocol", r.authorize("admin", "observer", "producer", "node")(r.handleProtocolManifest))
 	mux.HandleFunc("GET /v1/cluster/nodes", r.authorize("admin", "observer", "producer")(r.handleNodes))
+	mux.HandleFunc("POST /v1/cluster/nodes/{id}/{action}", r.authorize("admin")(r.handleNodeAdmission))
 	mux.HandleFunc("GET /v1/cluster/events", r.authorize("admin", "observer")(r.handleEvents))
 	mux.HandleFunc("GET /v1/cluster/jobs", r.authorize("admin", "observer", "producer")(r.handleJobs))
 	mux.HandleFunc("POST /v1/cluster/jobs", r.authorize("admin", "producer")(r.handleSubmit))
@@ -549,6 +550,48 @@ func (r *Relay) handleNodes(w http.ResponseWriter, _ *http.Request) {
 	// adapter session across node snapshots.
 	redactNodeRoutingEvidence(nodes)
 	writeJSON(w, http.StatusOK, nodes)
+}
+
+func (r *Relay) handleNodeAdmission(w http.ResponseWriter, req *http.Request) {
+	var input struct{}
+	if err := decodeJSON(req.Body, &input, 1<<10); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	id := strings.TrimSpace(req.PathValue("id"))
+	action := strings.ToLower(strings.TrimSpace(req.PathValue("action")))
+	if !validJobID(id) {
+		writeError(w, http.StatusBadRequest, errors.New("valid node ID is required"))
+		return
+	}
+	var draining bool
+	switch action {
+	case "drain":
+		draining = true
+	case "resume":
+		draining = false
+	default:
+		writeError(w, http.StatusNotFound, errors.New("node action must be drain or resume"))
+		return
+	}
+	node, err := r.store.SetNodeDraining(id, draining)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			writeError(w, http.StatusNotFound, errors.New("node not found"))
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	kind, message := "node.resumed", "Worker resumed admission"
+	if draining {
+		kind, message = "node.draining", "Worker is draining; existing jobs may finish"
+	}
+	_ = r.store.AddEvent(Event{Kind: kind, Message: message, NodeID: node.ID, Data: map[string]interface{}{"running": node.Capabilities.Running}})
+	if !draining {
+		r.signalDispatch()
+	}
+	writeJSON(w, http.StatusOK, node)
 }
 
 func redactNodeRoutingEvidence(nodes []Node) {
@@ -962,6 +1005,8 @@ func (r *Relay) handleReserve(w http.ResponseWriter, req *http.Request) {
 			status = http.StatusTooManyRequests
 		} else if errors.Is(err, ErrReservationCapacity) {
 			status = http.StatusServiceUnavailable
+		} else if errors.Is(err, ErrNodeDraining) {
+			status = http.StatusServiceUnavailable
 		} else if errors.Is(err, ErrAdapterSessionBusy) {
 			status = http.StatusConflict
 		} else if errors.Is(err, os.ErrExist) {
@@ -1262,6 +1307,10 @@ func (r *Relay) dispatch() {
 			if assignErr != nil {
 				worker.release(queued.ID)
 				r.endAdmission()
+				if errors.Is(assignErr, ErrNodeDraining) {
+					rejectRoutingCandidate(&decision, candidate.Node.ID, "worker_draining")
+					continue
+				}
 				break
 			}
 			// Cancellation may win after the slot reservation but before the

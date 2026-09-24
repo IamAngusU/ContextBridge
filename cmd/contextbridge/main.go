@@ -161,7 +161,7 @@ Usage:
   contextbridge pair [--config path] [--relay URL] [--identity path] [--name NAME]
   contextbridge worker [--config path] [--relay URL] [--identity path] [--name NAME] [--slots N] [--providers LIST] [--models LIST] [--tasks LIST] [--topmost]
   contextbridge selftest [options]
-	contextbridge cluster status|protocol|conformance|submit|chat|agent|selftest|route|contract|receipt|login|token|pairing [options]
+	contextbridge cluster status|node|protocol|conformance|submit|chat|agent|selftest|route|contract|receipt|login|token|pairing [options]
 	contextbridge cluster agent auto [--policy NAME] --goal TEXT [options]
 	contextbridge cluster agent plan --goal TEXT --out PLAN.json [options]
 	contextbridge cluster agent run --plan PLAN.json --approve sha256:HASH [options]
@@ -1385,11 +1385,13 @@ func freeLocalAddress() (string, error) {
 
 func clusterCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: contextbridge cluster status|protocol|conformance|submit|chat|agent|selftest|route|contract|receipt|login|token|pairing")
+		return errors.New("usage: contextbridge cluster status|node|protocol|conformance|submit|chat|agent|selftest|route|contract|receipt|login|token|pairing")
 	}
 	switch args[0] {
 	case "status":
 		return clusterStatusCommand(args[1:])
+	case "node":
+		return clusterNodeCommand(args[1:])
 	case "protocol":
 		return clusterProtocolCommand(args[1:])
 	case "conformance":
@@ -1692,6 +1694,11 @@ func clusterStatusCommand(args []string) error {
 		state := "offline"
 		if node.Connected {
 			state = "online"
+		}
+		if node.Draining && node.Connected {
+			state = "draining"
+		} else if node.Draining {
+			state = "offline · draining"
 		}
 		memory := fmt.Sprintf("%s/%s RAM free", formatBytes(node.Capabilities.MemoryFree), formatBytes(node.Capabilities.MemoryTotal))
 		if node.Capabilities.MemoryType != "" {
@@ -2069,6 +2076,8 @@ func clusterPOST(ctx context.Context, target, token string, input, output interf
 
 func clusterPOSTHeaders(ctx context.Context, target, token string, input, output interface{}, headers http.Header) (http.Header, error) {
 	raw, _ := json.Marshal(input)
+	// #nosec G704 -- target is the operator-configured relay URL plus a fixed
+	// cluster API path; connecting to that remote relay is this CLI's purpose.
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(raw))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
@@ -2077,6 +2086,7 @@ func clusterPOSTHeaders(ctx context.Context, target, token string, input, output
 			req.Header.Add(name, value)
 		}
 	}
+	// #nosec G704 -- see the operator-owned relay boundary above.
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err

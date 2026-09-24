@@ -349,6 +349,7 @@ func TestAdmissionStoreErrorsHaveStableCodes(t *testing.T) {
 		{ErrReservationContextMismatch, AdmissionCodeReservationContext},
 		{ErrReservationInvalidOrExpired, AdmissionCodeReservationExpired},
 		{ErrIdempotencyConflict, AdmissionCodeIdempotencyConflict},
+		{ErrNodeDraining, AdmissionCodeNodeDraining},
 	}
 	for _, item := range cases {
 		if got := admissionStoreErrorCode(item.err); got != item.code {

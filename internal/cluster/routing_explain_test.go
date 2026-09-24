@@ -26,6 +26,9 @@ func TestExplainRoutingMatchesSchedulerAndUsesStableReasons(t *testing.T) {
 		{ID: "busy", Connected: true, LastSeen: now, Capabilities: Capabilities{
 			Providers: []string{"ollama"}, AutomaticTasks: map[string][]string{"ollama": {"generation"}}, Models: []ModelCapability{model}, MaxConcurrent: 1, Running: 1,
 		}},
+		{ID: "draining", Connected: true, Draining: true, LastSeen: now, Capabilities: Capabilities{
+			Providers: []string{"ollama"}, AutomaticTasks: map[string][]string{"ollama": {"generation"}}, Models: []ModelCapability{model}, MaxConcurrent: 2,
+		}},
 	}
 
 	ranked := RankWithEstimate(nodes, requirements, 0)
@@ -45,6 +48,9 @@ func TestExplainRoutingMatchesSchedulerAndUsesStableReasons(t *testing.T) {
 	}
 	if !contains(byID["busy"].RejectionReasons, "worker_at_capacity") {
 		t.Fatalf("capacity reason missing: %#v", byID["busy"])
+	}
+	if !contains(byID["draining"].RejectionReasons, "worker_draining") {
+		t.Fatalf("drain reason missing: %#v", byID["draining"])
 	}
 	selected := byID["ready"]
 	components := selected.ScoreComponents

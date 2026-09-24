@@ -60,6 +60,7 @@ var (
 	ErrPipelineCapacity            = errors.New("active pipeline capacity is full")
 	ErrOwnerPipelineCapacity       = errors.New("producer active pipeline capacity is full")
 	ErrNodePublicKeyMismatch       = errors.New("node public key differs from paired identity")
+	ErrNodeDraining                = errors.New("node is draining")
 	ErrAdapterSessionBusy          = errors.New("adapter session already has an active job or reservation")
 	ErrIdempotencyConflict         = errors.New("idempotency key was already used for a different request")
 )
@@ -498,6 +499,10 @@ func mergeStoredNodeState(node *Node, existing Node) {
 	node.CostUSD = existing.CostUSD
 	node.CostKnownJobs = existing.CostKnownJobs
 	node.CostUnknownJobs = existing.CostUnknownJobs
+	node.Draining = existing.Draining
+	if node.Draining && node.Connected {
+		node.State = "draining"
+	}
 	if node.PublicKey == "" {
 		node.PublicKey = existing.PublicKey
 	}
@@ -534,7 +539,11 @@ func (s *Store) SetNodeConnected(id string, connected bool) error {
 		node.Connected = connected
 		node.LastSeen = time.Now().UTC()
 		if connected {
-			node.State = "online"
+			if node.Draining {
+				node.State = "draining"
+			} else {
+				node.State = "online"
+			}
 			if node.ConnectedAt.IsZero() {
 				node.ConnectedAt = node.LastSeen
 			}
@@ -544,6 +553,28 @@ func (s *Store) SetNodeConnected(id string, connected bool) error {
 		}
 		return putJSON(tx.Bucket(bucketNodes), id, node)
 	})
+}
+
+// SetNodeDraining changes only relay-owned admission state. It deliberately
+// leaves the connection and current execution counters intact so in-flight
+// work can finish and remain attributable to the same worker.
+func (s *Store) SetNodeDraining(id string, draining bool) (Node, error) {
+	var node Node
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		if err := getJSON(tx.Bucket(bucketNodes), id, &node); err != nil {
+			return err
+		}
+		node.Draining = draining
+		if node.Connected {
+			if draining {
+				node.State = "draining"
+			} else {
+				node.State = "online"
+			}
+		}
+		return putJSON(tx.Bucket(bucketNodes), id, node)
+	})
+	return node, err
 }
 
 func (s *Store) CreateJob(request SubmitRequest) (Job, error) {
@@ -768,6 +799,13 @@ func (s *Store) CreateReservationAdmitted(assignment Assignment, secret, owner s
 	return s.db.Update(func(tx *bolt.Tx) error {
 		now := time.Now().UTC()
 		assignments := tx.Bucket(bucketAssignments)
+		var node Node
+		if err := getJSON(tx.Bucket(bucketNodes), assignment.NodeID, &node); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if node.Draining {
+			return ErrNodeDraining
+		}
 		if err := garbageCollectReservations(assignments, now); err != nil {
 			return err
 		}
@@ -1418,6 +1456,16 @@ func (s *Store) assignJob(id, nodeID string, adapter *adapterAssignment, decisio
 		}
 		if job.SealedPayload != nil && job.AssignedNode != "" && job.AssignedNode != nodeID {
 			return errors.New("sealed job is bound to another node")
+		}
+		// This check shares the assignment transaction with the queue transition.
+		// It is the drain linearization point: even a dispatcher holding a stale
+		// pre-drain routing snapshot cannot create a new assignment afterward.
+		var node Node
+		if err := getJSON(tx.Bucket(bucketNodes), nodeID, &node); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if node.Draining {
+			return ErrNodeDraining
 		}
 		if adapter != nil {
 			if !strings.EqualFold(job.Requirements.Provider, "adapter") {

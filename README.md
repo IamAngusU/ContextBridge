@@ -353,6 +353,7 @@ These are different machines, not an OS comparison or an SLA. Model execution an
 contextbridge dashboard
 contextbridge models
 contextbridge cluster status
+contextbridge cluster node drain NODE_ID
 contextbridge route explain --file ./job.json
 contextbridge cluster conformance worker --json
 contextbridge benchmark --json
@@ -365,6 +366,7 @@ For `route explain`, use a native cluster job such as [examples/cluster-job.json
 | --- | --- |
 | Connect an MCP client | `contextbridge mcp serve` · [Integrations](docs/integrations.md) |
 | Inspect schedules | `contextbridge schedule list` · [Automation](docs/automation.md) |
+| Drain or resume a worker for maintenance | `contextbridge cluster node drain\|resume NODE_ID` · [Pools and placement](docs/pools-and-placement.md) |
 | Export or verify execution evidence | `contextbridge cluster receipt show JOB_ID` · [Execution receipts](docs/execution-receipts.md) |
 | Plan bounded multi-step work | [Agents and approval boundaries](docs/bounded-agent.md) |
 | Check for an update without installing it | `contextbridge update check` |

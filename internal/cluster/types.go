@@ -191,21 +191,25 @@ type Capabilities struct {
 }
 
 type Node struct {
-	ID              string       `json:"id"`
-	Name            string       `json:"name"`
-	PublicKey       string       `json:"public_key,omitempty"`
-	Capabilities    Capabilities `json:"capabilities"`
-	State           string       `json:"state"`
-	Connected       bool         `json:"connected"`
-	LastSeen        time.Time    `json:"last_seen"`
-	ClockOffsetMS   int64        `json:"clock_offset_ms,omitempty"`
-	ConnectedAt     time.Time    `json:"connected_at,omitempty"`
-	JobsTotal       uint64       `json:"jobs_total"`
-	JobsFailed      uint64       `json:"jobs_failed"`
-	ComputeMS       uint64       `json:"compute_ms"`
-	CostUSD         float64      `json:"cost_usd"`
-	CostKnownJobs   uint64       `json:"cost_known_jobs,omitempty"`
-	CostUnknownJobs uint64       `json:"cost_unknown_jobs,omitempty"`
+	ID           string       `json:"id"`
+	Name         string       `json:"name"`
+	PublicKey    string       `json:"public_key,omitempty"`
+	Capabilities Capabilities `json:"capabilities"`
+	State        string       `json:"state"`
+	Connected    bool         `json:"connected"`
+	// Draining is relay-owned operator state. A draining worker stays connected
+	// and may finish work it already owns, but it is never eligible for a new
+	// assignment until an administrator resumes it.
+	Draining        bool      `json:"draining,omitempty"`
+	LastSeen        time.Time `json:"last_seen"`
+	ClockOffsetMS   int64     `json:"clock_offset_ms,omitempty"`
+	ConnectedAt     time.Time `json:"connected_at,omitempty"`
+	JobsTotal       uint64    `json:"jobs_total"`
+	JobsFailed      uint64    `json:"jobs_failed"`
+	ComputeMS       uint64    `json:"compute_ms"`
+	CostUSD         float64   `json:"cost_usd"`
+	CostKnownJobs   uint64    `json:"cost_known_jobs,omitempty"`
+	CostUnknownJobs uint64    `json:"cost_unknown_jobs,omitempty"`
 }
 
 type Usage struct {

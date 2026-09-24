@@ -36,6 +36,7 @@ func CurrentProtocolManifest(configuredJobBytes int64) ProtocolManifest {
 		Features: []string{
 			"content_minimizing_execution_receipts",
 			"durable_execution_policy_v1",
+			"durable_worker_drain_v1",
 			"job_contract_dry_run",
 			"producer_scoped_idempotency",
 			"relay_conformance_v1",

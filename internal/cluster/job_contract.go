@@ -28,6 +28,7 @@ const (
 	AdmissionCodeIdempotencyInvalid    = "idempotency.invalid"
 	AdmissionCodeJobIDConflict         = "job_id.conflict"
 	AdmissionCodeJobIDInvalid          = "job_id.invalid"
+	AdmissionCodeNodeDraining          = "node.draining"
 	AdmissionCodePayloadInvalid        = "payload.invalid"
 	AdmissionCodePayloadRequired       = "payload.required"
 	AdmissionCodePayloadTooLarge       = "payload.too_large"
@@ -67,6 +68,7 @@ var stableAdmissionErrorCodes = []string{
 	AdmissionCodeIdempotencyInvalid,
 	AdmissionCodeJobIDConflict,
 	AdmissionCodeJobIDInvalid,
+	AdmissionCodeNodeDraining,
 	AdmissionCodePayloadInvalid,
 	AdmissionCodePayloadRequired,
 	AdmissionCodePayloadTooLarge,
@@ -250,6 +252,8 @@ func admissionStoreErrorCode(err error) string {
 		return AdmissionCodeReservationExpired
 	case errors.Is(err, ErrIdempotencyConflict):
 		return AdmissionCodeIdempotencyConflict
+	case errors.Is(err, ErrNodeDraining):
+		return AdmissionCodeNodeDraining
 	default:
 		return ""
 	}

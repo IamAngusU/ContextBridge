@@ -100,6 +100,9 @@ func rankWithDecision(nodes []Node, requirements Requirements, estimatedVRAM uin
 		if !node.Connected {
 			reasons = append(reasons, "worker_not_connected")
 		}
+		if node.Draining {
+			reasons = append(reasons, "worker_draining")
+		}
 		if age > NodeFreshnessWindow {
 			reasons = append(reasons, "worker_telemetry_stale")
 		}
