@@ -142,6 +142,15 @@ func TestWorkerReporterPanicIsIsolated(t *testing.T) {
 	}
 }
 
+func TestOptionalWorkerObserverPanicIsIsolated(t *testing.T) {
+	isolateOptionalWorkerObserver(func() { panic("progress-parser-bug") })
+	called := false
+	isolateOptionalWorkerObserver(func() { called = true })
+	if !called {
+		t.Fatal("ordinary optional observer did not run")
+	}
+}
+
 func TestPairWorkerRejectsUnsafePollingIntervals(t *testing.T) {
 	for _, interval := range []int{-1, 0, 61, int(^uint(0) >> 1)} {
 		t.Run(strings.ReplaceAll(time.Duration(interval).String(), "-", "negative"), func(t *testing.T) {

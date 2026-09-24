@@ -175,6 +175,11 @@ func isolateWorkerReporter(report WorkerReporter) WorkerReporter {
 	}
 }
 
+func isolateOptionalWorkerObserver(run func()) {
+	defer func() { _ = recover() }()
+	run()
+}
+
 func LoadWorker(cfg WorkerConfig) (*Worker, error) {
 	cfg.RelayURL = strings.TrimSpace(cfg.RelayURL)
 	if cfg.RelayURL == "" || cfg.IdentityFile == "" {
@@ -653,7 +658,11 @@ func (w *Worker) execute(ctx context.Context, job Job, emitProgress func(JobProg
 		progressWG.Add(1)
 		go func() {
 			defer progressWG.Done()
-			w.watchLocalAdapterProgress(progressCtx, localJobID, emitProgress)
+			// Progress is non-authoritative. An observer/parser bug must not kill
+			// the worker or change the independently verified final result.
+			isolateOptionalWorkerObserver(func() {
+				w.watchLocalAdapterProgress(progressCtx, localJobID, emitProgress)
+			})
 		}()
 	}
 	defer progressWG.Wait()
