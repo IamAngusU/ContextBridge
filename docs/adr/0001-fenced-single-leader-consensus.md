@@ -172,6 +172,23 @@ the current consensus problem.
 
 ## Dependency and release gates
 
+### Current dependency evaluation (2026-09-24)
+
+The current upstream releases are `hashicorp/raft` v1.8.0
+(`0f543c056e7e577a54b819a62116335c9661a13a`) and `raft-boltdb/v2` v2.4.2
+(`7915f80fb457a747c5dd50821d7de3dffa0fd9c3`). Both repositories identify the
+relevant code as MPL-2.0. No dependency is added to ContextBridge by this ADR.
+
+The Raft repository also has an open upstream bug report,
+[#695: Data divergence (Safety violation) due to Async Heartbeat](https://github.com/hashicorp/raft/issues/695),
+against post-v1.7.3 development code. v1.8.0 release notes do not claim that
+report as fixed and the upstream issue remained open when this evaluation was
+recorded. Because ContextBridge's purpose here is preventing duplicate or
+divergent execution authority, this is a release gate rather than an ordinary
+dependency warning. Do not pin or ship the proposed backend until the upstream
+resolution is understood and CB's own partition/replay harness reproduces the
+required safety invariants against the exact selected commit.
+
 Before a Raft build can be called supported:
 
 1. pin exact module versions and commit identities;
@@ -201,4 +218,3 @@ The prototype remains unsupported until automation proves all of the following:
 
 Until those gates pass, documentation and probes continue to say
 `mode: standalone`.
-

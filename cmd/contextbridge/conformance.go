@@ -34,13 +34,16 @@ type relayConformanceCheck struct {
 
 func clusterConformanceCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: contextbridge cluster conformance relay|worker [options]")
+		return errors.New("usage: contextbridge cluster conformance relay|worker|resilience [options]")
 	}
 	if args[0] == "worker" {
 		return clusterWorkerConformanceCommand(args[1:])
 	}
+	if args[0] == "resilience" {
+		return clusterResilienceConformanceCommand(args[1:])
+	}
 	if args[0] != "relay" {
-		return errors.New("usage: contextbridge cluster conformance relay|worker [options]")
+		return errors.New("usage: contextbridge cluster conformance relay|worker|resilience [options]")
 	}
 	flags := flag.NewFlagSet("cluster conformance relay", flag.ContinueOnError)
 	path := flags.String("config", defaultConfigPath(), "config path")
@@ -86,6 +89,43 @@ func clusterConformanceCommand(args []string) error {
 	}
 	if !report.Compatible {
 		return errors.New("relay does not satisfy the advertised ContextBridge conformance boundary")
+	}
+	return nil
+}
+
+func clusterResilienceConformanceCommand(args []string) error {
+	flags := flag.NewFlagSet("cluster conformance resilience", flag.ContinueOnError)
+	asJSON := flags.Bool("json", false, "print machine-readable proof report")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("usage: contextbridge cluster conformance resilience [--json]")
+	}
+	report, err := cluster.RunResilienceProof(version)
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		if err := json.NewEncoder(os.Stdout).Encode(report); err != nil {
+			return err
+		}
+	} else {
+		state := "PASS"
+		if !report.Passed {
+			state = "FAIL"
+		}
+		fmt.Printf("Resilience proof  [%s]  [%d checks]  [%d ms]  [isolated store · no AI request]\n", state, len(report.Checks), report.DurationMS)
+		for _, check := range report.Checks {
+			marker := "✓"
+			if !check.Passed {
+				marker = "!"
+			}
+			fmt.Printf("%s %-32s %s\n", marker, check.ID, check.Detail)
+		}
+	}
+	if !report.Passed {
+		return errors.New("one or more isolated resilience invariants failed")
 	}
 	return nil
 }

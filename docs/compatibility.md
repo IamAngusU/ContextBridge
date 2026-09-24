@@ -79,6 +79,17 @@ contextbridge cluster conformance worker \
   --json > worker-conformance.json
 ```
 
+An isolated, provider-free durability proof is also built in:
+
+```sh
+contextbridge cluster conformance resilience --json > resilience-proof.json
+```
+
+It verifies a bounded set of restart, idempotency, ambiguity, fencing and
+terminal-result invariants against temporary local stores. Its report is not a
+claim of network, provider or multi-relay HA validation; see
+[`field-validation.md`](field-validation.md) for the evidence boundary.
+
 A passing report is point-in-time evidence for the exact endpoint, worker,
 configuration, and versions tested. It is not a permanent badge, security
 audit, performance result, or endorsement by the ContextBridge project.

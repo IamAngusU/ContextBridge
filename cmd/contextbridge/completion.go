@@ -96,7 +96,7 @@ $script:ContextBridgeOptions = @{
 	'cluster events' = @('--config','--token','--after','--limit','--json','--follow','--pipeline','--poll')
 	'cluster node' = @('drain','resume','--config','--token','--json')
 	'cluster protocol' = @('--config','--token','--json')
-	'cluster conformance' = @('relay','worker','--config','--token','--node','--json')
+	'cluster conformance' = @('relay','worker','resilience','--config','--token','--node','--json')
     'cluster submit' = @('--config','--file','--token','--wait','--e2ee','--stream','--artifacts','--idempotency-key')
     'cluster chat' = @('--config','--token','--provider','--group','--model','--profile','--reasoning','--e2ee','--session','--prompt','--artifacts','--min-artifacts','--image','--min-images','--attach-image','--new-session','--new-session-per-job','--foreground-new-session','--egress','--max-cost-usd')
     'cluster agent' = @('plan','run','auto','--config','--token','--goal','--goal-file','--policy','--planner-provider','--planner-profile','--planner-model','--allow-providers','--allow-adapter-profiles','--max-steps','--step-timeout','--max-runtime','--planner-timeout','--out','--plan','--approve')
@@ -230,7 +230,7 @@ _contextbridge_complete() {
 	  "cluster events") candidates="--config --token --after --limit --json --follow --pipeline --poll" ;;
 	  "cluster node") candidates="drain resume --config --token --json" ;;
 	  "cluster protocol") candidates="--config --token --json" ;;
-	  "cluster conformance") candidates="relay worker --config --token --node --json" ;;
+	  "cluster conformance") candidates="relay worker resilience --config --token --node --json" ;;
       "cluster configure") candidates="--config --mode --relay-url --public-url --name --listen" ;;
       "cluster dashboard") candidates="--config --no-open" ;;
       "cluster pipeline") candidates="--config --name --file" ;;
@@ -265,7 +265,7 @@ _contextbridge_complete() {
 	elif [[ "$option_key" == "cluster contract" && "$COMP_CWORD" -eq 3 ]]; then
 	  candidates="validate"
 	elif [[ "$option_key" == "cluster conformance" && "$COMP_CWORD" -eq 3 ]]; then
-	  candidates="relay worker"
+	  candidates="relay worker resilience"
   elif [[ "$option_key" == "cluster agent" && "$COMP_CWORD" -eq 3 ]]; then
     candidates="plan run auto"
 	elif [[ "$option_key" == "cluster receipt" && "$COMP_CWORD" -eq 3 ]]; then
@@ -400,7 +400,7 @@ case "$words[2]" in
 	  protocol) _arguments "${config[@]}" '--token[Producer, observer, or admin token]:token:' '--json[Print machine-readable protocol manifest]' ;;
 	  conformance)
 		if (( CURRENT == 4 )); then
-		  _values 'conformance target' relay worker
+		  _values 'conformance target' relay worker resilience
 		  return
 		fi
 		_arguments "${config[@]}" '--token[Producer, observer, or admin token]:token:' '--node[Exact worker ID or unique worker name]:worker:' '--json[Print machine-readable conformance report]'

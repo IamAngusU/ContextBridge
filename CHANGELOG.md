@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Added `cluster conformance resilience`, a provider-free reproducible proof
+  for monotonic restart authority, idempotent lost-response recovery, explicit
+  post-dispatch ambiguity, stale-fence rejection and single durable terminal
+  results. The versioned JSON report states its narrow scope instead of
+  presenting local store checks as network or HA evidence.
+- Re-evaluated the proposed HA dependencies against their current upstream
+  releases and recorded the open HashiCorp Raft safety report as a fail-closed
+  release gate. No consensus dependency or unsupported HA claim was added.
 - Added real incremental text output for explicitly reviewed
   `openai_compatible` engines with the `incremental_output` capability. The
   v1 path has no fallback ambiguity, applies direct backpressure and hard
