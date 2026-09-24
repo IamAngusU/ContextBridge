@@ -110,6 +110,99 @@ func TestAdapterProfilesUseBoundedNeutralIdentifiers(t *testing.T) {
 	}
 }
 
+func TestScopedAdapterPrincipalsAreIndependentBoundedAndRedacted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := Default(path); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.AdapterProfiles["review-endpoint"] = AdapterProfile{Label: "Review endpoint", Driver: "custom-driver"}
+	cfg.Routes["review"] = Route{Provider: "adapter", AdapterProfile: "review-endpoint", TimeoutSeconds: 30}
+	cfg.Providers.Adapter.Principals = map[string]AdapterPrincipal{
+		"reviewer": {Token: strings.Repeat("r", 40), AllowedProfiles: []string{"review-endpoint"}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid scoped adapter principal was rejected: %v", err)
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte(strings.Repeat("r", 40))) {
+		t.Fatal("adapter credential leaked through JSON serialization")
+	}
+
+	principal := cfg.Providers.Adapter.Principals["reviewer"]
+	principal.AllowedProfiles = []string{"missing"}
+	cfg.Providers.Adapter.Principals["reviewer"] = principal
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "unknown profile") {
+		t.Fatalf("unknown adapter profile was accepted: %v", err)
+	}
+	principal.AllowedProfiles = []string{"review-endpoint"}
+	principal.Token = cfg.Server.Token
+	cfg.Providers.Adapter.Principals["reviewer"] = principal
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "must not reuse server.token") {
+		t.Fatalf("operator token reuse was accepted: %v", err)
+	}
+	principal.Token = "short"
+	cfg.Providers.Adapter.Principals["reviewer"] = principal
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "at least 32") {
+		t.Fatalf("weak adapter credential was accepted: %v", err)
+	}
+}
+
+func TestScopedAdapterPrincipalsRejectDuplicateCredentialsAndUncoveredRoutes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := Default(path); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.AdapterProfiles["one"] = AdapterProfile{Driver: "custom"}
+	cfg.AdapterProfiles["two"] = AdapterProfile{Driver: "custom"}
+	cfg.Routes["two"] = Route{Provider: "adapter", AdapterProfile: "two", TimeoutSeconds: 30}
+	shared := strings.Repeat("s", 40)
+	cfg.Providers.Adapter.Principals = map[string]AdapterPrincipal{
+		"one": {Token: shared, AllowedProfiles: []string{"one"}},
+		"two": {Token: shared, AllowedProfiles: []string{"two"}},
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "must not share") {
+		t.Fatalf("duplicate adapter credentials were accepted: %v", err)
+	}
+	delete(cfg.Providers.Adapter.Principals, "two")
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "has no scoped adapter principal") {
+		t.Fatalf("uncovered adapter route was accepted: %v", err)
+	}
+	cfg.Providers.Adapter.AuthMode = "dual"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("explicit migration mode should allow an uncovered legacy route: %v", err)
+	}
+}
+
+func TestScopedAdapterRoutesRequireProfile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := Default(path); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Routes["unscoped"] = Route{Provider: "adapter", TimeoutSeconds: 30}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "requires adapter_profile") {
+		t.Fatalf("unprofiled scoped adapter route was accepted: %v", err)
+	}
+	cfg.Providers.Adapter.AuthMode = "dual"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("explicit legacy migration mode rejected an unprofiled route: %v", err)
+	}
+}
+
 func TestModelRevisionMustBeImmutableCommit(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yml")
 	if err := Default(path); err != nil {

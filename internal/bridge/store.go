@@ -1,7 +1,10 @@
 package bridge
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -36,6 +39,8 @@ type Store struct {
 	completedOrder   []string
 	completedTotal   int
 	adapter          AdapterClientStatus
+	adapters         map[string]AdapterClientStatus
+	endpointCaps     map[adapterEndpointKey]adapterEndpointCapability
 	tunnel           TunnelStatus
 	activity         []Activity
 	metrics          Metrics
@@ -99,6 +104,8 @@ type AdapterClientStatus struct {
 type AdapterEndpointStatus struct {
 	ID                  int                     `json:"id,omitempty"`
 	Profile             string                  `json:"profile,omitempty"`
+	Principal           string                  `json:"principal,omitempty"`
+	EndpointCapability  string                  `json:"endpoint_capability,omitempty"`
 	State               string                  `json:"state,omitempty"`
 	SessionKey          string                  `json:"session_key,omitempty"`
 	SessionKeySupported bool                    `json:"session_key_supported,omitempty"`
@@ -120,6 +127,26 @@ type AdapterEndpointFailure struct {
 	At          time.Time `json:"at"`
 }
 
+type adapterEndpointKey struct {
+	principal string
+	profile   string
+	endpoint  int
+}
+
+type adapterEndpointCapability struct {
+	current           [sha256.Size]byte
+	previous          [sha256.Size]byte
+	previousExpiresAt time.Time
+	expiresAt         time.Time
+}
+
+type AdapterEndpointCapability struct {
+	Profile            string    `json:"profile"`
+	EndpointID         int       `json:"endpoint_id"`
+	EndpointCapability string    `json:"endpoint_capability"`
+	ExpiresAt          time.Time `json:"expires_at"`
+}
+
 type Activity struct {
 	Time    time.Time `json:"time"`
 	Kind    string    `json:"kind"`
@@ -136,6 +163,10 @@ type queuedJob struct {
 	actionUnknown   bool
 	done            chan Output
 	progress        *AdapterProgress
+	leasePrincipal  string
+	leaseProfile    string
+	leaseEndpointID int
+	leaseCapability [sha256.Size]byte
 }
 
 func (s *Store) UpdateAdapterProgress(id string, generation uint64, progress AdapterProgress) bool {
@@ -182,9 +213,11 @@ func NewStore(dir string) (*Store, error) {
 		return nil, err
 	}
 	store := &Store{
-		dir:       dir,
-		queued:    map[string]*queuedJob{},
-		completed: map[string]struct{}{},
+		dir:          dir,
+		queued:       map[string]*queuedJob{},
+		completed:    map[string]struct{}{},
+		adapters:     map[string]AdapterClientStatus{},
+		endpointCaps: map[adapterEndpointKey]adapterEndpointCapability{},
 		metrics: Metrics{
 			ByRoute: map[string]uint64{}, ByTask: map[string]uint64{}, ByProvider: map[string]uint64{},
 			ByModel: map[string]uint64{}, ByFlag: map[string]uint64{}, ProviderLatency: map[string]uint64{}, ProviderSamples: map[string]uint64{}, ProviderFailures: map[string]uint64{},
@@ -536,6 +569,23 @@ func (s *Store) NextAdapterJob(profile string, lease time.Duration) *adapterJob 
 func (s *Store) NextAdapterJobForEndpoint(profile string, endpointID int, lease time.Duration) *adapterJob {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.nextAdapterJobLocked("", profile, endpointID, lease, "")
+}
+
+func (s *Store) NextScopedAdapterJobForEndpoint(principal, profile string, endpointID int, endpointCapability string, lease time.Duration) (*adapterJob, error) {
+	leaseCapability, err := randomAdapterCapability()
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.validEndpointCapabilityLocked(principal, profile, endpointID, endpointCapability, time.Now()) {
+		return nil, errors.New("adapter endpoint capability is invalid or expired")
+	}
+	return s.nextAdapterJobLocked(principal, profile, endpointID, lease, leaseCapability), nil
+}
+
+func (s *Store) nextAdapterJobLocked(principal, profile string, endpointID int, lease time.Duration, leaseCapability string) *adapterJob {
 	now := time.Now()
 	for id, item := range s.queued {
 		if now.After(item.deadline) {
@@ -546,6 +596,9 @@ func (s *Store) NextAdapterJobForEndpoint(profile string, endpointID int, lease 
 			continue
 		}
 		if item.job.ContextBridgeAdapterEndpointID > 0 && item.job.ContextBridgeAdapterEndpointID != endpointID {
+			continue
+		}
+		if item.job.ContextBridgeAdapterPrincipal != "" && item.job.ContextBridgeAdapterPrincipal != principal {
 			continue
 		}
 		if profile != "" {
@@ -560,10 +613,22 @@ func (s *Store) NextAdapterJobForEndpoint(profile string, endpointID int, lease 
 			item.leaseGeneration = 1
 		}
 		item.leasedTil = now.Add(lease)
+		item.leasePrincipal = principal
+		item.leaseProfile = profile
+		item.leaseEndpointID = endpointID
+		item.leaseCapability = sha256.Sum256([]byte(leaseCapability))
 		return &adapterJob{Job: item.job, Profile: item.profile, Deadline: item.deadline,
-			LeaseGeneration: item.leaseGeneration, LeaseExpiresAt: item.leasedTil, ObservationOnly: item.actionUnknown}
+			LeaseGeneration: item.leaseGeneration, LeaseCapability: leaseCapability, LeaseExpiresAt: item.leasedTil, ObservationOnly: item.actionUnknown}
 	}
 	return nil
+}
+
+func randomAdapterCapability() (string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(raw), nil
 }
 
 func (s *Store) Complete(id string, generation uint64, output Output) bool {
@@ -705,6 +770,144 @@ func validAdapterLease(item *queuedJob, generation uint64, now time.Time) bool {
 	return generation != 0 && item.leaseGeneration == generation && now.Before(item.leasedTil)
 }
 
+func validScopedAdapterLease(item *queuedJob, generation uint64, principal, capability string, now time.Time) bool {
+	if !validAdapterLease(item, generation, now) || principal == "" || capability == "" || item.leasePrincipal != principal {
+		return false
+	}
+	digest := sha256.Sum256([]byte(capability))
+	return subtle.ConstantTimeCompare(digest[:], item.leaseCapability[:]) == 1
+}
+
+func (s *Store) UpdateAdapterProgressScoped(id string, generation uint64, principal, capability string, progress AdapterProgress) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.queued[id]
+	now := time.Now()
+	if !ok || now.After(item.deadline) || !validScopedAdapterLease(item, generation, principal, capability, now) {
+		if ok && now.After(item.deadline) {
+			delete(s.queued, id)
+		}
+		return false
+	}
+	if item.progress != nil && progress.Sequence <= item.progress.Sequence {
+		return true
+	}
+	progress.UpdatedAt = now.UTC()
+	copy := progress
+	item.progress = &copy
+	return true
+}
+
+func (s *Store) AdapterProgressScoped(id string, generation uint64, principal, capability string) (AdapterProgress, bool, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.queued[id]
+	now := time.Now()
+	if !ok || now.After(item.deadline) || !validScopedAdapterLease(item, generation, principal, capability, now) {
+		if ok && now.After(item.deadline) {
+			delete(s.queued, id)
+		}
+		return AdapterProgress{}, false, false
+	}
+	if item.progress == nil {
+		return AdapterProgress{}, true, false
+	}
+	return *item.progress, true, true
+}
+
+func (s *Store) CompleteScoped(id string, generation uint64, principal, capability string, output Output) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.queued[id]
+	now := time.Now()
+	if !ok || now.After(item.deadline) || !validScopedAdapterLease(item, generation, principal, capability, now) {
+		if ok && now.After(item.deadline) {
+			delete(s.queued, id)
+		}
+		return false
+	}
+	delete(s.queued, id)
+	completed := cloneOutput(output)
+	s.recordCompletionLocked(id)
+	message := "Adapter result received"
+	if output.Decision != nil {
+		message += ": " + output.Decision.Verdict
+	} else if output.Error != "" {
+		message += ": " + output.Error
+	}
+	s.addActivityLocked("completed", message, id)
+	item.done <- completed
+	close(item.done)
+	return true
+}
+
+func (s *Store) RenewScoped(id string, generation uint64, principal, capability string, lease time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.queued[id]
+	now := time.Now()
+	if !ok || now.After(item.deadline) || !validScopedAdapterLease(item, generation, principal, capability, now) {
+		if ok && now.After(item.deadline) {
+			delete(s.queued, id)
+		}
+		return false
+	}
+	item.leasedTil = now.Add(lease)
+	return true
+}
+
+func (s *Store) ReleaseAdapterLeaseScoped(id string, generation uint64, principal, capability string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.queued[id]
+	now := time.Now()
+	if !ok || !validScopedAdapterLease(item, generation, principal, capability, now) {
+		return false
+	}
+	item.leasedTil = time.Time{}
+	item.leaseCapability = [sha256.Size]byte{}
+	item.leasePrincipal = ""
+	item.leaseProfile = ""
+	item.leaseEndpointID = 0
+	return true
+}
+
+func (s *Store) AdapterLeaseStatusScoped(id string, generation uint64, principal, capability string) (time.Time, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.queued[id]
+	if !ok || !validScopedAdapterLease(item, generation, principal, capability, time.Now()) {
+		return time.Time{}, false
+	}
+	return item.leasedTil.UTC(), true
+}
+
+func (s *Store) MarkAdapterActionScoped(id string, generation uint64, principal, capability string, lease time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.queued[id]
+	now := time.Now()
+	if !ok || now.After(item.deadline) || !validScopedAdapterLease(item, generation, principal, capability, now) {
+		if ok && now.After(item.deadline) {
+			delete(s.queued, id)
+		}
+		return false
+	}
+	item.actionUnknown = true
+	item.leasedTil = now.Add(lease)
+	return true
+}
+
+func (s *Store) AdapterCompletionContextScoped(id string, generation uint64, principal, capability string) (OutputSpec, string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.queued[id]
+	if !ok || !validScopedAdapterLease(item, generation, principal, capability, time.Now()) {
+		return OutputSpec{}, "", false
+	}
+	return adapterCompletionContext(item)
+}
+
 func (s *Store) AdapterCompletionContext(id string, generation uint64) (OutputSpec, string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -712,6 +915,10 @@ func (s *Store) AdapterCompletionContext(id string, generation uint64) (OutputSp
 	if !ok || !validAdapterLease(item, generation, time.Now()) {
 		return OutputSpec{}, "", false
 	}
+	return adapterCompletionContext(item)
+}
+
+func adapterCompletionContext(item *queuedJob) (OutputSpec, string, bool) {
 	model := "adapter-endpoint"
 	if requested := strings.TrimSpace(item.job.Model); requested != "" {
 		model = "adapter:" + requested
@@ -742,11 +949,137 @@ func (s *Store) RecordAdapterHeartbeat(status AdapterClientStatus) {
 	}
 }
 
+func (s *Store) RecordScopedAdapterHeartbeat(principal string, status AdapterClientStatus) ([]AdapterEndpointCapability, error) {
+	now := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.adapters == nil {
+		s.adapters = map[string]AdapterClientStatus{}
+	}
+	if s.endpointCaps == nil {
+		s.endpointCaps = map[adapterEndpointKey]adapterEndpointCapability{}
+	}
+	status.Connected = status.State != "paused"
+	status.LastSeen = now
+	status.Adapter = principal
+	for index := range status.Endpoints {
+		status.Endpoints[index].Principal = principal
+	}
+	previousStatus := s.adapters[principal]
+	wasConnected := previousStatus.Connected && now.Sub(previousStatus.LastSeen) < adapterHeartbeatGracePeriod
+	capabilities := make([]AdapterEndpointCapability, 0, len(status.Endpoints))
+	activeKeys := make(map[adapterEndpointKey]struct{}, len(status.Endpoints))
+	type plannedEndpointCapability struct {
+		key    adapterEndpointKey
+		record adapterEndpointCapability
+		raw    string
+	}
+	planned := make([]plannedEndpointCapability, 0, len(status.Endpoints))
+	if status.Connected {
+		for index := range status.Endpoints {
+			endpoint := &status.Endpoints[index]
+			key := adapterEndpointKey{principal: principal, profile: endpoint.Profile, endpoint: endpoint.ID}
+			activeKeys[key] = struct{}{}
+			provided := strings.TrimSpace(endpoint.EndpointCapability)
+			record, exists := s.endpointCaps[key]
+			if exists && now.Before(record.expiresAt) {
+				if !endpointCapabilityMatches(record, provided, now) {
+					return nil, errors.New("active adapter endpoint requires its current capability")
+				}
+				// A healthy endpoint keeps one stable capability. Heartbeats renew its
+				// expiry without invalidating an in-flight long poll.
+				record.expiresAt = now.Add(adapterHeartbeatGracePeriod)
+				record.previous = [sha256.Size]byte{}
+				record.previousExpiresAt = time.Time{}
+				planned = append(planned, plannedEndpointCapability{key: key, record: record, raw: provided})
+				endpoint.EndpointCapability = ""
+				continue
+			}
+			raw, err := randomAdapterCapability()
+			if err != nil {
+				return nil, err
+			}
+			expiresAt := now.Add(adapterHeartbeatGracePeriod)
+			planned = append(planned, plannedEndpointCapability{
+				key: key, record: adapterEndpointCapability{current: sha256.Sum256([]byte(raw)), expiresAt: expiresAt}, raw: raw,
+			})
+			endpoint.EndpointCapability = ""
+		}
+	}
+	for _, candidate := range planned {
+		s.endpointCaps[candidate.key] = candidate.record
+		capabilities = append(capabilities, AdapterEndpointCapability{
+			Profile: candidate.key.profile, EndpointID: candidate.key.endpoint,
+			EndpointCapability: candidate.raw, ExpiresAt: candidate.record.expiresAt,
+		})
+	}
+	for key := range s.endpointCaps {
+		if key.principal == principal {
+			if _, active := activeKeys[key]; !active || !status.Connected {
+				delete(s.endpointCaps, key)
+			}
+		}
+	}
+	s.adapters[principal] = status
+	if status.Connected && !wasConnected {
+		s.addActivityLocked("adapter", "Scoped adapter "+principal+" connected", "")
+	}
+	return capabilities, nil
+}
+
+func endpointCapabilityMatches(record adapterEndpointCapability, capability string, now time.Time) bool {
+	if capability == "" {
+		return false
+	}
+	digest := sha256.Sum256([]byte(capability))
+	if subtle.ConstantTimeCompare(digest[:], record.current[:]) == 1 {
+		return true
+	}
+	return now.Before(record.previousExpiresAt) && subtle.ConstantTimeCompare(digest[:], record.previous[:]) == 1
+}
+
+func (s *Store) validEndpointCapabilityLocked(principal, profile string, endpointID int, capability string, now time.Time) bool {
+	if principal == "" || profile == "" || endpointID <= 0 || capability == "" {
+		return false
+	}
+	record, ok := s.endpointCaps[adapterEndpointKey{principal: principal, profile: profile, endpoint: endpointID}]
+	if !ok || !now.Before(record.expiresAt) {
+		return false
+	}
+	return endpointCapabilityMatches(record, capability, now)
+}
+
 func (s *Store) AdapterStatus() AdapterClientStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	status := s.adapter
 	status.Connected = status.Connected && time.Since(status.LastSeen) < adapterHeartbeatGracePeriod
+	if !status.Connected {
+		status = AdapterClientStatus{}
+	}
+	ids := make([]string, 0, len(s.adapters))
+	for id := range s.adapters {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		candidate := s.adapters[id]
+		candidate.Connected = candidate.Connected && time.Since(candidate.LastSeen) < adapterHeartbeatGracePeriod
+		if !candidate.Connected {
+			continue
+		}
+		status.Connected = true
+		status.Ready = status.Ready || candidate.Ready
+		status.ActiveEndpoints += candidate.ActiveEndpoints
+		status.BusyEndpoints += candidate.BusyEndpoints
+		status.Endpoints = append(status.Endpoints, candidate.Endpoints...)
+		if candidate.LastSeen.After(status.LastSeen) {
+			status.LastSeen = candidate.LastSeen
+		}
+	}
+	if status.Connected && status.State == "" {
+		status.State = "waiting"
+	}
 	return status
 }
 

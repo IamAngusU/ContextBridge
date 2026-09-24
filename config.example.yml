@@ -66,6 +66,8 @@ providers:
     timeout_seconds: 45
   adapter:
     lease_seconds: 90
+    auth_mode: scoped # v2 adapter credentials only; dual temporarily enables legacy v1 service-token access
+    principals: {}
 
 engines:
   nuextract:

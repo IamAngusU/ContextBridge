@@ -48,9 +48,10 @@ func TestDoctorEndToEndWithReadyAdapterRoute(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "config.yml")
 	cfg := config.Config{
-		Version: 1,
-		Server:  config.Server{Listen: strings.TrimPrefix(server.URL, "http://"), Token: "test_012345678901234567890123456789"},
-		Routes:  map[string]config.Route{"default": {Provider: "adapter"}},
+		Version:   1,
+		Server:    config.Server{Listen: strings.TrimPrefix(server.URL, "http://"), Token: "test_012345678901234567890123456789"},
+		Routes:    map[string]config.Route{"default": {Provider: "adapter"}},
+		Providers: config.Providers{Adapter: config.AdapterProvider{AuthMode: "dual"}},
 	}
 	if err := config.Save(path, cfg); err != nil {
 		t.Fatal(err)

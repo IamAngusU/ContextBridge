@@ -30,7 +30,7 @@ without sending an inference request.
 | Assignment authority | `assignment_fencing_v1`, wire v3 | Stable cluster identity, monotonic relay epoch, and exact per-assignment generation echoed by workers |
 | Worker advertisement | `contextbridge.worker-conformance.v1` | Worker Conformance v1 report over live bounded evidence |
 | Planned worker maintenance | `durable_worker_drain_v1`, `node.draining` | Admin-only durable admission state plus assignment-transaction recheck |
-| Out-of-tree adapter | Documented authenticated pull/lease lifecycle | Adapter contract; no standalone adapter certification suite is claimed yet |
+| Out-of-tree adapter | `contextbridge.adapter.v2` | Scoped principal, endpoint capability, and per-generation lease capability; no standalone adapter certification suite is claimed yet |
 | Portable resource pack | `.contextbridge-pack.json`, `schema_version: 1` | Bounded discovery and identity validation; discovery is not execution approval |
 
 The runtime protocol manifest publishes exact contract versions, feature IDs,

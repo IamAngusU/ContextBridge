@@ -73,7 +73,7 @@ func TestWorkerRelayParallelCapacityEndToEnd(t *testing.T) {
 				"status": "completed",
 			})
 		default:
-			if strings.HasPrefix(req.URL.Path, "/v1/adapter/jobs/") && strings.HasSuffix(req.URL.Path, "/progress") {
+			if strings.HasPrefix(req.URL.Path, "/v1/operator/adapter/jobs/") && strings.HasSuffix(req.URL.Path, "/progress") {
 				writeJSON(w, http.StatusOK, JobProgress{Sequence: 1, Text: "working", Phase: "generating", Busy: true})
 				return
 			}
@@ -221,7 +221,7 @@ func TestWorkerCancelsLocalExecutionWhenRelayConnectionDrops(t *testing.T) {
 			<-req.Context().Done()
 			close(localCancelled)
 		default:
-			if strings.HasPrefix(req.URL.Path, "/v1/adapter/jobs/") && strings.HasSuffix(req.URL.Path, "/progress") {
+			if strings.HasPrefix(req.URL.Path, "/v1/operator/adapter/jobs/") && strings.HasSuffix(req.URL.Path, "/progress") {
 				writeJSON(w, http.StatusOK, JobProgress{Sequence: 1, Phase: "generating", Busy: true})
 				return
 			}
@@ -344,7 +344,7 @@ func TestRelayCancellationInterruptsAssignedWorkerExecution(t *testing.T) {
 			<-req.Context().Done()
 			close(localCancelled)
 		default:
-			if strings.HasPrefix(req.URL.Path, "/v1/adapter/jobs/") && strings.HasSuffix(req.URL.Path, "/progress") {
+			if strings.HasPrefix(req.URL.Path, "/v1/operator/adapter/jobs/") && strings.HasSuffix(req.URL.Path, "/progress") {
 				writeJSON(w, http.StatusOK, JobProgress{Sequence: 1, Phase: "generating", Busy: true})
 				return
 			}
@@ -475,7 +475,7 @@ func TestMaintenanceTimeoutInterruptsHungWorkerExecution(t *testing.T) {
 			<-req.Context().Done()
 			close(localCancelled)
 		default:
-			if strings.HasPrefix(req.URL.Path, "/v1/adapter/jobs/") && strings.HasSuffix(req.URL.Path, "/progress") {
+			if strings.HasPrefix(req.URL.Path, "/v1/operator/adapter/jobs/") && strings.HasSuffix(req.URL.Path, "/progress") {
 				writeJSON(w, http.StatusOK, JobProgress{Sequence: 1, Phase: "generating", Busy: true})
 				return
 			}

@@ -907,6 +907,7 @@ func compactLocalSubmission(raw []byte) ([]byte, error) {
 		return nil, err
 	}
 	delete(envelope, "contextbridge_adapter_endpoint_id")
+	delete(envelope, "contextbridge_adapter_principal")
 	delete(envelope, "contextbridge_ephemeral_adapter_endpoint")
 	jobRaw, ok := envelope["job"]
 	if !ok {
@@ -918,7 +919,7 @@ func compactLocalSubmission(raw []byte) ([]byte, error) {
 	}
 	for _, field := range []string{
 		"prompt", "text", "texts", "documents", "query", "image_base64",
-		"contextbridge_session_key", "contextbridge_adapter_endpoint_id",
+		"contextbridge_session_key", "contextbridge_adapter_endpoint_id", "contextbridge_adapter_principal",
 	} {
 		delete(job, field)
 	}
@@ -1017,6 +1018,7 @@ func prepareLocalPayload(payload []byte, requirements Requirements, localJobID s
 	// hints are never authoritative; only authenticated requirements may add
 	// them back below.
 	delete(job, "contextbridge_adapter_endpoint_id")
+	delete(job, "contextbridge_adapter_principal")
 	delete(job, "contextbridge_session_key")
 	delete(job, "contextbridge_egress")
 	delete(job, "contextbridge_provider_classification")
@@ -1038,6 +1040,10 @@ func prepareLocalPayload(payload []byte, requirements Requirements, localJobID s
 	if requirements.AdapterEndpointID > 0 && strings.EqualFold(provider, "adapter") {
 		rawEndpointID, _ := json.Marshal(requirements.AdapterEndpointID)
 		job["contextbridge_adapter_endpoint_id"] = rawEndpointID
+	}
+	if requirements.AdapterPrincipal != "" && strings.EqualFold(provider, "adapter") {
+		rawPrincipal, _ := json.Marshal(requirements.AdapterPrincipal)
+		job["contextbridge_adapter_principal"] = rawPrincipal
 	}
 	// A adapter endpoint is a security boundary between producer conversations.
 	// Derive its internal binding from the authenticated producer, never from a
@@ -1143,7 +1149,7 @@ func (w *Worker) watchLocalAdapterProgress(ctx context.Context, jobID string, em
 		case <-ticker.C:
 		}
 		requestCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		request, _ := http.NewRequestWithContext(requestCtx, http.MethodGet, strings.TrimRight(w.cfg.LocalURL, "/")+"/v1/adapter/jobs/"+url.PathEscape(jobID)+"/progress", nil)
+		request, _ := http.NewRequestWithContext(requestCtx, http.MethodGet, strings.TrimRight(w.cfg.LocalURL, "/")+"/v1/operator/adapter/jobs/"+url.PathEscape(jobID)+"/progress", nil)
 		request.Header.Set("Authorization", "Bearer "+w.cfg.LocalToken)
 		response, err := w.client.Do(request)
 		if err != nil {
@@ -1190,6 +1196,7 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 				Endpoints       []struct {
 					ID                  int      `json:"id"`
 					Profile             string   `json:"profile"`
+					Principal           string   `json:"principal"`
 					State               string   `json:"state"`
 					SessionKey          string   `json:"session_key"`
 					SessionKeySupported bool     `json:"session_key_supported"`
@@ -1239,7 +1246,7 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 					modelChoices := cleanList(endpoint.Models, MaximumAdapterModelChoices, MaximumAdapterChoiceBytes)
 					reasoningLevels := cleanList(endpoint.ReasoningLevels, MaximumAdapterReasoningLevels, MaximumAdapterChoiceBytes)
 					capability.AdapterSessions = append(capability.AdapterSessions, AdapterSessionCapability{
-						EndpointID: endpoint.ID, Profile: truncate(endpoint.Profile, 40), State: truncate(endpoint.State, 40),
+						EndpointID: endpoint.ID, Profile: truncate(endpoint.Profile, 40), Principal: truncate(endpoint.Principal, 80), State: truncate(endpoint.State, 40),
 						SessionKey: truncate(endpoint.SessionKey, MaximumAdapterSessionKeyBytes), SessionKeySupported: endpoint.SessionKeySupported,
 						CanCreateSession: endpoint.CanCreateSession, DefaultNewSession: endpoint.DefaultNewSession,
 						CurrentModel: truncate(endpoint.CurrentModel, 100), CurrentReasoning: truncate(endpoint.CurrentReasoning, 100),

@@ -86,6 +86,9 @@ type Requirements struct {
 	// producer cannot set it directly; once assigned it is authenticated by the
 	// E2EE context and carried to the local adapter lease boundary.
 	AdapterEndpointID int `json:"adapter_endpoint_id,omitempty" yaml:"-"`
+	// AdapterPrincipal is selected exclusively from authenticated worker
+	// telemetry and is never accepted from producer input.
+	AdapterPrincipal string `json:"adapter_principal,omitempty" yaml:"-"`
 	// AdapterSessionRecovery is relay-internal. It allows a worker on the same
 	// node to prove that a durable session moved to another adapter endpoint
 	// without allowing the session to migrate to another machine.
@@ -146,6 +149,7 @@ type ModelCapability struct {
 type AdapterSessionCapability struct {
 	EndpointID          int      `json:"endpoint_id"`
 	Profile             string   `json:"profile,omitempty"`
+	Principal           string   `json:"principal,omitempty"`
 	State               string   `json:"state,omitempty"`
 	SessionKey          string   `json:"session_key,omitempty"`
 	SessionKeySupported bool     `json:"session_key_supported,omitempty"`

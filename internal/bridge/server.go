@@ -56,6 +56,7 @@ type Server struct {
 	poolSummaryMu       sync.Mutex
 	poolSummary         interface{}
 	poolSummaryAt       time.Time
+	adapterPrincipals   []adapterPrincipalIdentity
 }
 
 const (
@@ -137,6 +138,10 @@ func NewServer(cfg config.Config, logger *log.Logger) (*Server, error) {
 		runtime: NewRuntimeManager(cfg, logger), logger: logger,
 		jobAdmissionLimit: admissionLimit,
 		inboxSlots:        make(chan struct{}, maximumInboxConcurrent),
+		adapterPrincipals: configuredAdapterPrincipals(cfg),
+	}
+	if server.adapterAuthMode() == "dual" {
+		logger.Printf("warning: providers.adapter.auth_mode=dual enables legacy v1 adapter access with the operator token; migrate to contextbridge.adapter.v2 and scoped mode")
 	}
 	if cfg.RAG.Enabled {
 		ragStore, ragErr := vectorstore.NewLocal(cfg.RAG.Directory, cfg.RAG.MaxDocuments)
@@ -167,16 +172,45 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/jobs/", s.auth(s.handleJobResult))
 	mux.HandleFunc("/v1/schedules", s.auth(s.handleSchedules))
 	mux.HandleFunc("/v1/schedules/", s.auth(s.handleScheduleAction))
-	mux.HandleFunc("/v1/adapter/jobs/next", s.auth(s.handleAdapterNext))
-	mux.HandleFunc("/v1/adapter/heartbeat", s.auth(s.handleAdapterHeartbeat))
+	mux.HandleFunc("/v1/adapter/jobs/next", s.legacyAdapterAuth(s.handleAdapterNext))
+	mux.HandleFunc("/v1/adapter/heartbeat", s.legacyAdapterAuth(s.handleAdapterHeartbeat))
 	mux.HandleFunc("/v1/tunnel/heartbeat", s.auth(s.handleTunnelHeartbeat))
 	mux.HandleFunc("/v1/settings/updates", s.auth(s.handleUpdateSettings))
-	mux.HandleFunc("/v1/adapter/jobs/", s.auth(s.handleAdapterJobAction))
-	mux.HandleFunc("/v1/adapter/profiles", s.auth(s.handleProfiles))
+	mux.HandleFunc("/v1/adapter/jobs/", s.legacyAdapterAuth(s.handleAdapterJobAction))
+	mux.HandleFunc("/v1/operator/adapter/jobs/", s.auth(s.handleOperatorAdapterProgress))
+	mux.HandleFunc("/v1/adapter/profiles", s.legacyAdapterAuth(s.handleProfiles))
+	mux.HandleFunc("/v2/adapter/status", s.adapterAuth(s.handleAdapterStatusV2))
+	mux.HandleFunc("/v2/adapter/jobs/next", s.adapterAuth(s.handleAdapterNext))
+	mux.HandleFunc("/v2/adapter/heartbeat", s.adapterAuth(s.handleAdapterHeartbeat))
+	mux.HandleFunc("/v2/adapter/jobs/", s.adapterAuth(s.handleAdapterJobAction))
+	mux.HandleFunc("/v2/adapter/profiles", s.adapterAuth(s.handleProfiles))
 	mux.HandleFunc("/openai/v1/models", s.auth(s.handleOpenAIModels))
 	mux.HandleFunc("/openai/v1/chat/completions", s.auth(s.handleOpenAIChat))
 	mux.Handle("/", dashboardHandler())
 	return s.cors(mux)
+}
+
+// handleOperatorAdapterProgress exposes only local progress observation to the
+// authenticated cluster worker. It is deliberately separate from the adapter
+// action namespace so scoped mode can disable v1 adapter authority without
+// breaking operator-owned progress forwarding.
+func (s *Server) handleOperatorAdapterProgress(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/v1/operator/adapter/jobs/")
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if r.Method != http.MethodGet || len(parts) != 2 || parts[0] == "" || parts[1] != "progress" {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "operator adapter progress endpoint not found"})
+		return
+	}
+	progress, exists, ready := s.store.AdapterProgress(parts[0])
+	if !exists {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "adapter job not found"})
+		return
+	}
+	if !ready {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	writeJSON(w, http.StatusOK, progress)
 }
 
 func (s *Server) Run(ctx context.Context) error {
@@ -594,6 +628,7 @@ func responseJob(job Job) Job {
 	// must not become producer-visible correlation or topology metadata.
 	job.ContextBridgeSessionKey = ""
 	job.ContextBridgeAdapterEndpointID = 0
+	job.ContextBridgeAdapterPrincipal = ""
 	return job
 }
 
@@ -616,6 +651,11 @@ func (s *Server) handleAdapterNext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	profile := strings.TrimSpace(r.URL.Query().Get("profile"))
+	identity, scoped := adapterPrincipalFromRequest(r)
+	if scoped && !identity.allowsProfile(profile) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "adapter principal is not allowed to use this profile"})
+		return
+	}
 	endpointID := 0
 	if raw := strings.TrimSpace(r.URL.Query().Get("endpoint_id")); raw != "" {
 		parsed, err := strconv.Atoi(raw)
@@ -631,7 +671,21 @@ func (s *Server) handleAdapterNext(w http.ResponseWriter, r *http.Request) {
 	}
 	deadline := time.Now().Add(wait)
 	for {
-		item := s.store.NextAdapterJobForEndpoint(profile, endpointID, time.Duration(s.cfg.Providers.Adapter.LeaseSeconds)*time.Second)
+		var item *adapterJob
+		if scoped {
+			if endpointID <= 0 {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "v2 polling requires a positive endpoint_id"})
+				return
+			}
+			var err error
+			item, err = s.store.NextScopedAdapterJobForEndpoint(identity.id, profile, endpointID, r.Header.Get("X-ContextBridge-Endpoint-Capability"), time.Duration(s.cfg.Providers.Adapter.LeaseSeconds)*time.Second)
+			if err != nil {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+				return
+			}
+		} else {
+			item = s.store.NextAdapterJobForEndpoint(profile, endpointID, time.Duration(s.cfg.Providers.Adapter.LeaseSeconds)*time.Second)
+		}
 		if item != nil {
 			writeJSON(w, http.StatusOK, item)
 			return
@@ -650,6 +704,9 @@ func (s *Server) handleAdapterNext(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAdapterJobAction(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/v1/adapter/jobs/")
+	if strings.HasPrefix(r.URL.Path, "/v2/adapter/jobs/") {
+		path = strings.TrimPrefix(r.URL.Path, "/v2/adapter/jobs/")
+	}
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	if len(parts) != 2 || parts[0] == "" {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "adapter job endpoint not found"})
@@ -657,7 +714,18 @@ func (s *Server) handleAdapterJobAction(w http.ResponseWriter, r *http.Request) 
 	}
 	if parts[1] == "progress" {
 		if r.Method == http.MethodGet {
-			progress, exists, ready := s.store.AdapterProgress(parts[0])
+			var progress AdapterProgress
+			var exists, ready bool
+			if identity, scoped := adapterPrincipalFromRequest(r); scoped {
+				generation, capability, err := adapterLeaseCredentials(r)
+				if err != nil {
+					writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+					return
+				}
+				progress, exists, ready = s.store.AdapterProgressScoped(parts[0], generation, identity.id, capability)
+			} else {
+				progress, exists, ready = s.store.AdapterProgress(parts[0])
+			}
 			if !exists {
 				writeJSON(w, http.StatusNotFound, map[string]string{"error": "job is missing or expired"})
 				return
@@ -692,7 +760,13 @@ func (s *Server) handleAdapterJobAction(w http.ResponseWriter, r *http.Request) 
 		if progress.Phase != "generating" && progress.Phase != "stabilizing" && progress.Phase != "final" && progress.Phase != "submitting" && progress.Phase != "recovering" && progress.Phase != "rate_limited" {
 			progress.Phase = "generating"
 		}
-		if !s.store.UpdateAdapterProgress(parts[0], generation, progress) {
+		updated := false
+		if identity, scoped := adapterPrincipalFromRequest(r); scoped {
+			updated = s.store.UpdateAdapterProgressScoped(parts[0], generation, identity.id, r.Header.Get("X-ContextBridge-Lease-Capability"), progress)
+		} else {
+			updated = s.store.UpdateAdapterProgress(parts[0], generation, progress)
+		}
+		if !updated {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "job is missing or expired"})
 			return
 		}
@@ -711,7 +785,13 @@ func (s *Server) handleAdapterJobAction(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		if r.Method == http.MethodGet {
-			expiresAt, active := s.store.AdapterLeaseStatus(parts[0], generation)
+			var expiresAt time.Time
+			var active bool
+			if identity, scoped := adapterPrincipalFromRequest(r); scoped {
+				expiresAt, active = s.store.AdapterLeaseStatusScoped(parts[0], generation, identity.id, r.Header.Get("X-ContextBridge-Lease-Capability"))
+			} else {
+				expiresAt, active = s.store.AdapterLeaseStatus(parts[0], generation)
+			}
 			if !active {
 				writeJSON(w, http.StatusConflict, map[string]string{"error": "job is missing or expired"})
 				return
@@ -720,7 +800,13 @@ func (s *Server) handleAdapterJobAction(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		lease := time.Duration(s.cfg.Providers.Adapter.LeaseSeconds) * time.Second
-		if !s.store.Renew(parts[0], generation, lease) {
+		renewed := false
+		if identity, scoped := adapterPrincipalFromRequest(r); scoped {
+			renewed = s.store.RenewScoped(parts[0], generation, identity.id, r.Header.Get("X-ContextBridge-Lease-Capability"), lease)
+		} else {
+			renewed = s.store.Renew(parts[0], generation, lease)
+		}
+		if !renewed {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "job is missing or expired"})
 			return
 		}
@@ -752,7 +838,13 @@ func (s *Server) handleAdapterJobAction(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		lease := time.Duration(s.cfg.Providers.Adapter.LeaseSeconds) * time.Second
-		if !s.store.MarkAdapterAction(parts[0], generation, lease) {
+		marked := false
+		if identity, scoped := adapterPrincipalFromRequest(r); scoped {
+			marked = s.store.MarkAdapterActionScoped(parts[0], generation, identity.id, r.Header.Get("X-ContextBridge-Lease-Capability"), lease)
+		} else {
+			marked = s.store.MarkAdapterAction(parts[0], generation, lease)
+		}
+		if !marked {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "job lease was lost"})
 			return
 		}
@@ -765,7 +857,13 @@ func (s *Server) handleAdapterJobAction(w http.ResponseWriter, r *http.Request) 
 			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 			return
 		}
-		if !s.store.ReleaseAdapterLease(parts[0], generation) {
+		released := false
+		if identity, scoped := adapterPrincipalFromRequest(r); scoped {
+			released = s.store.ReleaseAdapterLeaseScoped(parts[0], generation, identity.id, r.Header.Get("X-ContextBridge-Lease-Capability"))
+		} else {
+			released = s.store.ReleaseAdapterLease(parts[0], generation)
+		}
+		if !released {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "job lease was lost"})
 			return
 		}
@@ -776,23 +874,44 @@ func (s *Server) handleAdapterJobAction(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "adapter job endpoint not found"})
 		return
 	}
+	identity, scoped := adapterPrincipalFromRequest(r)
+	var generation uint64
+	var capability string
+	var err error
+	if scoped {
+		generation, capability, err = adapterLeaseCredentials(r)
+	} else {
+		generation, err = adapterLeaseGeneration(r)
+	}
+	if err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		return
+	}
 	var raw json.RawMessage
 	if err := decodeJSON(r.Body, &raw, 20<<20); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	generation, err := adapterLeaseGeneration(r)
-	if err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
-		return
+	var spec OutputSpec
+	var model string
+	var ok bool
+	if scoped {
+		spec, model, ok = s.store.AdapterCompletionContextScoped(parts[0], generation, identity.id, capability)
+	} else {
+		spec, model, ok = s.store.AdapterCompletionContext(parts[0], generation)
 	}
-	spec, model, ok := s.store.AdapterCompletionContext(parts[0], generation)
 	if !ok {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "job is missing, expired, or already completed"})
 		return
 	}
 	output := NormalizeOutput(raw, spec, "adapter", model, 0)
-	if !s.store.Complete(parts[0], generation, output) {
+	completed := false
+	if scoped {
+		completed = s.store.CompleteScoped(parts[0], generation, identity.id, capability, output)
+	} else {
+		completed = s.store.Complete(parts[0], generation, output)
+	}
+	if !completed {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "job is missing, expired, or already completed"})
 		return
 	}
@@ -814,6 +933,18 @@ func adapterLeaseGeneration(r *http.Request) (uint64, error) {
 		return 0, errors.New("a valid adapter lease generation is required")
 	}
 	return generation, nil
+}
+
+func adapterLeaseCredentials(r *http.Request) (uint64, string, error) {
+	generation, err := adapterLeaseGeneration(r)
+	if err != nil {
+		return 0, "", err
+	}
+	capability := strings.TrimSpace(r.Header.Get("X-ContextBridge-Lease-Capability"))
+	if capability == "" || len(capability) > 256 {
+		return 0, "", errors.New("a valid adapter lease capability is required")
+	}
+	return generation, capability, nil
 }
 
 func artifactCounts(artifacts []Artifact) (files, references int) {
@@ -858,6 +989,8 @@ func (s *Server) handleAdapterHeartbeat(w http.ResponseWriter, r *http.Request) 
 		status.Endpoints = status.Endpoints[:16]
 	}
 	for index := range status.Endpoints {
+		status.Endpoints[index].Principal = ""
+		status.Endpoints[index].EndpointCapability = limitedValue(status.Endpoints[index].EndpointCapability, 128)
 		status.Endpoints[index].Profile = limitedValue(status.Endpoints[index].Profile, 80)
 		status.Endpoints[index].State = limitedValue(status.Endpoints[index].State, 30)
 		status.Endpoints[index].CurrentModel = limitedValue(status.Endpoints[index].CurrentModel, 100)
@@ -879,6 +1012,33 @@ func (s *Server) handleAdapterHeartbeat(w http.ResponseWriter, r *http.Request) 
 	if status.State == "" {
 		status.State = "waiting"
 	}
+	if identity, scoped := adapterPrincipalFromRequest(r); scoped {
+		seen := map[adapterEndpointKey]bool{}
+		for index := range status.Endpoints {
+			endpoint := &status.Endpoints[index]
+			if endpoint.ID <= 0 || !identity.allowsProfile(endpoint.Profile) {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "heartbeat endpoint is outside the adapter principal scope"})
+				return
+			}
+			endpoint.Principal = identity.id
+			key := adapterEndpointKey{principal: identity.id, profile: endpoint.Profile, endpoint: endpoint.ID}
+			if seen[key] {
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "heartbeat repeats an endpoint identity"})
+				return
+			}
+			seen[key] = true
+		}
+		capabilities, err := s.store.RecordScopedAdapterHeartbeat(identity.id, status)
+		if err != nil {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "protocol": adapterProtocolV2, "endpoints": capabilities})
+		return
+	}
+	for index := range status.Endpoints {
+		status.Endpoints[index].EndpointCapability = ""
+	}
 	s.store.RecordAdapterHeartbeat(status)
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
@@ -888,12 +1048,22 @@ func (s *Server) handleProfiles(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET required"})
 		return
 	}
+	if identity, scoped := adapterPrincipalFromRequest(r); scoped {
+		profiles := make(map[string]config.AdapterProfile, len(identity.profiles))
+		for profile := range identity.profiles {
+			if configured, exists := s.cfg.AdapterProfiles[profile]; exists {
+				profiles[profile] = configured
+			}
+		}
+		writeJSON(w, http.StatusOK, profiles)
+		return
+	}
 	writeJSON(w, http.StatusOK, s.cfg.AdapterProfiles)
 }
 
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		provided := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+		provided := bearerToken(r)
 		expected := s.cfg.Server.Token
 		if len(provided) != len(expected) || subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "valid bearer token required"})
@@ -1137,7 +1307,7 @@ func validateJob(job Job) error {
 	if job.ID != "" && (!jobIDPattern.MatchString(job.ID) || strings.Contains(job.ID, "..")) {
 		return errors.New("id must use 1 to 128 letters, numbers, dots, underscores, or hyphens")
 	}
-	for name, value := range map[string]string{"source": job.Source, "route": job.Route, "provider": job.Provider, "kind": job.Kind, "session_id": job.SessionID, "contextbridge_session_key": job.ContextBridgeSessionKey, "adapter_profile": job.AdapterProfile, "model": job.Model, "reasoning": job.Reasoning} {
+	for name, value := range map[string]string{"source": job.Source, "route": job.Route, "provider": job.Provider, "kind": job.Kind, "session_id": job.SessionID, "contextbridge_session_key": job.ContextBridgeSessionKey, "contextbridge_adapter_principal": job.ContextBridgeAdapterPrincipal, "adapter_profile": job.AdapterProfile, "model": job.Model, "reasoning": job.Reasoning} {
 		if len(value) > 100 || strings.IndexFunc(value, unicode.IsControl) >= 0 {
 			return fmt.Errorf("%s must be at most 100 bytes without control characters", name)
 		}

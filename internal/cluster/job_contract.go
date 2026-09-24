@@ -172,7 +172,7 @@ func (r *Relay) prepareAdmission(input SubmitRequest, record TokenRecord, mode a
 	if err := scopeRequirements(&input.Requirements, record); err != nil {
 		return SubmitRequest{}, ContractValidation{}, rejectAdmission(http.StatusForbidden, AdmissionCodeScopeForbidden, err)
 	}
-	if (input.Requirements.AdapterEndpointID != 0 || input.Requirements.AdapterSessionRecovery) && input.AssignmentID == "" {
+	if (input.Requirements.AdapterEndpointID != 0 || input.Requirements.AdapterPrincipal != "" || input.Requirements.AdapterSessionRecovery) && input.AssignmentID == "" {
 		return SubmitRequest{}, ContractValidation{}, rejectAdmission(http.StatusUnprocessableEntity, AdmissionCodeRequirementsManaged, errors.New("adapter endpoint and recovery requirements are relay-assigned and cannot be submitted directly"))
 	}
 	validatedRequirements := input.Requirements
@@ -180,6 +180,7 @@ func (r *Relay) prepareAdmission(input SubmitRequest, record TokenRecord, mode a
 		// The reservation owns these values and ConsumeReservationAdmitted compares
 		// the complete authenticated assignment before accepting the sealed job.
 		validatedRequirements.AdapterEndpointID = 0
+		validatedRequirements.AdapterPrincipal = ""
 		validatedRequirements.AdapterSessionRecovery = false
 	}
 	if err := r.validateRequirements(validatedRequirements); err != nil {

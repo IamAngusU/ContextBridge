@@ -696,6 +696,7 @@ func redactNodeRoutingEvidence(nodes []Node) {
 	for nodeIndex := range nodes {
 		for sessionIndex := range nodes[nodeIndex].Capabilities.AdapterSessions {
 			nodes[nodeIndex].Capabilities.AdapterSessions[sessionIndex].SessionKey = ""
+			nodes[nodeIndex].Capabilities.AdapterSessions[sessionIndex].Principal = ""
 		}
 	}
 }
@@ -769,7 +770,7 @@ func (r *Relay) handleRouteExplain(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	record, _ := tokenRecord(req.Context())
-	if input.Requirements.AdapterEndpointID != 0 || input.Requirements.AdapterSessionRecovery {
+	if input.Requirements.AdapterEndpointID != 0 || input.Requirements.AdapterPrincipal != "" || input.Requirements.AdapterSessionRecovery {
 		writeError(w, http.StatusUnprocessableEntity, errors.New("adapter endpoint and recovery requirements are relay-assigned"))
 		return
 	}
@@ -1055,7 +1056,7 @@ func (r *Relay) handleReserve(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	record, _ := tokenRecord(req.Context())
-	if input.Requirements.AdapterEndpointID != 0 || input.Requirements.AdapterSessionRecovery {
+	if input.Requirements.AdapterEndpointID != 0 || input.Requirements.AdapterPrincipal != "" || input.Requirements.AdapterSessionRecovery {
 		writeError(w, http.StatusUnprocessableEntity, errors.New("adapter endpoint and recovery requirements are relay-assigned"))
 		return
 	}
@@ -1107,6 +1108,7 @@ func (r *Relay) handleReserve(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 		assignedRequirements.AdapterEndpointID = selectedAdapterEndpointBinding(routingRequirements, session)
+		assignedRequirements.AdapterPrincipal = session.Principal
 	}
 	assignment := Assignment{
 		ID: randomID("assignment"), JobID: randomID("job"), NodeID: node.ID, NodeName: node.Name,
@@ -1423,6 +1425,7 @@ func (r *Relay) dispatch() {
 				continue
 			}
 			adapterEndpointID := queued.Requirements.AdapterEndpointID
+			adapterPrincipal := queued.Requirements.AdapterPrincipal
 			adapterSessionRecovery := routingRequirements.AdapterSessionRecovery
 			if sealedAssignment {
 				adapterSessionRecovery = queued.Requirements.AdapterSessionRecovery
@@ -1434,6 +1437,7 @@ func (r *Relay) dispatch() {
 				}
 				if !sealedAssignment {
 					adapterEndpointID = selectedAdapterEndpointBinding(routingRequirements, session)
+					adapterPrincipal = session.Principal
 				}
 			}
 			if !r.beginAdmission() {
@@ -1450,7 +1454,7 @@ func (r *Relay) dispatch() {
 			decision.SelectedNodeName = candidate.Node.Name
 			boundRoutingDecision(&decision)
 			if strings.EqualFold(queued.Requirements.Provider, "adapter") {
-				job, assignErr = r.store.AssignAdapterJobFencedWithDecision(queued.ID, candidate.Node.ID, adapterEndpointID, adapterSessionRecovery, decision, r.authority)
+				job, assignErr = r.store.AssignAdapterJobFencedWithDecision(queued.ID, candidate.Node.ID, adapterEndpointID, adapterPrincipal, adapterSessionRecovery, decision, r.authority)
 			} else {
 				job, assignErr = r.store.AssignJobFencedWithDecision(queued.ID, candidate.Node.ID, decision, r.authority)
 			}
@@ -1839,6 +1843,9 @@ func (r *Relay) validateRequirements(requirements Requirements) error {
 	if requirements.AdapterEndpointID > 0 && !strings.EqualFold(requirements.Provider, "adapter") {
 		return errors.New("requirements.adapter_endpoint_id requires provider adapter")
 	}
+	if requirements.AdapterPrincipal != "" && (!strings.EqualFold(requirements.Provider, "adapter") || !validRoutingLabel(requirements.AdapterPrincipal, 80)) {
+		return errors.New("requirements.adapter_principal is invalid or requires provider adapter")
+	}
 	if (requirements.AdapterFreshSession || requirements.AdapterEphemeralSession) && !strings.EqualFold(requirements.Provider, "adapter") {
 		return errors.New("adapter fresh-session requirements require provider adapter")
 	}
@@ -1876,12 +1883,13 @@ func (r *Relay) withSessionAffinity(requirements Requirements, owner string) (Re
 	if requirements.AdapterEphemeralSession {
 		return requirements, requiredNode
 	}
-	if nodeID, endpointID, ok := r.store.RecentSessionPlacement(owner, requirements); ok {
+	if nodeID, endpointID, principal, ok := r.store.RecentSessionPlacementBinding(owner, requirements); ok {
 		if !contains(requirements.PreferredNodes, nodeID) {
 			requirements.PreferredNodes = append([]string{nodeID}, requirements.PreferredNodes...)
 		}
 		if strings.EqualFold(requirements.Provider, "adapter") && requirements.AdapterEndpointID == 0 && endpointID > 0 {
 			requirements.AdapterEndpointID = endpointID
+			requirements.AdapterPrincipal = principal
 			requirements.AdapterSessionRecovery = true
 			requiredNode = nodeID
 		}

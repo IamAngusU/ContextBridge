@@ -269,6 +269,19 @@ func TestOpaqueAdapterSessionKeyEvidenceIsProfileScoped(t *testing.T) {
 	}
 }
 
+func TestAdapterEndpointSelectionIsPrincipalScoped(t *testing.T) {
+	sessions := []AdapterSessionCapability{
+		{EndpointID: 41, Profile: "shared", Principal: "adapter-b", State: "waiting"},
+		{EndpointID: 41, Profile: "shared", Principal: "adapter-a", State: "waiting"},
+	}
+	selected, ok := selectReadyAdapterSession(sessions, Requirements{
+		Task: "generation", Provider: "adapter", AdapterProfile: "shared", AdapterEndpointID: 41, AdapterPrincipal: "adapter-a",
+	})
+	if !ok || selected.Principal != "adapter-a" {
+		t.Fatalf("endpoint selection crossed scoped adapter identity: %#v %v", selected, ok)
+	}
+}
+
 func TestFreshAdapterChatCanUseBoundEndpointOnlyAsLauncher(t *testing.T) {
 	requirements := Requirements{Task: "generation", Provider: "adapter", AdapterProfile: "profile-one", AdapterFreshSession: true}
 	sessions := []AdapterSessionCapability{

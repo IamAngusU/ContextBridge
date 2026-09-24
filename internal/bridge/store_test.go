@@ -26,6 +26,126 @@ func TestAdapterHeartbeatAllowsDelayedWorkerWakeButNotStaleOrPaused(t *testing.T
 	}
 }
 
+func TestScopedAdapterCapabilitiesFencePrincipalEndpointAndLeaseGeneration(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	heartbeat := AdapterClientStatus{
+		State: "waiting", Ready: true, ActiveEndpoints: 1,
+		Endpoints: []AdapterEndpointStatus{{ID: 9, Profile: "shared", State: "idle"}},
+	}
+	capA, err := store.RecordScopedAdapterHeartbeat("adapter-a", heartbeat)
+	if err != nil || len(capA) != 1 {
+		t.Fatalf("could not register adapter A endpoint: %#v %v", capA, err)
+	}
+	capB, err := store.RecordScopedAdapterHeartbeat("adapter-b", heartbeat)
+	if err != nil || len(capB) != 1 {
+		t.Fatalf("could not register adapter B endpoint: %#v %v", capB, err)
+	}
+	store.Queue(Job{ID: "scoped-fence", ContextBridgeAdapterEndpointID: 9, ContextBridgeAdapterPrincipal: "adapter-a", Output: OutputSpec{Mode: "text"}}, map[string]interface{}{"name": "shared"}, time.Minute)
+	if work, err := store.NextScopedAdapterJobForEndpoint("adapter-b", "shared", 9, capA[0].EndpointCapability, time.Minute); err == nil || work != nil {
+		t.Fatal("an endpoint capability crossed adapter principal identity")
+	}
+	if work, err := store.NextScopedAdapterJobForEndpoint("adapter-b", "shared", 9, capB[0].EndpointCapability, time.Minute); err != nil || work != nil {
+		t.Fatalf("another principal claimed endpoint-pinned work with its own capability: %#v %v", work, err)
+	}
+	work, err := store.NextScopedAdapterJobForEndpoint("adapter-a", "shared", 9, capA[0].EndpointCapability, time.Minute)
+	if err != nil || work == nil {
+		t.Fatalf("valid scoped lease failed: %#v %v", work, err)
+	}
+	if store.RenewScoped("scoped-fence", work.LeaseGeneration, "adapter-b", work.LeaseCapability, time.Minute) {
+		t.Fatal("another principal renewed the lease")
+	}
+	if store.RenewScoped("scoped-fence", work.LeaseGeneration, "adapter-a", "wrong", time.Minute) {
+		t.Fatal("a wrong opaque capability renewed the lease")
+	}
+	if !store.ReleaseAdapterLeaseScoped("scoped-fence", work.LeaseGeneration, "adapter-a", work.LeaseCapability) {
+		t.Fatal("valid scoped release failed")
+	}
+	if store.RenewScoped("scoped-fence", work.LeaseGeneration, "adapter-a", work.LeaseCapability, time.Minute) {
+		t.Fatal("released lease capability remained usable")
+	}
+	replacement, err := store.NextScopedAdapterJobForEndpoint("adapter-a", "shared", 9, capA[0].EndpointCapability, time.Minute)
+	if err != nil || replacement == nil {
+		t.Fatalf("replacement lease failed: %#v %v", replacement, err)
+	}
+	if replacement.LeaseGeneration == work.LeaseGeneration || replacement.LeaseCapability == work.LeaseCapability {
+		t.Fatal("replacement lease reused its generation or capability")
+	}
+	if store.RenewScoped("scoped-fence", work.LeaseGeneration, "adapter-a", work.LeaseCapability, time.Minute) {
+		t.Fatal("stale generation and capability controlled the replacement lease")
+	}
+}
+
+func TestScopedAdapterHeartbeatKeepsCapabilityStableDuringLongPolls(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	heartbeat := AdapterClientStatus{
+		State: "waiting", Ready: true, ActiveEndpoints: 1,
+		Endpoints: []AdapterEndpointStatus{{ID: 5, Profile: "profile", State: "idle"}},
+	}
+	first, err := store.RecordScopedAdapterHeartbeat("adapter", heartbeat)
+	if err != nil || len(first) != 1 {
+		t.Fatalf("first heartbeat failed: %#v %v", first, err)
+	}
+	key := adapterEndpointKey{principal: "adapter", profile: "profile", endpoint: 5}
+	store.mu.Lock()
+	record := store.endpointCaps[key]
+	shortExpiry := time.Now().Add(30 * time.Second)
+	record.expiresAt = shortExpiry
+	store.endpointCaps[key] = record
+	store.mu.Unlock()
+	heartbeat.Endpoints[0].EndpointCapability = first[0].EndpointCapability
+	second, err := store.RecordScopedAdapterHeartbeat("adapter", heartbeat)
+	if err != nil || len(second) != 1 {
+		t.Fatalf("renewing heartbeat failed: %#v %v", second, err)
+	}
+	if second[0].EndpointCapability != first[0].EndpointCapability || !second[0].ExpiresAt.After(shortExpiry) {
+		t.Fatalf("healthy heartbeat rotated or failed to renew capability: first=%#v second=%#v", first[0], second[0])
+	}
+	if _, err := store.RecordScopedAdapterHeartbeat("adapter", AdapterClientStatus{
+		State: "waiting", Ready: true, ActiveEndpoints: 1,
+		Endpoints: []AdapterEndpointStatus{{ID: 5, Profile: "profile", State: "idle"}},
+	}); err == nil {
+		t.Fatal("an active endpoint was allowed to replace its capability without proof")
+	}
+}
+
+func TestExpiredEndpointCapabilityIsNotResurrectedByHeartbeat(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	heartbeat := AdapterClientStatus{
+		State: "waiting", Ready: true, ActiveEndpoints: 1,
+		Endpoints: []AdapterEndpointStatus{{ID: 4, Profile: "profile", State: "idle"}},
+	}
+	first, err := store.RecordScopedAdapterHeartbeat("adapter", heartbeat)
+	if err != nil || len(first) != 1 {
+		t.Fatalf("first heartbeat failed: %#v %v", first, err)
+	}
+	key := adapterEndpointKey{principal: "adapter", profile: "profile", endpoint: 4}
+	store.mu.Lock()
+	record := store.endpointCaps[key]
+	record.expiresAt = time.Now().Add(-time.Second)
+	store.endpointCaps[key] = record
+	store.mu.Unlock()
+	second, err := store.RecordScopedAdapterHeartbeat("adapter", heartbeat)
+	if err != nil || len(second) != 1 {
+		t.Fatalf("second heartbeat failed: %#v %v", second, err)
+	}
+	store.mu.Lock()
+	oldValid := store.validEndpointCapabilityLocked("adapter", "profile", 4, first[0].EndpointCapability, time.Now())
+	newValid := store.validEndpointCapabilityLocked("adapter", "profile", 4, second[0].EndpointCapability, time.Now())
+	store.mu.Unlock()
+	if oldValid || !newValid {
+		t.Fatalf("expired capability resurrection: old=%v new=%v", oldValid, newValid)
+	}
+}
+
 func TestMetricsSaturateAndBoundDimensions(t *testing.T) {
 	store, err := NewStore(t.TempDir())
 	if err != nil {

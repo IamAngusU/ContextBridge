@@ -271,6 +271,7 @@ func TestCompactResponseJobDoesNotEchoAnyLargeOrSensitiveInput(t *testing.T) {
 		Model:                          "vision-model",
 		ContextBridgeSessionKey:        "cb:" + strings.Repeat("a", 64),
 		ContextBridgeAdapterEndpointID: 42,
+		ContextBridgeAdapterPrincipal:  "adapter-a",
 	}
 	response := compactResponseJob(job)
 	if response.Prompt != "" || response.Text != "" || len(response.Texts) != 0 || len(response.Documents) != 0 || response.Query != "" || response.ImageBase64 != "" {
@@ -279,7 +280,7 @@ func TestCompactResponseJobDoesNotEchoAnyLargeOrSensitiveInput(t *testing.T) {
 	if response.ID != job.ID || response.Model != job.Model || response.ImageMediaType != job.ImageMediaType {
 		t.Fatalf("compact response lost routing metadata: %#v", response)
 	}
-	if response.ContextBridgeSessionKey != "" || response.ContextBridgeAdapterEndpointID != 0 {
+	if response.ContextBridgeSessionKey != "" || response.ContextBridgeAdapterEndpointID != 0 || response.ContextBridgeAdapterPrincipal != "" {
 		t.Fatalf("compact response leaked internal adapter routing metadata: %#v", response)
 	}
 	if job.Prompt == "" || job.ImageBase64 == "" || len(job.Documents) == 0 {

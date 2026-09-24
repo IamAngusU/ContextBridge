@@ -52,11 +52,14 @@ func TestRateLimitClientKeyTrustsOnlyLoopbackProxy(t *testing.T) {
 
 func TestPublicNodeResponseRedactsAdapterSessionKeys(t *testing.T) {
 	nodes := []Node{{ID: "node-a", Capabilities: Capabilities{AdapterSessions: []AdapterSessionCapability{{
-		EndpointID: 7, Profile: "profile-one", SessionKey: "cb:" + strings.Repeat("a", 64), SessionKeySupported: true,
+		EndpointID: 7, Profile: "profile-one", Principal: "adapter-a", SessionKey: "cb:" + strings.Repeat("a", 64), SessionKeySupported: true,
 	}}}}}
 	redactNodeRoutingEvidence(nodes)
 	if nodes[0].Capabilities.AdapterSessions[0].SessionKey != "" {
 		t.Fatal("routing-only adapter session key remained in a public node response")
+	}
+	if nodes[0].Capabilities.AdapterSessions[0].Principal != "" {
+		t.Fatal("routing-only adapter principal remained in a public node response")
 	}
 	if !nodes[0].Capabilities.AdapterSessions[0].SessionKeySupported {
 		t.Fatal("redaction removed non-sensitive compatibility metadata")

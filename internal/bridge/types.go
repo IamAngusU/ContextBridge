@@ -31,6 +31,10 @@ type Job struct {
 	// use it to keep the local lease on the exact adapter endpoint whose telemetry
 	// satisfied the requested profile/model/reasoning.
 	ContextBridgeAdapterEndpointID int `json:"contextbridge_adapter_endpoint_id,omitempty"`
+	// ContextBridgeAdapterPrincipal is authenticated relay/worker routing metadata.
+	// It prevents an endpoint ID advertised by one scoped adapter identity from
+	// being claimed by another identity that happens to reuse the same number.
+	ContextBridgeAdapterPrincipal string `json:"contextbridge_adapter_principal,omitempty"`
 	// ContextBridgeEgress and ContextBridgeProviderClassification are written by
 	// the authenticated cluster worker, not trusted from the producer payload.
 	// They bind name-based admission to the endpoint resolved on this machine.
@@ -141,6 +145,7 @@ type adapterJob struct {
 	Profile         interface{} `json:"profile"`
 	Deadline        time.Time   `json:"deadline"`
 	LeaseGeneration uint64      `json:"lease_generation"`
+	LeaseCapability string      `json:"lease_capability,omitempty"`
 	LeaseExpiresAt  time.Time   `json:"lease_expires_at"`
 	ObservationOnly bool        `json:"observation_only,omitempty"`
 }

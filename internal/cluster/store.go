@@ -90,6 +90,7 @@ type reservation struct {
 type sessionPlacement struct {
 	NodeID            string    `json:"node_id"`
 	AdapterEndpointID int       `json:"adapter_endpoint_id,omitempty"`
+	AdapterPrincipal  string    `json:"adapter_principal,omitempty"`
 	UpdatedAt         time.Time `json:"updated_at"`
 }
 
@@ -1220,6 +1221,14 @@ func (s *Store) RecentSessionNode(owner, session string) (string, bool) {
 // chosen for its previous turn. Adapter endpoint identifiers are meaningful only
 // together with their worker node, so both values come from the same job.
 func (s *Store) RecentSessionPlacement(owner string, requirements Requirements) (node string, adapterEndpointID int, ok bool) {
+	node, adapterEndpointID, _, ok = s.RecentSessionPlacementBinding(owner, requirements)
+	return node, adapterEndpointID, ok
+}
+
+// RecentSessionPlacementBinding additionally returns the scoped adapter
+// identity that owned the endpoint. This prevents a later endpoint-number
+// collision from moving a durable session across adapter principals.
+func (s *Store) RecentSessionPlacementBinding(owner string, requirements Requirements) (node string, adapterEndpointID int, adapterPrincipal string, ok bool) {
 	owner = cleanLabel(owner, 120)
 	session := canonicalSessionID(requirements.SessionID)
 	key := sessionPlacementKey(owner, requirements)
@@ -1227,7 +1236,7 @@ func (s *Store) RecentSessionPlacement(owner string, requirements Requirements) 
 	if err := s.db.View(func(tx *bolt.Tx) error {
 		return getJSON(tx.Bucket(bucketSessionPlacements), key, &placement)
 	}); err == nil && placement.NodeID != "" {
-		return placement.NodeID, placement.AdapterEndpointID, true
+		return placement.NodeID, placement.AdapterEndpointID, placement.AdapterPrincipal, true
 	}
 	var selected Job
 	err := s.db.View(func(tx *bolt.Tx) error {
@@ -1248,12 +1257,12 @@ func (s *Store) RecentSessionPlacement(owner string, requirements Requirements) 
 		})
 	})
 	if err != nil || selected.AssignedNode == "" {
-		return "", 0, false
+		return "", 0, "", false
 	}
 	endpointID := selected.ExecutedAdapterEndpointID
-	placement = sessionPlacement{NodeID: selected.AssignedNode, AdapterEndpointID: endpointID, UpdatedAt: selected.UpdatedAt}
+	placement = sessionPlacement{NodeID: selected.AssignedNode, AdapterEndpointID: endpointID, AdapterPrincipal: selected.Requirements.AdapterPrincipal, UpdatedAt: selected.UpdatedAt}
 	_ = s.db.Update(func(tx *bolt.Tx) error { return putSessionPlacement(tx, key, placement) })
-	return selected.AssignedNode, endpointID, true
+	return selected.AssignedNode, endpointID, selected.Requirements.AdapterPrincipal, true
 }
 
 func canonicalSessionID(session string) string {
@@ -1569,6 +1578,7 @@ func (s *Store) AssignJobFencedWithDecision(id, nodeID string, decision RoutingD
 
 type adapterAssignment struct {
 	EndpointID      int
+	Principal       string
 	SessionRecovery bool
 }
 
@@ -1580,11 +1590,11 @@ func (s *Store) AssignAdapterJobWithDecision(id, nodeID string, endpointID int, 
 	return s.assignJob(id, nodeID, &adapterAssignment{EndpointID: endpointID, SessionRecovery: sessionRecovery}, &decision, nil)
 }
 
-func (s *Store) AssignAdapterJobFencedWithDecision(id, nodeID string, endpointID int, sessionRecovery bool, decision RoutingDecision, authority RelayAuthority) (Job, error) {
+func (s *Store) AssignAdapterJobFencedWithDecision(id, nodeID string, endpointID int, principal string, sessionRecovery bool, decision RoutingDecision, authority RelayAuthority) (Job, error) {
 	if !authority.Valid() {
 		return Job{}, errors.New("valid relay authority is required for fenced assignment")
 	}
-	return s.assignJob(id, nodeID, &adapterAssignment{EndpointID: endpointID, SessionRecovery: sessionRecovery}, &decision, &authority)
+	return s.assignJob(id, nodeID, &adapterAssignment{EndpointID: endpointID, Principal: principal, SessionRecovery: sessionRecovery}, &decision, &authority)
 }
 
 func (s *Store) assignJob(id, nodeID string, adapter *adapterAssignment, decision *RoutingDecision, authority *RelayAuthority) (Job, error) {
@@ -1616,13 +1626,14 @@ func (s *Store) assignJob(id, nodeID string, adapter *adapterAssignment, decisio
 			if adapter.EndpointID < 0 {
 				return errors.New("adapter endpoint selection is invalid")
 			}
-			if job.SealedPayload != nil && (adapter.EndpointID != job.Requirements.AdapterEndpointID || adapter.SessionRecovery != job.Requirements.AdapterSessionRecovery) {
+			if job.SealedPayload != nil && (adapter.EndpointID != job.Requirements.AdapterEndpointID || adapter.Principal != job.Requirements.AdapterPrincipal || adapter.SessionRecovery != job.Requirements.AdapterSessionRecovery) {
 				return errors.New("sealed adapter assignment cannot change authenticated endpoint requirements")
 			}
 			if adapter.EndpointID > 0 && job.Requirements.AdapterEndpointID > 0 && job.Requirements.AdapterEndpointID != adapter.EndpointID {
 				return errors.New("adapter job is bound to another endpoint")
 			}
 			job.Requirements.AdapterEndpointID = adapter.EndpointID
+			job.Requirements.AdapterPrincipal = adapter.Principal
 			job.Requirements.AdapterSessionRecovery = adapter.SessionRecovery
 		}
 		if err := acquireAdapterSessionLockTx(tx, job.OwnerSubject, job.Requirements, adapterSessionLockJob, job.ID, time.Time{}, time.Now().UTC(), adapterSessionNeedsLockTx(tx, job.Requirements, nodeID)); err != nil {
@@ -1903,7 +1914,7 @@ func (s *Store) completeJobWithFailure(id, nodeID string, attempt int, fence *As
 		if strings.EqualFold(strings.TrimSpace(job.Requirements.Provider), "adapter") {
 			if job.ExecutedAdapterEndpointID > 0 && !job.EphemeralAdapterEndpoint {
 				if err := putSessionPlacement(tx, sessionPlacementKey(job.OwnerSubject, job.Requirements), sessionPlacement{
-					NodeID: job.AssignedNode, AdapterEndpointID: job.ExecutedAdapterEndpointID, UpdatedAt: job.UpdatedAt,
+					NodeID: job.AssignedNode, AdapterEndpointID: job.ExecutedAdapterEndpointID, AdapterPrincipal: job.Requirements.AdapterPrincipal, UpdatedAt: job.UpdatedAt,
 				}); err != nil {
 					return err
 				}

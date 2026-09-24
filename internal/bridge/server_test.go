@@ -152,7 +152,7 @@ func TestInboxWatcherBoundsConcurrentFanout(t *testing.T) {
 		Routes: map[string]config.Route{
 			"default": {Provider: "adapter", TimeoutSeconds: 30},
 		},
-		Providers: config.Providers{Adapter: config.AdapterProvider{LeaseSeconds: 5}},
+		Providers: config.Providers{Adapter: config.AdapterProvider{LeaseSeconds: 5, AuthMode: "dual"}},
 	}
 	server, err := NewServer(cfg, log.New(io.Discard, "", 0))
 	if err != nil {
@@ -229,7 +229,7 @@ func TestAdapterJobRoundTrip(t *testing.T) {
 		Routes: map[string]config.Route{
 			"default": {Provider: "adapter", TimeoutSeconds: 5, AdapterProfile: "test"},
 		},
-		Providers: config.Providers{Adapter: config.AdapterProvider{LeaseSeconds: 5}},
+		Providers: config.Providers{Adapter: config.AdapterProvider{LeaseSeconds: 5, AuthMode: "dual"}},
 		AdapterProfiles: map[string]config.AdapterProfile{
 			"test": {Label: "Test adapter", Driver: "test"},
 		},
@@ -398,7 +398,7 @@ func TestAdapterNextEndpointHonorsRelaySelectedEndpoint(t *testing.T) {
 		Version:   1,
 		Server:    config.Server{Listen: "127.0.0.1:32145", Token: "test-token-that-is-long-enough"},
 		Storage:   config.Storage{Directory: t.TempDir(), Inbox: t.TempDir()},
-		Providers: config.Providers{Adapter: config.AdapterProvider{LeaseSeconds: 5}},
+		Providers: config.Providers{Adapter: config.AdapterProvider{LeaseSeconds: 5, AuthMode: "dual"}},
 	}
 	server, err := NewServer(cfg, log.New(io.Discard, "", 0))
 	if err != nil {
@@ -497,7 +497,7 @@ func TestAdapterHeartbeatAndDashboardStatus(t *testing.T) {
 		Routes: map[string]config.Route{
 			"default": {Provider: "adapter", TimeoutSeconds: 5, AdapterProfile: "test"},
 		},
-		Providers: config.Providers{Adapter: config.AdapterProvider{LeaseSeconds: 5}},
+		Providers: config.Providers{Adapter: config.AdapterProvider{LeaseSeconds: 5, AuthMode: "dual"}},
 		AdapterProfiles: map[string]config.AdapterProfile{
 			"test": {Label: "Test adapter", Driver: "test"},
 		},
@@ -551,7 +551,7 @@ func TestAdapterJSONOutputRoundTrip(t *testing.T) {
 		Routes: map[string]config.Route{
 			"default": {Provider: "adapter", TimeoutSeconds: 5},
 		},
-		Providers: config.Providers{Adapter: config.AdapterProvider{LeaseSeconds: 5}},
+		Providers: config.Providers{Adapter: config.AdapterProvider{LeaseSeconds: 5, AuthMode: "dual"}},
 	}
 	server, err := NewServer(cfg, log.New(io.Discard, "", 0))
 	if err != nil {
@@ -718,7 +718,7 @@ func TestEmbeddingAndRAGRoundTrip(t *testing.T) {
 }
 
 func TestTunnelHeartbeatAppearsInStatus(t *testing.T) {
-	cfg := config.Config{Version: 1, Server: config.Server{Listen: "127.0.0.1:32145", Token: "test-token-that-is-long-enough"}, Storage: config.Storage{Directory: t.TempDir(), Inbox: t.TempDir()}, Routes: map[string]config.Route{"default": {Provider: "adapter"}}, Providers: config.Providers{Adapter: config.AdapterProvider{LeaseSeconds: 5}}}
+	cfg := config.Config{Version: 1, Server: config.Server{Listen: "127.0.0.1:32145", Token: "test-token-that-is-long-enough"}, Storage: config.Storage{Directory: t.TempDir(), Inbox: t.TempDir()}, Routes: map[string]config.Route{"default": {Provider: "adapter"}}, Providers: config.Providers{Adapter: config.AdapterProvider{LeaseSeconds: 5, AuthMode: "dual"}}}
 	server, err := NewServer(cfg, log.New(io.Discard, "", 0))
 	if err != nil {
 		t.Fatal(err)

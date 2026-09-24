@@ -416,6 +416,9 @@ func selectReadyAdapterSession(sessions []AdapterSessionCapability, requirements
 			!strings.EqualFold(strings.TrimSpace(session.Profile), strings.TrimSpace(requirements.AdapterProfile)) {
 			continue
 		}
+		if requirements.AdapterPrincipal != "" && session.Principal != requirements.AdapterPrincipal {
+			continue
+		}
 		if session.SessionKeySupported {
 			sessionKeySupported = true
 		}
@@ -445,6 +448,9 @@ func selectReadyAdapterSession(sessions []AdapterSessionCapability, requirements
 	}
 	for _, session := range sessions {
 		state := strings.TrimSpace(session.State)
+		if requirements.AdapterPrincipal != "" && session.Principal != requirements.AdapterPrincipal {
+			continue
+		}
 		keyMatch := authoritativeSessionMatch && session.SessionKey == wantedSessionKey
 		if authoritativeSessionMatch && !keyMatch {
 			continue
@@ -512,6 +518,9 @@ func selectReadyAdapterSession(sessions []AdapterSessionCapability, requirements
 }
 
 func adapterSessionSelectionMatches(session AdapterSessionCapability, requirements Requirements, wantedModel, wantedReasoning string) bool {
+	if requirements.AdapterPrincipal != "" && session.Principal != requirements.AdapterPrincipal {
+		return false
+	}
 	if requirements.AdapterProfile != "" && !strings.EqualFold(strings.TrimSpace(session.Profile), strings.TrimSpace(requirements.AdapterProfile)) {
 		return false
 	}

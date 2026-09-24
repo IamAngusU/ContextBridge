@@ -115,6 +115,7 @@ func TestPrepareLocalPayloadRemovesUnauthenticatedAdapterRoutingHints(t *testing
 	raw, err := prepareLocalPayload([]byte(`{
 		"prompt":"hello",
 		"contextbridge_adapter_endpoint_id":999,
+		"contextbridge_adapter_principal":"forged",
 		"contextbridge_session_key":"cb:forged",
 		"metadata":{"contextbridge_new_session":true,"contextbridge_new_session_per_job":true,"contextbridge_resume_only":true,"contextbridge_baseline_text":"forged","contextbridge_baseline_response_count":0,"contextbridge_baseline_response_identity":"forged","contextbridge_baseline_text_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","contextbridge_model_fallbacks":["Adapter Model A"],"contextbridge_reasoning_fallbacks":["Sehr hoch"],"keep":"value"}
 	}`), Requirements{Task: "generation", Provider: "adapter", AdapterProfile: "profile-one"}, "local-job", "producer-a")
@@ -127,6 +128,9 @@ func TestPrepareLocalPayloadRemovesUnauthenticatedAdapterRoutingHints(t *testing
 	}
 	if _, ok := job["contextbridge_adapter_endpoint_id"]; ok {
 		t.Fatal("producer supplied adapter endpoint id survived without an authenticated requirement")
+	}
+	if _, ok := job["contextbridge_adapter_principal"]; ok {
+		t.Fatal("producer supplied adapter principal survived without an authenticated requirement")
 	}
 	var sessionKey string
 	if err := json.Unmarshal(job["contextbridge_session_key"], &sessionKey); err != nil || sessionKey == "cb:forged" {
@@ -196,7 +200,7 @@ func TestPrepareLocalPayloadSecuresProviderlessAutomaticRoute(t *testing.T) {
 
 func TestAdapterProfileRequirementOverridesPayloadClaim(t *testing.T) {
 	raw, err := prepareLocalPayload([]byte(`{"adapter_profile":"profile-two","prompt":"safe"}`), Requirements{
-		Task: "generation", Provider: "adapter", AdapterProfile: "profile-one", Reasoning: "Sehr hoch", AdapterEndpointID: 42,
+		Task: "generation", Provider: "adapter", AdapterProfile: "profile-one", Reasoning: "Sehr hoch", AdapterEndpointID: 42, AdapterPrincipal: "adapter-a",
 	}, "local-job", "producer")
 	if err != nil {
 		t.Fatal(err)
@@ -210,6 +214,9 @@ func TestAdapterProfileRequirementOverridesPayloadClaim(t *testing.T) {
 	}
 	if job["reasoning"] != "Sehr hoch" || job["contextbridge_adapter_endpoint_id"] != float64(42) {
 		t.Fatalf("relay-selected adapter controls were not carried to the local lease boundary: %#v", job)
+	}
+	if job["contextbridge_adapter_principal"] != "adapter-a" {
+		t.Fatalf("relay-selected adapter identity was not carried to the local lease boundary: %#v", job)
 	}
 }
 
@@ -297,7 +304,7 @@ func TestWorkerConsoleLabelsDoNotExposePromptOrAssumeSelectedModel(t *testing.T)
 }
 
 func TestCompactLocalSubmissionDoesNotEchoLargeInput(t *testing.T) {
-	raw := []byte(`{"job":{"id":"job-1","prompt":"private prompt","text":"private text","image_base64":"very-large-input","model":"qwen","contextbridge_session_key":"cb:private-routing-key","contextbridge_adapter_endpoint_id":42},"contextbridge_adapter_endpoint_id":42,"contextbridge_ephemeral_adapter_endpoint":true,"output":{"mode":"text","text":"answer","contextbridge_adapter_endpoint_id":42,"contextbridge_ephemeral_adapter_endpoint":true},"status":"completed"}`)
+	raw := []byte(`{"job":{"id":"job-1","prompt":"private prompt","text":"private text","image_base64":"very-large-input","model":"qwen","contextbridge_session_key":"cb:private-routing-key","contextbridge_adapter_endpoint_id":42,"contextbridge_adapter_principal":"adapter-a"},"contextbridge_adapter_endpoint_id":42,"contextbridge_adapter_principal":"adapter-a","contextbridge_ephemeral_adapter_endpoint":true,"output":{"mode":"text","text":"answer","contextbridge_adapter_endpoint_id":42,"contextbridge_ephemeral_adapter_endpoint":true},"status":"completed"}`)
 	compact, err := compactLocalSubmission(raw)
 	if err != nil {
 		t.Fatal(err)
@@ -324,6 +331,9 @@ func TestCompactLocalSubmissionDoesNotEchoLargeInput(t *testing.T) {
 	if _, ok := decoded["contextbridge_adapter_endpoint_id"]; ok {
 		t.Fatal("top-level adapter execution metadata leaked to the producer result")
 	}
+	if _, ok := decoded["contextbridge_adapter_principal"]; ok {
+		t.Fatal("top-level adapter principal leaked to the producer result")
+	}
 	var compactJob map[string]json.RawMessage
 	if err := json.Unmarshal(decoded["job"], &compactJob); err != nil {
 		t.Fatal(err)
@@ -333,6 +343,9 @@ func TestCompactLocalSubmissionDoesNotEchoLargeInput(t *testing.T) {
 	}
 	if _, ok := compactJob["contextbridge_adapter_endpoint_id"]; ok {
 		t.Fatal("internal adapter endpoint id leaked inside the producer result")
+	}
+	if _, ok := compactJob["contextbridge_adapter_principal"]; ok {
+		t.Fatal("internal adapter principal leaked inside the producer result")
 	}
 	var compactOutput map[string]json.RawMessage
 	if err := json.Unmarshal(decoded["output"], &compactOutput); err != nil {

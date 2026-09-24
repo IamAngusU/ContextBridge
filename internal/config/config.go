@@ -2,6 +2,7 @@ package config
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -163,7 +164,26 @@ type OllamaProvider struct {
 }
 
 type AdapterProvider struct {
-	LeaseSeconds int `yaml:"lease_seconds"`
+	LeaseSeconds int                         `yaml:"lease_seconds" json:"lease_seconds"`
+	AuthMode     string                      `yaml:"auth_mode,omitempty" json:"auth_mode,omitempty"`
+	Principals   map[string]AdapterPrincipal `yaml:"principals,omitempty" json:"principals,omitempty"`
+}
+
+// AdapterPrincipal is a least-privilege identity for one out-of-tree adapter
+// process. Its credential is deliberately independent of server.token, which
+// remains the operator credential.
+type AdapterPrincipal struct {
+	Token           string   `yaml:"token,omitempty" json:"-"`
+	TokenFile       string   `yaml:"token_file,omitempty" json:"-"`
+	ResolvedToken   string   `yaml:"-" json:"-"`
+	AllowedProfiles []string `yaml:"allowed_profiles" json:"allowed_profiles"`
+}
+
+func (p AdapterPrincipal) EffectiveToken() string {
+	if p.ResolvedToken != "" {
+		return p.ResolvedToken
+	}
+	return p.Token
 }
 
 type AdapterProfile struct {
@@ -272,6 +292,9 @@ func Load(path string) (Config, error) {
 	if err := resolveEngineSecretFiles(&cfg, filepath.Dir(path)); err != nil {
 		return Config{}, err
 	}
+	if err := resolveAdapterSecretFiles(&cfg, filepath.Dir(path)); err != nil {
+		return Config{}, err
+	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -351,6 +374,45 @@ func resolveEngineSecretFiles(cfg *Config, configDirectory string) error {
 		}
 		engine.ResolvedAPIKey = secret
 		cfg.Engines[name] = engine
+	}
+	return nil
+}
+
+func resolveAdapterSecretFiles(cfg *Config, configDirectory string) error {
+	for id, principal := range cfg.Providers.Adapter.Principals {
+		if strings.TrimSpace(principal.Token) != "" && strings.TrimSpace(principal.TokenFile) != "" {
+			return fmt.Errorf("adapter principal %s must set only one of token or token_file", id)
+		}
+		if strings.TrimSpace(principal.TokenFile) == "" {
+			continue
+		}
+		secretPath := filepath.Clean(principal.TokenFile)
+		if !filepath.IsAbs(secretPath) {
+			secretPath = filepath.Join(configDirectory, secretPath)
+		}
+		info, err := os.Lstat(secretPath)
+		if err != nil {
+			return fmt.Errorf("adapter principal %s token_file: %w", id, err)
+		}
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("adapter principal %s token_file must be a regular non-symlink file", id)
+		}
+		if info.Size() <= 0 || info.Size() > maximumProviderSecretBytes {
+			return fmt.Errorf("adapter principal %s token_file must contain 1 to %d bytes", id, maximumProviderSecretBytes)
+		}
+		if runtime.GOOS != "windows" && info.Mode().Perm()&0077 != 0 {
+			return fmt.Errorf("adapter principal %s token_file permissions must deny group and other access", id)
+		}
+		raw, err := os.ReadFile(secretPath)
+		if err != nil {
+			return fmt.Errorf("adapter principal %s token_file: %w", id, err)
+		}
+		secret := strings.TrimSpace(string(raw))
+		if secret == "" || strings.ContainsAny(secret, "\x00\r\n") {
+			return fmt.Errorf("adapter principal %s token_file must contain exactly one non-empty secret line", id)
+		}
+		principal.ResolvedToken = secret
+		cfg.Providers.Adapter.Principals[id] = principal
 	}
 	return nil
 }
@@ -614,6 +676,9 @@ func (c Config) Validate() error {
 	if c.Providers.Adapter.LeaseSeconds < 0 || c.Providers.Adapter.LeaseSeconds > 3600 {
 		return errors.New("providers.adapter.lease_seconds must be between 1 and 3600 when set")
 	}
+	if err := c.validateAdapterAuthentication(); err != nil {
+		return err
+	}
 	if c.Tunnel.LocalPort < 0 || c.Tunnel.LocalPort > 65535 || c.Tunnel.RemotePort < 0 || c.Tunnel.RemotePort > 65535 {
 		return errors.New("tunnel ports must be between 1 and 65535 when set")
 	}
@@ -734,6 +799,65 @@ func (c Config) Validate() error {
 			}
 			if step.MaxIterations < 0 || step.MaxIterations > globalIterations {
 				return fmt.Errorf("pipeline %s step %s max_iterations exceeds the pipeline limit", name, step.Name)
+			}
+		}
+	}
+	return nil
+}
+
+func (c Config) validateAdapterAuthentication() error {
+	mode := strings.ToLower(strings.TrimSpace(c.Providers.Adapter.AuthMode))
+	if mode == "" {
+		mode = "scoped"
+	}
+	if mode != "scoped" && mode != "dual" {
+		return errors.New("providers.adapter.auth_mode must be scoped or dual")
+	}
+	if len(c.Providers.Adapter.Principals) > 32 {
+		return errors.New("providers.adapter.principals accepts at most 32 identities")
+	}
+	seenTokens := map[[32]byte]string{}
+	coveredProfiles := map[string]bool{}
+	for id, principal := range c.Providers.Adapter.Principals {
+		if len(id) > 80 || !safeNamePattern.MatchString(id) || strings.Contains(id, "..") {
+			return fmt.Errorf("invalid adapter principal ID %s", id)
+		}
+		token := strings.TrimSpace(principal.EffectiveToken())
+		if len(token) < 32 || strings.Contains(token, "change-me") || strings.Contains(token, "${") {
+			return fmt.Errorf("adapter principal %s requires an independent token of at least 32 characters", id)
+		}
+		if token == c.Server.Token {
+			return fmt.Errorf("adapter principal %s must not reuse server.token", id)
+		}
+		digest := sha256.Sum256([]byte(token))
+		if previous, exists := seenTokens[digest]; exists {
+			return fmt.Errorf("adapter principals %s and %s must not share a token", previous, id)
+		}
+		seenTokens[digest] = id
+		if len(principal.AllowedProfiles) == 0 || len(principal.AllowedProfiles) > 32 {
+			return fmt.Errorf("adapter principal %s must allow between 1 and 32 profiles", id)
+		}
+		seenProfiles := map[string]bool{}
+		for _, profile := range principal.AllowedProfiles {
+			profile = strings.TrimSpace(profile)
+			if _, exists := c.AdapterProfiles[profile]; !exists {
+				return fmt.Errorf("adapter principal %s references unknown profile %s", id, profile)
+			}
+			if seenProfiles[profile] {
+				return fmt.Errorf("adapter principal %s repeats profile %s", id, profile)
+			}
+			seenProfiles[profile] = true
+			coveredProfiles[profile] = true
+		}
+	}
+	if mode == "scoped" {
+		for routeName, route := range c.Routes {
+			usesAdapter := strings.EqualFold(route.Provider, "adapter") || containsFoldConfig(route.Fallback, "adapter")
+			if usesAdapter && strings.TrimSpace(route.AdapterProfile) == "" {
+				return fmt.Errorf("route %s requires adapter_profile when providers.adapter.auth_mode is scoped", routeName)
+			}
+			if usesAdapter && !coveredProfiles[route.AdapterProfile] {
+				return fmt.Errorf("route %s adapter profile %s has no scoped adapter principal", routeName, route.AdapterProfile)
 			}
 		}
 	}
@@ -989,6 +1113,9 @@ func applyDefaults(cfg *Config, base string) {
 	}
 	if cfg.Providers.Adapter.LeaseSeconds == 0 {
 		cfg.Providers.Adapter.LeaseSeconds = 90
+	}
+	if cfg.Providers.Adapter.AuthMode == "" {
+		cfg.Providers.Adapter.AuthMode = "scoped"
 	}
 	cfg.Updates.ApplyDefaults()
 	for name, route := range cfg.Routes {
@@ -1261,6 +1388,8 @@ providers:
     timeout_seconds: 45
   adapter:
     lease_seconds: 90
+    auth_mode: scoped # adapter credentials never reuse the operator token
+    principals: {}
 
 engines:
   nuextract:
