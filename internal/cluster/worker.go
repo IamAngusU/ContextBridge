@@ -181,8 +181,12 @@ func LoadWorker(cfg WorkerConfig) (*Worker, error) {
 	if cfg.MaxConcurrent == 0 {
 		cfg.MaxConcurrent = 1
 	}
+	cfg.LocalURL = strings.TrimSpace(cfg.LocalURL)
 	if cfg.LocalURL == "" {
 		cfg.LocalURL = "http://127.0.0.1:32145"
+	}
+	if err := ValidateLocalWorkerURL(cfg.LocalURL); err != nil {
+		return nil, fmt.Errorf("worker local URL: %w", err)
 	}
 	if cfg.HeartbeatEvery < 0 || cfg.HeartbeatEvery > maximumWorkerHeartbeat {
 		return nil, fmt.Errorf("worker heartbeat must be between 1 second and %s when set", maximumWorkerHeartbeat)
@@ -512,9 +516,12 @@ func (w *Worker) connect(ctx context.Context, report WorkerReporter) error {
 			errorText := ""
 			failureCode := ""
 			if runErr != nil {
-				errorText = runErr.Error()
-				failureCode = workerFailureCode(runErr)
-				report(WorkerEvent{Kind: WorkerJobFailed, NodeName: node.Name, JobID: job.ID, Task: job.Requirements.Task, Error: errorText})
+				localError := runErr.Error()
+				errorText, failureCode = relayVisibleWorkerFailure(job, runErr)
+				// The local operator boundary may retain the actionable runtime
+				// diagnostic. For a sealed job, only bounded metadata crosses the
+				// worker-to-relay protocol below.
+				report(WorkerEvent{Kind: WorkerJobFailed, NodeName: node.Name, JobID: job.ID, Task: job.Requirements.Task, Error: localError})
 			} else {
 				reportedProvider, reportedModel, reportedReasoning := localResultSelection(result)
 				report(WorkerEvent{Kind: WorkerJobCompleted, NodeName: node.Name, JobID: job.ID, Task: job.Requirements.Task, ComputeMS: usage.ComputeMS, ReportedProvider: reportedProvider, ReportedModel: reportedModel, ReportedReasoning: reportedReasoning})
@@ -1401,6 +1408,40 @@ func ValidateRelayURL(value string) error {
 	default:
 		return errors.New("relay URL must use HTTPS or loopback HTTP")
 	}
+}
+
+// ValidateLocalWorkerURL keeps the local service credential on the worker.
+// Both HTTP and HTTPS are accepted on loopback, but a remote host is rejected
+// regardless of scheme: remote execution belongs behind the authenticated
+// relay boundary, not behind the worker's local bearer token.
+func ValidateLocalWorkerURL(value string) error {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || parsed.Host == "" || parsed.Hostname() == "" {
+		return errors.New("local URL must be absolute")
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("local URL must not contain credentials, a query, or a fragment")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return errors.New("local URL must use loopback HTTP or HTTPS")
+	}
+	host := parsed.Hostname()
+	address := net.ParseIP(host)
+	if !strings.EqualFold(host, "localhost") && (address == nil || !address.IsLoopback()) {
+		return errors.New("local URL must use a loopback host")
+	}
+	return nil
+}
+
+func relayVisibleWorkerFailure(job Job, runErr error) (string, string) {
+	if runErr == nil {
+		return "", ""
+	}
+	failureCode := workerFailureCode(runErr)
+	if job.SealedPayload != nil {
+		return sealedJobFailureMessage(failureCode), failureCode
+	}
+	return runErr.Error(), failureCode
 }
 
 func readBoundedRegularFile(path string, maximum int64) ([]byte, error) {

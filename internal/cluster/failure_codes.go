@@ -104,3 +104,10 @@ func failureCodeFromText(message string) string {
 		return FailureWorkerExecution
 	}
 }
+
+func sealedJobFailureMessage(failureCode string) string {
+	if _, ok := stableFailureCodes[failureCode]; !ok {
+		failureCode = FailureWorkerExecution
+	}
+	return "sealed job failed: " + failureCode
+}

@@ -158,6 +158,25 @@ func TestRejectsRelayJobLimitAboveSupportedMaximum(t *testing.T) {
 	}
 }
 
+func TestConfigRejectsRemoteWorkerLocalURL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := Default(path); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Cluster.Worker.LocalURL = "https://worker.example.com:32145"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "cluster.worker.local_url") {
+		t.Fatalf("remote worker local URL returned %v", err)
+	}
+	cfg.Cluster.Worker.LocalURL = "http://[::1]:32145"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("loopback worker local URL was rejected: %v", err)
+	}
+}
+
 func TestRejectsPublicListen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yml")
 	raw := []byte("version: 1\nserver:\n  listen: 0.0.0.0:32145\n  token: strong-token-value\nroutes:\n  default:\n    provider: ollama\n")

@@ -1,7 +1,10 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -32,6 +35,57 @@ func TestValidateRelayURLRejectsDisguisedRemoteHTTP(t *testing.T) {
 		if err := ValidateRelayURL(value); err != nil {
 			t.Fatalf("safe relay URL %q rejected: %v", value, err)
 		}
+	}
+}
+
+func TestValidateLocalWorkerURLKeepsLocalTokenOnLoopback(t *testing.T) {
+	for _, value := range []string{
+		"http://localhost:32145@evil.example",
+		"http://127.0.0.1:32145@evil.example",
+		"http://localhost.evil.example:32145",
+		"http://192.0.2.10:32145",
+		"http://[2001:db8::10]:32145",
+		"https://worker.example.com:32145",
+		"http://user:secret@localhost:32145",
+		"http://localhost:32145?token=secret",
+		"http://localhost:32145/#fragment",
+		"file:///tmp/contextbridge.sock",
+	} {
+		if err := ValidateLocalWorkerURL(value); err == nil {
+			t.Fatalf("unsafe local worker URL %q was accepted", value)
+		}
+	}
+	for _, value := range []string{
+		"http://localhost:32145",
+		"http://127.0.0.1:32145",
+		"http://127.1.2.3:32145/base",
+		"http://[::1]:32145",
+		"https://localhost:32145/contextbridge",
+	} {
+		if err := ValidateLocalWorkerURL(value); err != nil {
+			t.Fatalf("safe local worker URL %q rejected: %v", value, err)
+		}
+	}
+}
+
+func TestSealedWorkerFailureExposesOnlyStableRelayMetadata(t *testing.T) {
+	const secret = "DECRYPTED-PROMPT-MARKER-9f3d"
+	job := Job{SealedPayload: &SealedEnvelope{Algorithm: sealedAlgorithm}}
+	errorText, failureCode := relayVisibleWorkerFailure(job, errors.New(FailureAdapterTimeout+": provider echoed "+secret))
+	wire, err := json.Marshal(WireMessage{Type: "result", JobID: "job-sealed", Attempt: 1, Error: errorText, FailureCode: failureCode})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(wire, []byte(secret)) || strings.Contains(errorText, secret) {
+		t.Fatalf("sealed failure leaked provider detail: %s", wire)
+	}
+	if failureCode != FailureAdapterTimeout || errorText != sealedJobFailureMessage(FailureAdapterTimeout) {
+		t.Fatalf("sealed failure lost bounded classification: error=%q code=%q", errorText, failureCode)
+	}
+
+	plainError, plainCode := relayVisibleWorkerFailure(Job{}, errors.New(FailureAdapterTimeout+": actionable local detail"))
+	if plainCode != FailureAdapterTimeout || !strings.Contains(plainError, "actionable local detail") {
+		t.Fatalf("plaintext diagnostics changed: error=%q code=%q", plainError, plainCode)
 	}
 }
 
@@ -100,6 +154,7 @@ func TestLoadWorkerRejectsUnsafeDirectNumericConfiguration(t *testing.T) {
 		"excess concurrency":   {RelayURL: "http://127.0.0.1:32150", IdentityFile: identityFile, MaxConcurrent: MaximumWorkerConcurrency + 1},
 		"negative heartbeat":   {RelayURL: "http://127.0.0.1:32150", IdentityFile: identityFile, HeartbeatEvery: -time.Second},
 		"excess timeout":       {RelayURL: "http://127.0.0.1:32150", IdentityFile: identityFile, RequestTimeout: maximumWorkerHTTPTimeout + time.Second},
+		"remote local URL":     {RelayURL: "http://127.0.0.1:32150", IdentityFile: identityFile, LocalURL: "http://192.0.2.10:32145"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := LoadWorker(cfg); err == nil {

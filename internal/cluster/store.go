@@ -1570,6 +1570,13 @@ func (s *Store) CompleteJobWithFailure(id, nodeID string, attempt int, result js
 		if attempt <= 0 || job.Attempt != attempt {
 			return errors.New("job result belongs to a stale assignment attempt")
 		}
+		// Treat the worker as a protocol peer, not as the E2EE trust boundary.
+		// Even an old or modified worker must not persist provider-controlled
+		// plaintext diagnostics for a sealed job at the relay.
+		if job.SealedPayload != nil && strings.TrimSpace(jobError) != "" {
+			failureCode = normalizedWorkerFailureCode(failureCode, jobError)
+			jobError = sealedJobFailureMessage(failureCode)
+		}
 		completionError := validateWorkerResult(job, result, sealed, jobError)
 		var executedAdapterEndpointID int
 		if len(execution) == 1 && execution[0] != nil && execution[0].AdapterEndpointID != 0 {

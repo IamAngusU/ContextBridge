@@ -650,6 +650,11 @@ func (c Config) Validate() error {
 			return fmt.Errorf("cluster.worker.relay_url: %w", err)
 		}
 	}
+	if strings.TrimSpace(c.Cluster.Worker.LocalURL) != "" {
+		if err := cluster.ValidateLocalWorkerURL(c.Cluster.Worker.LocalURL); err != nil {
+			return fmt.Errorf("cluster.worker.local_url: %w", err)
+		}
+	}
 	if c.Cluster.Worker.HeartbeatSeconds < 0 || c.Cluster.Worker.HeartbeatSeconds > 300 {
 		return errors.New("cluster.worker.heartbeat_seconds must be between 1 and 300 when set")
 	}

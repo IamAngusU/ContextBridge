@@ -807,6 +807,40 @@ func TestCompleteJobIsBoundToAssignedWorkerAndNeverRetriesAnError(t *testing.T) 
 	}
 }
 
+func TestCompleteSealedJobDoesNotPersistWorkerErrorDetail(t *testing.T) {
+	const secret = "DECRYPTED-PROMPT-MARKER-9f3d"
+	store, err := OpenStore(filepath.Join(t.TempDir(), "cluster.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	job, err := store.CreateJob(SubmitRequest{
+		Requirements: Requirements{Task: "generation"},
+		Sealed:       &SealedEnvelope{Algorithm: sealedAlgorithm},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err = store.AssignJob(job.ID, "assigned-node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err = store.CompleteJobWithFailure(job.ID, "assigned-node", job.Attempt, nil, nil, Usage{}, FailureAdapterTimeout+": provider echoed "+secret, "invented-worker-code")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte(secret)) || strings.Contains(job.Error, secret) {
+		t.Fatalf("sealed failure detail reached durable relay state: %s", raw)
+	}
+	if job.Status != JobFailed || job.FailureCode != FailureAdapterTimeout || job.Error != sealedJobFailureMessage(FailureAdapterTimeout) {
+		t.Fatalf("sealed failure lost stable metadata: %#v", job)
+	}
+}
+
 func TestCompleteJobRejectsStaleAttemptFromSameWorker(t *testing.T) {
 	store, err := OpenStore(filepath.Join(t.TempDir(), "cluster.db"))
 	if err != nil {
