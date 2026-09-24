@@ -62,6 +62,13 @@ const (
 	maximumWorkerHeartbeatBytes   = 4 << 20
 	maximumWorkerProgressBytes    = 1 << 20
 	maximumWorkerControlBytes     = 64 << 10
+	maximumJobHistoryPage         = 200
+	jobHistoryWriteTimeout        = 10 * time.Second
+	maximumWorkerReconnects       = 12
+	workerReconnectWindow         = time.Minute
+	maximumHeartbeatBurst         = 1000
+	maximumHeartbeatWindowBytes   = 32 << 20
+	workerHeartbeatWindow         = 10 * time.Second
 )
 
 type Relay struct {
@@ -74,6 +81,9 @@ type Relay struct {
 	rateMu          sync.Mutex
 	rate            map[string]*rateWindow
 	rateLastSweep   time.Time
+	workerRateMu    sync.Mutex
+	workerRate      map[string]*rateWindow
+	workerRateSweep time.Time
 	wake            chan struct{}
 	maintenanceMu   sync.Mutex
 	nextMaintenance time.Time
@@ -87,6 +97,11 @@ type Relay struct {
 	pipelineWG      sync.WaitGroup
 	admissionMu     sync.RWMutex
 	quiescing       bool
+}
+
+type heartbeatRateWindow struct {
+	rateWindow
+	bytes int64
 }
 
 func (r *Relay) Idle() bool {
@@ -378,7 +393,7 @@ func NewRelay(cfg RelayConfig, logger *log.Logger) (*Relay, error) {
 	if logger == nil {
 		logger = log.Default()
 	}
-	return &Relay{cfg: cfg, store: store, authority: authority, logger: logger, workers: map[string]*workerConnection{}, rate: map[string]*rateWindow{}, wake: make(chan struct{}, 1), nextRetention: now.Add(cfg.RetentionSweep), lastOwner: map[int]string{}}, nil
+	return &Relay{cfg: cfg, store: store, authority: authority, logger: logger, workers: map[string]*workerConnection{}, rate: map[string]*rateWindow{}, workerRate: map[string]*rateWindow{}, wake: make(chan struct{}, 1), nextRetention: now.Add(cfg.RetentionSweep), lastOwner: map[int]string{}}, nil
 }
 
 func applyRetentionDefaults(cfg *RelayConfig) error {
@@ -695,18 +710,25 @@ func (r *Relay) handleEvents(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Relay) handleJobs(w http.ResponseWriter, req *http.Request) {
-	limit := queryLimit(req, 100, 1000)
+	limit := queryLimit(req, 100, maximumJobHistoryPage)
 	status := cleanLabel(req.URL.Query().Get("status"), 20)
 	record, _ := tokenRecord(req.Context())
 	owner := ""
 	if record.Role == "producer" {
 		owner = record.Subject
 	}
-	jobs, err := r.store.ListJobsForOwner(limit, status, owner)
+	jobs, err := r.store.ListJobSummariesForOwner(limit, status, owner)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	// History is an index, not a bulk artifact endpoint. A list response never
+	// repeats request/result bodies or per-node candidate arrays; callers fetch
+	// one exact job when they need its retained result.
+	for index := range jobs {
+		jobs[index] = jobHistoryResponse(jobs[index])
+	}
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(jobHistoryWriteTimeout))
 	writeJSON(w, http.StatusOK, jobs)
 }
 
@@ -1007,6 +1029,25 @@ func jobResponse(job Job, compact bool) Job {
 	return job
 }
 
+func jobHistoryResponse(job Job) Job {
+	job.Payload = nil
+	job.SealedPayload = nil
+	job.Result = nil
+	job.SealedResult = nil
+	if job.Progress != nil {
+		progress := *job.Progress
+		progress.Text = ""
+		progress.Detail = ""
+		job.Progress = &progress
+	}
+	if job.RoutingDecision != nil {
+		decision := *job.RoutingDecision
+		decision.Candidates = nil
+		job.RoutingDecision = &decision
+	}
+	return job
+}
+
 func (r *Relay) handleReserve(w http.ResponseWriter, req *http.Request) {
 	var input AssignmentRequest
 	if err := decodeJSON(req.Body, &input, 64<<10); err != nil {
@@ -1134,6 +1175,16 @@ func (r *Relay) handleWorker(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusUnauthorized, errors.New("node token required"))
 		return
 	}
+	allowed, capacity := r.allowWorkerReconnect(record.Subject)
+	if !allowed {
+		w.Header().Set("Retry-After", fmt.Sprint(int(workerReconnectWindow.Seconds())))
+		message := "worker reconnect rate limit exceeded"
+		if capacity {
+			message = "worker reconnect limiter is at capacity"
+		}
+		writeError(w, http.StatusTooManyRequests, errors.New(message))
+		return
+	}
 	options := &websocket.AcceptOptions{OriginPatterns: r.cfg.AllowedOrigins}
 	conn, err := websocket.Accept(w, req, options)
 	if err != nil {
@@ -1205,6 +1256,7 @@ func (r *Relay) handleWorker(w http.ResponseWriter, req *http.Request) {
 	}
 	_ = r.store.AddEvent(Event{Kind: "node.online", Message: node.Name + " connected", NodeID: node.ID})
 	r.signalDispatch()
+	heartbeats := heartbeatRateWindow{rateWindow: rateWindow{started: time.Now()}}
 	for {
 		_, raw, err = conn.Read(ctx)
 		if err != nil {
@@ -1227,6 +1279,11 @@ func (r *Relay) handleWorker(w http.ResponseWriter, req *http.Request) {
 		}
 		switch message.Type {
 		case "heartbeat":
+			now := time.Now()
+			if !allowHeartbeatWindow(&heartbeats, len(raw), now) {
+				conn.Close(websocket.StatusPolicyViolation, "worker heartbeat rate limit exceeded")
+				return
+			}
 			if message.Capabilities != nil {
 				node.Capabilities = *message.Capabilities
 				scopeNodeCapabilities(&node.Capabilities, record)
@@ -1239,7 +1296,7 @@ func (r *Relay) handleWorker(w http.ResponseWriter, req *http.Request) {
 			}
 			node.Connected = true
 			node.State = "online"
-			node.LastSeen = time.Now().UTC()
+			node.LastSeen = now.UTC()
 			if !node.Capabilities.ClockTime.IsZero() {
 				node.ClockOffsetMS = node.Capabilities.ClockTime.Sub(node.LastSeen).Milliseconds()
 			}
@@ -1958,49 +2015,92 @@ func (r *Relay) authorize(roles ...string) func(http.HandlerFunc) http.HandlerFu
 
 func (r *Relay) rateLimit(max int, window time.Duration, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
-		host := rateLimitClientKey(req)
-		now := time.Now()
-		r.rateMu.Lock()
-		entry := r.rate[host]
-		if entry != nil && now.Sub(entry.started) >= window {
-			delete(r.rate, host)
-			entry = nil
-		}
-		sweepEvery := window
-		if sweepEvery > time.Minute {
-			sweepEvery = time.Minute
-		}
-		if sweepEvery <= 0 {
-			sweepEvery = time.Second
-		}
-		if r.rateLastSweep.IsZero() || now.Sub(r.rateLastSweep) >= sweepEvery {
-			for key, value := range r.rate {
-				if now.Sub(value.started) >= window {
-					delete(r.rate, key)
-				}
-			}
-			r.rateLastSweep = now
-		}
-		if entry == nil && len(r.rate) >= maximumRateLimitBuckets {
-			r.rateMu.Unlock()
-			w.Header().Set("Retry-After", fmt.Sprint(int(window.Seconds())))
-			writeError(w, http.StatusTooManyRequests, errors.New("rate limiter is at capacity"))
-			return
-		}
-		if entry == nil {
-			entry = &rateWindow{started: now}
-			r.rate[host] = entry
-		}
-		entry.count++
-		allowed := entry.count <= max
-		r.rateMu.Unlock()
+		allowed, capacity := r.allowRate("client:"+rateLimitClientKey(req), max, window)
 		if !allowed {
 			w.Header().Set("Retry-After", fmt.Sprint(int(window.Seconds())))
-			writeError(w, http.StatusTooManyRequests, errors.New("rate limit exceeded"))
+			message := "rate limit exceeded"
+			if capacity {
+				message = "rate limiter is at capacity"
+			}
+			writeError(w, http.StatusTooManyRequests, errors.New(message))
 			return
 		}
 		next(w, req)
 	}
+}
+
+func (r *Relay) allowRate(key string, max int, window time.Duration) (allowed, capacity bool) {
+	now := time.Now()
+	r.rateMu.Lock()
+	defer r.rateMu.Unlock()
+	entry := r.rate[key]
+	if entry != nil && now.Sub(entry.started) >= window {
+		delete(r.rate, key)
+		entry = nil
+	}
+	sweepEvery := min(window, time.Minute)
+	if sweepEvery <= 0 {
+		sweepEvery = time.Second
+	}
+	if r.rateLastSweep.IsZero() || now.Sub(r.rateLastSweep) >= sweepEvery {
+		for savedKey, value := range r.rate {
+			if now.Sub(value.started) >= window {
+				delete(r.rate, savedKey)
+			}
+		}
+		r.rateLastSweep = now
+	}
+	if entry == nil && len(r.rate) >= maximumRateLimitBuckets {
+		return false, true
+	}
+	if entry == nil {
+		entry = &rateWindow{started: now}
+		r.rate[key] = entry
+	}
+	entry.count++
+	return entry.count <= max, false
+}
+
+func (r *Relay) allowWorkerReconnect(nodeID string) (allowed, capacity bool) {
+	now := time.Now()
+	r.workerRateMu.Lock()
+	defer r.workerRateMu.Unlock()
+	entry := r.workerRate[nodeID]
+	if entry != nil && now.Sub(entry.started) >= workerReconnectWindow {
+		delete(r.workerRate, nodeID)
+		entry = nil
+	}
+	if r.workerRateSweep.IsZero() || now.Sub(r.workerRateSweep) >= workerReconnectWindow {
+		for savedNode, value := range r.workerRate {
+			if now.Sub(value.started) >= workerReconnectWindow {
+				delete(r.workerRate, savedNode)
+			}
+		}
+		r.workerRateSweep = now
+	}
+	if entry == nil && len(r.workerRate) >= maximumRateLimitBuckets {
+		return false, true
+	}
+	if entry == nil {
+		entry = &rateWindow{started: now}
+		r.workerRate[nodeID] = entry
+	}
+	entry.count++
+	return entry.count <= maximumWorkerReconnects, false
+}
+
+func allowHeartbeatWindow(window *heartbeatRateWindow, size int, now time.Time) bool {
+	if window.started.IsZero() || now.Sub(window.started) >= workerHeartbeatWindow {
+		window.started = now
+		window.count = 0
+		window.bytes = 0
+	}
+	if size < 0 || int64(size) > maximumHeartbeatWindowBytes-window.bytes {
+		return false
+	}
+	window.count++
+	window.bytes += int64(size)
+	return window.count <= maximumHeartbeatBurst
 }
 
 func rateLimitClientKey(req *http.Request) string {

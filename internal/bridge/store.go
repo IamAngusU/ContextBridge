@@ -20,20 +20,33 @@ import (
 const adapterHeartbeatGracePeriod = 90 * time.Second
 
 const (
-	maximumMetricsFileBytes = 8 << 20
-	maximumMetricDimensions = 1024
-	maximumMetricKeyBytes   = 256
+	maximumMetricsFileBytes   = 8 << 20
+	maximumMetricDimensions   = 1024
+	maximumMetricKeyBytes     = 256
+	maximumRecentCompletions  = 4096
+	localHistoryPruneInterval = 5 * time.Minute
 )
 
 type Store struct {
-	dir       string
-	mu        sync.Mutex
-	queued    map[string]*queuedJob
-	completed map[string]Output
-	adapter   AdapterClientStatus
-	tunnel    TunnelStatus
-	activity  []Activity
-	metrics   Metrics
+	dir              string
+	mu               sync.Mutex
+	historyMu        sync.Mutex
+	queued           map[string]*queuedJob
+	completed        map[string]struct{}
+	completedOrder   []string
+	completedTotal   int
+	adapter          AdapterClientStatus
+	tunnel           TunnelStatus
+	activity         []Activity
+	metrics          Metrics
+	retention        localHistoryRetention
+	nextHistoryPrune time.Time
+}
+
+type localHistoryRetention struct {
+	maxAge     time.Duration
+	maxRecords int
+	maxBytes   int64
 }
 
 type TunnelStatus struct {
@@ -171,13 +184,14 @@ func NewStore(dir string) (*Store, error) {
 	store := &Store{
 		dir:       dir,
 		queued:    map[string]*queuedJob{},
-		completed: map[string]Output{},
+		completed: map[string]struct{}{},
 		metrics: Metrics{
 			ByRoute: map[string]uint64{}, ByTask: map[string]uint64{}, ByProvider: map[string]uint64{},
 			ByModel: map[string]uint64{}, ByFlag: map[string]uint64{}, ProviderLatency: map[string]uint64{}, ProviderSamples: map[string]uint64{}, ProviderFailures: map[string]uint64{},
 			ByAttemptedProvider: map[string]uint64{}, AttemptedProviderFailures: map[string]uint64{}, ByAttemptedModel: map[string]uint64{}, ByReasoning: map[string]uint64{}, ReasoningFailures: map[string]uint64{}, ModelFailures: map[string]uint64{}, BySelection: map[string]uint64{}, SelectionFailures: map[string]uint64{},
 		},
 	}
+	store.retention = localHistoryRetention{maxAge: 30 * 24 * time.Hour, maxRecords: 1000, maxBytes: 4 << 30}
 	raw, _ := readMetricsFile(filepath.Join(dir, "metrics.json"))
 	if len(raw) > 0 {
 		_ = json.Unmarshal(raw, &store.metrics)
@@ -186,12 +200,32 @@ func NewStore(dir string) (*Store, error) {
 	return store, nil
 }
 
+func (s *Store) ConfigureHistoryRetention(maxAge time.Duration, maxRecords int, maxBytes int64) error {
+	if maxAge == 0 {
+		maxAge = 30 * 24 * time.Hour
+	}
+	if maxRecords == 0 {
+		maxRecords = 1000
+	}
+	if maxBytes == 0 {
+		maxBytes = 4 << 30
+	}
+	if maxAge < 24*time.Hour || maxAge > 3650*24*time.Hour || maxRecords < 1 || maxRecords > 1_000_000 || maxBytes < 64<<20 || maxBytes > 1<<50 {
+		return errors.New("local job history retention is outside its safe bounds")
+	}
+	s.historyMu.Lock()
+	s.retention = localHistoryRetention{maxAge: maxAge, maxRecords: maxRecords, maxBytes: maxBytes}
+	s.nextHistoryPrune = time.Time{}
+	s.historyMu.Unlock()
+	return s.pruneJobHistory(time.Now().UTC())
+}
+
 func (s *Store) SaveJob(job Job) error {
 	raw, err := json.MarshalIndent(job, "", "  ")
 	if err != nil {
 		return err
 	}
-	file, err := os.OpenFile(filepath.Join(s.dir, "jobs", storageID(job.ID)+".json"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	file, err := os.OpenFile(filepath.Join(s.dir, "jobs", jobStorageStem(job.ID)+".job.json"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		return err
 	}
@@ -210,13 +244,104 @@ func (s *Store) SaveOutput(id string, output Output) error {
 		return err
 	}
 	// #nosec G703 -- storageID returns a validated safe ID or a fixed-length SHA-256-derived name.
-	return os.WriteFile(filepath.Join(s.dir, "jobs", storageID(id)+".result.json"), append(raw, '\n'), 0600)
+	if err := os.WriteFile(filepath.Join(s.dir, "jobs", jobStorageStem(id)+".result.json"), append(raw, '\n'), 0600); err != nil {
+		return err
+	}
+	return s.maybePruneJobHistory(time.Now().UTC())
+}
+
+type localHistoryRecord struct {
+	jobPath    string
+	resultPath string
+	updated    time.Time
+	bytes      int64
+	complete   bool
+}
+
+func (s *Store) maybePruneJobHistory(now time.Time) error {
+	s.historyMu.Lock()
+	due := !now.Before(s.nextHistoryPrune)
+	s.historyMu.Unlock()
+	if !due {
+		return nil
+	}
+	return s.pruneJobHistory(now)
+}
+
+func (s *Store) pruneJobHistory(now time.Time) error {
+	s.historyMu.Lock()
+	defer s.historyMu.Unlock()
+	directory := filepath.Join(s.dir, "jobs")
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return err
+	}
+	records := map[string]*localHistoryRecord{}
+	for _, entry := range entries {
+		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, "record-") {
+			continue
+		}
+		result := strings.HasSuffix(name, ".result.json")
+		jobFile := strings.HasSuffix(name, ".job.json")
+		if !result && !jobFile {
+			continue
+		}
+		base := strings.TrimSuffix(strings.TrimSuffix(name, ".result.json"), ".job.json")
+		info, infoErr := entry.Info()
+		if infoErr != nil || !info.Mode().IsRegular() || info.Size() < 0 {
+			continue
+		}
+		record := records[base]
+		if record == nil {
+			record = &localHistoryRecord{}
+			records[base] = record
+		}
+		path := filepath.Join(directory, name)
+		if result {
+			record.resultPath = path
+			record.complete = true
+		} else {
+			record.jobPath = path
+		}
+		record.bytes += info.Size()
+		if info.ModTime().After(record.updated) {
+			record.updated = info.ModTime()
+		}
+	}
+	completed := make([]*localHistoryRecord, 0, len(records))
+	for _, record := range records {
+		if record.complete {
+			completed = append(completed, record)
+		}
+	}
+	sort.Slice(completed, func(left, right int) bool { return completed[left].updated.After(completed[right].updated) })
+	var retainedBytes int64
+	for index, record := range completed {
+		keep := index < s.retention.maxRecords && now.Sub(record.updated) <= s.retention.maxAge && record.bytes <= s.retention.maxBytes-retainedBytes
+		if keep {
+			retainedBytes += record.bytes
+			continue
+		}
+		for _, path := range []string{record.jobPath, record.resultPath} {
+			if path != "" {
+				if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+					return removeErr
+				}
+			}
+		}
+	}
+	s.nextHistoryPrune = now.Add(localHistoryPruneInterval)
+	return nil
 }
 
 func (s *Store) RecordCompleted(job Job, output Output) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.completed[job.ID] = output
+	s.recordCompletionLocked(job.ID)
 	s.metrics.JobsTotal = saturatingMetricAdd(s.metrics.JobsTotal, 1)
 	if output.Error != "" {
 		s.metrics.JobsFailed = saturatingMetricAdd(s.metrics.JobsFailed, 1)
@@ -385,6 +510,11 @@ func storageID(id string) string {
 	return "job-" + hex.EncodeToString(sum[:16])
 }
 
+func jobStorageStem(id string) string {
+	sum := sha256.Sum256([]byte(id))
+	return "record-" + hex.EncodeToString(sum[:])
+}
+
 func (s *Store) Queue(job Job, profile interface{}, timeout time.Duration) <-chan Output {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -452,7 +582,7 @@ func (s *Store) Complete(id string, generation uint64, output Output) bool {
 	}
 	delete(s.queued, id)
 	completed := cloneOutput(output)
-	s.completed[id] = completed
+	s.recordCompletionLocked(id)
 	message := "Adapter result received"
 	if output.Decision != nil {
 		message += ": " + output.Decision.Verdict
@@ -474,6 +604,23 @@ func cloneOutput(output Output) Output {
 		clone.Decision = &decision
 	}
 	return clone
+}
+
+func (s *Store) recordCompletionLocked(id string) {
+	if _, exists := s.completed[id]; exists {
+		return
+	}
+	s.completed[id] = struct{}{}
+	s.completedOrder = append(s.completedOrder, id)
+	if s.completedTotal < int(^uint(0)>>1) {
+		s.completedTotal++
+	}
+	if len(s.completedOrder) <= maximumRecentCompletions {
+		return
+	}
+	oldest := s.completedOrder[0]
+	s.completedOrder = s.completedOrder[1:]
+	delete(s.completed, oldest)
 }
 
 func (s *Store) Cancel(id string) {
@@ -580,7 +727,7 @@ func (s *Store) AdapterCompletionContext(id string, generation uint64) (OutputSp
 func (s *Store) Stats() (queued, completed int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return len(s.queued), len(s.completed)
+	return len(s.queued), s.completedTotal
 }
 
 func (s *Store) RecordAdapterHeartbeat(status AdapterClientStatus) {

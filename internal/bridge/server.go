@@ -118,6 +118,9 @@ func NewServer(cfg config.Config, logger *log.Logger) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := store.ConfigureHistoryRetention(time.Duration(cfg.Storage.JobRetentionDays)*24*time.Hour, cfg.Storage.MaxJobRecords, cfg.Storage.MaxJobStorageBytes); err != nil {
+		return nil, err
+	}
 	admissionLimit := configuredJobAdmissionLimit(cfg)
 	schedules, err := newScheduleStore(cfg.Storage.Directory, admissionLimit)
 	if err != nil {

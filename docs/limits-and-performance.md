@@ -112,6 +112,31 @@ advertised endpoints, diagnostics, GPUs, models, capabilities, reconnects, and
 configured intervals. Bolt reuses pages and does not compact on deletion, so
 fresh-file growth is not a forecast for every retention mix.
 
+### Bounded history and control traffic
+
+The relay job-list endpoint is a bounded summary index: at most 200 records
+per request, without request bodies, result bodies, sealed envelopes, progress
+text, or per-node routing candidates. Retrieve one exact job when its retained
+result is required. Queued jobs use a small durable owner/priority index, so
+admission and fair dispatch do not deserialize every queued payload.
+
+Local service job/result pairs are retained together and pruned by all three
+configured limits:
+
+```yaml
+storage:
+  job_retention_days: 30
+  max_job_records: 1000
+  max_job_storage_bytes: 4294967296 # 4 GiB
+```
+
+Incomplete jobs are not pruned by this history policy. Files delivered to the
+operator-facing inbox are separate artifacts and are never silently deleted by
+job-history retention. Authenticated worker reconnects are rate-limited per
+node identity, and heartbeat control traffic has a per-connection count and
+byte budget; different workers behind one IP do not consume each other's
+allowance.
+
 ## Dated Linux/amd64 VPS snapshot
 
 This second snapshot was measured on 2026-09-20 from source commit

@@ -47,9 +47,12 @@ type Server struct {
 }
 
 type Storage struct {
-	Directory string `yaml:"directory"`
-	Inbox     string `yaml:"inbox"`
-	Models    string `yaml:"models"`
+	Directory          string `yaml:"directory"`
+	Inbox              string `yaml:"inbox"`
+	Models             string `yaml:"models"`
+	JobRetentionDays   int    `yaml:"job_retention_days"`
+	MaxJobRecords      int    `yaml:"max_job_records"`
+	MaxJobStorageBytes int64  `yaml:"max_job_storage_bytes"`
 }
 
 type Runtime struct {
@@ -376,6 +379,15 @@ func (c Config) Validate() error {
 	}
 	if c.Runtime.HardwareRefreshSeconds < 0 || c.Runtime.HardwareRefreshSeconds > 86400 {
 		return errors.New("runtime.hardware_refresh_seconds must be between 1 and 86400 when set")
+	}
+	if c.Storage.JobRetentionDays < 1 || c.Storage.JobRetentionDays > 3650 {
+		return errors.New("storage.job_retention_days must be between 1 and 3650")
+	}
+	if c.Storage.MaxJobRecords < 1 || c.Storage.MaxJobRecords > 1_000_000 {
+		return errors.New("storage.max_job_records must be between 1 and 1000000")
+	}
+	if c.Storage.MaxJobStorageBytes < 64<<20 || c.Storage.MaxJobStorageBytes > 1<<50 {
+		return errors.New("storage.max_job_storage_bytes must be between 64 MiB and 1 PiB")
 	}
 	if c.Portable.MaxPacks < 1 || c.Portable.MaxPacks > 128 {
 		return errors.New("portable_resources.max_packs must be between 1 and 128")
@@ -902,6 +914,15 @@ func applyDefaults(cfg *Config, base string) {
 	} else if !filepath.IsAbs(cfg.Storage.Models) {
 		cfg.Storage.Models = filepath.Join(base, cfg.Storage.Models)
 	}
+	if cfg.Storage.JobRetentionDays == 0 {
+		cfg.Storage.JobRetentionDays = 30
+	}
+	if cfg.Storage.MaxJobRecords == 0 {
+		cfg.Storage.MaxJobRecords = 1000
+	}
+	if cfg.Storage.MaxJobStorageBytes == 0 {
+		cfg.Storage.MaxJobStorageBytes = 4 << 30
+	}
 	if cfg.Runtime.HardwareRefreshSeconds == 0 {
 		cfg.Runtime.HardwareRefreshSeconds = 10
 	}
@@ -1179,6 +1200,9 @@ storage:
   directory: ./data
   inbox: ./inbox
   models: ./models
+  job_retention_days: 30
+  max_job_records: 1000
+  max_job_storage_bytes: 4294967296 # 4 GiB; inbox delivery artifacts are separate
 
 runtime:
   hardware_refresh_seconds: 10

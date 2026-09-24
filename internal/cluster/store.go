@@ -41,6 +41,8 @@ var (
 	jobOwnerIndexVersion      = []byte("1")
 	keyJobContractVersion     = []byte("job_contract_version")
 	jobContractVersion        = []byte("1")
+	keyQueueIndexVersion      = []byte("queue_index_version")
+	queueIndexVersion         = []byte("2")
 	keyClusterID              = []byte("cluster_id_v1")
 	keyRelayEpoch             = []byte("relay_epoch_v1")
 )
@@ -96,6 +98,61 @@ type jobIdempotencyRecord struct {
 	RequestHash string `json:"request_hash"`
 }
 
+// queueEntry is deliberately tiny. Queue admission and fair scheduling must
+// not deserialize multi-megabyte request bodies merely to identify an owner.
+// The authoritative Job remains in bucketJobs and is loaded only for the
+// bounded page that the dispatcher is about to consider.
+type queueEntry struct {
+	JobID          string         `json:"job_id"`
+	OwnerSubject   string         `json:"owner_subject,omitempty"`
+	Priority       int            `json:"priority"`
+	Requirements   Requirements   `json:"requirements"`
+	PolicyDecision PolicyDecision `json:"policy_decision"`
+	AssignedNode   string         `json:"assigned_node,omitempty"`
+	Sealed         bool           `json:"sealed,omitempty"`
+}
+
+type jobHistoryRecord struct {
+	ID                        string           `json:"id"`
+	ContractVersion           string           `json:"contract_version"`
+	OwnerSubject              string           `json:"owner_subject"`
+	TenantID                  string           `json:"tenant_id"`
+	Source                    string           `json:"source"`
+	Pipeline                  string           `json:"pipeline"`
+	Step                      string           `json:"step"`
+	ParentID                  string           `json:"parent_id"`
+	Requirements              Requirements     `json:"requirements"`
+	PolicyDecision            PolicyDecision   `json:"policy_decision"`
+	Status                    string           `json:"status"`
+	Priority                  int              `json:"priority"`
+	Attempt                   int              `json:"attempt"`
+	MaxAttempts               int              `json:"max_attempts"`
+	AssignedNode              string           `json:"assigned_node"`
+	AssignmentFence           *AssignmentFence `json:"assignment_fence"`
+	ExecutedAdapterEndpointID int              `json:"executed_adapter_endpoint_id"`
+	EphemeralAdapterEndpoint  bool             `json:"ephemeral_adapter_endpoint"`
+	Error                     string           `json:"error"`
+	FailureCode               string           `json:"failure_code"`
+	Usage                     Usage            `json:"usage"`
+	CreatedAt                 time.Time        `json:"created_at"`
+	UpdatedAt                 time.Time        `json:"updated_at"`
+	AssignedAt                time.Time        `json:"assigned_at"`
+	StartedAt                 time.Time        `json:"started_at"`
+	FinishedAt                time.Time        `json:"finished_at"`
+}
+
+func (record jobHistoryRecord) Job() Job {
+	return Job{
+		ID: record.ID, ContractVersion: record.ContractVersion, OwnerSubject: record.OwnerSubject, TenantID: record.TenantID,
+		Source: record.Source, Pipeline: record.Pipeline, Step: record.Step, ParentID: record.ParentID,
+		Requirements: record.Requirements, PolicyDecision: record.PolicyDecision, Status: record.Status, Priority: record.Priority,
+		Attempt: record.Attempt, MaxAttempts: record.MaxAttempts, AssignedNode: record.AssignedNode, AssignmentFence: record.AssignmentFence,
+		ExecutedAdapterEndpointID: record.ExecutedAdapterEndpointID, EphemeralAdapterEndpoint: record.EphemeralAdapterEndpoint,
+		Error: record.Error, FailureCode: record.FailureCode, Usage: record.Usage,
+		CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt, AssignedAt: record.AssignedAt, StartedAt: record.StartedAt, FinishedAt: record.FinishedAt,
+	}
+}
+
 // adapterSessionLock serializes non-ephemeral jobs for one pseudonymous
 // producer/session scope. Explicit profiles are independent; provider-less or
 // profile-less routes use a wildcard scope that conflicts with every profile.
@@ -126,6 +183,9 @@ func OpenStore(path string) (*Store, error) {
 			return err
 		}
 		if err := ensureJobContractVersion(tx); err != nil {
+			return err
+		}
+		if err := ensureQueueIndex(tx); err != nil {
 			return err
 		}
 		return rebuildAdapterSessionLocks(tx, time.Now().UTC())
@@ -755,7 +815,7 @@ func (s *Store) createJob(request SubmitRequest, maxQueued, maxOwner int, idempo
 		if err := putJobOwnerIndex(tx.Bucket(bucketJobOwnerIndex), job); err != nil {
 			return err
 		}
-		if err := tx.Bucket(bucketQueue).Put(queueKey(job), []byte(job.ID)); err != nil {
+		if err := putQueueEntry(tx.Bucket(bucketQueue), job); err != nil {
 			return err
 		}
 		if idempotencyKey != "" {
@@ -1029,7 +1089,7 @@ func (s *Store) consumeReservationAdmitted(id, secret string, sealed *SealedEnve
 		if err := putJobOwnerIndex(tx.Bucket(bucketJobOwnerIndex), job); err != nil {
 			return err
 		}
-		if err := tx.Bucket(bucketQueue).Put(queueKey(job), []byte(job.ID)); err != nil {
+		if err := putQueueEntry(tx.Bucket(bucketQueue), job); err != nil {
 			return err
 		}
 		if idempotencyKey != "" {
@@ -1122,26 +1182,20 @@ func queueCounts(tx *bolt.Tx, owner string) (total, owned int, err error) {
 	queue := tx.Bucket(bucketQueue)
 	jobs := tx.Bucket(bucketJobs)
 	cursor := queue.Cursor()
-	for key, id := cursor.First(); key != nil; key, id = cursor.Next() {
-		raw := jobs.Get(id)
+	for key, value := cursor.First(); key != nil; key, value = cursor.Next() {
+		entry, decodeErr := queueEntryFromValue(jobs, value)
+		if decodeErr != nil {
+			return 0, 0, decodeErr
+		}
+		raw := jobs.Get([]byte(entry.JobID))
 		if raw == nil {
 			if err := cursor.Delete(); err != nil {
 				return 0, 0, err
 			}
 			continue
 		}
-		var job Job
-		if err := json.Unmarshal(raw, &job); err != nil {
-			return 0, 0, err
-		}
-		if job.Status != JobQueued {
-			if err := cursor.Delete(); err != nil {
-				return 0, 0, err
-			}
-			continue
-		}
 		total++
-		if job.OwnerSubject == owner {
+		if entry.OwnerSubject == owner {
 			owned++
 		}
 	}
@@ -1700,9 +1754,21 @@ func (s *Store) CancelJob(id string) (Job, error) {
 		if job.Status == JobCompleted || job.Status == JobFailed || job.Status == JobCancelled {
 			return errors.New("job is already final")
 		}
+		queued := job.Status == JobQueued
 		job.Status = JobCancelled
 		job.FinishedAt = time.Now().UTC()
 		job.UpdatedAt = job.FinishedAt
+		if queued {
+			// No provider action can have begun for a queued job. Retain its
+			// identity, ownership, policy and routing evidence, but discard the
+			// attacker-controlled bulk body. Idempotency continues to resolve to
+			// this terminal tombstone without retaining MiBs per cancel cycle.
+			job.Payload = nil
+			job.SealedPayload = nil
+			job.Result = nil
+			job.SealedResult = nil
+			job.Progress = nil
+		}
 		if err := deleteQueueEntry(tx.Bucket(bucketQueue), id); err != nil {
 			return err
 		}
@@ -1780,7 +1846,7 @@ func (s *Store) completeJobWithFailure(id, nodeID string, attempt int, fence *As
 			if err := putJSON(tx.Bucket(bucketJobs), id, job); err != nil {
 				return err
 			}
-			return tx.Bucket(bucketQueue).Put(queueKey(job), []byte(job.ID))
+			return putQueueEntry(tx.Bucket(bucketQueue), job)
 		}
 		completionError := validateWorkerResult(job, result, sealed, jobError)
 		var executedAdapterEndpointID int
@@ -2132,10 +2198,15 @@ func (s *Store) QueuedJobs(limit int) ([]Job, error) {
 	}
 	queued := make([]Job, 0, limit)
 	err := s.db.View(func(tx *bolt.Tx) error {
+		jobs := tx.Bucket(bucketJobs)
 		cursor := tx.Bucket(bucketQueue).Cursor()
-		for key, id := cursor.First(); key != nil && len(queued) < limit; key, id = cursor.Next() {
+		for key, value := cursor.First(); key != nil && len(queued) < limit; key, value = cursor.Next() {
+			entry, err := queueEntryFromValue(jobs, value)
+			if err != nil {
+				return err
+			}
 			var job Job
-			if err := getJSON(tx.Bucket(bucketJobs), string(id), &job); err != nil {
+			if err := getJSON(jobs, entry.JobID, &job); err != nil {
 				return err
 			}
 			if job.Status == JobQueued {
@@ -2171,30 +2242,47 @@ func (s *Store) QueuedJobsFairPage(limit, offset int, afterOwner map[int]string)
 		limit = 100
 	}
 	all := []Job{}
+	ordered := []Job{}
+	result := []Job{}
 	err := s.db.View(func(tx *bolt.Tx) error {
+		jobs := tx.Bucket(bucketJobs)
 		cursor := tx.Bucket(bucketQueue).Cursor()
-		for key, id := cursor.First(); key != nil; key, id = cursor.Next() {
-			var job Job
-			if err := getJSON(tx.Bucket(bucketJobs), string(id), &job); err != nil {
+		for key, value := cursor.First(); key != nil; key, value = cursor.Next() {
+			entry, err := queueEntryFromValue(jobs, value)
+			if err != nil {
 				return err
 			}
-			if job.Status == JobQueued {
-				all = append(all, job)
+			projection := Job{ID: entry.JobID, OwnerSubject: entry.OwnerSubject, Priority: entry.Priority, Requirements: entry.Requirements, PolicyDecision: entry.PolicyDecision, AssignedNode: entry.AssignedNode}
+			if entry.Sealed {
+				projection.SealedPayload = &SealedEnvelope{}
 			}
+			all = append(all, projection)
+		}
+		ordered = make([]Job, 0, len(all))
+		for start := 0; start < len(all); {
+			end := start + 1
+			for end < len(all) && all[end].Priority == all[start].Priority {
+				end++
+			}
+			appendFairPriorityTier(&ordered, all[start:end], len(all), afterOwner[all[start].Priority])
+			start = end
+		}
+		if len(ordered) == 0 {
+			return nil
+		}
+		normalizedOffset := offset % len(ordered)
+		if normalizedOffset < 0 {
+			normalizedOffset += len(ordered)
+		}
+		count := min(limit, len(ordered))
+		result = make([]Job, 0, count)
+		for index := 0; index < count; index++ {
+			result = append(result, ordered[(normalizedOffset+index)%len(ordered)])
 		}
 		return nil
 	})
 	if err != nil {
 		return nil, 0, 0, err
-	}
-	ordered := make([]Job, 0, len(all))
-	for start := 0; start < len(all); {
-		end := start + 1
-		for end < len(all) && all[end].Priority == all[start].Priority {
-			end++
-		}
-		appendFairPriorityTier(&ordered, all[start:end], len(all), afterOwner[all[start].Priority])
-		start = end
 	}
 	total := len(ordered)
 	if total == 0 {
@@ -2204,12 +2292,7 @@ func (s *Store) QueuedJobsFairPage(limit, offset int, afterOwner map[int]string)
 	if offset < 0 {
 		offset += total
 	}
-	count := min(limit, total)
-	result := make([]Job, 0, count)
-	for index := 0; index < count; index++ {
-		result = append(result, ordered[(offset+index)%total])
-	}
-	return result, total, (offset + count) % total, nil
+	return result, total, (offset + min(limit, total)) % total, nil
 }
 
 func appendFairPriorityTier(target *[]Job, tier []Job, limit int, afterOwner string) {
@@ -2288,6 +2371,60 @@ func (s *Store) ListJobsForOwner(limit int, status, owner string) ([]Job, error)
 			if err := getJSON(tx.Bucket(bucketJobs), string(id), &job); err != nil {
 				return err
 			}
+			if owner != "" && (job.OwnerSubject != owner || !bytes.Equal(key, jobOwnerIndexKey(job))) {
+				return errors.New("job owner index does not match its authoritative record")
+			}
+			if (owner == "" || job.OwnerSubject == owner) && (status == "" || job.Status == status) {
+				jobs = append(jobs, job)
+			}
+		}
+		return nil
+	})
+	return jobs, err
+}
+
+// ListJobSummariesForOwner decodes only bounded lifecycle/routing metadata.
+// Request and result bodies are skipped by encoding/json instead of first
+// being materialized and discarded by the HTTP layer.
+func (s *Store) ListJobSummariesForOwner(limit int, status, owner string) ([]Job, error) {
+	if limit <= 0 || limit > maximumJobHistoryPage {
+		limit = 100
+	}
+	owner = cleanLabel(owner, 120)
+	jobs := []Job{}
+	err := s.db.View(func(tx *bolt.Tx) error {
+		index := tx.Bucket(bucketJobIndex)
+		var prefix []byte
+		if owner != "" {
+			index = tx.Bucket(bucketJobOwnerIndex)
+			prefix = jobOwnerIndexPrefix(owner)
+		}
+		cursor := index.Cursor()
+		key, id := cursor.Last()
+		if len(prefix) > 0 {
+			upper := prefixUpperBound(prefix)
+			if upper != nil {
+				key, id = cursor.Seek(upper)
+				if key == nil {
+					key, id = cursor.Last()
+				} else {
+					key, id = cursor.Prev()
+				}
+			}
+		}
+		for ; key != nil && len(jobs) < limit; key, id = cursor.Prev() {
+			if len(prefix) > 0 && !bytes.HasPrefix(key, prefix) {
+				break
+			}
+			raw := tx.Bucket(bucketJobs).Get(id)
+			if raw == nil {
+				return os.ErrNotExist
+			}
+			var record jobHistoryRecord
+			if err := json.Unmarshal(raw, &record); err != nil {
+				return err
+			}
+			job := record.Job()
 			if owner != "" && (job.OwnerSubject != owner || !bytes.Equal(key, jobOwnerIndexKey(job))) {
 				return errors.New("job owner index does not match its authoritative record")
 			}
@@ -2693,10 +2830,118 @@ func queueKey(job Job) []byte {
 	return []byte(fmt.Sprintf("%03d:%020d:%s", 100-job.Priority, job.CreatedAt.UnixNano(), job.ID))
 }
 
+func putQueueEntry(bucket *bolt.Bucket, job Job) error {
+	value, err := json.Marshal(queueEntry{JobID: job.ID, OwnerSubject: job.OwnerSubject, Priority: job.Priority, Requirements: job.Requirements, PolicyDecision: job.PolicyDecision, AssignedNode: job.AssignedNode, Sealed: job.SealedPayload != nil})
+	if err != nil {
+		return err
+	}
+	return bucket.Put(queueKey(job), value)
+}
+
+func queueEntryFromValue(jobs *bolt.Bucket, value []byte) (queueEntry, error) {
+	var entry queueEntry
+	if len(value) > 0 && value[0] == '{' {
+		if err := json.Unmarshal(value, &entry); err != nil {
+			return queueEntry{}, err
+		}
+	} else {
+		raw := jobs.Get(value)
+		if raw == nil {
+			return queueEntry{JobID: string(value)}, nil
+		}
+		var err error
+		entry, _, err = queueEntryFromJob(raw)
+		if err != nil {
+			return queueEntry{}, err
+		}
+	}
+	if !validJobID(entry.JobID) || entry.Priority < -100 || entry.Priority > 100 {
+		return queueEntry{}, errors.New("queue entry is invalid")
+	}
+	return entry, nil
+}
+
+func queueEntryFromJob(raw []byte) (queueEntry, string, error) {
+	var projection struct {
+		ID             string         `json:"id"`
+		OwnerSubject   string         `json:"owner_subject"`
+		Priority       int            `json:"priority"`
+		Requirements   Requirements   `json:"requirements"`
+		PolicyDecision PolicyDecision `json:"policy_decision"`
+		AssignedNode   string         `json:"assigned_node"`
+		SealedPayload  *struct{}      `json:"sealed_payload"`
+		Status         string         `json:"status"`
+	}
+	if err := json.Unmarshal(raw, &projection); err != nil {
+		return queueEntry{}, "", err
+	}
+	return queueEntry{JobID: projection.ID, OwnerSubject: projection.OwnerSubject, Priority: projection.Priority, Requirements: projection.Requirements, PolicyDecision: projection.PolicyDecision, AssignedNode: projection.AssignedNode, Sealed: projection.SealedPayload != nil}, projection.Status, nil
+}
+
+func ensureQueueIndex(tx *bolt.Tx) error {
+	meta := tx.Bucket(bucketStoreMeta)
+	if bytes.Equal(meta.Get(keyQueueIndexVersion), queueIndexVersion) {
+		return nil
+	}
+	queue := tx.Bucket(bucketQueue)
+	jobs := tx.Bucket(bucketJobs)
+	type replacement struct{ key, value []byte }
+	replacements := []replacement{}
+	deletions := [][]byte{}
+	cursor := queue.Cursor()
+	for key, value := cursor.First(); key != nil; key, value = cursor.Next() {
+		entryID := string(value)
+		if len(value) > 0 && value[0] == '{' {
+			var saved queueEntry
+			if err := json.Unmarshal(value, &saved); err != nil {
+				return fmt.Errorf("migrate queue entry %q: %w", key, err)
+			}
+			entryID = saved.JobID
+		}
+		raw := jobs.Get([]byte(entryID))
+		if raw == nil {
+			deletions = append(deletions, append([]byte(nil), key...))
+			continue
+		}
+		entry, status, err := queueEntryFromJob(raw)
+		if err != nil {
+			return fmt.Errorf("migrate queue job %q: %w", entryID, err)
+		}
+		if status != JobQueued {
+			deletions = append(deletions, append([]byte(nil), key...))
+			continue
+		}
+		encoded, err := json.Marshal(entry)
+		if err != nil {
+			return err
+		}
+		replacements = append(replacements, replacement{append([]byte(nil), key...), encoded})
+	}
+	for _, key := range deletions {
+		if err := queue.Delete(key); err != nil {
+			return err
+		}
+	}
+	for _, item := range replacements {
+		if err := queue.Put(item.key, item.value); err != nil {
+			return err
+		}
+	}
+	return meta.Put(keyQueueIndexVersion, queueIndexVersion)
+}
+
 func deleteQueueEntry(bucket *bolt.Bucket, jobID string) error {
 	cursor := bucket.Cursor()
-	for key, id := cursor.First(); key != nil; key, id = cursor.Next() {
-		if string(id) == jobID {
+	for key, value := cursor.First(); key != nil; key, value = cursor.Next() {
+		entryID := string(value)
+		if len(value) > 0 && value[0] == '{' {
+			var entry queueEntry
+			if err := json.Unmarshal(value, &entry); err != nil {
+				return err
+			}
+			entryID = entry.JobID
+		}
+		if entryID == jobID {
 			return bucket.Delete(key)
 		}
 	}
