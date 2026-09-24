@@ -49,8 +49,11 @@ contextbridge cluster submit --file ./job.json
 
 The first two commands submit no model work. A successful dry run is not a
 reservation or a promise that capacity will still be available on submission.
-The last command submits a real job. `max_attempts` does not grant permission
-to replay a job whose execution state became ambiguous.
+The last command submits a real job. `max_attempts` bounds assignment
+generations only. ContextBridge retries automatically only when a non-adapter
+worker reports capacity or shutdown refusal before it reports `started` and
+without any execution evidence. It never grants permission to replay a job
+whose execution state became ambiguous.
 
 The equivalent HTTP submission is a JSON POST to
 `/v1/cluster/jobs?compact=1`, with `Content-Type: application/json`,

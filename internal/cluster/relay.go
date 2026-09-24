@@ -1129,10 +1129,18 @@ func (r *Relay) handleWorker(w http.ResponseWriter, req *http.Request) {
 			}
 			if completeErr == nil {
 				kind := "job.completed"
-				if job.Status == JobFailed {
+				event := Event{Kind: kind, Message: "Worker reported " + job.Status, JobID: job.ID, NodeID: node.ID}
+				if job.Status == JobQueued {
+					kind = "job.retrying"
+					event.Data = map[string]interface{}{
+						"attempt": message.Attempt, "max_attempts": job.MaxAttempts,
+						"failure_code": normalizedWorkerFailureCode(message.FailureCode, message.Error),
+					}
+				} else if job.Status == JobFailed {
 					kind = "job.failed"
 				}
-				_ = r.store.AddEvent(Event{Kind: kind, Message: "Worker reported " + job.Status, JobID: job.ID, NodeID: node.ID})
+				event.Kind = kind
+				_ = r.store.AddEvent(event)
 			}
 		}
 	}

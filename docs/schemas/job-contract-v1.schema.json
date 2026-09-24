@@ -48,7 +48,12 @@
     "assignment_id": { "type": "string" },
     "assignment_secret": { "type": "string" },
     "priority": { "type": "integer", "minimum": -100, "maximum": 100 },
-    "max_attempts": { "type": "integer" }
+    "max_attempts": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10,
+      "description": "Maximum assignment generations. Automatic reuse is limited to a non-adapter worker capacity or shutdown refusal proven before execution starts; ambiguous execution is never retried. Zero selects relay policy."
+    }
   },
   "oneOf": [
     { "required": ["payload"], "not": { "required": ["sealed_payload"] } },

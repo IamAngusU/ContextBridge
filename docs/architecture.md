@@ -26,8 +26,13 @@ validate request
   -> persist receipt and terminal state
 ```
 
-An ambiguous post-dispatch failure is not retried automatically because the
-engine may already have performed the work.
+`max_attempts` bounds dispatch generations, not arbitrary provider retries.
+The only automatic retry classes are a worker capacity refusal or worker
+shutdown refusal received while the authoritative job state is still
+`assigned`, before any `started` message or execution evidence. Adapter jobs
+are excluded because their endpoint/session state is not interchangeable.
+An ambiguous post-dispatch failure is terminal because the engine may already
+have performed the work.
 
 ## State authority
 

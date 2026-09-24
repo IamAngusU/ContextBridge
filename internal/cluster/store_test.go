@@ -773,7 +773,7 @@ func TestSealedAdapterAssignmentCannotMutateAuthenticatedEndpointContext(t *test
 	}
 }
 
-func TestCompleteJobIsBoundToAssignedWorkerAndNeverRetriesAnError(t *testing.T) {
+func TestCompleteJobIsBoundToAssignedWorkerAndNeverRetriesAmbiguousError(t *testing.T) {
 	store, err := OpenStore(filepath.Join(t.TempDir(), "cluster.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -804,6 +804,97 @@ func TestCompleteJobIsBoundToAssignedWorkerAndNeverRetriesAnError(t *testing.T) 
 	queued, _ := store.QueuedJobs(10)
 	if len(queued) != 0 {
 		t.Fatal("failed worker completion was silently requeued")
+	}
+}
+
+func TestCompleteJobRetriesOnlyProvenPreExecutionWorkerRefusal(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "cluster.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	job, err := store.CreateJob(SubmitRequest{Requirements: Requirements{Task: "generation"}, Payload: json.RawMessage(`{}`), MaxAttempts: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.AssignJob(job.ID, "node-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	requeued, err := store.CompleteJobWithFailure(first.ID, "node-a", first.Attempt, nil, nil, Usage{CostStatus: CostUnknown, CostUnknownJobs: 1}, "worker capacity exceeded", FailureWorkerCapacity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requeued.Status != JobQueued || requeued.Attempt != 1 || requeued.AssignedNode != "" || requeued.Error != "" || requeued.FailureCode != "" || requeued.RoutingDecision != nil {
+		t.Fatalf("proven pre-execution refusal was not cleanly requeued: %#v", requeued)
+	}
+	queued, err := store.QueuedJobs(10)
+	if err != nil || len(queued) != 1 || queued[0].ID != job.ID {
+		t.Fatalf("retry queue state = %#v, %v", queued, err)
+	}
+	second, err := store.AssignJob(job.ID, "node-b")
+	if err != nil || second.Attempt != 2 {
+		t.Fatalf("second assignment = %#v, %v", second, err)
+	}
+	if _, err := store.CompleteJob(first.ID, "node-a", first.Attempt, json.RawMessage(`{"stale":true}`), nil, Usage{}, ""); err == nil {
+		t.Fatal("stale first-attempt completion changed the replacement assignment")
+	}
+	if _, err := store.MarkRunning(second.ID, "node-b", second.Attempt); err != nil {
+		t.Fatal(err)
+	}
+	terminal, err := store.CompleteJobWithFailure(second.ID, "node-b", second.Attempt, nil, nil, Usage{}, "worker is stopping", FailureWorkerStopping)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if terminal.Status != JobFailed || terminal.FailureCode != FailureWorkerStopping || terminal.Attempt != 2 {
+		t.Fatalf("post-start refusal was retried despite ambiguous execution: %#v", terminal)
+	}
+	queued, _ = store.QueuedJobs(10)
+	if len(queued) != 0 {
+		t.Fatalf("post-start failure returned to queue: %#v", queued)
+	}
+}
+
+func TestPreExecutionRetryRejectsEvidenceAdapterAndExhaustedAttempts(t *testing.T) {
+	tests := []struct {
+		name         string
+		requirements Requirements
+		maxAttempts  int
+		usage        Usage
+		failureCode  string
+	}{
+		{name: "execution evidence", requirements: Requirements{Task: "generation"}, maxAttempts: 2, usage: Usage{ComputeMS: 1}, failureCode: FailureWorkerCapacity},
+		{name: "adapter session", requirements: Requirements{Task: "generation", Provider: "adapter", AdapterProfile: "profile"}, maxAttempts: 2, failureCode: FailureWorkerCapacity},
+		{name: "attempt limit", requirements: Requirements{Task: "generation"}, maxAttempts: 1, failureCode: FailureWorkerCapacity},
+		{name: "unstructured worker prose", requirements: Requirements{Task: "generation"}, maxAttempts: 2},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store, err := OpenStore(filepath.Join(t.TempDir(), "cluster.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			job, err := store.CreateJob(SubmitRequest{Requirements: test.requirements, Payload: json.RawMessage(`{}`), MaxAttempts: test.maxAttempts})
+			if err != nil {
+				t.Fatal(err)
+			}
+			job, err = store.AssignJob(job.ID, "node-a")
+			if err != nil {
+				t.Fatal(err)
+			}
+			job, err = store.CompleteJobWithFailure(job.ID, "node-a", job.Attempt, nil, nil, test.usage, "worker capacity exceeded", test.failureCode)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if job.Status != JobFailed || job.FailureCode != FailureWorkerCapacity {
+				t.Fatalf("unsafe retry class was accepted: %#v", job)
+			}
+			queued, _ := store.QueuedJobs(10)
+			if len(queued) != 0 {
+				t.Fatalf("unsafe retry class returned to queue: %#v", queued)
+			}
+		})
 	}
 }
 

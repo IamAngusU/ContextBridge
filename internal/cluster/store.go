@@ -1573,9 +1573,36 @@ func (s *Store) CompleteJobWithFailure(id, nodeID string, attempt int, result js
 		// Treat the worker as a protocol peer, not as the E2EE trust boundary.
 		// Even an old or modified worker must not persist provider-controlled
 		// plaintext diagnostics for a sealed job at the relay.
+		reportedFailureCode := failureCode
 		if job.SealedPayload != nil && strings.TrimSpace(jobError) != "" {
 			failureCode = normalizedWorkerFailureCode(failureCode, jobError)
 			jobError = sealedJobFailureMessage(failureCode)
+		}
+		failureCode = normalizedWorkerFailureCode(failureCode, jobError)
+		if preExecutionRetryAllowed(job, result, sealed, usage, jobError, reportedFailureCode, failureCode, execution) {
+			job.Status = JobQueued
+			job.Error = ""
+			job.FailureCode = ""
+			job.Result = nil
+			job.SealedResult = nil
+			job.Usage = Usage{}
+			job.Progress = nil
+			job.RoutingDecision = nil
+			job.ExecutedAdapterEndpointID = 0
+			job.EphemeralAdapterEndpoint = false
+			job.AssignedAt = time.Time{}
+			job.StartedAt = time.Time{}
+			job.FinishedAt = time.Time{}
+			job.UpdatedAt = time.Now().UTC()
+			// A sealed payload is authenticated to one reserved worker. Plaintext
+			// jobs may be rerouted after a proven pre-execution refusal.
+			if job.SealedPayload == nil {
+				job.AssignedNode = ""
+			}
+			if err := putJSON(tx.Bucket(bucketJobs), id, job); err != nil {
+				return err
+			}
+			return tx.Bucket(bucketQueue).Put(queueKey(job), []byte(job.ID))
 		}
 		completionError := validateWorkerResult(job, result, sealed, jobError)
 		var executedAdapterEndpointID int
@@ -1662,6 +1689,31 @@ func (s *Store) CompleteJobWithFailure(id, nodeID string, attempt int, result js
 		return nil
 	})
 	return job, err
+}
+
+// preExecutionRetryAllowed recognizes only worker refusals emitted before the
+// worker starts a provider execution. No timeout, disconnect, provider error,
+// adapter failure, malformed completion, or other ambiguous state is eligible.
+func preExecutionRetryAllowed(job Job, result json.RawMessage, sealed *SealedEnvelope, usage Usage, jobError, reportedFailureCode, failureCode string, execution []*ExecutionMetadata) bool {
+	if job.Status != JobAssigned || job.Attempt <= 0 || job.Attempt >= job.MaxAttempts || strings.TrimSpace(jobError) == "" {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(job.Requirements.Provider), "adapter") {
+		return false
+	}
+	if reportedFailureCode != failureCode || failureCode != FailureWorkerCapacity && failureCode != FailureWorkerStopping {
+		return false
+	}
+	if len(result) != 0 || sealed != nil || !usageHasNoExecutionEvidence(usage) {
+		return false
+	}
+	return len(execution) == 0 || execution[0] == nil || *execution[0] == (ExecutionMetadata{})
+}
+
+func usageHasNoExecutionEvidence(usage Usage) bool {
+	return usage.InputTokens == 0 && usage.OutputTokens == 0 && usage.TotalTokens == 0 && usage.ComputeMS == 0 && usage.QueueMS == 0 &&
+		usage.ReservedCostUSD == 0 && usage.EstimatedCostUSD == 0 && usage.EquivalentCostUSD == 0 && usage.SavedCostUSD == 0 &&
+		usage.PeakVRAMBytes == 0 && usage.PeakRAMBytes == 0 && usage.PeakGPUUtilization == 0 && usage.ResourceScope == ""
 }
 
 func validateWorkerResult(job Job, result json.RawMessage, sealed *SealedEnvelope, jobError string) error {
