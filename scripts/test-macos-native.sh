@@ -128,7 +128,7 @@ wait "$service_pid" || true
 service_pid=""
 
 "$installed" uninstall --config "$config" --install-dir "$install_dir" --dry-run --yes > "$test_root/uninstall-plan.out"
-require_contains 'Configuration and managed data are preserved' "$test_root/uninstall-plan.out" "uninstall dry-run did not preserve managed data"
+require_contains "Config:       preserve $config" "$test_root/uninstall-plan.out" "uninstall dry-run did not preserve the expected config path"
 "$installed" uninstall --config "$config" --install-dir "$install_dir" --yes > "$test_root/uninstall.out"
 
 [[ -f "$config" ]]
