@@ -23,18 +23,28 @@ replication, elections, or quorum.
 
 ## Decision
 
-Prototype an embedded Raft finite-state machine with
-[`hashicorp/raft`](https://github.com/hashicorp/raft) and a separate pure-Go
-[`raft-boltdb/v2`](https://github.com/hashicorp/raft-boltdb) log/stable store.
-Do not add either dependency to release builds until the prototype passes the
-proof gates below and its pinned dependency/license inventory is accepted.
+Implement the opt-in consensus plane on the deterministic
+[`etcd-io/raft`](https://github.com/etcd-io/raft) core. Pinning begins with
+`go.etcd.io/raft/v3` v3.7.0 (`b867cf13f6bc0dae21204302df97bc2355c3af55`),
+but the dependency does not enter release builds until the storage/transport
+implementation and the proof gates below are complete.
 
-HashiCorp Raft provides the primitives this control plane needs: majority
-commit, voter/non-voter membership, leadership transfer, barriers, snapshots,
-and explicit not-leader/leadership-lost failures. Its own documentation
-describes committed entries as persisted on a majority before FSM application
-and requires stale-intolerant reads to use the leader. The Bolt backend
-implements both `LogStore` and `StableStore` without requiring cgo.
+`etcd-io/raft` deliberately implements only the consensus state machine. CB
+therefore owns a small, explicit integration around it:
+
+- a separate durable Bolt WAL/hard-state/snapshot path, never the application
+  store and never shared by two processes;
+- one serialized `Ready` persistence/apply/send loop per relay voter;
+- an authenticated mTLS peer transport with bounded frames, peer identities
+  pinned to the configured membership, and no producer/worker bearer tokens;
+- a versioned deterministic CB command FSM and checksummed snapshots;
+- linearizable execution-affecting reads through `ReadIndex`; and
+- explicit leadership transfer and one-at-a-time joint membership changes.
+
+The larger integration burden is intentional. The Raft algorithm remains a
+single-threaded deterministic state machine, while disk and network behavior
+stay visible and testable in CB rather than being hidden behind a transport
+fast path.
 
 The coordination model is CP and single-writer:
 
@@ -147,6 +157,22 @@ Rolling upgrades require an explicit command/snapshot compatibility matrix.
 An older binary that cannot understand the committed command version refuses
 to join or become writable.
 
+## Why not HashiCorp Raft now
+
+The first draft selected `hashicorp/raft` plus `raft-boltdb/v2`. That selection
+was withdrawn before either dependency entered a release build. Upstream issue
+[#695](https://github.com/hashicorp/raft/issues/695) reports reproduced log,
+leader-completeness, state-machine, and election-safety violations caused by a
+heartbeat fast path mutating Raft term/state concurrently with the main loop.
+The report remains open and v1.8.0 does not claim a correction.
+
+Disabling or locally patching a critical protocol path without an accepted
+upstream contract would make CB the maintainer of an unverifiable fork. This
+feature exists specifically to prevent divergent execution authority, so that
+is not an acceptable release basis. HashiCorp Raft can be reconsidered only
+after an upstream resolution and the same CB partition/replay harness passes
+against an exact released version.
+
 ## Why not embedded JetStream now
 
 [JetStream clustering](https://docs.nats.io/learn/topologies/jetstream-in-a-cluster)
@@ -174,27 +200,26 @@ the current consensus problem.
 
 ### Current dependency evaluation (2026-09-24)
 
-The current upstream releases are `hashicorp/raft` v1.8.0
-(`0f543c056e7e577a54b819a62116335c9661a13a`) and `raft-boltdb/v2` v2.4.2
-(`7915f80fb457a747c5dd50821d7de3dffa0fd9c3`). Both repositories identify the
-relevant code as MPL-2.0. No dependency is added to ContextBridge by this ADR.
+`go.etcd.io/raft/v3` v3.7.0 resolves to upstream commit
+`b867cf13f6bc0dae21204302df97bc2355c3af55`, requires Go 1.26, and is
+Apache-2.0. It is the consensus core used by etcd and exposes deterministic
+message/state transitions rather than owning CB's transport or disk. The exact
+module is pinned in `go.mod` for the CB-specific partition safety test. It is
+not imported by non-test code, linked into a release binary, or listed in the
+runtime SBOM while the integration remains unsupported; its source and license
+are nevertheless included in the corresponding-source vendor archive.
 
-The Raft repository also has an open upstream bug report,
-[#695: Data divergence (Safety violation) due to Async Heartbeat](https://github.com/hashicorp/raft/issues/695),
-against post-v1.7.3 development code. v1.8.0 release notes do not claim that
-report as fixed and the upstream issue remained open when this evaluation was
-recorded. Because ContextBridge's purpose here is preventing duplicate or
-divergent execution authority, this is a release gate rather than an ordinary
-dependency warning. Do not pin or ship the proposed backend until the upstream
-resolution is understood and CB's own partition/replay harness reproduces the
-required safety invariants against the exact selected commit.
+The earlier HashiCorp v1.8.0 / raft-boltdb v2.4.2 evaluation remains useful
+historical evidence, but upstream issue #695 is now a rejection reason for
+that backend rather than a reason to leave the entire HA design direction
+undecided.
 
 Before a Raft build can be called supported:
 
-1. pin exact module versions and commit identities;
+1. pin the exact module version and commit identity shown above;
 2. record SPDX/license notices and obtain legal review for the AGPL/commercial
-   distribution boundary (HashiCorp Raft and raft-boltdb currently identify as
-   MPL-2.0; this document is not legal advice);
+   distribution boundary (`etcd-io/raft` identifies as Apache-2.0; this
+   document is not legal advice);
 3. compare source archive, SBOM, binary size, idle RSS/CPU, open handles, and
    startup time against standalone mode;
 4. run `govulncheck`, race tests, fuzz tests, static analysis, and deterministic

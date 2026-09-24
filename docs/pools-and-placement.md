@@ -15,7 +15,8 @@ advertise bounded capability evidence.
 
 The current relay is one durable coordination authority. ContextBridge does
 not claim active multi-relay consensus or transparent cross-relay replication.
-The accepted but not yet implemented HA design is documented in
+The accepted but not yet implemented HA design, including the selected
+deterministic `etcd-io/raft` core and its release proof gates, is documented in
 [ADR 0001](adr/0001-fenced-single-leader-consensus.md).
 
 It exposes three deliberately separate, content-minimizing probes:

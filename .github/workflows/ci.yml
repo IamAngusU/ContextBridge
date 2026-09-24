@@ -3,6 +3,7 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -68,3 +69,15 @@ jobs:
           go-version: '1.27.x'
           cache: true
       - run: pwsh -NoProfile -File scripts/test-release-reproducibility.ps1
+
+  macos-native-lifecycle:
+    name: Native macOS 26 arm64 lifecycle
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.27.x'
+          cache: true
+      - run: go test -race ./cmd/contextbridge ./internal/bridge ./internal/cluster ./internal/verification
+      - run: bash scripts/test-macos-native.sh

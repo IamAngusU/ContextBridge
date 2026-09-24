@@ -7,9 +7,16 @@
   post-dispatch ambiguity, stale-fence rejection and single durable terminal
   results. The versioned JSON report states its narrow scope instead of
   presenting local store checks as network or HA evidence.
-- Re-evaluated the proposed HA dependencies against their current upstream
-  releases and recorded the open HashiCorp Raft safety report as a fail-closed
-  release gate. No consensus dependency or unsupported HA claim was added.
+- Rejected HashiCorp Raft as the HA release basis while its reported
+  asynchronous-heartbeat safety violation remains open, selected the
+  deterministic `etcd-io/raft` v3.7.0 core instead, and added a pinned
+  CB-specific partition proof that a former leader's minority proposal never
+  enters the committed stream. This is a dependency gate, not an unsupported
+  claim that the relay integration is already HA.
+- Added an explicit native macOS 26 arm64 Actions job. Beyond tests and the
+  race detector it builds and executes the native binary, performs an isolated
+  checksum-verified install, validates both LaunchAgents, starts the loopback
+  service, and verifies ordinary uninstall preserves configuration.
 - Added real incremental text output for explicitly reviewed
   `openai_compatible` engines with the `incremental_output` capability. The
   v1 path has no fallback ambiguity, applies direct backpressure and hard
@@ -49,8 +56,8 @@
   safety primitive; it does not claim multi-relay failover or Raft consensus.
 - Accepted an implementation-gated HA architecture: an opt-in, quorum-backed
   single-writer FSM with explicit replicated-state, membership, migration,
-  snapshot, dependency, and failure-proof boundaries. No Raft dependency or
-  HA support claim is included yet.
+  snapshot, dependency, and failure-proof boundaries. The selected consensus
+  core is pinned for tests only; no runtime HA support claim is included yet.
 - Worker identity and accepted relay epochs are now flushed to a temporary
   same-directory file and atomically replaced. A failed replacement cleans up
   its temporary file instead of risking a partially written durable fence.

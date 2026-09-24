@@ -199,6 +199,7 @@ func integrateCommand(args []string) error {
 }
 
 func createRelayIntegrationBundle(ctx context.Context, cfg config.Config, path, subject string, groups []string, lifetimeHours int) (relayIntegrationInfo, error) {
+	// #nosec G703 -- path is the operator-selected absolute --write-env target; O_EXCL prevents replacing existing data.
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return relayIntegrationInfo{}, fmt.Errorf("reserve integration file without overwriting existing data: %w", err)
@@ -207,6 +208,7 @@ func createRelayIntegrationBundle(ctx context.Context, cfg config.Config, path, 
 	defer func() {
 		_ = file.Close()
 		if remove {
+			// #nosec G703 -- cleanup removes only the exact O_EXCL file created above after an incomplete credential write.
 			_ = os.Remove(path)
 		}
 	}()
@@ -392,6 +394,7 @@ func writeOpenAIIntegrationEnv(path, baseURL, token, model string) error {
 			return errors.New("integration value is empty or unsafe for a .env file")
 		}
 	}
+	// #nosec G703 -- path is the operator-selected absolute --write-env target; O_EXCL prevents replacing existing data.
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("create integration file without overwriting existing data: %w", err)
@@ -399,15 +402,18 @@ func writeOpenAIIntegrationEnv(path, baseURL, token, model string) error {
 	content := fmt.Sprintf("OPENAI_BASE_URL=%s\nOPENAI_API_KEY=%s\nOPENAI_MODEL=%s\n", baseURL, token, model)
 	if _, err := file.WriteString(content); err != nil {
 		_ = file.Close()
+		// #nosec G703 -- cleanup removes only the exact O_EXCL file created above after an incomplete write.
 		_ = os.Remove(path)
 		return err
 	}
 	if err := file.Sync(); err != nil {
 		_ = file.Close()
+		// #nosec G703 -- cleanup removes only the exact O_EXCL file created above after a failed sync.
 		_ = os.Remove(path)
 		return fmt.Errorf("sync integration file: %w", err)
 	}
 	if err := file.Close(); err != nil {
+		// #nosec G703 -- cleanup removes only the exact O_EXCL file created above after a failed close.
 		_ = os.Remove(path)
 		return err
 	}
