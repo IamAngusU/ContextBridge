@@ -101,6 +101,24 @@ Your local relay queues the request, your worker runs a compatible installed mod
 
 Commands use the installer-created configuration automatically. For a custom installation, append `--config /path/to/config.yml`. Read [install.ps1](install.ps1) / [install.sh](install.sh) before executing them, or use the [release archives](https://github.com/IamAngusU/ContextBridge/releases/latest).
 
+If you cloned the repository or used GitHub's **Code -> Download ZIP**, run the
+checked-out installer directly:
+
+```powershell
+# Windows, from the extracted repository directory
+.\install.ps1
+```
+
+```sh
+# Linux/macOS, from the extracted repository directory
+sh ./install.sh
+```
+
+Those scripts still install the latest checksummed release binary; a source
+ZIP is not itself a platform binary and is not an offline installer. For an
+offline/manual installation, download the matching platform archive and
+`SHA256SUMS` from [Releases](https://github.com/IamAngusU/ContextBridge/releases/latest).
+
 ### Connect an app without reading YAML
 
 If an app accepts an OpenAI-compatible base URL, let CB generate a private,
@@ -177,6 +195,35 @@ contextbridge cluster pairing --approve PAIRING-CODE
 
 Replace `PAIRING-CODE` with the code shown on that device. After approval, run `contextbridge run` on the worker. Its identity is saved locally; you do not copy the relay admin token to it. Repeat with a distinct name for each device.
 
+For a one-line Windows worker install, PowerShell must invoke the downloaded
+text as a script block so the options reach the installer (options appended to
+`iex` itself do not):
+
+```powershell
+& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/IamAngusU/ContextBridge/main/install.ps1'))) `
+  -Provider ollama `
+  -RelayUrl 'https://relay.example.net' `
+  -NodeName 'home-pc'
+```
+
+The supplied relay URL infers worker mode. `NodeName` is optional and defaults
+to the operating-system hostname. The equivalent unattended Linux/macOS
+installation is:
+
+```sh
+tmp="$(mktemp)"
+curl -fsSL https://raw.githubusercontent.com/IamAngusU/ContextBridge/main/install.sh -o "$tmp"
+CONTEXTBRIDGE_NONINTERACTIVE=1 \
+CONTEXTBRIDGE_PROVIDER=ollama \
+CONTEXTBRIDGE_RELAY_URL=https://relay.example.net \
+CONTEXTBRIDGE_WORKER_NAME=home-pc \
+sh "$tmp"
+rm -f "$tmp"
+```
+
+Both commands still stop at the short-lived pairing approval. Supplying a
+relay URL removes redundant setup questions; it does not bypass trust.
+
 On the relay host, check the pool and send a job:
 
 ```sh
@@ -194,15 +241,49 @@ contextbridge cluster token --role producer --subject my-app
 
 This prints token JSON. Store it securely; **never give an application the relay admin token**. For a separate CLI client, save the returned JSON as a private **UTF-8** file named `producer-token.json` and transfer it through a secure channel. Do not commit it.
 
-On that client, install CB in **local** mode, then point it at the relay and load the credential:
+On that client, install CB in **client/sender** mode, then point it at the relay and load the credential:
 
 ```sh
-contextbridge cluster configure --mode local --relay-url https://relay.example.net
+contextbridge cluster configure --mode client --relay-url https://relay.example.net
 contextbridge cluster login --token-file ./producer-token.json
 contextbridge cluster chat --provider ollama --model auto --artifacts off --prompt "Reply exactly with POOL-OK"
 ```
 
 The client submits work without joining as a worker. Login stores the token in its private config; remove the temporary token file when no longer needed. Use `--role observer` when issuing a read-only monitoring credential.
+
+### 4. Change a device's role later
+
+Roles are reversible. Stop the managed process before changing the role so a
+previous worker cannot keep accepting assignments with an old in-memory
+configuration. To retain the CLI/API as a sender but stop contributing local
+execution capacity:
+
+```sh
+contextbridge stop
+contextbridge cluster configure --mode client --relay-url https://relay.example.net
+contextbridge run
+```
+
+`sender` is accepted as an alias for `client`. The saved worker identity stays
+on that device, but the restarted service does not send worker heartbeats or
+accept assignments. A sender also needs its own scoped producer credential as
+shown in step 3.
+
+To contribute the device again:
+
+```sh
+contextbridge stop
+contextbridge cluster configure --mode worker --relay-url https://relay.example.net --name home-pc
+contextbridge doctor
+contextbridge run
+```
+
+When the saved identity still belongs to that relay, no new pairing is needed.
+If `doctor` reports a missing or incompatible worker identity, run
+`contextbridge pair` and approve the new code on the relay. Switching to
+`local` disables the relay and worker services while keeping the local bridge
+available; revoke or remove a saved producer credential separately when the
+device must also lose permission to submit remote work.
 
 For your own app, use the producer token with the [native job API or PHP client](docs/integrations.md). The local OpenAI-compatible API uses the **local service token**, not the relay producer token. [Pool and placement details](docs/pools-and-placement.md).
 

@@ -1628,7 +1628,7 @@ func routingScoreSummary(components cluster.RoutingScoreComponents) string {
 func clusterConfigureCommand(args []string) error {
 	flags := flag.NewFlagSet("cluster configure", flag.ContinueOnError)
 	path := flags.String("config", defaultConfigPath(), "config path")
-	mode := flags.String("mode", "local", "local, relay, worker, or all")
+	mode := flags.String("mode", "local", "local, client/sender, relay, worker, or all")
 	relayURL := flags.String("relay-url", "", "public relay URL for this worker")
 	publicURL := flags.String("public-url", "", "public HTTPS URL of this relay")
 	name := flags.String("name", "auto", "worker node name")
@@ -1636,12 +1636,24 @@ func clusterConfigureCommand(args []string) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
+	nameWasSet := false
+	flags.Visit(func(option *flag.Flag) {
+		if option.Name == "name" {
+			nameWasSet = true
+		}
+	})
 	cfg, err := config.Load(*path)
 	if err != nil {
 		return err
 	}
-	switch *mode {
+	configuredMode := strings.ToLower(strings.TrimSpace(*mode))
+	if configuredMode == "sender" {
+		configuredMode = "client"
+	}
+	switch configuredMode {
 	case "local":
+		cfg.Cluster.Relay.Enabled, cfg.Cluster.Worker.Enabled = false, false
+	case "client":
 		cfg.Cluster.Relay.Enabled, cfg.Cluster.Worker.Enabled = false, false
 	case "relay":
 		cfg.Cluster.Relay.Enabled, cfg.Cluster.Worker.Enabled = true, false
@@ -1650,7 +1662,7 @@ func clusterConfigureCommand(args []string) error {
 	case "all":
 		cfg.Cluster.Relay.Enabled, cfg.Cluster.Worker.Enabled = true, true
 	default:
-		return errors.New("--mode must be local, relay, worker, or all")
+		return errors.New("--mode must be local, client (or sender), relay, worker, or all")
 	}
 	if *publicURL != "" {
 		cfg.Cluster.Relay.PublicURL = strings.TrimRight(*publicURL, "/")
@@ -1668,21 +1680,41 @@ func clusterConfigureCommand(args []string) error {
 		cfg.Cluster.Relay.Listen = *listen
 	}
 	if *relayURL != "" {
-		cfg.Cluster.Worker.RelayURL = strings.TrimRight(*relayURL, "/")
+		normalizedRelayURL := strings.TrimRight(strings.TrimSpace(*relayURL), "/")
+		if err := cluster.ValidateRelayURL(normalizedRelayURL); err != nil {
+			return fmt.Errorf("--relay-url: %w", err)
+		}
+		cfg.Cluster.Worker.RelayURL = normalizedRelayURL
 	}
-	if *mode == "all" && cfg.Cluster.Worker.RelayURL == "" {
+	if configuredMode == "all" && cfg.Cluster.Worker.RelayURL == "" {
 		cfg.Cluster.Worker.RelayURL = "http://" + cfg.Cluster.Relay.Listen
+	}
+	if configuredMode == "client" && cfg.Cluster.Worker.RelayURL == "" {
+		return errors.New("--relay-url is required for client/sender mode unless a relay URL is already saved")
 	}
 	if cfg.Cluster.Worker.Enabled && cfg.Cluster.Worker.RelayURL == "" {
 		return errors.New("--relay-url is required for worker mode")
 	}
-	cfg.Cluster.Worker.NodeName = *name
+	if cfg.Cluster.Worker.Enabled && (nameWasSet || strings.TrimSpace(cfg.Cluster.Worker.NodeName) == "") {
+		cfg.Cluster.Worker.NodeName = *name
+	}
 	if err := config.Save(*path, cfg); err != nil {
 		return err
 	}
-	fmt.Printf("Cluster mode saved: %s\n", *mode)
+	fmt.Printf("Cluster mode saved: %s\n", configuredMode)
+	if configuredMode == "client" {
+		fmt.Println("This device can submit and observe work but will not accept worker assignments after the service restarts.")
+		fmt.Println("The saved worker identity was retained, so switching back to worker mode does not require re-pairing when the relay is unchanged.")
+		if strings.TrimSpace(cfg.Cluster.ClientToken) == "" {
+			fmt.Println("Next: create a scoped producer token on the relay, then run contextbridge cluster login --token-file <path>.")
+		}
+	}
 	if cfg.Cluster.Worker.Enabled {
-		fmt.Println("Next: contextbridge pair --config", *path)
+		if _, identityErr := configuredWorker(cfg); identityErr != nil {
+			fmt.Println("Next: contextbridge pair --config", *path)
+		} else {
+			fmt.Println("Existing worker identity retained. Restart ContextBridge to rejoin the pool as a worker.")
+		}
 	}
 	return nil
 }

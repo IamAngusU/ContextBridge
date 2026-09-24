@@ -1,20 +1,49 @@
 param(
     [string]$InstallDir = "$env:LOCALAPPDATA\ContextBridge",
     [ValidateSet("ask", "ollama", "managed", "later")][string]$Provider = "ask",
-    [ValidateSet("ask", "local", "relay", "worker", "all")][string]$ClusterMode = "ask",
+    [ValidateSet("ask", "local", "client", "sender", "relay", "worker", "all")][string]$ClusterMode = "ask",
     [ValidateSet("jina", "nuextract", "both")][string]$ManagedModel = "jina",
     [string]$RelayUrl = "",
+    [string]$PublicUrl = "",
     [string]$NodeName = "auto",
     [string]$CommandName = "",
     [switch]$NoAutostart,
     [switch]$NoStart,
     [switch]$NoDashboard,
     [switch]$NoPath,
-    [switch]$NoCompletion
+    [switch]$NoCompletion,
+    [switch]$NonInteractive
 )
 
 $ErrorActionPreference = "Stop"
 $repo = "IamAngusU/ContextBridge"
+
+if (-not $PSBoundParameters.ContainsKey('Provider') -and $env:CONTEXTBRIDGE_PROVIDER) {
+    $Provider = $env:CONTEXTBRIDGE_PROVIDER
+}
+if (-not $PSBoundParameters.ContainsKey('ClusterMode') -and $env:CONTEXTBRIDGE_CLUSTER_MODE) {
+    $ClusterMode = $env:CONTEXTBRIDGE_CLUSTER_MODE
+}
+if (-not $PSBoundParameters.ContainsKey('RelayUrl') -and $env:CONTEXTBRIDGE_RELAY_URL) {
+    $RelayUrl = $env:CONTEXTBRIDGE_RELAY_URL
+}
+if (-not $PSBoundParameters.ContainsKey('PublicUrl') -and $env:CONTEXTBRIDGE_PUBLIC_URL) {
+    $PublicUrl = $env:CONTEXTBRIDGE_PUBLIC_URL
+}
+if (-not $PSBoundParameters.ContainsKey('NodeName') -and $env:CONTEXTBRIDGE_WORKER_NAME) {
+    $NodeName = $env:CONTEXTBRIDGE_WORKER_NAME
+}
+if (-not $PSBoundParameters.ContainsKey('CommandName') -and $env:CONTEXTBRIDGE_COMMAND) {
+    $CommandName = $env:CONTEXTBRIDGE_COMMAND
+}
+if (-not $PSBoundParameters.ContainsKey('NonInteractive') -and $env:CONTEXTBRIDGE_NONINTERACTIVE -eq '1') {
+    $NonInteractive = $true
+}
+
+$validProviders = @('ask', 'ollama', 'managed', 'later')
+$validClusterModes = @('ask', 'local', 'client', 'sender', 'relay', 'worker', 'all')
+if ($Provider -notin $validProviders) { throw 'Provider must be ask, ollama, managed, or later.' }
+if ($ClusterMode -notin $validClusterModes) { throw 'ClusterMode must be ask, local, client/sender, relay, worker, or all.' }
 
 function Info($Text) { Write-Host $Text -ForegroundColor Cyan }
 function Good($Text) { Write-Host $Text -ForegroundColor Green }
@@ -64,6 +93,24 @@ function Write-ContextBridgeInstallManifest {
 function Test-ContextBridgeCommandName {
     param([string]$Name)
     return $Name -match '^[A-Za-z][A-Za-z0-9_-]{0,31}$'
+}
+
+function Resolve-ContextBridgeInstallMode {
+    param(
+        [Parameter(Mandatory = $true)][string]$Mode,
+        [string]$Relay,
+        [string]$PublicRelay,
+        [bool]$Interactive
+    )
+    if ($Mode -eq 'sender') { return 'client' }
+    if ($Mode -ne 'ask') { return $Mode }
+    if ($Relay -and $PublicRelay) {
+        throw 'Both a worker relay URL and a relay public URL were supplied. Set ClusterMode explicitly.'
+    }
+    if ($Relay) { return 'worker' }
+    if ($PublicRelay) { return 'relay' }
+    if (-not $Interactive) { return 'local' }
+    return 'ask'
 }
 
 function Test-ContextBridgeInstallCommand {
@@ -138,6 +185,17 @@ function Update-ContextBridgeCompletionProfile {
 Info "ContextBridge installer"
 Muted "A local-first router for local engines, APIs, and trusted worker pools."
 
+$installerInteractive = -not $NonInteractive -and [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
+$requestedClusterMode = $ClusterMode
+$ClusterMode = Resolve-ContextBridgeInstallMode -Mode $ClusterMode -Relay $RelayUrl -PublicRelay $PublicUrl -Interactive $installerInteractive
+if ($requestedClusterMode -eq 'ask' -and $ClusterMode -ne 'ask' -and ($RelayUrl -or $PublicUrl)) {
+    Muted "Inferred $ClusterMode mode from the supplied relay URL."
+}
+if ($ClusterMode -eq 'client' -and $Provider -eq 'ask') {
+    $Provider = 'later'
+    Muted 'Sender-only mode does not need a local model provider.'
+}
+
 $existingCanonicalCommand = Get-Command contextbridge -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $PSBoundParameters.ContainsKey('InstallDir') -and (Test-ContextBridgeInstallCommand $existingCanonicalCommand)) {
     $InstallDir = Split-Path -Parent $existingCanonicalCommand.Path
@@ -153,7 +211,7 @@ if ($CommandName -and (($CommandName -ieq 'contextbridge') -or ($CommandName -ie
     throw '-CommandName must be a custom shell name with 1-32 letters, numbers, underscores, or hyphens, starting with a letter.'
 }
 if (-not $NoPath -and -not $CommandName -and -not $canonicalNameAvailable -and -not $cbNameAvailable) {
-    $canPrompt = [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
+    $canPrompt = $installerInteractive
     if (-not $canPrompt) {
         throw "Both 'contextbridge' and 'cb' already belong to other programs. Re-run with -CommandName <your-name>."
     }
@@ -181,7 +239,7 @@ if ($CommandName) {
     }
 }
 
-if ($Provider -eq "ask") {
+if ($Provider -eq "ask" -and $installerInteractive) {
     Write-Host ""
     Write-Host "Choose the first local target:"
     Write-Host "  1) Existing Ollama, with automatic local model detection (recommended)"
@@ -199,6 +257,8 @@ if ($Provider -eq "ask") {
         $modelChoice = Read-Host "Choose 1, 2, or 3 [1]"
         $ManagedModel = if ($modelChoice -eq "2") { "nuextract" } elseif ($modelChoice -eq "3") { "both" } else { "jina" }
     }
+} elseif ($Provider -eq "ask") {
+    $Provider = "ollama"
 }
 
 $architecture = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "amd64" }
@@ -377,18 +437,22 @@ if ($ClusterMode -eq "ask") {
     Write-Host "  2) Relay for other devices"
     Write-Host "  3) Worker for an existing relay"
     Write-Host "  4) Relay and worker on this device"
-    $clusterChoice = Read-Host "Choose 1, 2, 3, or 4 [1]"
-    $ClusterMode = if ($clusterChoice -eq "2") { "relay" } elseif ($clusterChoice -eq "3") { "worker" } elseif ($clusterChoice -eq "4") { "all" } else { "local" }
+    Write-Host "  5) Sender/client for an existing relay (no pool jobs assigned here)"
+    $clusterChoice = Read-Host "Choose 1, 2, 3, 4, or 5 [1]"
+    $ClusterMode = if ($clusterChoice -eq "2") { "relay" } elseif ($clusterChoice -eq "3") { "worker" } elseif ($clusterChoice -eq "4") { "all" } elseif ($clusterChoice -eq "5") { "client" } else { "local" }
 }
 $clusterArguments = @("cluster", "configure", "--config", $config, "--mode", $ClusterMode)
 if ($ClusterMode -in @("relay", "all")) { $clusterArguments += @("--listen", "auto") }
-if ($ClusterMode -eq "worker") {
-    if (-not $RelayUrl) { $RelayUrl = Read-Host "Public HTTPS relay URL" }
-    if (-not $RelayUrl) { throw "A relay URL is required for worker mode." }
-    $clusterArguments += @("--relay-url", $RelayUrl, "--name", $NodeName)
+if ($ClusterMode -in @("worker", "client")) {
+    if (-not $RelayUrl -and $installerInteractive) { $RelayUrl = Read-Host "Public HTTPS relay URL" }
+    if (-not $RelayUrl) { throw "A relay URL is required for $ClusterMode mode." }
+    $clusterArguments += @("--relay-url", $RelayUrl)
+    if ($ClusterMode -eq "worker") { $clusterArguments += @("--name", $NodeName) }
 } elseif ($ClusterMode -eq "relay") {
-    $publicUrl = Read-Host "Public HTTPS relay URL, or leave empty while configuring the reverse proxy"
-    if ($publicUrl) { $clusterArguments += @("--public-url", $publicUrl) }
+    if (-not $PublicUrl -and $installerInteractive) { $PublicUrl = Read-Host "Public HTTPS relay URL, or leave empty while configuring the reverse proxy" }
+    if ($PublicUrl) { $clusterArguments += @("--public-url", $PublicUrl) }
+} elseif ($ClusterMode -eq "all") {
+    $clusterArguments += @("--name", $NodeName)
 }
 & $exe @clusterArguments
 if ($LASTEXITCODE -ne 0) { throw "Cluster mode could not be configured." }

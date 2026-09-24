@@ -326,6 +326,54 @@ test ! -e "$completion_failure/home/.local/share/bash-completion/completions/cb"
 test ! -e "$completion_failure/home/.zfunc/_cb"
 grep -F -- 'Shell completion could not be installed; ContextBridge itself is ready.' "$completion_failure/err" >/dev/null
 
+# A relay URL is an unambiguous worker hint for the installer. Users invoking
+# a downloaded installer or `curl | sh` should not also have to repeat the
+# role when the only meaningful interpretation is an existing relay worker.
+inferred_worker="$test_root/inferred-worker"
+mkdir -p "$inferred_worker/home"
+HOME="$inferred_worker/home" \
+  PATH="$fake_bin:$test_system_path" \
+  CONTEXTBRIDGE_HOME="$inferred_worker/share" \
+  CONTEXTBRIDGE_BIN_DIR="$inferred_worker/bin" \
+  CONTEXTBRIDGE_CONFIG="$inferred_worker/config.yml" \
+  CONTEXTBRIDGE_PROVIDER="later" \
+  CONTEXTBRIDGE_CLUSTER_MODE="ask" \
+  CONTEXTBRIDGE_RELAY_URL="https://relay.example.test/contextbridge" \
+  CONTEXTBRIDGE_WORKER_NAME="inferred-worker" \
+  CONTEXTBRIDGE_NO_COMPLETION="1" \
+  CONTEXTBRIDGE_NO_DASHBOARD="1" \
+  CONTEXTBRIDGE_NONINTERACTIVE="1" \
+  CONTEXTBRIDGE_TEST_CALLS="$inferred_worker/calls" \
+  sh "$root/install.sh" > "$inferred_worker/out"
+grep -F -- 'Inferred worker mode from CONTEXTBRIDGE_RELAY_URL.' "$inferred_worker/out" >/dev/null
+grep -F -- "cluster configure --config $inferred_worker/config.yml --mode worker --relay-url https://relay.example.test/contextbridge --name inferred-worker" "$inferred_worker/calls" >/dev/null
+grep -F -- "pair --config $inferred_worker/config.yml --name inferred-worker" "$inferred_worker/calls" >/dev/null
+
+# Sender is a first-class non-execution role. It retains the relay address but
+# must neither pair nor advertise a local provider merely because installer
+# defaults were omitted.
+sender_only="$test_root/sender-only"
+mkdir -p "$sender_only/home"
+HOME="$sender_only/home" \
+  PATH="$fake_bin:$test_system_path" \
+  CONTEXTBRIDGE_HOME="$sender_only/share" \
+  CONTEXTBRIDGE_BIN_DIR="$sender_only/bin" \
+  CONTEXTBRIDGE_CONFIG="$sender_only/config.yml" \
+  CONTEXTBRIDGE_PROVIDER="ask" \
+  CONTEXTBRIDGE_CLUSTER_MODE="sender" \
+  CONTEXTBRIDGE_RELAY_URL="https://relay.example.test/contextbridge" \
+  CONTEXTBRIDGE_NO_COMPLETION="1" \
+  CONTEXTBRIDGE_NO_DASHBOARD="1" \
+  CONTEXTBRIDGE_NONINTERACTIVE="1" \
+  CONTEXTBRIDGE_TEST_CALLS="$sender_only/calls" \
+  sh "$root/install.sh" > "$sender_only/out"
+grep -F -- 'Sender-only mode does not need a local model provider.' "$sender_only/out" >/dev/null
+grep -F -- "cluster configure --config $sender_only/config.yml --mode client --relay-url https://relay.example.test/contextbridge --name auto" "$sender_only/calls" >/dev/null
+if grep -F -- 'pair --config' "$sender_only/calls" >/dev/null; then
+  echo "sender-only installer attempted worker pairing" >&2
+  exit 1
+fi
+
 missing_relay="$test_root/missing-relay"
 mkdir -p "$missing_relay/home"
 if HOME="$missing_relay/home" \

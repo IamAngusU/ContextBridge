@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Added a reversible `client`/`sender` cluster role for devices that may submit
+  and observe work but must not advertise worker capacity. Role changes retain
+  the bounded worker identity for a later opt-in return, require a safe relay
+  URL, preserve scoped-token revocation as a separate authority boundary, and
+  take effect after an explicit service restart. Installers now infer worker
+  mode from a supplied relay URL, accept equivalent Windows environment hints,
+  expose sender-only setup, reject ambiguous role hints, and document both
+  checked-out/ZIP installation and the pairing-preserving one-line path.
 - Added `cluster conformance resilience`, a provider-free reproducible proof
   for monotonic restart authority, idempotent lost-response recovery, explicit
   post-dispatch ambiguity, stale-fence rejection and single durable terminal

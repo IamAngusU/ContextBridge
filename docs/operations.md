@@ -72,6 +72,22 @@ contextbridge pair --config ./config.yml --name gpu-workstation
 contextbridge run --config ./config.yml
 ```
 
+The role can be changed without reinstalling. A sender/client keeps its relay
+address and producer credential but contributes no worker capacity:
+
+```sh
+contextbridge stop --config ./config.yml
+contextbridge cluster configure --config ./config.yml --mode client --relay-url https://relay.example.net
+contextbridge run --config ./config.yml
+```
+
+`--mode sender` is an alias for `--mode client`. The worker identity is retained
+for a later switch back; the new role takes effect after the service restart.
+Switch back with `--mode worker`, run `doctor`, and pair again only when doctor
+reports that the retained identity is missing or belongs to another relay.
+Changing the role does not revoke a producer credential. Revoke that scoped
+token at the relay when the device must no longer be allowed to submit work.
+
 Inspect before submitting work:
 
 ```sh

@@ -47,6 +47,24 @@ Invoke-Expression $nameFunctionAst[0].Extent.Text
 Assert-True (Test-ContextBridgeCommandName 'bridge-ai') 'A safe custom command name was rejected.'
 Assert-True (-not (Test-ContextBridgeCommandName '../cb')) 'A path-like custom command name was accepted.'
 Assert-True (-not (Test-ContextBridgeCommandName '9bridge')) 'A custom command starting with a digit was accepted.'
+$modeFunctionAst = @($ast.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'Resolve-ContextBridgeInstallMode'
+}, $true))
+Assert-True ($modeFunctionAst.Count -eq 1) 'Expected exactly one installer mode resolver in install.ps1.'
+Invoke-Expression $modeFunctionAst[0].Extent.Text
+Assert-True ((Resolve-ContextBridgeInstallMode -Mode ask -Relay 'https://relay.example.test' -PublicRelay '' -Interactive $true) -eq 'worker') 'A supplied worker relay URL did not infer worker mode.'
+Assert-True ((Resolve-ContextBridgeInstallMode -Mode ask -Relay '' -PublicRelay 'https://relay.example.test' -Interactive $true) -eq 'relay') 'A supplied public relay URL did not infer relay mode.'
+Assert-True ((Resolve-ContextBridgeInstallMode -Mode sender -Relay 'https://relay.example.test' -PublicRelay '' -Interactive $false) -eq 'client') 'Sender mode was not normalized to client mode.'
+Assert-True ((Resolve-ContextBridgeInstallMode -Mode ask -Relay '' -PublicRelay '' -Interactive $false) -eq 'local') 'A headless install without cluster hints did not remain local.'
+$ambiguousModeFailed = $false
+try {
+    Resolve-ContextBridgeInstallMode -Mode ask -Relay 'https://worker.example.test' -PublicRelay 'https://relay.example.test' -Interactive $false | Out-Null
+} catch {
+    $ambiguousModeFailed = $true
+}
+Assert-True $ambiguousModeFailed 'Conflicting relay-role hints were silently accepted.'
 $pathFunctionAst = @($ast.FindAll({
     param($node)
     $node -is [Management.Automation.Language.FunctionDefinitionAst] -and

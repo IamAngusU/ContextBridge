@@ -99,8 +99,28 @@ if [ -n "$command_name" ]; then
     exit 1
   fi
 fi
-if [ "$cluster_mode" = "worker" ] && [ "$interactive" = "0" ] && [ -z "$relay_url" ]; then
-  echo "A relay URL is required for worker mode. Set CONTEXTBRIDGE_RELAY_URL for an unattended install." >&2
+case "$cluster_mode" in
+  ask|local|client|sender|relay|worker|all) ;;
+  *) echo "CONTEXTBRIDGE_CLUSTER_MODE must be ask, local, client/sender, relay, worker, or all." >&2; exit 1 ;;
+esac
+if [ "$cluster_mode" = "sender" ]; then
+  cluster_mode="client"
+fi
+if [ "$cluster_mode" = "ask" ] && [ -n "$relay_url" ] && [ -n "$public_url" ]; then
+  echo "Both CONTEXTBRIDGE_RELAY_URL and CONTEXTBRIDGE_PUBLIC_URL were supplied. Set CONTEXTBRIDGE_CLUSTER_MODE explicitly." >&2
+  exit 1
+fi
+if [ "$cluster_mode" = "ask" ] && [ -n "$relay_url" ]; then
+  cluster_mode="worker"
+  echo "Inferred worker mode from CONTEXTBRIDGE_RELAY_URL."
+elif [ "$cluster_mode" = "ask" ] && [ -n "$public_url" ]; then
+  cluster_mode="relay"
+  echo "Inferred relay mode from CONTEXTBRIDGE_PUBLIC_URL."
+elif [ "$cluster_mode" = "ask" ] && [ "$interactive" = "0" ]; then
+  cluster_mode="local"
+fi
+if { [ "$cluster_mode" = "worker" ] || [ "$cluster_mode" = "client" ]; } && [ "$interactive" = "0" ] && [ -z "$relay_url" ]; then
+  echo "A relay URL is required for $cluster_mode mode. Set CONTEXTBRIDGE_RELAY_URL for an unattended install." >&2
   exit 1
 fi
 if [ -n "$relay_url" ]; then
@@ -110,7 +130,10 @@ if [ -n "$relay_url" ]; then
   esac
 fi
 
-if [ "$provider" = "ask" ] && [ "$interactive" = "1" ]; then
+if [ "$cluster_mode" = "client" ] && [ "$provider" = "ask" ]; then
+  provider="later"
+  echo "Sender-only mode does not need a local model provider."
+elif [ "$provider" = "ask" ] && [ "$interactive" = "1" ]; then
   printf '\nChoose the first local target:\n' >/dev/tty
   printf '  1) Existing Ollama, with automatic local model detection (recommended)\n' >/dev/tty
   printf '  2) Managed llama.cpp runtime and a verified GGUF model\n' >/dev/tty
@@ -344,14 +367,15 @@ if [ "$cluster_mode" = "ask" ] && [ "$interactive" = "1" ]; then
   printf '  2) Relay for other devices\n' >/dev/tty
   printf '  3) Worker for an existing relay\n' >/dev/tty
   printf '  4) Relay and worker on this device\n' >/dev/tty
-  printf 'Choose 1, 2, 3, or 4 [1]: ' >/dev/tty
+  printf '  5) Sender/client for an existing relay (no pool jobs assigned here)\n' >/dev/tty
+  printf 'Choose 1, 2, 3, 4, or 5 [1]: ' >/dev/tty
   read -r cluster_choice </dev/tty || cluster_choice="1"
-  case "${cluster_choice:-1}" in 2) cluster_mode="relay" ;; 3) cluster_mode="worker" ;; 4) cluster_mode="all" ;; *) cluster_mode="local" ;; esac
+  case "${cluster_choice:-1}" in 2) cluster_mode="relay" ;; 3) cluster_mode="worker" ;; 4) cluster_mode="all" ;; 5) cluster_mode="client" ;; *) cluster_mode="local" ;; esac
 elif [ "$cluster_mode" = "ask" ]; then
   cluster_mode="local"
 fi
 
-if [ "$cluster_mode" = "worker" ] && [ -z "$relay_url" ] && [ "$interactive" = "1" ]; then
+if { [ "$cluster_mode" = "worker" ] || [ "$cluster_mode" = "client" ]; } && [ -z "$relay_url" ] && [ "$interactive" = "1" ]; then
   printf 'Public HTTPS relay URL: ' >/dev/tty
   read -r relay_url </dev/tty
 fi
@@ -359,8 +383,8 @@ if { [ "$cluster_mode" = "relay" ] || [ "$cluster_mode" = "all" ]; } && [ -z "$p
   printf 'Public HTTPS relay URL, or leave empty while configuring the reverse proxy: ' >/dev/tty
   read -r public_url </dev/tty || public_url=""
 fi
-if [ "$cluster_mode" = "worker" ] && [ -z "$relay_url" ]; then
-  echo "A relay URL is required for worker mode. Set CONTEXTBRIDGE_RELAY_URL for an unattended install." >&2
+if { [ "$cluster_mode" = "worker" ] || [ "$cluster_mode" = "client" ]; } && [ -z "$relay_url" ]; then
+  echo "A relay URL is required for $cluster_mode mode. Set CONTEXTBRIDGE_RELAY_URL for an unattended install." >&2
   exit 1
 fi
 if [ -n "$relay_url" ]; then
