@@ -12,6 +12,9 @@ described as vendor integrations here.
   a worker pool, and repeatable health checks.
 - [Pools and placement](pools-and-placement.md): topologies, capacity,
   capability evidence, and failure semantics.
+- [ADR 0001: fenced single-leader consensus](adr/0001-fenced-single-leader-consensus.md):
+  accepted HA architecture, replicated-state boundary, alternatives, and proof
+  gates; the implementation is not yet claimed.
 - [Automation](automation.md): schedules, pipelines, and verified follow-ups.
 - [Portable resources](portable-resources.md): hot-plug packs identified by a
   stable manifest rather than a drive letter.

@@ -8,6 +8,10 @@
   release. Workers persist the highest accepted epoch and reject older or
   foreign relay authority before model execution. This is a pre-consensus
   safety primitive; it does not claim multi-relay failover or Raft consensus.
+- Accepted an implementation-gated HA architecture: an opt-in, quorum-backed
+  single-writer FSM with explicit replicated-state, membership, migration,
+  snapshot, dependency, and failure-proof boundaries. No Raft dependency or
+  HA support claim is included yet.
 
 ## v0.7.3 - 2026-09-24
 
