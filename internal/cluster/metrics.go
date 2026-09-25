@@ -42,8 +42,8 @@ func (r *Relay) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 			if running > capacity {
 				running = capacity
 			}
-			slotsTotal = saturatingUint64Add(slotsTotal, uint64(capacity))
-			slotsBusy = saturatingUint64Add(slotsBusy, uint64(running))
+			slotsTotal = saturatingUint64Add(slotsTotal, boundedMetricSlotCount(capacity))
+			slotsBusy = saturatingUint64Add(slotsBusy, boundedMetricSlotCount(running))
 		}
 		for _, health := range node.RoutingHealth {
 			if !validRoutingHealthRouteKey(health.RouteKey) {
@@ -84,6 +84,16 @@ func (r *Relay) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(output.String()))
+}
+
+func boundedMetricSlotCount(value int) uint64 {
+	if value <= 0 {
+		return 0
+	}
+	if value > MaximumWorkerConcurrency {
+		return MaximumWorkerConcurrency
+	}
+	return uint64(value)
 }
 
 func writeMetricHelp(output *strings.Builder, name, help, metricType string) {

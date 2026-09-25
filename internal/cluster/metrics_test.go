@@ -12,6 +12,29 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
+func TestBoundedMetricSlotCountRejectsNegativeAndCapsLargeValues(t *testing.T) {
+	maxInt := int(^uint(0) >> 1)
+	for _, test := range []struct {
+		name  string
+		value int
+		want  uint64
+	}{
+		{name: "minimum integer", value: -maxInt - 1, want: 0},
+		{name: "negative", value: -1, want: 0},
+		{name: "zero", value: 0, want: 0},
+		{name: "one", value: 1, want: 1},
+		{name: "maximum worker concurrency", value: MaximumWorkerConcurrency, want: MaximumWorkerConcurrency},
+		{name: "above maximum worker concurrency", value: MaximumWorkerConcurrency + 1, want: MaximumWorkerConcurrency},
+		{name: "maximum integer", value: maxInt, want: MaximumWorkerConcurrency},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := boundedMetricSlotCount(test.value); got != test.want {
+				t.Fatalf("boundedMetricSlotCount(%d) = %d, want %d", test.value, got, test.want)
+			}
+		})
+	}
+}
+
 func TestMetricsRequiresObserverAndUsesOnlyBoundedAggregateLabels(t *testing.T) {
 	admin := "admin_012345678901234567890123456789012345"
 	relay, err := NewRelay(RelayConfig{Database: filepath.Join(t.TempDir(), "relay.db"), AdminToken: admin}, nil)
