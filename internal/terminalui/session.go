@@ -19,16 +19,34 @@ import (
 )
 
 const (
-	ansiReset               = "\x1b[0m"
-	ansiCyan                = "\x1b[36m"
-	ansiGreen               = "\x1b[32m"
-	ansiYellow              = "\x1b[33m"
-	ansiRed                 = "\x1b[31m"
-	ansiDim                 = "\x1b[2m"
-	ansiOrange              = "\x1b[38;5;208m"
-	ansiPurple              = "\x1b[35m"
-	ansiBlue                = "\x1b[34m"
-	maximumVisiblePoolNodes = 8
+	ansiReset                 = "\x1b[0m"
+	ansiCyan                  = "\x1b[36m"
+	ansiGreen                 = "\x1b[32m"
+	ansiYellow                = "\x1b[33m"
+	ansiRed                   = "\x1b[31m"
+	ansiDim                   = "\x1b[2m"
+	ansiOrange                = "\x1b[38;5;208m"
+	ansiPurple                = "\x1b[35m"
+	ansiBlue                  = "\x1b[34m"
+	maximumVisiblePoolNodes   = 8
+	maximumConsolePromptRunes = 512
+	maximumConsoleActionQueue = 16
+)
+
+// ConsoleIntent is a bounded request from the terminal renderer to its owning
+// client. The terminal UI deliberately has no network, filesystem, shell, or
+// credential access; callers decide how an allowed intent is executed.
+type ConsoleIntent struct {
+	Action   string
+	Argument string
+}
+
+const (
+	ConsoleIntentSend   = "send"
+	ConsoleIntentJobs   = "jobs"
+	ConsoleIntentJob    = "job"
+	ConsoleIntentResult = "result"
+	ConsoleIntentCancel = "cancel"
 )
 
 type jobState struct {
@@ -141,6 +159,9 @@ type Session struct {
 	serviceStopCommand string
 	commandInput       string
 	commandNotice      string
+	workActions        bool
+	commandIntents     chan ConsoleIntent
+	closedState        bool
 	selectionActiveFn  func() bool
 }
 
@@ -187,6 +208,49 @@ func (s *Session) EnableCommands() {
 	if s.panelStarted {
 		s.renderPanelLocked()
 	}
+}
+
+// EnableWorkActions lets an attached console emit only the typed, bounded
+// intents documented by commandHelpLocked. It never grants authority itself;
+// the caller must enable this only after resolving an explicit producer
+// credential and must still send every mutation through the normal relay API.
+func (s *Session) EnableWorkActions() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.interactive || !s.commandEnabled || !s.commandClosesView {
+		return false
+	}
+	s.workActions = true
+	if s.commandIntents == nil {
+		s.commandIntents = make(chan ConsoleIntent, maximumConsoleActionQueue)
+	}
+	if s.panelStarted {
+		s.renderPanelLocked()
+	}
+	return true
+}
+
+// CommandIntents returns the typed action stream. It is nil until work actions
+// are explicitly enabled, so display-only foreground sessions cannot emit
+// mutations by accident.
+func (s *Session) CommandIntents() <-chan ConsoleIntent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.commandIntents
+}
+
+// SetCommandNotice publishes bounded client feedback in the console command
+// area. It is deliberately separate from service history: prompts and results
+// must not become global logs or relay telemetry merely because they were used
+// from the terminal client.
+func (s *Session) SetCommandNotice(notice string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closedState {
+		return
+	}
+	s.commandNotice = cleanTerminalMultiline(notice, 16, 4096)
+	s.renderCommandResultLocked()
 }
 
 // EnableServiceStopCommand advertises the authenticated local lifecycle
@@ -240,8 +304,9 @@ func (s *Session) SetCommandInput(value string) {
 	}
 }
 
-// HandleCommand applies read-only console commands. It returns true only when
-// the caller should close this view; it never stops the ContextBridge service.
+// HandleCommand applies local view controls and, when explicitly enabled,
+// emits a small typed set of work intents. It never executes shell commands,
+// contacts the network, or stops the ContextBridge service itself.
 func (s *Session) HandleCommand(command string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -288,6 +353,21 @@ func (s *Session) HandleCommand(command string) bool {
 			break
 		}
 		s.commandNotice = s.changeNodeDetailsLocked(strings.ToLower(fields[0]), action, target)
+	case "send":
+		s.emitWorkIntentLocked(ConsoleIntentSend, commandArgument(command), true)
+	case "jobs":
+		if len(fields) != 1 {
+			s.commandNotice = "jobs takes no arguments"
+			break
+		}
+		s.emitWorkIntentLocked(ConsoleIntentJobs, "", false)
+	case "job", "result", "cancel":
+		if len(fields) != 2 {
+			s.commandNotice = fields[0] + " expects exactly one job ID"
+			break
+		}
+		action := map[string]string{"job": ConsoleIntentJob, "result": ConsoleIntentResult, "cancel": ConsoleIntentCancel}[strings.ToLower(fields[0])]
+		s.emitWorkIntentLocked(action, fields[1], true)
 	default:
 		s.commandNotice = "Unknown command: " + cleanTerminalLabel(fields[0], 40) + " · help lists all commands"
 	}
@@ -295,9 +375,36 @@ func (s *Session) HandleCommand(command string) bool {
 	return false
 }
 
+func commandArgument(command string) string {
+	command = strings.TrimSpace(command)
+	if index := strings.IndexFunc(command, unicode.IsSpace); index >= 0 {
+		return strings.TrimSpace(command[index:])
+	}
+	return ""
+}
+
+func (s *Session) emitWorkIntentLocked(action, argument string, required bool) {
+	if !s.workActions || s.commandIntents == nil {
+		s.commandNotice = "Work actions unavailable · add a scoped producer credential with console --token, CONTEXTBRIDGE_CLUSTER_TOKEN, or cluster.client_token"
+		return
+	}
+	argument = cleanTerminalLabel(argument, maximumConsolePromptRunes)
+	if required && argument == "" {
+		s.commandNotice = action + " requires " + map[string]string{ConsoleIntentSend: "text", ConsoleIntentJob: "a job ID", ConsoleIntentResult: "a job ID", ConsoleIntentCancel: "a job ID"}[action]
+		return
+	}
+	intent := ConsoleIntent{Action: action, Argument: argument}
+	select {
+	case s.commandIntents <- intent:
+		s.commandNotice = "Accepted " + action + " action · relay policy and ownership still apply"
+	default:
+		s.commandNotice = "Console action queue is busy · wait for an earlier action to finish"
+	}
+}
+
 func (s *Session) commandHelpLocked() string {
 	lines := []string{
-		"VIEW CONTROLS · this input is not a command shell",
+		"CONSOLE · bounded ContextBridge client; never a command shell",
 		"help | ?                     Show these controls",
 		"clear | cls                  Clear visible session history only",
 		"details NODE                 Toggle GPU + model rows (number, name, or all)",
@@ -306,17 +413,32 @@ func (s *Session) commandHelpLocked() string {
 		"models show|hide NODE        Set model rows explicitly",
 		"details | gpus | models none Hide that detail type for every visible node",
 	}
+	if s.workActions {
+		lines = append(lines,
+			"WORK ACTIONS · scoped relay policy and ownership apply",
+			"send TEXT                    Submit one plaintext text job and follow it",
+			"jobs                         List your recent jobs",
+			"job ID                       Inspect one owned job",
+			"result ID                    Show one owned retained text result",
+			"cancel ID                    Request cancellation; execution may be ambiguous",
+		)
+	} else if s.commandClosesView {
+		lines = append(lines, "WORK ACTIONS · unavailable until a scoped producer credential is configured")
+	}
 	if s.commandClosesView {
 		lines = append(lines, "exit | quit | q               Close this view; service + jobs keep running")
 	} else {
 		lines = append(lines, "Ctrl+C                        Stop this foreground service")
 	}
-	lines = append(lines, "SHELL · run `contextbridge help` in CMD, PowerShell, or another terminal")
+	lines = append(lines, "HOST COMMANDS · run `contextbridge help` in CMD, PowerShell, or another terminal")
 	return strings.Join(lines, "\n")
 }
 
 func (s *Session) commandHintLocked() string {
-	commands := "view controls only · help · details N · clear"
+	commands := "view controls · help · details N · clear"
+	if s.workActions {
+		commands = "bounded client · help · send TEXT · jobs · details N · clear"
+	}
 	if s.commandClosesView {
 		return commands + " · exit"
 	}
@@ -956,8 +1078,37 @@ func cleanTerminalLabel(value string, limit int) string {
 	return truncateRunes(value, limit)
 }
 
+func cleanTerminalMultiline(value string, maxLines, maxRunes int) string {
+	value = strings.ReplaceAll(strings.ReplaceAll(value, "\r\n", "\n"), "\r", "\n")
+	parts := strings.Split(value, "\n")
+	if maxLines > 0 && len(parts) > maxLines {
+		parts = parts[:maxLines]
+		parts[len(parts)-1] += " …"
+	}
+	remaining := maxRunes
+	cleaned := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if maxRunes > 0 && remaining <= 0 {
+			break
+		}
+		line := cleanTerminalLabel(part, 0)
+		if maxRunes > 0 {
+			lineRunes := utf8.RuneCountInString(line)
+			if lineRunes > remaining {
+				line = truncateRunes(line, remaining) + "…"
+				cleaned = append(cleaned, line)
+				break
+			}
+			remaining -= lineRunes
+		}
+		cleaned = append(cleaned, line)
+	}
+	return strings.TrimSpace(strings.Join(cleaned, "\n"))
+}
+
 func (s *Session) Close() {
 	s.mu.Lock()
+	s.closedState = true
 	if s.interactive {
 		close(s.done)
 	}

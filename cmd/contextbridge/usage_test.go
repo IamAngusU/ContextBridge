@@ -19,8 +19,9 @@ func TestRootUsageIsTaskOrientedAndExplainsConsoleBoundary(t *testing.T) {
 		"contextbridge guide",
 		"contextbridge cluster lan init|join|status",
 		"contextbridge COMMAND --help",
-		"console input controls only the live view",
-		`"exit" closes an attached console without stopping the service`,
+		"console is never a host shell",
+		"only bounded work actions such as send/jobs/result/cancel",
+		`"exit" closes the view without stopping the service`,
 	} {
 		if !strings.Contains(shown, want) {
 			t.Errorf("root usage is missing %q:\n%s", want, shown)

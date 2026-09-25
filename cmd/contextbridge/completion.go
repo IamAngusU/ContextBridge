@@ -69,7 +69,7 @@ $script:ContextBridgeOptions = @{
     'run' = @('--config','--slots','--topmost')
     'stop' = @('--config','--force')
     'uninstall' = @('--config','--install-dir','--purge','--force','--yes','--dry-run')
-    'console' = @('--config')
+    'console' = @('--config','--token')
     'submit' = @('--file','--artifacts','--config')
     'schedule' = @('--file','--config')
     'result' = @('--config')
@@ -248,7 +248,8 @@ _contextbridge_complete() {
       benchmark) candidates="--json --samples --warmup --database-jobs --idle-duration --binary" ;;
       "schedule add") candidates="--config --file" ;;
       "schedule "*) candidates="--config --file" ;;
-      init|serve|console|result|health|guide|pull|relay) candidates="--config" ;;
+      console) candidates="--config --token" ;;
+      init|serve|result|health|guide|pull|relay) candidates="--config" ;;
       run) candidates="--config --slots --topmost" ;;
       stop) candidates="--config --force" ;;
       uninstall) candidates="--config --install-dir --purge --force --yes --dry-run" ;;
@@ -485,7 +486,8 @@ case "$words[2]" in
     fi
     ;;
 	selftest) _arguments "${config[@]}" '--providers[Checks to run]:providers:' '--local-model[Specific local model]:model:' '--run[Run live checks]' '--dry-run[Readiness checks only]' '--image[Also verify one image]' '--image-profile[Adapter profile for image verification]:profile:' '--artifacts[Artifact directory]:directory:_directories' '--keep-artifacts[Keep temporary artifacts]' '--timeout[Capacity wait timeout]:duration:' '--job-timeout[Per-job timeout]:duration:' '--poll[Polling interval]:duration:' ;;
-  init|serve|console|health|guide|pull|relay) _arguments "${config[@]}" '*:argument:' ;;
+  console) _arguments "${config[@]}" '--token[Scoped producer token for bounded work actions]:token:' ;;
+  init|serve|health|guide|pull|relay) _arguments "${config[@]}" '*:argument:' ;;
   run) _arguments "${config[@]}" '--slots[Session worker job limit]:slots:' '--topmost[Keep the Windows console above other windows]' ;;
   stop) _arguments "${config[@]}" '--force[Stop even while jobs are active]' ;;
   uninstall) _arguments "${config[@]}" '--install-dir[Installation directory when automatic discovery is unavailable]:directory:_directories' '--purge[Also remove locally managed configuration and data]' '--force[Allow shutdown with active jobs or unreadable configuration]' '--yes[Confirm the displayed plan non-interactively]' '--dry-run[Show the exact plan without removing anything]' ;;

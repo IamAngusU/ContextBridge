@@ -116,19 +116,47 @@ and tenant-specific labels:
 curl -fsS -H "Authorization: Bearer $CONTEXTBRIDGE_TOKEN" https://relay.example.net/metrics
 ```
 
-`console` is a view of the managed service. Leaving it with `exit` or Ctrl+C
+`console` is a detachable view and, when a scoped producer credential is
+available, a bounded interactive job client. Leaving it with `exit` or Ctrl+C
 does not stop the service. `contextbridge stop --config ./config.yml` asks a
 loopback-managed `run`/`serve` process to stop and refuses while work is active.
 `contextbridge stop --force --config ./config.yml` is the explicit interruption
 override. Standalone relay/worker processes remain owned by their service
 manager or foreground terminal.
 
-The command row inside the console intentionally controls only that view; it is
-not a second shell. Type `help` there to see view controls. `details show 1`,
-`gpus show all`, and `models hide 2` set per-node detail rows explicitly;
-`details none` collapses every visible node. Submit work and change persistent
-configuration from CMD, PowerShell, or another shell. This separation prevents
-a mistyped view command from mutating the service or dispatching work.
+The command row is never a PowerShell/CMD/shell surface. Type `help` there to
+see the complete bounded vocabulary. `details show 1`, `gpus show all`, and
+`models hide 2` set per-node detail rows explicitly; `details none` collapses
+every visible node.
+
+Work actions are enabled only in an interactive terminal when a credential is
+resolved from `console --token`, `CONTEXTBRIDGE_CLUSTER_TOKEN`, or
+`cluster.client_token`, in that order. The console deliberately does not inherit
+`cluster.relay.admin_token`. Without a producer credential it remains read-only
+and explains why. Piped or redirected console input also remains read-only.
+
+```text
+cb › send Summarize why durable idempotency matters in two sentences.
+cb › jobs
+cb › job job_...
+cb › result job_...
+cb › cancel job_...
+```
+
+`send` creates one bounded plaintext text job through the normal relay admission
+path. Relay policy, ownership, queue/rate limits, egress rules and cost policy
+apply exactly as for another producer. The client follows only authoritative
+relay lifecycle events, keeps at most four automatic followers, and bounds text
+shown in the panel without altering the retained result. A lost plaintext submit
+response is retried once with the same idempotency key, so it still represents
+one logical job. Cancellation makes relay state terminal but does not prove that
+a side-effecting provider execution instantly stopped.
+
+Use `cluster chat --e2ee` for encrypted prompts and results. The initial console
+composer is intentionally plaintext-only and never silently downgrades an E2EE
+request. Persistent configuration, token management, pairing, updates,
+installation, node administration, arbitrary URLs/files and host commands stay
+outside the console action vocabulary.
 
 ## Remove ContextBridge safely
 

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Turned `contextbridge console` into a bounded interactive pool client when an
+  explicit scoped producer credential is available. Its typed `send`, `jobs`,
+  `job`, `result`, and `cancel` actions reuse normal relay admission, ownership,
+  policy and event APIs; never inherit relay-admin authority; never execute host
+  commands; remain disabled for redirected/non-TTY input; cap automatic event
+  followers; keep prompt/result content out of global history; and preserve
+  plaintext idempotency and honest cancellation/E2EE wording. Without a
+  producer credential the same console stays read-only.
 - Added bounded performance-aware placement. Successful fenced jobs build a
   relay-owned smoothed runtime estimate per node and opaque execution route;
   after a configurable minimum sample count it becomes one additive routing

@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -668,7 +669,7 @@ func TestHelpCommandRendersReadableRowsInsteadOfOneClippedLine(t *testing.T) {
 	frames := strings.Split(output.String(), "\x1b[H\x1b[2J")
 	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(frames[len(frames)-1], "")
 	for _, want := range []string{
-		"VIEW CONTROLS · this input is not a command shell",
+		"CONSOLE · bounded ContextBridge client; never a command shell",
 		"help | ?                     Show these controls",
 		"clear | cls                  Clear visible session history only",
 		"details NODE                 Toggle GPU + model rows",
@@ -677,7 +678,8 @@ func TestHelpCommandRendersReadableRowsInsteadOfOneClippedLine(t *testing.T) {
 		"models show|hide NODE        Set model rows explicitly",
 		"details | gpus | models none Hide that detail type for every visible node",
 		"exit | quit | q               Close this view; service + jobs keep running",
-		"SHELL · run `contextbridge help` in CMD, PowerShell, or another terminal",
+		"WORK ACTIONS · unavailable until a scoped producer credential is configure",
+		"HOST COMMANDS · run `contextbridge help` in CMD, PowerShell, or another te",
 	} {
 		if !strings.Contains(plain, want) {
 			t.Errorf("multi-line help is missing %q:\n%s", want, plain)
@@ -685,6 +687,95 @@ func TestHelpCommandRendersReadableRowsInsteadOfOneClippedLine(t *testing.T) {
 	}
 	if got := strings.Count(plain, "  | help | ?"); got != 1 {
 		t.Fatalf("help output was duplicated or flattened: count=%d\n%s", got, plain)
+	}
+}
+
+func TestConsoleWorkActionsRequireExplicitEnablementAndEmitOnlyTypedIntents(t *testing.T) {
+	var output bytes.Buffer
+	session := &Session{out: &output, interactive: true, style: "panel", widthFn: func() int { return 120 }, heightFn: func() int { return 42 },
+		jobs: map[string]jobState{}, adapterSelections: map[int]adapterSelection{}, localModels: map[string]localModelSelection{}}
+	session.EnableCommands()
+	session.Banner("v0.test", "console")
+	if session.CommandIntents() != nil {
+		t.Fatal("display-only console exposed a mutation channel")
+	}
+	session.HandleCommand("send must-not-run")
+	if !strings.Contains(session.commandNotice, "Work actions unavailable") {
+		t.Fatalf("display-only send did not fail honestly: %q", session.commandNotice)
+	}
+
+	session.EnableWorkActions()
+	intents := session.CommandIntents()
+	if intents == nil {
+		t.Fatal("enabled console did not expose typed intents")
+	}
+	session.HandleCommand("send preserve   these spaces")
+	select {
+	case intent := <-intents:
+		if intent.Action != ConsoleIntentSend || intent.Argument != "preserve   these spaces" {
+			t.Fatalf("send intent = %#v", intent)
+		}
+	default:
+		t.Fatal("send did not emit an intent")
+	}
+	session.HandleCommand("cancel job-safe-1")
+	select {
+	case intent := <-intents:
+		if intent.Action != ConsoleIntentCancel || intent.Argument != "job-safe-1" {
+			t.Fatalf("cancel intent = %#v", intent)
+		}
+	default:
+		t.Fatal("cancel did not emit an intent")
+	}
+	session.HandleCommand("contextbridge uninstall --purge")
+	select {
+	case intent := <-intents:
+		t.Fatalf("host command escaped as intent: %#v", intent)
+	default:
+	}
+	if !strings.Contains(session.commandNotice, "Unknown command") {
+		t.Fatalf("host command was not rejected: %q", session.commandNotice)
+	}
+}
+
+func TestConsoleWorkActionQueueIsBounded(t *testing.T) {
+	var output bytes.Buffer
+	session := &Session{out: &output, interactive: true}
+	session.EnableCommands()
+	if !session.EnableWorkActions() {
+		t.Fatal("interactive console refused work actions")
+	}
+	for index := 0; index < maximumConsoleActionQueue; index++ {
+		session.HandleCommand("jobs")
+	}
+	session.HandleCommand("jobs")
+	if !strings.Contains(session.commandNotice, "queue is busy") {
+		t.Fatalf("full queue was not reported: %q", session.commandNotice)
+	}
+}
+
+func TestRedirectedSessionCannotEnableWorkActions(t *testing.T) {
+	session := &Session{interactive: false}
+	session.EnableCommands()
+	if session.EnableWorkActions() || session.CommandIntents() != nil {
+		t.Fatal("redirected session became an interactive mutation surface")
+	}
+}
+
+func TestConsoleNoticeStaysOutOfGlobalHistoryAndStripsTerminalControls(t *testing.T) {
+	var output bytes.Buffer
+	session := &Session{out: &output, interactive: true, style: "panel", widthFn: func() int { return 100 }, heightFn: func() int { return 32 },
+		jobs: map[string]jobState{}, adapterSelections: map[int]adapterSelection{}, localModels: map[string]localModelSelection{}}
+	session.Banner("v0.test", "console")
+	session.nextSection = "SERVICE"
+	session.writeEventLocked("·", "ordinary event")
+	before := append([]historyEntry(nil), session.history...)
+	session.SetCommandNotice("private result\x1b[31m\nsecond line")
+	if !reflect.DeepEqual(before, session.history) {
+		t.Fatalf("console content entered operational history: before=%#v after=%#v", before, session.history)
+	}
+	if strings.Contains(session.commandNotice, "\x1b") || !strings.Contains(session.commandNotice, "private result[31m\nsecond line") {
+		t.Fatalf("console notice was not sanitized locally: %q", session.commandNotice)
 	}
 }
 
@@ -732,6 +823,9 @@ func TestForegroundServiceCommandsCannotAccidentallyCloseTheirOwner(t *testing.T
 	session := &Session{out: &output, interactive: true, style: "panel", widthFn: func() int { return 120 }, heightFn: func() int { return 30 },
 		jobs: map[string]jobState{}, adapterSelections: map[int]adapterSelection{}, localModels: map[string]localModelSelection{}}
 	session.EnableServiceCommands()
+	if session.EnableWorkActions() {
+		t.Fatal("foreground service command row became a mutation client")
+	}
 	session.Banner("v0.test", "foreground worker")
 	if !session.LiveCommandEditor() {
 		t.Fatal("foreground panel did not expose its command editor")

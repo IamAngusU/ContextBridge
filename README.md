@@ -333,6 +333,13 @@ ai  › CB-OK
 
 The `ai ›` line is the model answer. ContextBridge then shows execution metadata so you can see what actually handled the job. The selected model, worker ID and timing depend on your pool.
 
+Prefer one live surface? Run `contextbridge console`. With a configured scoped
+producer credential, its bounded command row can `send TEXT`, list `jobs`, open
+an owned `job`/`result`, and request `cancel`; without that credential it stays
+read-only. It is never a host shell, never inherits relay-admin authority merely
+because it runs beside the relay, and piped input cannot turn it into a mutation
+surface. See [operations](docs/operations.md#observe-diagnose-and-stop).
+
 Attach one local image when the selected worker/model supports vision:
 
 ```sh

@@ -151,7 +151,7 @@ START HERE
   contextbridge guide                         Interactive setup for this device
   contextbridge doctor                        Diagnose configuration and connectivity
   contextbridge run                           Start local service, relay, and/or worker
-  contextbridge console                       Open the detachable read-only live view
+  contextbridge console                       Open the detachable bounded live client
 
 SEND AND INSPECT WORK
   contextbridge submit --file JOB.json        Submit one local job contract
@@ -194,8 +194,9 @@ HELP
   contextbridge COMMAND --help                Show flags for a command
   contextbridge guide                         Recommended path when you are unsure
 
-The console input controls only the live view; submit jobs from CMD, PowerShell,
-or another shell. "exit" closes an attached console without stopping the service.`)
+The console is never a host shell. With a scoped producer credential it accepts
+only bounded work actions such as send/jobs/result/cancel; without one it stays
+honestly read-only. "exit" closes the view without stopping the service.`)
 }
 
 func helpFlag(value string) bool {

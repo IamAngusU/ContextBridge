@@ -43,6 +43,7 @@ type consoleStatus struct {
 func consoleCommand(args []string) error {
 	flags := flag.NewFlagSet("console", flag.ContinueOnError)
 	path := flags.String("config", defaultConfigPath(), "config path")
+	token := flags.String("token", "", "scoped producer token for bounded console work actions")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -55,7 +56,17 @@ func consoleCommand(args []string) error {
 	session := terminalui.NewWithStyle(os.Stdout, cfg.Terminal.Style)
 	defer session.Close()
 	session.EnableCommands()
-	session.Banner(version, "read-only · exit + Enter / Ctrl+C closes this view")
+	actionToken, actionSource := consoleActionCredential(cfg, *token)
+	if actionToken != "" && session.EnableWorkActions() {
+		session.Banner(version, "bounded live client · producer credential from "+actionSource+" · host commands are never executed")
+		go runConsoleActions(ctx, newClusterAPIClient(clusterBaseURL(cfg), actionToken), session.CommandIntents(), session)
+	} else {
+		reason := "configure a scoped producer credential for work actions"
+		if actionToken != "" {
+			reason = "work actions require an interactive terminal; piped/redirected input stays read-only"
+		}
+		session.Banner(version, "read-only · "+reason+" · host commands are never executed")
+	}
 	if cfg.Cluster.Relay.Enabled || cfg.Cluster.Worker.Enabled {
 		go watchPoolDisplay(ctx, cfg, session)
 	}
