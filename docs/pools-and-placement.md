@@ -70,6 +70,17 @@ capacity is still rejected, old evidence expires, one extreme completion is
 winsorized, and an unknown worker stays neutral so new hardware can be
 explored rather than being permanently treated as slow.
 
+CB also learns a bounded load curve instead of treating that route-wide speed
+as fixed truth. At assignment the relay derives a coarse `idle`, `light`,
+`moderate`, or `high` class from slot occupancy, queue depth, CPU/GPU pressure,
+RAM/VRAM pressure and adapter occupancy, plus `warm`, `cold`, or `unknown`
+model state. A class needs the same minimum number of fresh successful samples
+before it can override the route-wide baseline. This lets two nodes with equal
+current telemetry be compared using how each one historically behaved under
+that kind of load, while keeping state bounded to twelve classes per route.
+It is deliberately not a black-box model and it does not yet normalize for
+prompt/token size; those remain visible limitations rather than guessed data.
+
 The operator controls this soft behavior centrally in `config.yml`:
 
 ```yaml
@@ -86,8 +97,9 @@ These settings cannot widen permissions, capabilities, tenant scope, cost
 authority, or trust. Per-job hard and soft controls remain in `requirements`,
 including exact provider/model/group/tags, minimum VRAM and
 `preferred_nodes`. `route explain` reports the performance sample count,
-smoothed compute estimate, evidence age and additive `historical_latency`
-score used for a decision.
+smoothed compute estimate, current load context, whether the estimate came
+from that context or the route baseline, evidence age and additive
+`historical_latency` score used for a decision.
 
 Recent transient failures are relay-owned placement evidence. A matching
 execution route receives a bounded soft penalty after the first failure. Route

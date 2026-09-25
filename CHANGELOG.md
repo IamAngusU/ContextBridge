@@ -9,6 +9,9 @@
   state, affinity and failures. Evidence expires, outliers are limited,
   unknown workers remain neutral, workers cannot forge it through heartbeats,
   and `route explain` exposes the exact samples, estimate, age and score.
+  Relay-derived coarse load contexts additionally learn separate curves for
+  slot/queue, CPU/GPU, RAM/VRAM, adapter pressure and model warmth, while the
+  route-wide estimate remains a neutral fallback until a context is proven.
 
 ## v0.8.0 - 2026-09-25
 

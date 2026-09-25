@@ -2244,7 +2244,7 @@ func (s *Store) completeJobWithFailure(id, nodeID string, attempt int, fence *As
 				node.CostUnknownJobs = saturatingUint64Add(node.CostUnknownJobs, usage.CostUnknownJobs)
 				recordRoutingOutcomeForOwnerRoute(&node, job.Requirements, job.OwnerSubject, jobRoutingHealthRouteKey(job), job.ID, job.Status == JobCompleted, job.FailureCode, job.FinishedAt)
 				if job.Status == JobCompleted {
-					recordRoutingPerformance(&node, job.Requirements, jobRoutingHealthRouteKey(job), routingObservedComputeMS(job), job.FinishedAt)
+					recordRoutingPerformance(&node, job.Requirements, jobRoutingHealthRouteKey(job), routingObservedComputeMS(job), job.FinishedAt, jobRoutingPerformanceContext(job))
 				}
 				if err := putJSON(tx.Bucket(bucketNodes), node.ID, node); err != nil {
 					return err
@@ -2270,6 +2270,18 @@ func (s *Store) completeJobWithFailure(id, nodeID string, attempt int, fence *As
 func jobRoutingHealthRouteKey(job Job) string {
 	if job.RoutingDecision != nil && validRoutingHealthRouteKey(job.RoutingDecision.RouteKey) {
 		return job.RoutingDecision.RouteKey
+	}
+	return ""
+}
+
+func jobRoutingPerformanceContext(job Job) string {
+	if job.RoutingDecision == nil || job.RoutingDecision.SelectedNodeID == "" || job.RoutingDecision.SelectedNodeID != job.AssignedNode {
+		return ""
+	}
+	for _, candidate := range job.RoutingDecision.Candidates {
+		if candidate.NodeID == job.AssignedNode && candidate.Eligible && validRoutingPerformanceContext(candidate.PerformanceContext) {
+			return candidate.PerformanceContext
+		}
 	}
 	return ""
 }

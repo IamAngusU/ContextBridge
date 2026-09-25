@@ -48,6 +48,8 @@ type RoutingCandidateDecision struct {
 	PerformanceSamples uint32                 `json:"performance_samples,omitempty"`
 	EstimatedComputeMS uint64                 `json:"estimated_compute_ms,omitempty"`
 	PerformanceAgeMS   int64                  `json:"performance_age_ms,omitempty"`
+	PerformanceContext string                 `json:"performance_context,omitempty"`
+	PerformanceSource  string                 `json:"performance_source,omitempty"`
 }
 
 // RoutingDecision is a point-in-time explanation. The relay adds ID, JobID,
@@ -111,7 +113,7 @@ func rankWithDecisionForOwner(nodes []Node, requirements Requirements, estimated
 
 func rankWithDecisionForOwnerPolicy(nodes []Node, requirements Requirements, estimatedVRAM uint64, ownerSubject string, now time.Time, placement PlacementPolicy) ([]Candidate, RoutingDecision) {
 	placement = normalizePlacementPolicy(placement)
-	fastestHistoricalMS := fastestEligibleHistoricalRuntime(nodes, requirements, ownerSubject, now, placement)
+	fastestHistoricalMS := fastestEligibleHistoricalRuntime(nodes, requirements, estimatedVRAM, ownerSubject, now, placement)
 	candidates := make([]Candidate, 0, len(nodes))
 	decisions := make([]RoutingCandidateDecision, 0, min(len(nodes), MaximumRoutingDecisionCandidates))
 	for _, node := range nodes {
@@ -166,6 +168,8 @@ func rankWithDecisionForOwnerPolicy(nodes []Node, requirements Requirements, est
 		if placementVRAM == 0 {
 			placementVRAM = estimatedVRAM
 		}
+		performanceContext := routingPerformanceContext(node, requirements, placementVRAM)
+		candidateDecision.PerformanceContext = performanceContext
 		vramHeadroom := bestVRAMHeadroom(node, placementVRAM)
 		gpuPressure := bestGPUUtilization(node, placementVRAM)
 		cpuPressure := boundedUtilization(node.Capabilities.CPUUtilization)
@@ -176,9 +180,10 @@ func rankWithDecisionForOwnerPolicy(nodes []Node, requirements Requirements, est
 		if hasHealth && now.Sub(health.LastFailureAt) >= 0 && now.Sub(health.LastFailureAt) <= routingFailureWindow {
 			components.RecentFailures = math.Min(float64(health.ConsecutiveFailures)*routingFailureScore, routingFailureScore*float64(routingFailureThreshold))
 		}
-		if performance, ok := routingPerformanceFor(node, requirements, placement, now); ok {
+		if performance, ok := routingPerformanceEstimateFor(node, requirements, performanceContext, placement, now); ok {
 			candidateDecision.PerformanceSamples = performance.Samples
 			candidateDecision.EstimatedComputeMS = performance.EWMAComputeMS
+			candidateDecision.PerformanceSource = performance.Source
 			age := now.Sub(performance.LastCompletedAt)
 			if age < 0 {
 				age = 0
@@ -241,7 +246,7 @@ func rankWithDecisionForOwnerPolicy(nodes []Node, requirements Requirements, est
 	return candidates, decision
 }
 
-func fastestEligibleHistoricalRuntime(nodes []Node, requirements Requirements, ownerSubject string, now time.Time, placement PlacementPolicy) uint64 {
+func fastestEligibleHistoricalRuntime(nodes []Node, requirements Requirements, estimatedVRAM uint64, ownerSubject string, now time.Time, placement PlacementPolicy) uint64 {
 	if !placement.PerformanceLearning {
 		return 0
 	}
@@ -261,7 +266,12 @@ func fastestEligibleHistoricalRuntime(nodes []Node, requirements Requirements, o
 		if health, ok := routingHealthForOwnerAt(node, requirements, ownerSubject, now); ok && health.CircuitOpenUntil.After(now) {
 			continue
 		}
-		performance, ok := routingPerformanceFor(node, requirements, placement, now)
+		placementVRAM := requirements.MinFreeVRAM
+		if placementVRAM == 0 {
+			placementVRAM = estimatedVRAM
+		}
+		contextClass := routingPerformanceContext(node, requirements, placementVRAM)
+		performance, ok := routingPerformanceEstimateFor(node, requirements, contextClass, placement, now)
 		if !ok {
 			continue
 		}
