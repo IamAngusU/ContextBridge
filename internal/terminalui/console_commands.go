@@ -55,6 +55,12 @@ var consoleSendValueFlags = []string{
 
 var consoleSendBooleanFlags = []string{"--new-session", "--new-session-per-job"}
 
+// maximumConsoleCommandOverheadRunes leaves bounded room for every accepted
+// routing flag and its maximum-length value in addition to the configured
+// prompt. Without this reserve, a valid prompt at its advertised limit could
+// be silently truncated merely because the user also selected routing options.
+const maximumConsoleCommandOverheadRunes = 2048
+
 func defaultConsoleCommandLimits() ConsoleCommandLimits {
 	return ConsoleCommandLimits{MaxPromptCharacters: maximumConsolePromptRunes, SessionProvider: "adapter"}
 }
@@ -85,9 +91,10 @@ func (s *Session) effectiveCommandLimitsLocked() ConsoleCommandLimits {
 
 func (s *Session) commandInputLimitLocked() int {
 	limits := s.effectiveCommandLimitsLocked()
-	// Keep enough room to type one visibly invalid value and receive a useful
-	// red diagnostic instead of silently truncating exactly at the valid edge.
-	return min(65792, limits.MaxPromptCharacters+256)
+	// Keep enough room for the complete bounded routing header and for a visibly
+	// invalid prompt to reach the red diagnostic instead of being truncated at
+	// the advertised valid edge.
+	return limits.MaxPromptCharacters + maximumConsoleCommandOverheadRunes
 }
 
 func (s *Session) parseSendIntentLocked(command string) (ConsoleIntent, string, bool) {

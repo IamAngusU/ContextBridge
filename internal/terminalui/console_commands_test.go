@@ -62,6 +62,18 @@ func TestSendGuideUsesExactJSONPayloadBytes(t *testing.T) {
 	}
 }
 
+func TestCommandInputLimitReservesRoutingHeaderBeyondPromptLimit(t *testing.T) {
+	session := commandTestSession()
+	if got, want := session.commandInputLimitLocked(), 64+maximumConsoleCommandOverheadRunes; got != want {
+		t.Fatalf("command input limit = %d, want %d", got, want)
+	}
+	command := "send --provider ollama --model qwen -- " + strings.Repeat("x", 64)
+	session.SetCommandInput(command)
+	if session.commandInput != command {
+		t.Fatalf("valid maximum prompt plus routing header was truncated: got %d runes, want %d", len([]rune(session.commandInput)), len([]rune(command)))
+	}
+}
+
 func TestSendFlagsExposeOnlyValidNextOptionsAndTypedIntent(t *testing.T) {
 	session := commandTestSession()
 	session.commandInput = "send --provider "
