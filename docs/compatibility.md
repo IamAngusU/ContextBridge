@@ -31,6 +31,7 @@ without sending an inference request.
 | Worker advertisement | `contextbridge.worker-conformance.v1` | Worker Conformance v1 report over live bounded evidence |
 | Planned worker maintenance | `durable_worker_drain_v1`, `node.draining` | Admin-only durable admission state plus assignment-transaction recheck |
 | Failure-aware placement | `failure_aware_routing_v1`, `routing_recovery_probation_v1`, `route_circuit_open` | Relay-owned bounded failure streak, opaque execution-route and producer isolation, global node-failure scope, cooldown, durable single-flight recovery probe, and auditable route evidence |
+| Performance-aware placement | `performance_aware_routing_v1` | Bounded relay-owned successful-runtime EWMA per node and opaque route, minimum samples, expiry, outlier limiting, operator-controlled soft weight, and auditable score evidence |
 | Offline LAN trust | `secure_offline_lan_pinning_v1`, LAN join bundle v1 | Relay-owned TLS leaf identity, explicitly transferred certificate/SPKI pin, persistent worker binding, and the same authenticated HTTP/WebSocket protocol without Internet PKI |
 | Pool metrics | `prometheus_metrics_v1`, `GET /metrics` | Authenticated fixed-cardinality aggregates with no tenant, job, node, provider, model, prompt, or error labels |
 | Producer resource governance | `producer_resource_governance_v1`, `capacity.owner_hourly_jobs_full` | Token-bound queue, hourly job, provider and local-egress ceilings; durable fixed-window accounting |

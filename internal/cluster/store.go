@@ -692,6 +692,9 @@ func mergeStoredNodeState(node *Node, existing Node) {
 	// Routing health is relay-owned. In particular, a reconnecting worker must
 	// not be able to clear an open circuit or forge one for a different route.
 	node.RoutingHealth = boundedRoutingHealth(existing.RoutingHealth)
+	// Historical performance is also relay-owned and derived only from accepted
+	// terminal jobs. Heartbeats cannot claim an artificially fast route.
+	node.RoutingPerformance = boundedRoutingPerformance(existing.RoutingPerformance)
 	if node.Draining && node.Connected {
 		node.State = "draining"
 	}
@@ -2240,6 +2243,9 @@ func (s *Store) completeJobWithFailure(id, nodeID string, attempt int, fence *As
 				node.CostKnownJobs = saturatingUint64Add(node.CostKnownJobs, usage.CostKnownJobs)
 				node.CostUnknownJobs = saturatingUint64Add(node.CostUnknownJobs, usage.CostUnknownJobs)
 				recordRoutingOutcomeForOwnerRoute(&node, job.Requirements, job.OwnerSubject, jobRoutingHealthRouteKey(job), job.ID, job.Status == JobCompleted, job.FailureCode, job.FinishedAt)
+				if job.Status == JobCompleted {
+					recordRoutingPerformance(&node, job.Requirements, jobRoutingHealthRouteKey(job), routingObservedComputeMS(job), job.FinishedAt)
+				}
 				if err := putJSON(tx.Bucket(bucketNodes), node.ID, node); err != nil {
 					return err
 				}

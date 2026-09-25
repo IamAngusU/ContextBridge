@@ -220,6 +220,24 @@ type Node struct {
 	// RoutingHealth is bounded relay-owned evidence about recent transient
 	// execution failures. Workers cannot set or clear it through heartbeats.
 	RoutingHealth []RoutingHealth `json:"routing_health,omitempty"`
+	// RoutingPerformance is bounded relay-owned evidence derived only from
+	// successfully completed, fenced jobs. Workers cannot advertise a faster
+	// historical estimate through heartbeats.
+	RoutingPerformance []RoutingPerformance `json:"routing_performance,omitempty"`
+}
+
+// RoutingPerformance keeps a bounded smoothed execution-time estimate for one
+// concrete route on one node. RouteKey has the same opaque identity as routing
+// health, so adapter profile/session constraints cannot contaminate an
+// independent route and no raw session identifier is persisted here.
+type RoutingPerformance struct {
+	RouteKey        string    `json:"route_key"`
+	Provider        string    `json:"provider"`
+	Model           string    `json:"model"`
+	Samples         uint32    `json:"samples"`
+	EWMAComputeMS   uint64    `json:"ewma_compute_ms"`
+	LastComputeMS   uint64    `json:"last_compute_ms"`
+	LastCompletedAt time.Time `json:"last_completed_at"`
 }
 
 // RoutingHealth is keyed by an opaque producer scope plus an opaque execution

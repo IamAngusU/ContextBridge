@@ -195,10 +195,22 @@ type AdapterProfile struct {
 type Cluster struct {
 	Relay       ClusterRelay                `yaml:"relay" json:"relay"`
 	Worker      ClusterWorker               `yaml:"worker" json:"worker"`
+	Placement   ClusterPlacement            `yaml:"placement" json:"placement"`
 	ClientToken string                      `yaml:"client_token,omitempty" json:"-"`
 	Policies    ClusterPolicies             `yaml:"policies" json:"policies"`
 	Pricing     cluster.Pricing             `yaml:"pricing" json:"pricing"`
 	Pipelines   map[string]cluster.Pipeline `yaml:"pipelines" json:"pipelines"`
+}
+
+// ClusterPlacement contains operator-tunable soft ranking behavior. None of
+// these values can widen task, provider, tenant, cost, trust, or hardware
+// requirements; they only rank workers that already passed every hard gate.
+type ClusterPlacement struct {
+	PerformanceLearning *bool   `yaml:"performance_learning" json:"performance_learning"`
+	MinimumSamples      int     `yaml:"minimum_samples" json:"minimum_samples"`
+	HistoryTTLHours     int     `yaml:"history_ttl_hours" json:"history_ttl_hours"`
+	LatencyWeight       float64 `yaml:"latency_weight" json:"latency_weight"`
+	MaxLatencyPenalty   float64 `yaml:"max_latency_penalty" json:"max_latency_penalty"`
 }
 
 type ClusterRelay struct {
@@ -762,6 +774,18 @@ func (c Config) Validate() error {
 	if c.Cluster.Worker.HeartbeatSeconds < 0 || c.Cluster.Worker.HeartbeatSeconds > 300 {
 		return errors.New("cluster.worker.heartbeat_seconds must be between 1 and 300 when set")
 	}
+	if c.Cluster.Placement.MinimumSamples < 1 || c.Cluster.Placement.MinimumSamples > 1000 {
+		return errors.New("cluster.placement.minimum_samples must be between 1 and 1000")
+	}
+	if c.Cluster.Placement.HistoryTTLHours < 1 || c.Cluster.Placement.HistoryTTLHours > 8760 {
+		return errors.New("cluster.placement.history_ttl_hours must be between 1 and 8760")
+	}
+	if math.IsNaN(c.Cluster.Placement.LatencyWeight) || math.IsInf(c.Cluster.Placement.LatencyWeight, 0) || c.Cluster.Placement.LatencyWeight <= 0 || c.Cluster.Placement.LatencyWeight > 100 {
+		return errors.New("cluster.placement.latency_weight must be finite and between 0 and 100")
+	}
+	if math.IsNaN(c.Cluster.Placement.MaxLatencyPenalty) || math.IsInf(c.Cluster.Placement.MaxLatencyPenalty, 0) || c.Cluster.Placement.MaxLatencyPenalty <= 0 || c.Cluster.Placement.MaxLatencyPenalty > 1000 {
+		return errors.New("cluster.placement.max_latency_penalty must be finite and between 0 and 1000")
+	}
 	if c.Cluster.Policies.MaxAttempts < 0 || c.Cluster.Policies.MaxAttempts > 10 {
 		return errors.New("cluster.policies.max_attempts must be between 1 and 10 when set")
 	}
@@ -1219,6 +1243,22 @@ func applyDefaults(cfg *Config, base string) {
 	if cfg.Cluster.Worker.HeartbeatSeconds == 0 {
 		cfg.Cluster.Worker.HeartbeatSeconds = 5
 	}
+	if cfg.Cluster.Placement.PerformanceLearning == nil {
+		enabled := true
+		cfg.Cluster.Placement.PerformanceLearning = &enabled
+	}
+	if cfg.Cluster.Placement.MinimumSamples == 0 {
+		cfg.Cluster.Placement.MinimumSamples = 3
+	}
+	if cfg.Cluster.Placement.HistoryTTLHours == 0 {
+		cfg.Cluster.Placement.HistoryTTLHours = 168
+	}
+	if cfg.Cluster.Placement.LatencyWeight == 0 {
+		cfg.Cluster.Placement.LatencyWeight = 12
+	}
+	if cfg.Cluster.Placement.MaxLatencyPenalty == 0 {
+		cfg.Cluster.Placement.MaxLatencyPenalty = 60
+	}
 	if len(cfg.Cluster.Policies.AllowedTasks) == 0 {
 		cfg.Cluster.Policies.AllowedTasks = []string{"moderation", "generation", "extraction", "embedding", "rag_ingest", "rag_query", "vision"}
 	}
@@ -1535,6 +1575,14 @@ cluster:
     local_url: http://127.0.0.1:32145
     local_token: GENERATED_TOKEN
     heartbeat_seconds: 5
+  placement:
+    # Soft evidence only. Hard permissions/capabilities and current load are
+    # always evaluated first; unknown workers remain eligible to learn.
+    performance_learning: true
+    minimum_samples: 3
+    history_ttl_hours: 168
+    latency_weight: 12
+    max_latency_penalty: 60
   policies:
     allowed_tasks: [moderation, generation, extraction, embedding, rag_ingest, rag_query, vision]
     # Assignment generations. Only proven pre-execution worker capacity or

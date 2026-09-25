@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,8 +39,31 @@ func TestDefaultConfigLoads(t *testing.T) {
 	if cfg.Terminal.Style != "panel" {
 		t.Fatalf("unexpected terminal style: %q", cfg.Terminal.Style)
 	}
+	if cfg.Cluster.Placement.PerformanceLearning == nil || !*cfg.Cluster.Placement.PerformanceLearning || cfg.Cluster.Placement.MinimumSamples != 3 || cfg.Cluster.Placement.HistoryTTLHours != 168 {
+		t.Fatalf("unexpected placement defaults: %#v", cfg.Cluster.Placement)
+	}
 	if _, err := os.Stat(cfg.Storage.Inbox); !os.IsNotExist(err) {
 		t.Fatal("loading config should not create the inbox")
+	}
+}
+
+func TestPlacementConfigurationIsBounded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := Default(path); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Cluster.Placement.MinimumSamples = 0
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "minimum_samples") {
+		t.Fatalf("invalid placement sample count was accepted: %v", err)
+	}
+	cfg.Cluster.Placement.MinimumSamples = 3
+	cfg.Cluster.Placement.LatencyWeight = math.NaN()
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "latency_weight") {
+		t.Fatalf("invalid placement weight was accepted: %v", err)
 	}
 }
 

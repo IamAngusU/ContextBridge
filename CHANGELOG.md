@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Added bounded performance-aware placement. Successful fenced jobs build a
+  relay-owned smoothed runtime estimate per node and opaque execution route;
+  after a configurable minimum sample count it becomes one additive routing
+  signal alongside live slots, queue, CPU/GPU/RAM/VRAM pressure, loaded-model
+  state, affinity and failures. Evidence expires, outliers are limited,
+  unknown workers remain neutral, workers cannot forge it through heartbeats,
+  and `route explain` exposes the exact samples, estimate, age and score.
+
 ## v0.8.0 - 2026-09-25
 
 - Added `contextbridge guide` and opt-in `cluster configure --interactive` for

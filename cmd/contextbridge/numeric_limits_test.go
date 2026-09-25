@@ -23,3 +23,15 @@ func TestDisplayConversionsRejectOrSaturateExtremeValues(t *testing.T) {
 		t.Fatalf("signed duration wrapped: %v", got)
 	}
 }
+
+func TestPlacementMinimumSamplesConversionIsBounded(t *testing.T) {
+	if got := boundedPlacementMinimumSamples(-1); got != 1 {
+		t.Fatalf("negative sample count wrapped: %d", got)
+	}
+	if got := boundedPlacementMinimumSamples(3); got != 3 {
+		t.Fatalf("valid sample count changed: %d", got)
+	}
+	if got := boundedPlacementMinimumSamples(int(^uint(0) >> 1)); got != 1000 {
+		t.Fatalf("large sample count was not capped: %d", got)
+	}
+}

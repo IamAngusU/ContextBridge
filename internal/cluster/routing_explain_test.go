@@ -56,7 +56,7 @@ func TestExplainRoutingMatchesSchedulerAndUsesStableReasons(t *testing.T) {
 	components := selected.ScoreComponents
 	sum := components.ActiveLoad + components.QueueDepth + components.MemoryPressure + components.CPUPressure +
 		components.GPUPressure + components.VRAMHeadroom + components.AdapterPressure + components.LoadedModel +
-		components.EstimatedVRAMFit + components.PreferredNode + components.RecentFailures
+		components.EstimatedVRAMFit + components.PreferredNode + components.RecentFailures + components.HistoricalLatency
 	if math.Abs(sum-selected.Score) > 0.000001 {
 		t.Fatalf("score components do not sum to score: sum=%v score=%v components=%#v", sum, selected.Score, components)
 	}

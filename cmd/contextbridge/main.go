@@ -1357,6 +1357,13 @@ func relayConfig(cfg config.Config) cluster.RelayConfig {
 		MaxTerminalRuns:      cfg.Cluster.Relay.MaxTerminalPipelineRuns,
 		MaxSessionPlacements: cfg.Cluster.Relay.MaxSessionPlacements,
 		RetentionSweep:       time.Duration(cfg.Cluster.Relay.RetentionSweepSeconds) * time.Second,
+		Placement: cluster.PlacementPolicy{
+			PerformanceLearning: cfg.Cluster.Placement.PerformanceLearning != nil && *cfg.Cluster.Placement.PerformanceLearning,
+			MinimumSamples:      boundedPlacementMinimumSamples(cfg.Cluster.Placement.MinimumSamples),
+			HistoryTTL:          time.Duration(cfg.Cluster.Placement.HistoryTTLHours) * time.Hour,
+			LatencyWeight:       cfg.Cluster.Placement.LatencyWeight,
+			MaxLatencyPenalty:   cfg.Cluster.Placement.MaxLatencyPenalty,
+		},
 	}
 	if cfg.Cluster.Relay.LAN.Enabled {
 		result.LANListen = cfg.Cluster.Relay.LAN.Listen
@@ -1365,6 +1372,16 @@ func relayConfig(cfg config.Config) cluster.RelayConfig {
 		result.LANTLSPrivateKey = cfg.Cluster.Relay.LAN.PrivateKeyFile
 	}
 	return result
+}
+
+func boundedPlacementMinimumSamples(value int) uint32 {
+	if value < 1 {
+		return 1
+	}
+	if value > 1000 {
+		return 1000
+	}
+	return uint32(value) // #nosec G115 -- value is explicitly bounded to 1..1000 above.
 }
 
 func configuredWorker(cfg config.Config) (*cluster.Worker, error) {

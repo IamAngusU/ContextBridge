@@ -25,6 +25,7 @@ type ProtocolLimits struct {
 	MaximumNodeListValues            int   `json:"maximum_node_list_values"`
 	MaximumRoutingHealthRecords      int   `json:"maximum_routing_health_records"`
 	MaximumRoutingHealthPerOwner     int   `json:"maximum_routing_health_records_per_owner"`
+	MaximumRoutingPerformanceRecords int   `json:"maximum_routing_performance_records"`
 }
 
 func CurrentProtocolManifest(configuredJobBytes int64) ProtocolManifest {
@@ -44,6 +45,7 @@ func CurrentProtocolManifest(configuredJobBytes int64) ProtocolManifest {
 			"durable_worker_drain_v1",
 			"failure_aware_routing_v1",
 			"job_contract_dry_run",
+			"performance_aware_routing_v1",
 			"prometheus_metrics_v1",
 			"producer_resource_governance_v1",
 			"producer_scoped_idempotency",
@@ -69,6 +71,7 @@ func CurrentProtocolManifest(configuredJobBytes int64) ProtocolManifest {
 			MaximumNodeListValues:            MaximumNodeListValues,
 			MaximumRoutingHealthRecords:      MaximumRoutingHealthRecords,
 			MaximumRoutingHealthPerOwner:     MaximumRoutingHealthRecordsPerOwner,
+			MaximumRoutingPerformanceRecords: MaximumRoutingPerformanceRecords,
 		},
 	}
 }

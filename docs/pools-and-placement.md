@@ -59,6 +59,36 @@ evidence. `contextbridge route explain --file JOB.json` previews the decision
 without submitting provider work. The selected job stores rejection reasons
 and additive score components so placement is inspectable later.
 
+Successful jobs also build bounded relay-owned performance evidence per node
+and opaque execution route. After the configured minimum number of comparable
+samples, the scheduler adds a logarithmic historical-latency component to the
+same score. A route averaging 1.4 seconds can therefore beat an otherwise
+similar 40-second route when both are available, but history is never a hard
+lock: current slots, queue depth, CPU/GPU pressure, RAM/VRAM headroom, loaded
+models, affinity and recent failures remain independent inputs. A worker at
+capacity is still rejected, old evidence expires, one extreme completion is
+winsorized, and an unknown worker stays neutral so new hardware can be
+explored rather than being permanently treated as slow.
+
+The operator controls this soft behavior centrally in `config.yml`:
+
+```yaml
+cluster:
+  placement:
+    performance_learning: true
+    minimum_samples: 3
+    history_ttl_hours: 168
+    latency_weight: 12
+    max_latency_penalty: 60
+```
+
+These settings cannot widen permissions, capabilities, tenant scope, cost
+authority, or trust. Per-job hard and soft controls remain in `requirements`,
+including exact provider/model/group/tags, minimum VRAM and
+`preferred_nodes`. `route explain` reports the performance sample count,
+smoothed compute estimate, evidence age and additive `historical_latency`
+score used for a decision.
+
 Recent transient failures are relay-owned placement evidence. A matching
 execution route receives a bounded soft penalty after the first failure. Route
 identity is an opaque fingerprint over the provider/model/task selection and,

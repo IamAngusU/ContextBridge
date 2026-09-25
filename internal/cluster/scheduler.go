@@ -17,33 +17,37 @@ type Candidate struct {
 // this separate from raw hardware telemetry makes route explanations useful
 // without turning them into another unrestricted node-status response.
 type RoutingScoreComponents struct {
-	ActiveLoad       float64 `json:"active_load,omitempty"`
-	QueueDepth       float64 `json:"queue_depth,omitempty"`
-	MemoryPressure   float64 `json:"memory_pressure,omitempty"`
-	CPUPressure      float64 `json:"cpu_pressure,omitempty"`
-	GPUPressure      float64 `json:"gpu_pressure,omitempty"`
-	VRAMHeadroom     float64 `json:"vram_headroom,omitempty"`
-	AdapterPressure  float64 `json:"adapter_pressure,omitempty"`
-	LoadedModel      float64 `json:"loaded_model,omitempty"`
-	EstimatedVRAMFit float64 `json:"estimated_vram_fit,omitempty"`
-	PreferredNode    float64 `json:"preferred_node,omitempty"`
-	RecentFailures   float64 `json:"recent_failures,omitempty"`
+	ActiveLoad        float64 `json:"active_load,omitempty"`
+	QueueDepth        float64 `json:"queue_depth,omitempty"`
+	MemoryPressure    float64 `json:"memory_pressure,omitempty"`
+	CPUPressure       float64 `json:"cpu_pressure,omitempty"`
+	GPUPressure       float64 `json:"gpu_pressure,omitempty"`
+	VRAMHeadroom      float64 `json:"vram_headroom,omitempty"`
+	AdapterPressure   float64 `json:"adapter_pressure,omitempty"`
+	LoadedModel       float64 `json:"loaded_model,omitempty"`
+	EstimatedVRAMFit  float64 `json:"estimated_vram_fit,omitempty"`
+	PreferredNode     float64 `json:"preferred_node,omitempty"`
+	RecentFailures    float64 `json:"recent_failures,omitempty"`
+	HistoricalLatency float64 `json:"historical_latency,omitempty"`
 }
 
 // RoutingCandidateDecision is deliberately smaller than Node. It contains the
 // evidence needed to audit a placement decision without copying a worker's
 // complete hardware or adapter-session inventory into every job.
 type RoutingCandidateDecision struct {
-	NodeID            string                 `json:"node_id"`
-	NodeName          string                 `json:"node_name,omitempty"`
-	Eligible          bool                   `json:"eligible"`
-	RejectionReasons  []string               `json:"rejection_reasons,omitempty"`
-	Score             float64                `json:"score,omitempty"`
-	ScoreComponents   RoutingScoreComponents `json:"score_components,omitempty"`
-	EvidenceAgeMS     int64                  `json:"evidence_age_ms"`
-	FailureStreak     uint32                 `json:"failure_streak,omitempty"`
-	CircuitOpenUntil  time.Time              `json:"circuit_open_until,omitempty"`
-	RecoveryProbation bool                   `json:"recovery_probation,omitempty"`
+	NodeID             string                 `json:"node_id"`
+	NodeName           string                 `json:"node_name,omitempty"`
+	Eligible           bool                   `json:"eligible"`
+	RejectionReasons   []string               `json:"rejection_reasons,omitempty"`
+	Score              float64                `json:"score,omitempty"`
+	ScoreComponents    RoutingScoreComponents `json:"score_components,omitempty"`
+	EvidenceAgeMS      int64                  `json:"evidence_age_ms"`
+	FailureStreak      uint32                 `json:"failure_streak,omitempty"`
+	CircuitOpenUntil   time.Time              `json:"circuit_open_until,omitempty"`
+	RecoveryProbation  bool                   `json:"recovery_probation,omitempty"`
+	PerformanceSamples uint32                 `json:"performance_samples,omitempty"`
+	EstimatedComputeMS uint64                 `json:"estimated_compute_ms,omitempty"`
+	PerformanceAgeMS   int64                  `json:"performance_age_ms,omitempty"`
 }
 
 // RoutingDecision is a point-in-time explanation. The relay adds ID, JobID,
@@ -85,7 +89,7 @@ func RankWithEstimate(nodes []Node, requirements Requirements, estimatedVRAM uin
 }
 
 func rankWithOwnerEstimate(nodes []Node, requirements Requirements, estimatedVRAM uint64, ownerSubject string, now time.Time) []Candidate {
-	candidates, _ := rankWithDecisionForOwner(nodes, requirements, estimatedVRAM, ownerSubject, now)
+	candidates, _ := rankWithDecisionForOwnerPolicy(nodes, requirements, estimatedVRAM, ownerSubject, now, DefaultPlacementPolicy())
 	return candidates
 }
 
@@ -102,6 +106,12 @@ func rankWithDecision(nodes []Node, requirements Requirements, estimatedVRAM uin
 }
 
 func rankWithDecisionForOwner(nodes []Node, requirements Requirements, estimatedVRAM uint64, ownerSubject string, now time.Time) ([]Candidate, RoutingDecision) {
+	return rankWithDecisionForOwnerPolicy(nodes, requirements, estimatedVRAM, ownerSubject, now, DefaultPlacementPolicy())
+}
+
+func rankWithDecisionForOwnerPolicy(nodes []Node, requirements Requirements, estimatedVRAM uint64, ownerSubject string, now time.Time, placement PlacementPolicy) ([]Candidate, RoutingDecision) {
+	placement = normalizePlacementPolicy(placement)
+	fastestHistoricalMS := fastestEligibleHistoricalRuntime(nodes, requirements, ownerSubject, now, placement)
 	candidates := make([]Candidate, 0, len(nodes))
 	decisions := make([]RoutingCandidateDecision, 0, min(len(nodes), MaximumRoutingDecisionCandidates))
 	for _, node := range nodes {
@@ -166,6 +176,19 @@ func rankWithDecisionForOwner(nodes []Node, requirements Requirements, estimated
 		if hasHealth && now.Sub(health.LastFailureAt) >= 0 && now.Sub(health.LastFailureAt) <= routingFailureWindow {
 			components.RecentFailures = math.Min(float64(health.ConsecutiveFailures)*routingFailureScore, routingFailureScore*float64(routingFailureThreshold))
 		}
+		if performance, ok := routingPerformanceFor(node, requirements, placement, now); ok {
+			candidateDecision.PerformanceSamples = performance.Samples
+			candidateDecision.EstimatedComputeMS = performance.EWMAComputeMS
+			age := now.Sub(performance.LastCompletedAt)
+			if age < 0 {
+				age = 0
+			}
+			candidateDecision.PerformanceAgeMS = age.Milliseconds()
+			if fastestHistoricalMS > 0 && performance.EWMAComputeMS > fastestHistoricalMS {
+				ratio := float64(performance.EWMAComputeMS) / float64(fastestHistoricalMS)
+				components.HistoricalLatency = math.Min(math.Log2(ratio)*placement.LatencyWeight, placement.MaxLatencyPenalty)
+			}
+		}
 		if strings.EqualFold(requirements.Provider, "adapter") && node.Capabilities.AdapterEndpoints > 0 {
 			components.AdapterPressure = float64(node.Capabilities.AdapterBusy) / float64(node.Capabilities.AdapterEndpoints) * 40
 		}
@@ -193,7 +216,7 @@ func rankWithDecisionForOwner(nodes []Node, requirements Requirements, estimated
 		}
 		score := components.ActiveLoad + components.QueueDepth + components.MemoryPressure + components.CPUPressure +
 			components.GPUPressure + components.VRAMHeadroom + components.AdapterPressure + components.LoadedModel +
-			components.EstimatedVRAMFit + components.PreferredNode + components.RecentFailures
+			components.EstimatedVRAMFit + components.PreferredNode + components.RecentFailures + components.HistoricalLatency
 		candidates = append(candidates, Candidate{Node: node, Score: score})
 		candidateDecision.Score = score
 		candidateDecision.ScoreComponents = components
@@ -216,6 +239,37 @@ func rankWithDecisionForOwner(nodes []Node, requirements Requirements, estimated
 		decision.SelectedNodeName = candidates[0].Node.Name
 	}
 	return candidates, decision
+}
+
+func fastestEligibleHistoricalRuntime(nodes []Node, requirements Requirements, ownerSubject string, now time.Time, placement PlacementPolicy) uint64 {
+	if !placement.PerformanceLearning {
+		return 0
+	}
+	var fastest uint64
+	for _, node := range nodes {
+		age := now.Sub(node.LastSeen)
+		if age < 0 {
+			age = 0
+		}
+		capacity := node.Capabilities.MaxConcurrent
+		if capacity <= 0 {
+			capacity = 1
+		}
+		if !node.Connected || node.Draining || age > NodeFreshnessWindow || !matchesNode(node, requirements) || node.Capabilities.Running >= capacity {
+			continue
+		}
+		if health, ok := routingHealthForOwnerAt(node, requirements, ownerSubject, now); ok && health.CircuitOpenUntil.After(now) {
+			continue
+		}
+		performance, ok := routingPerformanceFor(node, requirements, placement, now)
+		if !ok {
+			continue
+		}
+		if fastest == 0 || performance.EWMAComputeMS < fastest {
+			fastest = performance.EWMAComputeMS
+		}
+	}
+	return fastest
 }
 
 func boundRoutingDecision(decision *RoutingDecision) {

@@ -148,6 +148,14 @@ cluster:
     local_url: http://127.0.0.1:32145
     local_token: replace-with-the-local-service-token
     heartbeat_seconds: 5
+  placement:
+    # Soft evidence only. Hard permissions/capabilities and current load are
+    # always evaluated first; unknown workers remain eligible to learn.
+    performance_learning: true
+    minimum_samples: 3
+    history_ttl_hours: 168
+    latency_weight: 12
+    max_latency_penalty: 60
   policies:
     allowed_tasks: [moderation, generation, extraction, embedding, rag_ingest, rag_query, vision]
     # Assignment generations. Only proven pre-execution worker capacity or
