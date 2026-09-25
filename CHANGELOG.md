@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.8.0 - 2026-09-25
+
 - Added `contextbridge guide` and opt-in `cluster configure --interactive` for
   bounded, TTY-only device-role setup. The guide resolves explicit flags,
   existing config, supported environment values and safe defaults before it
