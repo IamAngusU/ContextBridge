@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Added relay-owned failure-aware placement. Matching node/provider/model
+  routes receive a bounded recent-failure penalty, open a short exponentially
+  capped circuit after repeated transient failures, recover through a
+  successful probe, and expose stable evidence through `route explain`.
+  Producer-triggered evidence is isolated by an opaque producer scope, while
+  relay-observed node disconnects remain global. Heartbeats cannot forge or
+  clear the state, while policy, budget, artifact, cancellation, capacity, and
+  planned-drain failures do not poison it.
+- Added an authenticated Prometheus-compatible `/metrics` endpoint for admin
+  and observer credentials. It exports only fixed-cardinality pool aggregates
+  and deliberately omits tenant, job, node, provider, model, prompt, and error
+  labels.
 - Added a reversible `client`/`sender` cluster role for devices that may submit
   and observe work but must not advertise worker capacity. Role changes retain
   the bounded worker identity for a later opt-in return, require a safe relay

@@ -27,6 +27,7 @@ type RoutingScoreComponents struct {
 	LoadedModel      float64 `json:"loaded_model,omitempty"`
 	EstimatedVRAMFit float64 `json:"estimated_vram_fit,omitempty"`
 	PreferredNode    float64 `json:"preferred_node,omitempty"`
+	RecentFailures   float64 `json:"recent_failures,omitempty"`
 }
 
 // RoutingCandidateDecision is deliberately smaller than Node. It contains the
@@ -40,6 +41,8 @@ type RoutingCandidateDecision struct {
 	Score            float64                `json:"score,omitempty"`
 	ScoreComponents  RoutingScoreComponents `json:"score_components,omitempty"`
 	EvidenceAgeMS    int64                  `json:"evidence_age_ms"`
+	FailureStreak    uint32                 `json:"failure_streak,omitempty"`
+	CircuitOpenUntil time.Time              `json:"circuit_open_until,omitempty"`
 }
 
 // RoutingDecision is a point-in-time explanation. The relay adds ID, JobID,
@@ -79,6 +82,11 @@ func RankWithEstimate(nodes []Node, requirements Requirements, estimatedVRAM uin
 	return candidates
 }
 
+func rankWithOwnerEstimate(nodes []Node, requirements Requirements, estimatedVRAM uint64, ownerSubject string, now time.Time) []Candidate {
+	candidates, _ := rankWithDecisionForOwner(nodes, requirements, estimatedVRAM, ownerSubject, now)
+	return candidates
+}
+
 // ExplainRouting returns the same ranking used by RankWithEstimate together
 // with stable reason codes and score components for every bounded candidate.
 func ExplainRouting(nodes []Node, requirements Requirements, estimatedVRAM uint64) RoutingDecision {
@@ -88,6 +96,10 @@ func ExplainRouting(nodes []Node, requirements Requirements, estimatedVRAM uint6
 }
 
 func rankWithDecision(nodes []Node, requirements Requirements, estimatedVRAM uint64, now time.Time) ([]Candidate, RoutingDecision) {
+	return rankWithDecisionForOwner(nodes, requirements, estimatedVRAM, "", now)
+}
+
+func rankWithDecisionForOwner(nodes []Node, requirements Requirements, estimatedVRAM uint64, ownerSubject string, now time.Time) ([]Candidate, RoutingDecision) {
 	candidates := make([]Candidate, 0, len(nodes))
 	decisions := make([]RoutingCandidateDecision, 0, min(len(nodes), MaximumRoutingDecisionCandidates))
 	for _, node := range nodes {
@@ -119,6 +131,14 @@ func rankWithDecision(nodes []Node, requirements Requirements, estimatedVRAM uin
 		if node.Capabilities.Running >= capacity {
 			reasons = appendUniqueReason(reasons, "worker_at_capacity")
 		}
+		health, hasHealth := routingHealthForOwner(node, requirements, ownerSubject)
+		if hasHealth {
+			candidateDecision.FailureStreak = health.ConsecutiveFailures
+			if health.CircuitOpenUntil.After(now) {
+				candidateDecision.CircuitOpenUntil = health.CircuitOpenUntil
+				reasons = appendUniqueReason(reasons, "route_circuit_open")
+			}
+		}
 		if len(reasons) > 0 {
 			candidateDecision.RejectionReasons = reasons
 			decisions = append(decisions, candidateDecision)
@@ -138,6 +158,9 @@ func rankWithDecision(nodes []Node, requirements Requirements, estimatedVRAM uin
 		components := RoutingScoreComponents{
 			ActiveLoad: busy * 60, QueueDepth: queue * 20, MemoryPressure: memoryPressure * 10,
 			CPUPressure: cpuPressure * 10, GPUPressure: gpuPressure * 15, VRAMHeadroom: -vramHeadroom * 12,
+		}
+		if hasHealth && now.Sub(health.LastFailureAt) >= 0 && now.Sub(health.LastFailureAt) <= routingFailureWindow {
+			components.RecentFailures = math.Min(float64(health.ConsecutiveFailures)*routingFailureScore, routingFailureScore*float64(routingFailureThreshold))
 		}
 		if strings.EqualFold(requirements.Provider, "adapter") && node.Capabilities.AdapterEndpoints > 0 {
 			components.AdapterPressure = float64(node.Capabilities.AdapterBusy) / float64(node.Capabilities.AdapterEndpoints) * 40
@@ -166,7 +189,7 @@ func rankWithDecision(nodes []Node, requirements Requirements, estimatedVRAM uin
 		}
 		score := components.ActiveLoad + components.QueueDepth + components.MemoryPressure + components.CPUPressure +
 			components.GPUPressure + components.VRAMHeadroom + components.AdapterPressure + components.LoadedModel +
-			components.EstimatedVRAMFit + components.PreferredNode
+			components.EstimatedVRAMFit + components.PreferredNode + components.RecentFailures
 		candidates = append(candidates, Candidate{Node: node, Score: score})
 		candidateDecision.Score = score
 		candidateDecision.ScoreComponents = components

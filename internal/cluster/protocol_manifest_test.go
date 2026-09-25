@@ -40,6 +40,9 @@ func TestProtocolManifestIsDeterministicAndNamesPublicBoundaries(t *testing.T) {
 	if !containsString(first.Features, "producer_resource_governance_v1") || !containsString(first.AdmissionErrorCodes, AdmissionCodeCapacityOwnerRate) {
 		t.Fatalf("producer resource governance contract is not advertised: %#v %#v", first.Features, first.AdmissionErrorCodes)
 	}
+	if !containsString(first.Features, "failure_aware_routing_v1") || !containsString(first.Features, "prometheus_metrics_v1") || first.Limits.MaximumRoutingHealthRecords != MaximumRoutingHealthRecords || first.Limits.MaximumRoutingHealthPerOwner != MaximumRoutingHealthRecordsPerOwner {
+		t.Fatalf("bounded routing health or metrics is not advertised: %#v %#v", first.Features, first.Limits)
+	}
 	if !containsString(first.Features, "relay_role_health_v1") {
 		t.Fatalf("relay role health feature is not advertised: %#v", first.Features)
 	}

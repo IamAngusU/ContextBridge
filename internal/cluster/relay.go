@@ -446,6 +446,7 @@ func (r *Relay) Handler() http.Handler {
 	mux.HandleFunc("GET /livez", r.handleLiveness)
 	mux.HandleFunc("GET /readyz", r.handleReadiness)
 	mux.HandleFunc("GET /leaderz", r.handleLeadership)
+	mux.HandleFunc("GET /metrics", r.authorize("admin", "observer")(r.handleMetrics))
 	mux.HandleFunc("GET /v1/cluster/lifecycle", r.authorize("admin")(r.handleLifecycle))
 	mux.HandleFunc("POST /v1/pair/request", r.rateLimit(12, time.Minute, r.handlePairRequest))
 	mux.HandleFunc("POST /v1/pair/token", r.rateLimit(30, time.Minute, r.handlePairPoll))
@@ -697,6 +698,10 @@ func (r *Relay) handleNodeAdmission(w http.ResponseWriter, req *http.Request) {
 
 func redactNodeRoutingEvidence(nodes []Node) {
 	for nodeIndex := range nodes {
+		// Provider/model health is relay-owned placement evidence. Aggregate
+		// operators can inspect its effect through route explanations and metrics;
+		// node listings must not reveal another producer's route labels.
+		nodes[nodeIndex].RoutingHealth = nil
 		for sessionIndex := range nodes[nodeIndex].Capabilities.AdapterSessions {
 			nodes[nodeIndex].Capabilities.AdapterSessions[sessionIndex].SessionKey = ""
 			nodes[nodeIndex].Capabilities.AdapterSessions[sessionIndex].Principal = ""
@@ -833,7 +838,7 @@ func (r *Relay) handleRouteExplain(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	routingRequirements, requiredSessionNode := r.withSessionAffinity(input.Requirements, record.Subject)
-	_, decision := rankWithDecision(nodes, routingRequirements, r.store.EstimateVRAM(input.Requirements), time.Now().UTC())
+	_, decision := rankWithDecisionForOwner(nodes, routingRequirements, r.store.EstimateVRAM(input.Requirements), record.Subject, time.Now().UTC())
 	decision.ID = randomID("route_preview")
 	decision.Preview = true
 	decision.PolicyDecision = &policyDecision
@@ -1120,7 +1125,7 @@ func (r *Relay) handleReserve(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	routingRequirements, requiredSessionNode := r.withSessionAffinity(input.Requirements, record.Subject)
-	candidates := RankWithEstimate(nodes, routingRequirements, r.store.EstimateVRAM(input.Requirements))
+	candidates := rankWithOwnerEstimate(nodes, routingRequirements, r.store.EstimateVRAM(input.Requirements), record.Subject, time.Now().UTC())
 	node, found := firstSessionCandidate(candidates, requiredSessionNode)
 	if !found {
 		writeError(w, http.StatusServiceUnavailable, errors.New("no online node satisfies these requirements"))
@@ -1437,7 +1442,7 @@ func (r *Relay) dispatch() {
 			routingRequirements, requiredSessionNode = r.withSessionAffinity(queued.Requirements, queued.OwnerSubject)
 		}
 		estimatedVRAM := r.store.EstimateVRAM(queued.Requirements)
-		candidates, decision := rankWithDecision(nodes, routingRequirements, estimatedVRAM, now)
+		candidates, decision := rankWithDecisionForOwner(nodes, routingRequirements, estimatedVRAM, queued.OwnerSubject, now)
 		if queued.PolicyDecision.Schema != "" {
 			policyDecision := queued.PolicyDecision
 			decision.PolicyDecision = &policyDecision

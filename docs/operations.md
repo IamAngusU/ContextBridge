@@ -108,6 +108,14 @@ contextbridge resources --config ./config.yml
 contextbridge benchmark
 ```
 
+Prometheus-compatible pool aggregates are available to relay administrators
+and observer tokens at `GET /metrics`. They intentionally omit user-controlled
+and tenant-specific labels:
+
+```sh
+curl -fsS -H "Authorization: Bearer $CONTEXTBRIDGE_TOKEN" https://relay.example.net/metrics
+```
+
 `console` is a view of the managed service. Leaving it with `exit` or Ctrl+C
 does not stop the service. `contextbridge stop --config ./config.yml` asks a
 loopback-managed `run`/`serve` process to stop and refuses while work is active.

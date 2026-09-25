@@ -1596,7 +1596,11 @@ func printRoutingDecision(decision cluster.RoutingDecision) {
 			fmt.Printf("  ✓ %s  [score %.2f]  %s\n", emptyLabel(candidate.NodeName, candidate.NodeID), candidate.Score, routingScoreSummary(candidate.ScoreComponents))
 			continue
 		}
-		fmt.Printf("  × %s  [%s]\n", emptyLabel(candidate.NodeName, candidate.NodeID), strings.Join(candidate.RejectionReasons, " · "))
+		details := append([]string(nil), candidate.RejectionReasons...)
+		if !candidate.CircuitOpenUntil.IsZero() {
+			details = append(details, fmt.Sprintf("failures %d · retry after %s", candidate.FailureStreak, candidate.CircuitOpenUntil.UTC().Format(time.RFC3339)))
+		}
+		fmt.Printf("  × %s  [%s]\n", emptyLabel(candidate.NodeName, candidate.NodeID), strings.Join(details, " · "))
 	}
 	if decision.CandidatesTruncated > 0 {
 		fmt.Printf("  … %d additional candidates omitted\n", decision.CandidatesTruncated)
@@ -1612,7 +1616,7 @@ func routingScoreSummary(components cluster.RoutingScoreComponents) string {
 		{"load", components.ActiveLoad}, {"queue", components.QueueDepth}, {"memory", components.MemoryPressure},
 		{"cpu", components.CPUPressure}, {"gpu", components.GPUPressure}, {"vram", components.VRAMHeadroom},
 		{"adapter", components.AdapterPressure}, {"loaded", components.LoadedModel}, {"fit", components.EstimatedVRAMFit},
-		{"preferred", components.PreferredNode},
+		{"preferred", components.PreferredNode}, {"failures", components.RecentFailures},
 	}
 	for _, value := range values {
 		if value.value != 0 {

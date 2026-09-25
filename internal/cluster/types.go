@@ -217,6 +217,23 @@ type Node struct {
 	CostUSD         float64   `json:"cost_usd"`
 	CostKnownJobs   uint64    `json:"cost_known_jobs,omitempty"`
 	CostUnknownJobs uint64    `json:"cost_unknown_jobs,omitempty"`
+	// RoutingHealth is bounded relay-owned evidence about recent transient
+	// execution failures. Workers cannot set or clear it through heartbeats.
+	RoutingHealth []RoutingHealth `json:"routing_health,omitempty"`
+}
+
+// RoutingHealth is keyed by an opaque producer scope plus normalized provider
+// and model labels from an admitted job. An empty owner scope is reserved for
+// relay-observed node-wide failures. It never contains provider error text,
+// prompts, tenant identifiers, or other unbounded worker-controlled data.
+type RoutingHealth struct {
+	OwnerScope          string    `json:"owner_scope,omitempty"`
+	Provider            string    `json:"provider"`
+	Model               string    `json:"model"`
+	ConsecutiveFailures uint32    `json:"consecutive_failures"`
+	LastFailureCode     string    `json:"last_failure_code,omitempty"`
+	LastFailureAt       time.Time `json:"last_failure_at,omitempty"`
+	CircuitOpenUntil    time.Time `json:"circuit_open_until,omitempty"`
 }
 
 type Usage struct {

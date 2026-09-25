@@ -688,12 +688,30 @@ func mergeStoredNodeState(node *Node, existing Node) {
 	node.CostKnownJobs = existing.CostKnownJobs
 	node.CostUnknownJobs = existing.CostUnknownJobs
 	node.Draining = existing.Draining
+	// Routing health is relay-owned. In particular, a reconnecting worker must
+	// not be able to clear an open circuit or forge one for a different route.
+	node.RoutingHealth = boundedRoutingHealth(existing.RoutingHealth)
 	if node.Draining && node.Connected {
 		node.State = "draining"
 	}
 	if node.PublicKey == "" {
 		node.PublicKey = existing.PublicKey
 	}
+}
+
+func recordNodeRoutingOutcomeTx(tx *bolt.Tx, nodeID string, requirements Requirements, ownerSubject string, success bool, failureCode string, now time.Time) error {
+	if strings.TrimSpace(nodeID) == "" {
+		return nil
+	}
+	var node Node
+	if err := getJSON(tx.Bucket(bucketNodes), nodeID, &node); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	recordRoutingOutcomeForOwner(&node, requirements, ownerSubject, success, failureCode, now)
+	return putJSON(tx.Bucket(bucketNodes), node.ID, node)
 }
 
 func (s *Store) GetNode(id string) (Node, error) {
@@ -2087,7 +2105,10 @@ func (s *Store) completeJobWithFailure(id, nodeID string, attempt int, fence *As
 				node.CostUSD = saturatingCostAdd(node.CostUSD, usage.EstimatedCostUSD)
 				node.CostKnownJobs = saturatingUint64Add(node.CostKnownJobs, usage.CostKnownJobs)
 				node.CostUnknownJobs = saturatingUint64Add(node.CostUnknownJobs, usage.CostUnknownJobs)
-				_ = putJSON(tx.Bucket(bucketNodes), node.ID, node)
+				recordRoutingOutcomeForOwner(&node, job.Requirements, job.OwnerSubject, job.Status == JobCompleted, job.FailureCode, job.FinishedAt)
+				if err := putJSON(tx.Bucket(bucketNodes), node.ID, node); err != nil {
+					return err
+				}
 			}
 		}
 		eventType := "job.completed"
@@ -2233,6 +2254,9 @@ func (s *Store) RequeueNode(nodeID, reason string) ([]Job, error) {
 				return err
 			}
 			if err := appendPipelineStepEventTx(tx, s, change.job, "pipeline.step.ambiguous"); err != nil {
+				return err
+			}
+			if err := recordNodeRoutingOutcomeTx(tx, change.job.AssignedNode, change.job.Requirements, "", false, change.job.FailureCode, change.job.FinishedAt); err != nil {
 				return err
 			}
 		}
@@ -2386,6 +2410,11 @@ func (s *Store) RecoverStaleJobs(now time.Time, sealedWait, execution time.Durat
 			}
 			if err := appendPipelineStepEventTx(tx, s, item.job, stepType); err != nil {
 				return err
+			}
+			if item.eventType == "job.ambiguous" {
+				if err := recordNodeRoutingOutcomeTx(tx, item.job.AssignedNode, item.job.Requirements, item.job.OwnerSubject, false, item.job.FailureCode, item.job.FinishedAt); err != nil {
+					return err
+				}
 			}
 		}
 		return nil

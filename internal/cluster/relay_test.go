@@ -51,7 +51,7 @@ func TestRateLimitClientKeyTrustsOnlyLoopbackProxy(t *testing.T) {
 }
 
 func TestPublicNodeResponseRedactsAdapterSessionKeys(t *testing.T) {
-	nodes := []Node{{ID: "node-a", Capabilities: Capabilities{AdapterSessions: []AdapterSessionCapability{{
+	nodes := []Node{{ID: "node-a", RoutingHealth: []RoutingHealth{{Provider: "private-provider", Model: "private-model", ConsecutiveFailures: 2}}, Capabilities: Capabilities{AdapterSessions: []AdapterSessionCapability{{
 		EndpointID: 7, Profile: "profile-one", Principal: "adapter-a", SessionKey: "cb:" + strings.Repeat("a", 64), SessionKeySupported: true,
 	}}}}}
 	redactNodeRoutingEvidence(nodes)
@@ -63,6 +63,9 @@ func TestPublicNodeResponseRedactsAdapterSessionKeys(t *testing.T) {
 	}
 	if !nodes[0].Capabilities.AdapterSessions[0].SessionKeySupported {
 		t.Fatal("redaction removed non-sensitive compatibility metadata")
+	}
+	if len(nodes[0].RoutingHealth) != 0 {
+		t.Fatal("relay-owned provider/model health remained in a public node response")
 	}
 }
 

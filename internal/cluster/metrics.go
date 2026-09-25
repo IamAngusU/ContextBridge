@@ -1,0 +1,81 @@
+package cluster
+
+import (
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+)
+
+// handleMetrics exposes only fixed-cardinality, pool-level operational data.
+// It deliberately omits job, tenant, model, provider, prompt, and node labels:
+// those are either sensitive, attacker-controlled, or unbounded. Access is
+// restricted by Handler to administrators and read-only observers.
+func (r *Relay) handleMetrics(w http.ResponseWriter, _ *http.Request) {
+	overview, err := r.store.Overview()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	nodes, err := r.store.ListNodes()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	now := time.Now().UTC()
+	var draining, slotsTotal, slotsBusy, circuitsOpen uint64
+	for _, node := range nodes {
+		if node.Draining {
+			draining++
+		}
+		age := now.Sub(node.LastSeen)
+		if node.Connected && age <= NodeFreshnessWindow {
+			capacity := boundedWorkerCapacity(node.Capabilities.MaxConcurrent)
+			running := node.Capabilities.Running
+			if running < 0 {
+				running = 0
+			}
+			if running > capacity {
+				running = capacity
+			}
+			slotsTotal = saturatingUint64Add(slotsTotal, uint64(capacity))
+			slotsBusy = saturatingUint64Add(slotsBusy, uint64(running))
+		}
+		for _, health := range node.RoutingHealth {
+			if health.CircuitOpenUntil.After(now) {
+				circuitsOpen = saturatingUint64Add(circuitsOpen, 1)
+			}
+		}
+	}
+
+	var output strings.Builder
+	writeMetricHelp(&output, "contextbridge_nodes", "Relay-known worker nodes by fixed state.", "gauge")
+	fmt.Fprintf(&output, "contextbridge_nodes{state=\"total\"} %d\n", overview.NodesTotal)
+	fmt.Fprintf(&output, "contextbridge_nodes{state=\"online\"} %d\n", overview.NodesOnline)
+	fmt.Fprintf(&output, "contextbridge_nodes{state=\"draining\"} %d\n", draining)
+	writeMetricHelp(&output, "contextbridge_worker_slots", "Worker execution slots by fixed state.", "gauge")
+	fmt.Fprintf(&output, "contextbridge_worker_slots{state=\"total\"} %d\n", slotsTotal)
+	fmt.Fprintf(&output, "contextbridge_worker_slots{state=\"busy\"} %d\n", slotsBusy)
+	writeMetricHelp(&output, "contextbridge_jobs", "Retained jobs by fixed durable state.", "gauge")
+	for _, state := range []string{JobQueued, JobAssigned, JobRunning, JobCompleted, JobFailed, JobCancelled} {
+		fmt.Fprintf(&output, "contextbridge_jobs{state=\"%s\"} %d\n", state, overview.JobsByState[state])
+	}
+	writeMetricHelp(&output, "contextbridge_routing_circuits_open", "Currently open relay-owned routing circuits.", "gauge")
+	fmt.Fprintf(&output, "contextbridge_routing_circuits_open %d\n", circuitsOpen)
+	writeMetricHelp(&output, "contextbridge_retained_compute_seconds", "Attributed compute seconds represented by retained aggregate state.", "gauge")
+	fmt.Fprintf(&output, "contextbridge_retained_compute_seconds %.3f\n", float64(overview.Usage.ComputeMS)/1000)
+	writeMetricHelp(&output, "contextbridge_retained_job_tokens", "Tokens represented by retained aggregate state, by fixed direction.", "gauge")
+	fmt.Fprintf(&output, "contextbridge_retained_job_tokens{direction=\"input\"} %d\n", overview.Usage.InputTokens)
+	fmt.Fprintf(&output, "contextbridge_retained_job_tokens{direction=\"output\"} %d\n", overview.Usage.OutputTokens)
+	fmt.Fprintf(&output, "contextbridge_retained_job_tokens{direction=\"total\"} %d\n", overview.Usage.TotalTokens)
+
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(output.String()))
+}
+
+func writeMetricHelp(output *strings.Builder, name, help, metricType string) {
+	fmt.Fprintf(output, "# HELP %s %s\n", name, help)
+	fmt.Fprintf(output, "# TYPE %s %s\n", name, metricType)
+}

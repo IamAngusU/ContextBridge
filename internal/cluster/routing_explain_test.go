@@ -56,7 +56,7 @@ func TestExplainRoutingMatchesSchedulerAndUsesStableReasons(t *testing.T) {
 	components := selected.ScoreComponents
 	sum := components.ActiveLoad + components.QueueDepth + components.MemoryPressure + components.CPUPressure +
 		components.GPUPressure + components.VRAMHeadroom + components.AdapterPressure + components.LoadedModel +
-		components.EstimatedVRAMFit + components.PreferredNode
+		components.EstimatedVRAMFit + components.PreferredNode + components.RecentFailures
 	if math.Abs(sum-selected.Score) > 0.000001 {
 		t.Fatalf("score components do not sum to score: sum=%v score=%v components=%#v", sum, selected.Score, components)
 	}
@@ -96,6 +96,57 @@ func TestRouteExplainEndpointScopesProducerAndDoesNotSubmit(t *testing.T) {
 	}
 	if count, err := relay.store.CountJobs(""); err != nil || count != 0 {
 		t.Fatalf("route preview submitted a job: count=%d err=%v", count, err)
+	}
+}
+
+func TestRouteExplainDoesNotShareProducerCircuitState(t *testing.T) {
+	const admin = "admin-token-with-enough-entropy-000000000000"
+	const tokenA = "producer-a-token-with-enough-entropy-000000"
+	const tokenB = "producer-b-token-with-enough-entropy-000000"
+	relay, err := NewRelay(RelayConfig{Database: t.TempDir() + "/relay.db", AdminToken: admin, AllowedTasks: []string{"generation"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+	if err := relay.store.EnsureToken(tokenA, "producer", "producer-a", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := relay.store.EnsureToken(tokenB, "producer", "producer-b", nil); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	requirements := Requirements{Task: "generation", Provider: "ollama", Model: "model-a"}
+	node := Node{ID: "shared-node", Name: "Shared", Connected: true, LastSeen: now, Capabilities: Capabilities{
+		Providers: []string{"ollama"}, Tasks: []string{"generation"}, Models: []ModelCapability{{Name: "model-a", Provider: "ollama", Tasks: []string{"generation"}, Available: true}}, MaxConcurrent: 4,
+	}}
+	if err := relay.store.UpsertNode(node); err != nil {
+		t.Fatal(err)
+	}
+	relay.workers[node.ID] = newWorkerConnection(nil, 4)
+	for i := uint32(0); i < routingFailureThreshold; i++ {
+		job, err := relay.store.CreateJob(SubmitRequest{OwnerSubject: "producer-a", Requirements: requirements, Payload: json.RawMessage(`{}`)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		job, err = relay.store.AssignJob(job.ID, node.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := relay.store.CompleteJobWithFailure(job.ID, node.ID, job.Attempt, nil, nil, Usage{}, "provider timed out", FailureAdapterTimeout); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server := httptest.NewServer(relay.Handler())
+	defer server.Close()
+	var decisionA RoutingDecision
+	postTest(t, server.URL+"/v1/cluster/routes/explain", tokenA, AssignmentRequest{Requirements: requirements}, &decisionA)
+	if len(decisionA.Candidates) != 1 || decisionA.Candidates[0].Eligible || !contains(decisionA.Candidates[0].RejectionReasons, "route_circuit_open") {
+		t.Fatalf("producer A preview ignored its open circuit: %#v", decisionA)
+	}
+	var decisionB RoutingDecision
+	postTest(t, server.URL+"/v1/cluster/routes/explain", tokenB, AssignmentRequest{Requirements: requirements}, &decisionB)
+	if decisionB.SelectedNodeID != node.ID || len(decisionB.Candidates) != 1 || !decisionB.Candidates[0].Eligible || decisionB.Candidates[0].FailureStreak != 0 {
+		t.Fatalf("producer A circuit leaked into producer B preview: %#v", decisionB)
 	}
 }
 

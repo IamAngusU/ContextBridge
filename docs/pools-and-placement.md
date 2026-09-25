@@ -59,6 +59,21 @@ evidence. `contextbridge route explain --file JOB.json` previews the decision
 without submitting provider work. The selected job stores rejection reasons
 and additive score components so placement is inspectable later.
 
+Recent transient failures are relay-owned placement evidence. A matching
+node/provider/model route receives a bounded soft penalty after the first
+failure. Three consecutive infrastructure failures within ten minutes open a
+30-second circuit; repeated failed probes increase the cooldown, capped at 15
+minutes. Producer-triggered evidence is keyed by an opaque producer scope, so
+one producer cannot open or penalize another producer's route. Relay-observed
+node disconnects use a separate global scope because they affect every caller.
+A successful result closes the matching producer circuit and any global
+circuit for that route. Producer-policy, budget, artifact, cancellation,
+capacity, and planned-drain failures do not poison route health. Workers cannot
+forge or clear this state through a heartbeat. `route explain` exposes
+`failure_streak`, `circuit_open_until`, and the stable rejection reason
+`route_circuit_open`, without exposing provider error text, owner scopes, or
+another producer's route labels.
+
 ## Draining a worker
 
 Before maintenance or a planned shutdown, an administrator can stop new work
@@ -110,3 +125,22 @@ contextbridge route explain --config ./config.yml --file ./examples/cluster-job.
 
 Clock differences displayed for nodes are approximate observations based on
 heartbeat receipt, not a time-synchronization guarantee.
+
+## Prometheus-compatible metrics
+
+Administrators and read-only observers may scrape `GET /metrics` with the
+same bearer authentication as the relay API. Producers and anonymous callers
+are denied. The endpoint exports only fixed-cardinality pool aggregates:
+node/slot/job state, open-circuit count, retained compute time, and retained
+token counts. It never uses tenant, job, node, provider, model, prompt, or
+error text as a metric label.
+
+```sh
+curl -fsS \
+  -H "Authorization: Bearer $CONTEXTBRIDGE_TOKEN" \
+  https://relay.example.net/metrics
+```
+
+The job, compute, and token gauges describe the relay's retained aggregate
+state and may decrease after retention pruning; they are not lifetime billing
+counters.
