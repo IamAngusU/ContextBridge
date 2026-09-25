@@ -551,14 +551,14 @@ func (s *Session) commandNoticeLinesLocked() []string {
 func (s *Session) commandLifecycleHintLocked() string {
 	if s.commandClosesView {
 		if s.serviceStopCommand != "" {
-			return "exit: close view · service/jobs stay active · shell stop: " + s.serviceStopCommand
+			return "exit: close view · jobs stay active · shell: " + s.serviceStopCommand
 		}
 		return "exit: close view only · service and jobs stay active"
 	}
 	if s.serviceStopCommand != "" {
-		return "Ctrl+C: stop foreground · background shell stop: " + s.serviceStopCommand
+		return "Ctrl+C: stop foreground · shell: " + s.serviceStopCommand
 	}
-	return "Ctrl+C stops foreground service"
+	return "Ctrl+C: stop foreground service"
 }
 
 func backgroundServiceStopCommand() string {

@@ -870,7 +870,7 @@ func TestForegroundServiceCommandsCannotAccidentallyCloseTheirOwner(t *testing.T
 	}
 	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(output.String(), "")
 	if !strings.Contains(plain, "Foreground service remains active") || !strings.Contains(plain, "Ctrl+C stops it") || !strings.Contains(plain, "contextbridge console") ||
-		!strings.Contains(plain, "Ctrl+C stops foreground service") {
+		!strings.Contains(plain, "Ctrl+C: stop foreground service") {
 		t.Fatalf("foreground exit did not explain the safe lifecycle: %s", plain)
 	}
 	if strings.Contains(plain, backgroundServiceStopCommand()) {
