@@ -32,7 +32,7 @@ func TestSessionLabelsStayEnglishAcrossHostLocales(t *testing.T) {
 		adapterStateLabel("working"),
 		adapterStateLabel("rate_limited"),
 	}, "\n")
-	for _, want := range []string{"Show this help", "service v0.test", "queue 0", "model requested:", "reasoning requested:", "running", "cooling down"} {
+	for _, want := range []string{"Show these controls", "service v0.test", "queue 0", "model requested:", "reasoning requested:", "running", "cooling down"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("session status is missing English label %q:\n%s", want, joined)
 		}
@@ -668,12 +668,16 @@ func TestHelpCommandRendersReadableRowsInsteadOfOneClippedLine(t *testing.T) {
 	frames := strings.Split(output.String(), "\x1b[H\x1b[2J")
 	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(frames[len(frames)-1], "")
 	for _, want := range []string{
-		"help | ?         Show this help",
-		"clear | cls      Clear only the visible session history",
-		"details all|N    Toggle GPU and model details for a node",
-		"gpus all|N       Toggle GPU details for a node",
-		"models all|N     Toggle model details for a node",
-		"exit | quit | q   Close only this view; service continues running",
+		"VIEW CONTROLS · this input is not a command shell",
+		"help | ?                     Show these controls",
+		"clear | cls                  Clear visible session history only",
+		"details NODE                 Toggle GPU + model rows",
+		"details show|hide NODE       Set GPU + model rows explicitly",
+		"gpus show|hide NODE          Set per-device GPU rows explicitly",
+		"models show|hide NODE        Set model rows explicitly",
+		"details | gpus | models none Hide that detail type for every visible node",
+		"exit | quit | q               Close this view; service + jobs keep running",
+		"SHELL · run `contextbridge help` in CMD, PowerShell, or another terminal",
 	} {
 		if !strings.Contains(plain, want) {
 			t.Errorf("multi-line help is missing %q:\n%s", want, plain)
@@ -681,6 +685,45 @@ func TestHelpCommandRendersReadableRowsInsteadOfOneClippedLine(t *testing.T) {
 	}
 	if got := strings.Count(plain, "  | help | ?"); got != 1 {
 		t.Fatalf("help output was duplicated or flattened: count=%d\n%s", got, plain)
+	}
+}
+
+func TestNodeDetailCommandsSupportExplicitShowHideAndNone(t *testing.T) {
+	session := &Session{poolNodes: []PoolNode{
+		{ID: "node-a", Name: "alpha", Connected: true},
+		{ID: "node-b", Name: "beta", Connected: true},
+	}, nodeDetails: map[string]nodeDetailVisibility{}}
+
+	if got := session.changeNodeDetailsLocked("details", "show", "all"); !strings.Contains(got, "shown") {
+		t.Fatalf("show all result = %q", got)
+	}
+	for _, id := range []string{"node-a", "node-b"} {
+		if state := session.nodeDetails[id]; !state.gpus || !state.models {
+			t.Fatalf("show all did not expose both detail types for %s: %#v", id, state)
+		}
+	}
+	if got := session.changeNodeDetailsLocked("gpus", "hide", "1"); !strings.Contains(got, "hidden") {
+		t.Fatalf("hide GPU result = %q", got)
+	}
+	if state := session.nodeDetails["node-a"]; state.gpus || !state.models {
+		t.Fatalf("GPU-only hide changed the wrong state: %#v", state)
+	}
+	if got := session.changeNodeDetailsLocked("models", "hide", "all"); !strings.Contains(got, "hidden") {
+		t.Fatalf("hide all models result = %q", got)
+	}
+	for _, id := range []string{"node-a", "node-b"} {
+		if session.nodeDetails[id].models {
+			t.Fatalf("models none left %s visible: %#v", id, session.nodeDetails[id])
+		}
+	}
+	session.changeNodeDetailsLocked("details", "show", "all")
+	if session.HandleCommand("details none") {
+		t.Fatal("details none unexpectedly requested console shutdown")
+	}
+	for _, id := range []string{"node-a", "node-b"} {
+		if state := session.nodeDetails[id]; state.gpus || state.models {
+			t.Fatalf("details none left %s visible through the command parser: %#v", id, state)
+		}
 	}
 }
 

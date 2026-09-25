@@ -45,6 +45,9 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
+	if len(os.Args) > 2 && helpFlag(os.Args[len(os.Args)-1]) && writeCommandGroupHelp(os.Stderr, os.Args[1:len(os.Args)-1]) {
+		return
+	}
 	var err error
 	switch os.Args[1] {
 	case "init":
@@ -123,6 +126,9 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
+	if errors.Is(err, flag.ErrHelp) {
+		return
+	}
 	if err != nil {
 		if len(os.Args) > 1 && (os.Args[1] == "run" || os.Args[1] == "serve" || os.Args[1] == "relay" || os.Args[1] == "worker") {
 			if rollbackErr := updater.RollbackFailedStart(version); rollbackErr != nil {
@@ -135,46 +141,118 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, `ContextBridge routes trusted jobs across local engines, API engines, and worker pools.
+	writeUsage(os.Stderr)
+}
 
-Usage:
-  contextbridge init [--config path]
-  contextbridge serve [--config path]
-  contextbridge run [--config path] [--slots N] [--topmost]
-  contextbridge stop [--config path] [--force]
-  contextbridge uninstall [--config path] [--install-dir path] [--purge] [--force] [--yes] [--dry-run]
-  contextbridge console [--config path] # read-only view; type exit + Enter to close
-  contextbridge submit --file job.json [--config path]
-  contextbridge schedule add --file schedule.json [--config path]
-  contextbridge schedule list|show|pause|resume|run|delete [ID] [--config path]
-  contextbridge result JOB_ID [--config path]
-  contextbridge review --job-dir path [--config path]
-  contextbridge health [--config path]
-  contextbridge dashboard [--config path] [--no-open]
-  contextbridge status [--config path] [--json]
-  contextbridge doctor [--config path] [--json]
-  contextbridge guide [--config path]
-  contextbridge hardware [--json]
-  contextbridge models [--config path] [--json]
-  contextbridge resources [--config path] [--json]
-  contextbridge pull [--config path] MODEL
-  contextbridge runtime install [--config path] llama.cpp
-  contextbridge mcp serve [--config path]
-  contextbridge integrate openai|mcp|relay [--config path] [--json]
-  contextbridge benchmark [--json] [--samples N] [--warmup N] [--database-jobs N] [--idle-duration D] [--binary path]
-  contextbridge verification verify --file STATEMENT.json --trust-key KEY.json [--artifact FILE] [--require-artifact] [--evidence-dir DIR] [--require-evidence] [--json]
-  contextbridge relay [--config path]
-  contextbridge pair [--config path] [--relay URL] [--identity path] [--name NAME]
-  contextbridge worker [--config path] [--relay URL] [--identity path] [--name NAME] [--slots N] [--providers LIST] [--models LIST] [--tasks LIST] [--topmost]
-  contextbridge selftest [options]
-	contextbridge cluster status|events|node|protocol|conformance|submit|chat|agent|selftest|route|contract|receipt|login|token|pairing|lan [options]
-	contextbridge cluster agent auto [--policy NAME] --goal TEXT [options]
-	contextbridge cluster agent plan --goal TEXT --out PLAN.json [options]
-	contextbridge cluster agent run --plan PLAN.json --approve sha256:HASH [options]
-	contextbridge route explain (--file job.json | --job JOB_ID) [--json]
-  contextbridge update status|check|apply|enable|disable|auto [options]
+func writeUsage(out io.Writer) {
+	fmt.Fprintln(out, `ContextBridge routes trusted jobs across local engines, APIs, and worker pools.
+
+START HERE
+  contextbridge guide                         Interactive setup for this device
+  contextbridge doctor                        Diagnose configuration and connectivity
+  contextbridge run                           Start local service, relay, and/or worker
+  contextbridge console                       Open the detachable read-only live view
+
+SEND AND INSPECT WORK
+  contextbridge submit --file JOB.json        Submit one local job contract
+  contextbridge result JOB_ID                 Read one retained result
+  contextbridge review --job-dir DIR          Review a file/folder inbox job
+  contextbridge schedule add|list|show|pause|resume|run|delete
+                                               Manage durable scheduled work
+
+POOL AND ROUTING
+  contextbridge cluster status|events|node|submit|chat|route|pipeline
+                                               Inspect or use a connected pool
+  contextbridge cluster agent auto|plan|run   Run bounded agent workflows
+  contextbridge cluster pairing|token|login   Manage scoped cluster access
+  contextbridge cluster lan init|join|status  Build an explicitly trusted offline LAN pool
+  contextbridge selftest                      Check local + pool readiness without AI work
+  contextbridge route explain --file JOB.json Explain placement before execution
+  contextbridge relay | pair | worker         Run individual cluster components
+
+LOCAL RESOURCES AND INTEGRATIONS
+  contextbridge hardware | models | resources Inspect usable local capacity
+  contextbridge pull MODEL                    Download a configured model safely
+  contextbridge runtime install llama.cpp     Install the supported local runtime
+  contextbridge integrate openai|mcp|relay    Print copy-ready integration settings
+  contextbridge mcp serve                     Expose the bounded MCP surface
+
+OPERATE AND MAINTAIN
+  contextbridge status | health | dashboard   Observe the local service
+  contextbridge benchmark                     Measure relay and resource footprint
+  contextbridge verification verify           Verify a signed CB statement
+  contextbridge update status|check|apply|enable|disable|auto
+  contextbridge stop                          Stop the managed background service
+  contextbridge uninstall [--dry-run] [--purge]
+                                               Remove installer-owned state safely
   contextbridge completion powershell|bash|zsh
-  contextbridge version`)
+  contextbridge init | serve                  Low-level local setup/service commands
+  contextbridge version
+
+HELP
+  contextbridge help                          Show this map
+  contextbridge COMMAND --help                Show flags for a command
+  contextbridge guide                         Recommended path when you are unsure
+
+The console input controls only the live view; submit jobs from CMD, PowerShell,
+or another shell. "exit" closes an attached console without stopping the service.`)
+}
+
+func helpFlag(value string) bool {
+	return value == "--help" || value == "-h"
+}
+
+// writeCommandGroupHelp handles dispatcher levels before they load a config or
+// contact a service. Leaf commands keep using flag.FlagSet so their exact flags
+// remain the source of truth.
+func writeCommandGroupHelp(out io.Writer, path []string) bool {
+	topic := strings.Join(path, " ")
+	var help string
+	switch topic {
+	case "schedule":
+		help = "Usage: contextbridge schedule add|list|show|pause|resume|run|delete [options]\n"
+	case "runtime":
+		help = "Usage: contextbridge runtime install [--config PATH] llama.cpp\n"
+	case "mcp":
+		help = "Usage: contextbridge mcp serve [--config PATH]\n"
+	case "integrate":
+		help = "Usage: contextbridge integrate openai|mcp|relay [options]\n"
+	case "verification":
+		help = "Usage: contextbridge verification verify [options]\n"
+	case "update":
+		help = "Usage: contextbridge update status|check|apply|enable|disable|auto [options]\n"
+	case "completion":
+		help = "Usage: contextbridge completion powershell|bash|zsh\n"
+	case "route", "cluster route":
+		help = "Usage: contextbridge " + topic + " explain (--file JOB.json | --job JOB_ID) [options]\n"
+	case "cluster":
+		help = `Usage: contextbridge cluster COMMAND [options]
+
+Observe:  status, events, node, dashboard, protocol
+Run:      submit, chat, pipeline, agent, selftest, route
+Trust:    pairing, token, login, lan
+Verify:   contract, receipt, conformance
+Setup:    configure
+
+Use ` + "`contextbridge cluster COMMAND --help`" + ` for exact flags.
+`
+	case "cluster agent":
+		help = "Usage: contextbridge cluster agent auto|plan|run [options]\n"
+	case "cluster lan":
+		help = "Usage: contextbridge cluster lan init|join|status [options]\n"
+	case "cluster node":
+		help = "Usage: contextbridge cluster node drain|resume NODE_ID [options]\n"
+	case "cluster conformance":
+		help = "Usage: contextbridge cluster conformance relay|worker|resilience [options]\n"
+	case "cluster contract":
+		help = "Usage: contextbridge cluster contract validate --file JOB.json [options]\n"
+	case "cluster receipt":
+		help = "Usage: contextbridge cluster receipt show|export|verify|keygen [options]\n"
+	default:
+		return false
+	}
+	fmt.Fprint(out, help)
+	return true
 }
 
 func initCommand(args []string) error {

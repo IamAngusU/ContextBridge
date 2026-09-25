@@ -268,11 +268,26 @@ func (s *Session) HandleCommand(command string) bool {
 		}
 		s.commandNotice = "Session history cleared; service and jobs continue running."
 	case "details", "gpus", "models":
-		if len(fields) != 2 {
-			s.commandNotice = fields[0] + " expects all or a displayed node number, for example " + fields[0] + " 1"
+		action, target := "toggle", ""
+		switch len(fields) {
+		case 2:
+			target = fields[1]
+			if strings.EqualFold(target, "none") {
+				action, target = "hide", "all"
+			}
+		case 3:
+			action, target = strings.ToLower(fields[1]), fields[2]
+			if action != "show" && action != "hide" && action != "toggle" {
+				s.commandNotice = fields[0] + " action must be show, hide, or toggle; try `" + fields[0] + " show 1`"
+				break
+			}
+		default:
+			s.commandNotice = fields[0] + " expects NODE, none, or show|hide NODE; try `" + fields[0] + " show 1`"
+		}
+		if target == "" {
 			break
 		}
-		s.commandNotice = s.toggleNodeDetailsLocked(strings.ToLower(fields[0]), fields[1])
+		s.commandNotice = s.changeNodeDetailsLocked(strings.ToLower(fields[0]), action, target)
 	default:
 		s.commandNotice = "Unknown command: " + cleanTerminalLabel(fields[0], 40) + " · help lists all commands"
 	}
@@ -282,22 +297,26 @@ func (s *Session) HandleCommand(command string) bool {
 
 func (s *Session) commandHelpLocked() string {
 	lines := []string{
-		"help | ?         Show this help",
-		"clear | cls      Clear only the visible session history",
-		"details all|N    Toggle GPU and model details for a node",
-		"gpus all|N       Toggle GPU details for a node",
-		"models all|N     Toggle model details for a node",
+		"VIEW CONTROLS · this input is not a command shell",
+		"help | ?                     Show these controls",
+		"clear | cls                  Clear visible session history only",
+		"details NODE                 Toggle GPU + model rows (number, name, or all)",
+		"details show|hide NODE       Set GPU + model rows explicitly",
+		"gpus show|hide NODE          Set per-device GPU rows explicitly",
+		"models show|hide NODE        Set model rows explicitly",
+		"details | gpus | models none Hide that detail type for every visible node",
 	}
 	if s.commandClosesView {
-		lines = append(lines, "exit | quit | q   Close only this view; service continues running")
+		lines = append(lines, "exit | quit | q               Close this view; service + jobs keep running")
 	} else {
-		lines = append(lines, "Ctrl+C            Stop this foreground service")
+		lines = append(lines, "Ctrl+C                        Stop this foreground service")
 	}
+	lines = append(lines, "SHELL · run `contextbridge help` in CMD, PowerShell, or another terminal")
 	return strings.Join(lines, "\n")
 }
 
 func (s *Session) commandHintLocked() string {
-	commands := "help · clear · details all|N · gpus all|N · models all|N"
+	commands := "view controls only · help · details N · clear"
 	if s.commandClosesView {
 		return commands + " · exit"
 	}
@@ -356,6 +375,10 @@ func (s *Session) renderCommandResultLocked() {
 }
 
 func (s *Session) toggleNodeDetailsLocked(kind, target string) string {
+	return s.changeNodeDetailsLocked(kind, "toggle", target)
+}
+
+func (s *Session) changeNodeDetailsLocked(kind, action, target string) string {
 	nodes := s.orderedPoolNodesLocked()
 	if len(nodes) == 0 {
 		return "No pool nodes available."
@@ -388,19 +411,22 @@ func (s *Session) toggleNodeDetailsLocked(kind, target string) string {
 	if s.nodeDetails == nil {
 		s.nodeDetails = map[string]nodeDetailVisibility{}
 	}
-	allVisible := true
-	for _, node := range selected {
-		visibility := s.nodeDetails[nodeDetailKey(node)]
-		switch kind {
-		case "gpus":
-			allVisible = allVisible && visibility.gpus
-		case "models":
-			allVisible = allVisible && visibility.models
-		default:
-			allVisible = allVisible && visibility.gpus && visibility.models
+	show := action == "show"
+	if action == "toggle" {
+		allVisible := true
+		for _, node := range selected {
+			visibility := s.nodeDetails[nodeDetailKey(node)]
+			switch kind {
+			case "gpus":
+				allVisible = allVisible && visibility.gpus
+			case "models":
+				allVisible = allVisible && visibility.models
+			default:
+				allVisible = allVisible && visibility.gpus && visibility.models
+			}
 		}
+		show = !allVisible
 	}
-	show := !allVisible
 	for _, node := range selected {
 		key := nodeDetailKey(node)
 		visibility := s.nodeDetails[key]

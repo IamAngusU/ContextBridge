@@ -123,6 +123,13 @@ loopback-managed `run`/`serve` process to stop and refuses while work is active.
 override. Standalone relay/worker processes remain owned by their service
 manager or foreground terminal.
 
+The command row inside the console intentionally controls only that view; it is
+not a second shell. Type `help` there to see view controls. `details show 1`,
+`gpus show all`, and `models hide 2` set per-node detail rows explicitly;
+`details none` collapses every visible node. Submit work and change persistent
+configuration from CMD, PowerShell, or another shell. This separation prevents
+a mistyped view command from mutating the service or dispatching work.
+
 ## Remove ContextBridge safely
 
 Preview the exact removal plan first:
