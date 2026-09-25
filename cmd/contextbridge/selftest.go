@@ -694,7 +694,7 @@ func cancelSelftestJob(relayURL, token, jobID string) error {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := clusterHTTPClient(relayURL).Do(req)
 	if err != nil {
 		return err
 	}

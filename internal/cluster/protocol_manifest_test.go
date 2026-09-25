@@ -46,6 +46,9 @@ func TestProtocolManifestIsDeterministicAndNamesPublicBoundaries(t *testing.T) {
 	if !containsString(first.Features, "relay_role_health_v1") {
 		t.Fatalf("relay role health feature is not advertised: %#v", first.Features)
 	}
+	if !containsString(first.Features, "secure_offline_lan_pinning_v1") {
+		t.Fatalf("secure offline LAN trust is not advertised: %#v", first.Features)
+	}
 	if !containsString(first.Features, "authoritative_job_events_v1") {
 		t.Fatalf("authoritative job event feature is not advertised: %#v", first.Features)
 	}

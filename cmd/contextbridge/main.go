@@ -164,7 +164,7 @@ Usage:
   contextbridge pair [--config path] [--relay URL] [--identity path] [--name NAME]
   contextbridge worker [--config path] [--relay URL] [--identity path] [--name NAME] [--slots N] [--providers LIST] [--models LIST] [--tasks LIST] [--topmost]
   contextbridge selftest [options]
-	contextbridge cluster status|events|node|protocol|conformance|submit|chat|agent|selftest|route|contract|receipt|login|token|pairing [options]
+	contextbridge cluster status|events|node|protocol|conformance|submit|chat|agent|selftest|route|contract|receipt|login|token|pairing|lan [options]
 	contextbridge cluster agent auto [--policy NAME] --goal TEXT [options]
 	contextbridge cluster agent plan --goal TEXT --out PLAN.json [options]
 	contextbridge cluster agent run --plan PLAN.json --approve sha256:HASH [options]
@@ -1340,7 +1340,7 @@ func splitWorkerList(raw string) []string {
 }
 
 func relayConfig(cfg config.Config) cluster.RelayConfig {
-	return cluster.RelayConfig{
+	result := cluster.RelayConfig{
 		Version: version, Listen: cfg.Cluster.Relay.Listen, PublicURL: cfg.Cluster.Relay.PublicURL,
 		Database: cfg.Cluster.Relay.Database, AdminToken: cfg.Cluster.Relay.AdminToken, AllowedOrigins: cfg.Cluster.Relay.AllowedOrigins,
 		MaxJobBytes: cfg.Cluster.Relay.MaxJobBytes, MaxQueuedJobs: cfg.Cluster.Relay.MaxQueue,
@@ -1355,6 +1355,13 @@ func relayConfig(cfg config.Config) cluster.RelayConfig {
 		MaxSessionPlacements: cfg.Cluster.Relay.MaxSessionPlacements,
 		RetentionSweep:       time.Duration(cfg.Cluster.Relay.RetentionSweepSeconds) * time.Second,
 	}
+	if cfg.Cluster.Relay.LAN.Enabled {
+		result.LANListen = cfg.Cluster.Relay.LAN.Listen
+		result.LANPublicURL = cfg.Cluster.Relay.LAN.PublicURL
+		result.LANTLSCertificate = cfg.Cluster.Relay.LAN.CertificateFile
+		result.LANTLSPrivateKey = cfg.Cluster.Relay.LAN.PrivateKeyFile
+	}
+	return result
 }
 
 func configuredWorker(cfg config.Config) (*cluster.Worker, error) {
@@ -1387,7 +1394,7 @@ func freeLocalAddress() (string, error) {
 
 func clusterCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: contextbridge cluster status|events|node|protocol|conformance|submit|chat|agent|selftest|route|contract|receipt|login|token|pairing")
+		return errors.New("usage: contextbridge cluster status|events|node|protocol|conformance|submit|chat|agent|selftest|route|contract|receipt|login|token|pairing|lan")
 	}
 	switch args[0] {
 	case "status":
@@ -1426,6 +1433,8 @@ func clusterCommand(args []string) error {
 		return clusterDashboardCommand(args[1:])
 	case "pipeline":
 		return clusterPipelineCommand(args[1:])
+	case "lan":
+		return clusterLANCommand(args[1:])
 	default:
 		return fmt.Errorf("unknown cluster command %s", args[0])
 	}
@@ -1813,7 +1822,7 @@ func clusterStatusCommand(args []string) error {
 		return err
 	}
 	if *asJSON {
-		return json.NewEncoder(os.Stdout).Encode(map[string]interface{}{"overview": overview, "nodes": nodes})
+		return json.NewEncoder(os.Stdout).Encode(map[string]interface{}{"overview": overview, "nodes": nodes, "lan": clusterLANStatusView(cfg)})
 	}
 	totalSlots, running := 0, 0
 	for _, node := range nodes {
@@ -1823,6 +1832,11 @@ func clusterStatusCommand(args []string) error {
 		}
 	}
 	fmt.Printf("Pool  [%d/%d PCs online]  [%d/%d slots busy]  [%d queued]\n", overview.NodesOnline, overview.NodesTotal, running, totalSlots, overview.JobsByState[cluster.JobQueued])
+	if cfg.Cluster.Relay.LAN.Enabled {
+		fmt.Printf("LAN  [relay · pinned TLS · %s]  [Internet not required for local routes]\n", cfg.Cluster.Relay.LAN.PublicURL)
+	} else if trust, trustErr := cluster.LoadWorkerRelayTrust(cfg.Cluster.Worker.IdentityFile, cfg.Cluster.Worker.RelayURL); trustErr == nil && trust.SPKISHA256 != "" {
+		fmt.Printf("LAN  [worker/client · pinned TLS · %s]  [Internet not required for local routes]\n", cfg.Cluster.Worker.RelayURL)
+	}
 	if !overview.GeneratedAt.IsZero() {
 		zone := time.FixedZone("relay", overview.UTCOffsetSeconds)
 		midpoint := clockRequestStarted.Add(clockRequestEnded.Sub(clockRequestStarted) / 2)
@@ -1879,6 +1893,19 @@ func clusterStatusCommand(args []string) error {
 	}
 	fmt.Printf("Jobs  [%d completed]  [%d failed]  [%.2f compute hours]  %s\n", overview.JobsByState[cluster.JobCompleted], overview.JobsByState[cluster.JobFailed], float64(overview.Usage.ComputeMS)/3600000, formatClusterCost(overview.Usage))
 	return nil
+}
+
+func clusterLANStatusView(cfg config.Config) map[string]interface{} {
+	view := map[string]interface{}{"relay_enabled": cfg.Cluster.Relay.LAN.Enabled, "internet_required_for_local_routes": false}
+	if cfg.Cluster.Relay.LAN.Enabled {
+		view["relay_url"] = cfg.Cluster.Relay.LAN.PublicURL
+		view["transport"] = "pinned_tls"
+	}
+	if trust, err := cluster.LoadWorkerRelayTrust(cfg.Cluster.Worker.IdentityFile, cfg.Cluster.Worker.RelayURL); err == nil && trust.SPKISHA256 != "" {
+		view["worker_pinned"] = true
+		view["relay_spki_sha256"] = trust.SPKISHA256
+	}
+	return view
 }
 
 func formatClusterCost(usage cluster.Usage) string {
@@ -2190,19 +2217,22 @@ func clusterPairingCommand(args []string) error {
 }
 
 func clusterBaseURL(cfg config.Config) string {
+	var target string
 	if cfg.Cluster.Relay.PublicURL != "" {
-		return strings.TrimRight(cfg.Cluster.Relay.PublicURL, "/")
+		target = strings.TrimRight(cfg.Cluster.Relay.PublicURL, "/")
+	} else if cfg.Cluster.Worker.RelayURL != "" {
+		target = strings.TrimRight(cfg.Cluster.Worker.RelayURL, "/")
+	} else {
+		target = "http://" + cfg.Cluster.Relay.Listen
 	}
-	if cfg.Cluster.Worker.RelayURL != "" {
-		return strings.TrimRight(cfg.Cluster.Worker.RelayURL, "/")
-	}
-	return "http://" + cfg.Cluster.Relay.Listen
+	registerClusterTrust(cfg, target)
+	return target
 }
 
 func clusterGET(ctx context.Context, target, token string, output interface{}) error {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := clusterHTTPClient(target).Do(req)
 	if err != nil {
 		return err
 	}
@@ -2235,7 +2265,7 @@ func clusterPOSTHeaders(ctx context.Context, target, token string, input, output
 		}
 	}
 	// #nosec G704 -- see the operator-owned relay boundary above.
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := clusterHTTPClient(target).Do(req)
 	if err != nil {
 		return nil, err
 	}

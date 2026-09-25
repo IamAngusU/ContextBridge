@@ -18,7 +18,7 @@ var completionSubcommands = map[string][]string{
 	"mcp":          {"serve"},
 	"integrate":    {"openai", "mcp", "relay"},
 	"verification": {"verify"},
-	"cluster":      {"status", "events", "node", "protocol", "conformance", "submit", "chat", "agent", "selftest", "route", "contract", "receipt", "login", "token", "pairing", "configure", "dashboard", "pipeline"},
+	"cluster":      {"status", "events", "node", "protocol", "conformance", "submit", "chat", "agent", "selftest", "route", "contract", "receipt", "login", "token", "pairing", "configure", "dashboard", "pipeline", "lan"},
 	"route":        {"explain"},
 	"update":       {"status", "check", "apply", "enable", "disable", "auto"},
 	"completion":   {"powershell", "bash", "zsh"},
@@ -58,7 +58,7 @@ $script:ContextBridgeSubcommands = @{
     mcp = @('serve')
     integrate = @('openai','mcp','relay')
     verification = @('verify')
-	cluster = @('status','events','node','protocol','conformance','submit','chat','agent','selftest','route','contract','receipt','login','token','pairing','configure','dashboard','pipeline')
+	cluster = @('status','events','node','protocol','conformance','submit','chat','agent','selftest','route','contract','receipt','login','token','pairing','configure','dashboard','pipeline','lan')
     route = @('explain')
     update = @('status','check','apply','enable','disable','auto')
     completion = @('powershell','bash','zsh')
@@ -111,7 +111,8 @@ $script:ContextBridgeOptions = @{
     'cluster pipeline' = @('--config','--name','--file')
     'cluster login' = @('--config','--token-file')
     'cluster token' = @('--config','--role','--subject','--groups','--lifetime-hours','--max-queued-jobs','--max-jobs-per-hour','--providers','--egress')
-    'cluster pairing' = @('--config','--approve','--deny')
+	'cluster pairing' = @('--config','--approve','--deny')
+	'cluster lan' = @('init','join','status','--config','--listen','--advertise-host','--out','--bundle','--name')
     'update' = @('--config','--force','--json','--managed-service','--relay-only')
 }
 $script:ContextBridgeValueOptions = @{
@@ -122,7 +123,7 @@ $script:ContextBridgeValueOptions = @{
     '--role' = @('producer','observer')
 }
 $script:ContextBridgeTakesValue = @(
-	'--config','--install-dir','--file','--job','--artifacts','--artifact','--attach-image','--identity','--job-dir','--token-file','--trust-key','--evidence-dir','--write-env',
+	'--config','--install-dir','--file','--job','--artifacts','--artifact','--attach-image','--identity','--job-dir','--token-file','--trust-key','--evidence-dir','--write-env','--bundle','--advertise-host',
     '--slots','--endpoint','--relay','--name','--providers','--models','--tasks','--groups',
     '--token','--provider','--group','--model','--profile','--reasoning','--session','--prompt',
 	'--min-artifacts','--min-images','--local-model','--image-profile','--timeout','--job-timeout','--poll','--after','--limit','--idempotency-key','--subject','--groups','--lifetime-hours',
@@ -237,6 +238,7 @@ _contextbridge_complete() {
       "cluster login") candidates="--config --token-file" ;;
       "cluster token") candidates="--config --role --subject --groups --lifetime-hours --max-queued-jobs --max-jobs-per-hour --providers --egress" ;;
       "cluster pairing") candidates="--config --approve --deny" ;;
+	  "cluster lan") candidates="init join status --config --listen --advertise-host --out --bundle --name" ;;
       "mcp serve") candidates="--config" ;;
       "integrate openai") candidates="--config --json --show-token --write-env --check --live" ;;
       "integrate mcp") candidates="--config --json" ;;
@@ -279,7 +281,7 @@ _contextbridge_complete() {
       mcp) candidates="serve" ;;
       integrate) candidates="openai mcp relay" ;;
       verification) candidates="verify" ;;
-	  cluster) candidates="status events node protocol conformance submit chat agent selftest route contract receipt login token pairing configure dashboard pipeline" ;;
+	  cluster) candidates="status events node protocol conformance submit chat agent selftest route contract receipt login token pairing configure dashboard pipeline lan" ;;
       route) candidates="explain" ;;
       update) candidates="status check apply enable disable auto" ;;
       completion) candidates="powershell bash zsh" ;;
@@ -384,7 +386,7 @@ case "$words[2]" in
     ;;
   cluster)
     if (( CURRENT == 3 )); then
-	  _values 'cluster action' status events node protocol conformance submit chat agent selftest route contract receipt login token pairing configure dashboard pipeline
+	  _values 'cluster action' status events node protocol conformance submit chat agent selftest route contract receipt login token pairing configure dashboard pipeline lan
       return
     fi
     case "$words[3]" in
@@ -446,6 +448,17 @@ case "$words[2]" in
       login) _arguments "${config[@]}" '--token-file[Producer token file]:token file:_files' ;;
 	  token) _arguments "${config[@]}" '--role[Token role]:role:(producer observer)' '--subject[Token label]:label:' '--groups[Comma-separated scheduling groups]:groups:' '--lifetime-hours[Credential lifetime; 0 never expires]:hours:' '--max-queued-jobs[Producer queued-job limit]:count:' '--max-jobs-per-hour[Durable hourly admission limit]:count:' '--providers[Comma-separated provider allowlist]:providers:' '--egress[Producer egress ceiling]:egress:(local_only)' ;;
       pairing) _arguments "${config[@]}" '--approve[Approve pairing code]:code:' '--deny[Deny pairing code]:code:' ;;
+	  lan)
+		if (( CURRENT == 4 )); then
+		  _values 'LAN action' init join status
+		  return
+		fi
+		case "$words[4]" in
+		  init) _arguments "${config[@]}" '--listen[Private or wildcard LAN address]:address:' '--advertise-host[Reachable LAN IP or local DNS name]:host:' '--out[New join bundle]:file:_files' ;;
+		  join) _arguments "${config[@]}" '--bundle[Trusted LAN join bundle]:file:_files' '--name[Worker node name]:name:' ;;
+		  status) _arguments "${config[@]}" ;;
+		esac
+		;;
       *) _arguments '*:argument:' ;;
     esac
     ;;

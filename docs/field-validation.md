@@ -62,6 +62,21 @@ lost submit response with exact idempotent replay, worker death during
 execution with no duplicate dispatch, slot saturation with explainable
 placement, mixed Windows/Linux workers, and 24/72-hour resource soaks.
 
+Secure offline-LAN evidence additionally records:
+
+- one-machine local inference with WAN physically absent;
+- two-machine pinned TLS pairing and execution on an isolated switch;
+- WAN removal during a local job without loss of local finality;
+- simultaneous local and cloud routes where only the cloud route becomes
+  unavailable;
+- relay-address change without acceptance of a different TLS identity;
+- forged discovery/advertisement and TLS-MITM rejection;
+- worker sleep/resume and a 24-hour reconnect soak without hosted CB traffic.
+
+The unit/integration suite exercises pinned TLS HTTP, pairing and WebSocket
+transport entirely on loopback. It does not replace the isolated-switch and
+WAN fault-injection evidence above.
+
 Issue
 [#12](https://github.com/IamAngusU/ContextBridge/issues/12) is the living,
 fine-grained checklist. This document defines the evidence standard and the

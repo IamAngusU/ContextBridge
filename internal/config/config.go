@@ -202,21 +202,30 @@ type Cluster struct {
 }
 
 type ClusterRelay struct {
-	Enabled                 bool     `yaml:"enabled" json:"enabled"`
-	Listen                  string   `yaml:"listen" json:"listen"`
-	PublicURL               string   `yaml:"public_url" json:"public_url"`
-	Database                string   `yaml:"database" json:"database"`
-	AdminToken              string   `yaml:"admin_token" json:"-"`
-	AllowedOrigins          []string `yaml:"allowed_origins" json:"allowed_origins"`
-	MaxQueue                int      `yaml:"max_queue" json:"max_queue"`
-	MaxJobBytes             int64    `yaml:"max_job_bytes" json:"max_job_bytes"`
-	PairingTTLSeconds       int      `yaml:"pairing_ttl_seconds" json:"pairing_ttl_seconds"`
-	RetentionDays           int      `yaml:"retention_days" json:"retention_days"`
-	MaxTerminalJobs         int      `yaml:"max_terminal_jobs" json:"max_terminal_jobs"`
-	MaxEvents               int      `yaml:"max_events" json:"max_events"`
-	MaxTerminalPipelineRuns int      `yaml:"max_terminal_pipeline_runs" json:"max_terminal_pipeline_runs"`
-	MaxSessionPlacements    int      `yaml:"max_session_placements" json:"max_session_placements"`
-	RetentionSweepSeconds   int      `yaml:"retention_sweep_seconds" json:"retention_sweep_seconds"`
+	Enabled                 bool            `yaml:"enabled" json:"enabled"`
+	Listen                  string          `yaml:"listen" json:"listen"`
+	PublicURL               string          `yaml:"public_url" json:"public_url"`
+	LAN                     ClusterRelayLAN `yaml:"lan" json:"lan"`
+	Database                string          `yaml:"database" json:"database"`
+	AdminToken              string          `yaml:"admin_token" json:"-"`
+	AllowedOrigins          []string        `yaml:"allowed_origins" json:"allowed_origins"`
+	MaxQueue                int             `yaml:"max_queue" json:"max_queue"`
+	MaxJobBytes             int64           `yaml:"max_job_bytes" json:"max_job_bytes"`
+	PairingTTLSeconds       int             `yaml:"pairing_ttl_seconds" json:"pairing_ttl_seconds"`
+	RetentionDays           int             `yaml:"retention_days" json:"retention_days"`
+	MaxTerminalJobs         int             `yaml:"max_terminal_jobs" json:"max_terminal_jobs"`
+	MaxEvents               int             `yaml:"max_events" json:"max_events"`
+	MaxTerminalPipelineRuns int             `yaml:"max_terminal_pipeline_runs" json:"max_terminal_pipeline_runs"`
+	MaxSessionPlacements    int             `yaml:"max_session_placements" json:"max_session_placements"`
+	RetentionSweepSeconds   int             `yaml:"retention_sweep_seconds" json:"retention_sweep_seconds"`
+}
+
+type ClusterRelayLAN struct {
+	Enabled         bool   `yaml:"enabled" json:"enabled"`
+	Listen          string `yaml:"listen" json:"listen"`
+	PublicURL       string `yaml:"public_url" json:"public_url"`
+	CertificateFile string `yaml:"certificate_file" json:"certificate_file"`
+	PrivateKeyFile  string `yaml:"private_key_file" json:"-"`
 }
 
 type ClusterWorker struct {
@@ -696,6 +705,17 @@ func (c Config) Validate() error {
 		if err := validateLoopbackListen(c.Cluster.Relay.Listen); err != nil {
 			return errors.New("cluster.relay.listen must use localhost; publish it through a TLS reverse proxy")
 		}
+		if c.Cluster.Relay.LAN.Enabled {
+			if err := validateLANListen(c.Cluster.Relay.LAN.Listen); err != nil {
+				return fmt.Errorf("cluster.relay.lan.listen: %w", err)
+			}
+			if err := cluster.ValidateRelayURL(c.Cluster.Relay.LAN.PublicURL); err != nil || !strings.HasPrefix(strings.ToLower(c.Cluster.Relay.LAN.PublicURL), "https://") {
+				return errors.New("cluster.relay.lan.public_url must be an absolute HTTPS URL")
+			}
+			if strings.TrimSpace(c.Cluster.Relay.LAN.CertificateFile) == "" || strings.TrimSpace(c.Cluster.Relay.LAN.PrivateKeyFile) == "" {
+				return errors.New("cluster.relay.lan certificate_file and private_key_file are required")
+			}
+		}
 	}
 	if c.Cluster.Relay.MaxQueue < 0 || c.Cluster.Relay.MaxQueue > 1_000_000 {
 		return errors.New("cluster.relay.max_queue must be between 1 and 1000000 when set")
@@ -1131,6 +1151,19 @@ func applyDefaults(cfg *Config, base string) {
 	if cfg.Cluster.Relay.Listen == "" {
 		cfg.Cluster.Relay.Listen = "127.0.0.1:32150"
 	}
+	if cfg.Cluster.Relay.LAN.Listen == "" {
+		cfg.Cluster.Relay.LAN.Listen = "0.0.0.0:32151"
+	}
+	if cfg.Cluster.Relay.LAN.CertificateFile == "" {
+		cfg.Cluster.Relay.LAN.CertificateFile = filepath.Join(cfg.Storage.Directory, "lan", "relay-cert.pem")
+	} else if !filepath.IsAbs(cfg.Cluster.Relay.LAN.CertificateFile) {
+		cfg.Cluster.Relay.LAN.CertificateFile = filepath.Join(base, cfg.Cluster.Relay.LAN.CertificateFile)
+	}
+	if cfg.Cluster.Relay.LAN.PrivateKeyFile == "" {
+		cfg.Cluster.Relay.LAN.PrivateKeyFile = filepath.Join(cfg.Storage.Directory, "lan", "relay-key.pem")
+	} else if !filepath.IsAbs(cfg.Cluster.Relay.LAN.PrivateKeyFile) {
+		cfg.Cluster.Relay.LAN.PrivateKeyFile = filepath.Join(base, cfg.Cluster.Relay.LAN.PrivateKeyFile)
+	}
 	if cfg.Cluster.Relay.Database == "" {
 		cfg.Cluster.Relay.Database = filepath.Join(cfg.Storage.Directory, "cluster.db")
 	} else if !filepath.IsAbs(cfg.Cluster.Relay.Database) {
@@ -1303,6 +1336,28 @@ func validateLoopbackListen(value string) error {
 	return nil
 }
 
+func validateLANListen(value string) error {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(value))
+	if err != nil || port == "" {
+		return errors.New("LAN listen address must contain an IP host and numeric port")
+	}
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
+		return errors.New("LAN listen address port must be between 1 and 65535")
+	}
+	if host == "" {
+		return errors.New("LAN listen address must use an explicit IP or wildcard")
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return errors.New("LAN listen address host must be an IP or wildcard, not a DNS name")
+	}
+	if !ip.IsUnspecified() && !ip.IsPrivate() && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() {
+		return errors.New("LAN listen address must be private, link-local, loopback, or a wildcard")
+	}
+	return nil
+}
+
 func expandEnvironment(value string) string {
 	return envPattern.ReplaceAllStringFunc(value, func(token string) string {
 		name := token[2 : len(token)-1]
@@ -1448,6 +1503,12 @@ cluster:
     enabled: false
     listen: 127.0.0.1:32150
     public_url: ""
+    lan:
+      enabled: false
+      listen: 0.0.0.0:32151
+      public_url: ""
+      certificate_file: ./data/lan/relay-cert.pem
+      private_key_file: ./data/lan/relay-key.pem
     database: ./data/cluster.db
     admin_token: GENERATED_CLUSTER_ADMIN_TOKEN
     allowed_origins: []

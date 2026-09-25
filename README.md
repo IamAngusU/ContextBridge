@@ -161,6 +161,22 @@ and terminal-result handling.
 
 A **relay** coordinates the pool. A **worker** runs the job. An **application token** lets another client submit work. Workers connect outbound; they need no public inbound ports.
 
+No VPS, public DNS or Internet connection is required for a pool that stays on
+one private LAN. Initialize a relay-owned TLS identity, transfer the public
+join bundle through a trusted local channel, and join the worker:
+
+```sh
+# relay machine
+contextbridge cluster lan init
+
+# worker machine
+contextbridge cluster lan join --bundle ./contextbridge-lan-join.json --name home-pc
+```
+
+The bundle pins the relay certificate; CB does not weaken the boundary to
+cleartext private-network HTTP. See [Secure offline LAN pools](docs/offline-lan.md)
+for approval, firewall, air-gap and WAN-loss behavior.
+
 <details>
 <summary><strong>Set up a relay, pair another machine and issue an app token</strong></summary>
 

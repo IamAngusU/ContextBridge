@@ -200,7 +200,7 @@ func relayConformancePost(ctx context.Context, baseURL, token string, body []byt
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("Content-Type", "application/json")
-	response, err := http.DefaultClient.Do(request)
+	response, err := clusterHTTPClient(baseURL).Do(request)
 	if err != nil {
 		return 0, nil, fmt.Errorf("relay conformance request: %w", err)
 	}

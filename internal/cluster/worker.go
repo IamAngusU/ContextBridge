@@ -53,19 +53,21 @@ type WorkerConfig struct {
 }
 
 type WorkerIdentity struct {
-	NodeID            string `json:"node_id"`
-	NodeToken         string `json:"node_token"`
-	PrivateKey        string `json:"private_key"`
-	PublicKey         string `json:"public_key"`
-	RelayURL          string `json:"relay_url"`
-	ClusterID         string `json:"cluster_id,omitempty"`
-	HighestRelayEpoch uint64 `json:"highest_relay_epoch,omitempty"`
+	NodeID            string      `json:"node_id"`
+	NodeToken         string      `json:"node_token"`
+	PrivateKey        string      `json:"private_key"`
+	PublicKey         string      `json:"public_key"`
+	RelayURL          string      `json:"relay_url"`
+	RelayTrust        *RelayTrust `json:"relay_trust,omitempty"`
+	ClusterID         string      `json:"cluster_id,omitempty"`
+	HighestRelayEpoch uint64      `json:"highest_relay_epoch,omitempty"`
 }
 
 type Worker struct {
 	cfg         WorkerConfig
 	identity    WorkerIdentity
 	client      *http.Client
+	relayClient *http.Client
 	sem         chan struct{}
 	mu          sync.Mutex
 	running     int
@@ -294,13 +296,29 @@ func LoadWorker(cfg WorkerConfig) (*Worker, error) {
 	if cfg.RequestTimeout == 0 {
 		cfg.RequestTimeout = 10 * time.Minute
 	}
-	return &Worker{cfg: cfg, identity: identity, client: &http.Client{Timeout: cfg.RequestTimeout}, sem: make(chan struct{}, cfg.MaxConcurrent), clusterID: identity.ClusterID, relayEpoch: identity.HighestRelayEpoch}, nil
+	trust := RelayTrust{}
+	if identity.RelayTrust != nil {
+		trust = *identity.RelayTrust
+	}
+	client, err := NewRelayHTTPClient(cfg.RelayURL, trust, cfg.RequestTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("load worker relay trust: %w", err)
+	}
+	return &Worker{cfg: cfg, identity: identity, client: &http.Client{Timeout: cfg.RequestTimeout}, relayClient: client, sem: make(chan struct{}, cfg.MaxConcurrent), clusterID: identity.ClusterID, relayEpoch: identity.HighestRelayEpoch}, nil
 }
 
 func PairWorker(ctx context.Context, relayURL, name, identityFile string, groups []string, output func(PairResponse)) error {
+	return PairWorkerWithTrust(ctx, relayURL, name, identityFile, groups, RelayTrust{}, output)
+}
+
+func PairWorkerWithTrust(ctx context.Context, relayURL, name, identityFile string, groups []string, trust RelayTrust, output func(PairResponse)) error {
 	relayURL = strings.TrimSpace(relayURL)
 	if err := ValidateRelayURL(relayURL); err != nil {
 		return fmt.Errorf("worker relay URL: %w", err)
+	}
+	client, err := NewRelayHTTPClient(relayURL, trust, maximumWorkerHTTPTimeout)
+	if err != nil {
+		return fmt.Errorf("worker relay trust: %w", err)
 	}
 	if strings.TrimSpace(identityFile) == "" {
 		return errors.New("identity file is required")
@@ -323,7 +341,7 @@ func PairWorker(ctx context.Context, relayURL, name, identityFile string, groups
 	}
 	request := PairRequest{NodeName: name, PublicKey: publicKey, Groups: groups}
 	var response PairResponse
-	if err := postJSON(ctx, http.DefaultClient, endpoint(relayURL, "/v1/pair/request"), "", request, &response); err != nil {
+	if err := postJSON(ctx, client, endpoint(relayURL, "/v1/pair/request"), "", request, &response); err != nil {
 		return err
 	}
 	if err := validatePairResponse(response); err != nil {
@@ -353,7 +371,7 @@ func PairWorker(ctx context.Context, relayURL, name, identityFile string, groups
 				NodeID    string `json:"node_id"`
 				NodeToken string `json:"node_token"`
 			}
-			err := postJSON(ctx, http.DefaultClient, endpoint(relayURL, "/v1/pair/token"), "", map[string]string{"device_code": response.DeviceCode}, &poll)
+			err := postJSON(ctx, client, endpoint(relayURL, "/v1/pair/token"), "", map[string]string{"device_code": response.DeviceCode}, &poll)
 			if err != nil {
 				var statusErr *HTTPError
 				if errors.As(err, &statusErr) && statusErr.Status == http.StatusAccepted {
@@ -366,6 +384,9 @@ func PairWorker(ctx context.Context, relayURL, name, identityFile string, groups
 				continue
 			case "approved":
 				identity := WorkerIdentity{NodeID: poll.NodeID, NodeToken: poll.NodeToken, PrivateKey: privateKey, PublicKey: publicKey, RelayURL: relayURL}
+				if trust.SPKISHA256 != "" || trust.CertificatePEM != "" {
+					identity.RelayTrust = &trust
+				}
 				if err := validateWorkerIdentity(identity); err != nil {
 					return fmt.Errorf("relay returned invalid worker identity: %w", err)
 				}
@@ -478,7 +499,7 @@ func (w *Worker) connect(ctx context.Context, report WorkerReporter) error {
 	}
 	header := http.Header{}
 	header.Set("Authorization", "Bearer "+w.identity.NodeToken)
-	conn, _, err := websocket.Dial(ctx, target, &websocket.DialOptions{HTTPHeader: header})
+	conn, _, err := websocket.Dial(ctx, target, &websocket.DialOptions{HTTPClient: w.relayClient, HTTPHeader: header})
 	if err != nil {
 		return err
 	}
@@ -1678,6 +1699,14 @@ func validateWorkerIdentity(identity WorkerIdentity) error {
 			return fmt.Errorf("saved relay URL: %w", err)
 		}
 	}
+	if identity.RelayTrust != nil {
+		if identity.RelayURL == "" {
+			return errors.New("saved relay trust requires a relay URL")
+		}
+		if _, err := relayTLSConfig(identity.RelayURL, *identity.RelayTrust, time.Now().UTC()); err != nil {
+			return fmt.Errorf("saved relay trust: %w", err)
+		}
+	}
 	if (identity.ClusterID == "") != (identity.HighestRelayEpoch == 0) {
 		return errors.New("saved relay authority fence is incomplete")
 	}
@@ -1687,6 +1716,29 @@ func validateWorkerIdentity(identity WorkerIdentity) error {
 	return nil
 }
 
+// LoadWorkerRelayTrust returns only the public trust material bound to a saved
+// worker identity. It never exposes the worker token or private key.
+func LoadWorkerRelayTrust(identityFile, relayURL string) (RelayTrust, error) {
+	raw, err := readBoundedRegularFile(identityFile, maximumWorkerIdentityBytes)
+	if err != nil {
+		return RelayTrust{}, err
+	}
+	var identity WorkerIdentity
+	if err := json.Unmarshal(raw, &identity); err != nil {
+		return RelayTrust{}, errors.New("worker identity is invalid")
+	}
+	if strings.TrimRight(identity.RelayURL, "/") != strings.TrimRight(strings.TrimSpace(relayURL), "/") {
+		return RelayTrust{}, errors.New("worker identity belongs to another relay")
+	}
+	if identity.RelayTrust == nil {
+		return RelayTrust{}, nil
+	}
+	if _, err := relayTLSConfig(relayURL, *identity.RelayTrust, time.Now().UTC()); err != nil {
+		return RelayTrust{}, err
+	}
+	return *identity.RelayTrust, nil
+}
+
 func validatePairResponse(response PairResponse) error {
 	if !validOpaqueSecret(response.DeviceCode, 16, 1024) {
 		return errors.New("relay returned an invalid pairing device code")
@@ -1694,7 +1746,7 @@ func validatePairResponse(response PairResponse) error {
 	if !validRoutingLabel(response.UserCode, 64) {
 		return errors.New("relay returned an invalid pairing user code")
 	}
-	if err := ValidateRelayURL(response.VerificationURI); err != nil {
+	if err := validatePairingVerificationURL(response.VerificationURI); err != nil {
 		return fmt.Errorf("relay returned an invalid pairing verification URL: %w", err)
 	}
 	pollEvery := time.Duration(response.IntervalSeconds) * time.Second
@@ -1705,6 +1757,18 @@ func validatePairResponse(response PairResponse) error {
 		return errors.New("relay returned an invalid pairing expiry")
 	}
 	return nil
+}
+
+func validatePairingVerificationURL(value string) error {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil {
+		return errors.New("verification URL is invalid")
+	}
+	if parsed.Fragment != "" && parsed.Fragment != "pair" {
+		return errors.New("verification URL has an unsupported fragment")
+	}
+	parsed.Fragment = ""
+	return ValidateRelayURL(parsed.String())
 }
 
 func validOpaqueSecret(value string, minimum, maximum int) bool {

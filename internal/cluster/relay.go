@@ -13,6 +13,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -29,6 +30,10 @@ type RelayConfig struct {
 	Version              string
 	Listen               string
 	PublicURL            string
+	LANListen            string
+	LANPublicURL         string
+	LANTLSCertificate    string
+	LANTLSPrivateKey     string
 	Database             string
 	AdminToken           string
 	AllowedOrigins       []string
@@ -345,6 +350,24 @@ func NewRelay(cfg RelayConfig, logger *log.Logger) (*Relay, error) {
 	if err := ValidateRelayURL(cfg.PublicURL); err != nil {
 		return nil, fmt.Errorf("relay public URL: %w", err)
 	}
+	if cfg.LANListen != "" {
+		if cfg.LANPublicURL == "" || cfg.LANTLSCertificate == "" || cfg.LANTLSPrivateKey == "" {
+			return nil, errors.New("LAN relay listener requires public URL, certificate, and private key")
+		}
+		if err := ValidateRelayURL(cfg.LANPublicURL); err != nil {
+			return nil, fmt.Errorf("LAN relay public URL: %w", err)
+		}
+		if !strings.HasPrefix(strings.ToLower(cfg.LANPublicURL), "https://") {
+			return nil, errors.New("LAN relay public URL must use HTTPS")
+		}
+		parsedLANURL, err := url.Parse(cfg.LANPublicURL)
+		if err != nil {
+			return nil, fmt.Errorf("LAN relay public URL: %w", err)
+		}
+		if _, err := LoadLANTLSIdentity(cfg.LANTLSCertificate, cfg.LANTLSPrivateKey, parsedLANURL.Hostname(), time.Now().UTC()); err != nil {
+			return nil, fmt.Errorf("LAN relay TLS identity: %w", err)
+		}
+	}
 	if cfg.Database == "" {
 		return nil, errors.New("relay database path is required")
 	}
@@ -499,24 +522,59 @@ func (r *Relay) Run(ctx context.Context) error {
 	r.lifecycleMu.Lock()
 	r.lifecycleCtx = ctx
 	r.lifecycleMu.Unlock()
-	server := &http.Server{Addr: r.cfg.Listen, Handler: r.Handler(), BaseContext: func(net.Listener) context.Context { return ctx }, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 32 << 10}
-	go r.dispatchLoop(ctx)
-	shutdownDone := make(chan error, 1)
-	// #nosec G118 -- shutdown must derive a fresh grace context after the parent context has been cancelled.
-	go func() {
-		<-ctx.Done()
-		shutdown, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-		defer cancel()
-		shutdownDone <- server.Shutdown(shutdown)
-	}()
-	r.logger.Printf("relay listening on http://%s", r.cfg.Listen)
-	err := server.ListenAndServe()
-	if errors.Is(err, http.ErrServerClosed) {
-		shutdownErr := <-shutdownDone
-		r.pipelineWG.Wait()
-		return shutdownErr
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+	servers := []*http.Server{r.httpServer(runCtx, r.cfg.Listen)}
+	tlsServer := -1
+	if r.cfg.LANListen != "" {
+		tlsServer = len(servers)
+		servers = append(servers, r.httpServer(runCtx, r.cfg.LANListen))
 	}
-	return err
+	go r.dispatchLoop(runCtx)
+	errorsCh := make(chan error, len(servers))
+	r.logger.Printf("relay listening on http://%s", r.cfg.Listen)
+	for index, server := range servers {
+		index, server := index, server
+		go func() {
+			if index == tlsServer {
+				r.logger.Printf("relay LAN listener on %s (%s)", r.cfg.LANPublicURL, r.cfg.LANListen)
+				errorsCh <- server.ListenAndServeTLS(r.cfg.LANTLSCertificate, r.cfg.LANTLSPrivateKey)
+				return
+			}
+			errorsCh <- server.ListenAndServe()
+		}()
+	}
+	select {
+	case <-ctx.Done():
+	case err := <-errorsCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			cancelRun()
+			shutdownRelayServers(servers)
+			r.pipelineWG.Wait()
+			return err
+		}
+	}
+	cancelRun()
+	shutdownErr := shutdownRelayServers(servers)
+	r.pipelineWG.Wait()
+	return shutdownErr
+}
+
+func (r *Relay) httpServer(ctx context.Context, address string) *http.Server {
+	return &http.Server{Addr: address, Handler: r.Handler(), BaseContext: func(net.Listener) context.Context { return ctx }, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 32 << 10}
+}
+
+func shutdownRelayServers(servers []*http.Server) error {
+	// #nosec G118 -- shutdown must outlive the cancelled serving context.
+	shutdown, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	var result error
+	for _, server := range servers {
+		if err := server.Shutdown(shutdown); err != nil && result == nil {
+			result = err
+		}
+	}
+	return result
 }
 
 func (r *Relay) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -594,7 +652,11 @@ func (r *Relay) handlePairRequest(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("valid node_name and public_key are required"))
 		return
 	}
-	uri := strings.TrimRight(r.cfg.PublicURL, "/") + "/dashboard/#pair"
+	publicURL := r.cfg.PublicURL
+	if req.TLS != nil && r.cfg.LANPublicURL != "" {
+		publicURL = r.cfg.LANPublicURL
+	}
+	uri := strings.TrimRight(publicURL, "/") + "/dashboard/#pair"
 	response, err := r.store.CreatePairing(input, uri, r.cfg.PairingTTL)
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err)

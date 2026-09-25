@@ -485,6 +485,38 @@ func TestRelayPublicURLRejectsDisguisedRemoteHTTP(t *testing.T) {
 	}
 }
 
+func TestLANRelayRequiresPrivateListenerAndHTTPSIdentity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := Default(path); err != nil {
+		t.Fatal(err)
+	}
+	base, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.Cluster.Relay.Enabled = true
+	base.Cluster.Relay.LAN.Enabled = true
+	base.Cluster.Relay.LAN.Listen = "0.0.0.0:32151"
+	base.Cluster.Relay.LAN.PublicURL = "https://192.168.1.20:32151"
+	if err := base.Validate(); err != nil {
+		t.Fatalf("valid private LAN relay rejected: %v", err)
+	}
+	for name, mutate := range map[string]func(*Config){
+		"public-listener": func(candidate *Config) { candidate.Cluster.Relay.LAN.Listen = "8.8.8.8:32151" },
+		"cleartext-url":   func(candidate *Config) { candidate.Cluster.Relay.LAN.PublicURL = "http://192.168.1.20:32151" },
+		"missing-cert":    func(candidate *Config) { candidate.Cluster.Relay.LAN.CertificateFile = "" },
+		"missing-key":     func(candidate *Config) { candidate.Cluster.Relay.LAN.PrivateKeyFile = "" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := base
+			mutate(&candidate)
+			if err := candidate.Validate(); err == nil {
+				t.Fatalf("unsafe LAN relay configuration %q was accepted", name)
+			}
+		})
+	}
+}
+
 func TestListenAddressesRequireParsedLoopbackHostAndPort(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yml")
 	if err := Default(path); err != nil {
