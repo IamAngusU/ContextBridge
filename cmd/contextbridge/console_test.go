@@ -45,6 +45,28 @@ func TestFetchConsoleStatusUsesReadOnlyAuthenticatedRequest(t *testing.T) {
 	}
 }
 
+func TestServiceSnapshotFeatureIndicatorsReflectEffectiveConfiguration(t *testing.T) {
+	enabled := true
+	cfg := config.Config{
+		Cluster:  config.Cluster{Relay: config.ClusterRelay{Enabled: true}, Worker: config.ClusterWorker{Enabled: false}},
+		Portable: config.PortableResources{Enabled: &enabled},
+		Engines:  map[string]config.Engine{"ollama": {AutoStart: true}},
+	}
+	status := consoleStatus{}
+	status.Updates.Enabled = true
+	status.RAG.Enabled = false
+	snapshot := toServiceSnapshot(status, cfg)
+	want := map[string]bool{"RLY": true, "WRK": false, "UPD": true, "RAG": false, "PCK": true, "EAS": true}
+	if len(snapshot.Features) != len(want) {
+		t.Fatalf("feature count = %d; want %d", len(snapshot.Features), len(want))
+	}
+	for _, feature := range snapshot.Features {
+		if enabled, ok := want[feature.Label]; !ok || enabled != feature.Enabled {
+			t.Fatalf("feature %#v not in expected state %#v", feature, want)
+		}
+	}
+}
+
 func TestFetchConsoleStatusRejectsWrongToken(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusUnauthorized) }))
 	defer server.Close()

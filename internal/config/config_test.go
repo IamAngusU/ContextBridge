@@ -39,6 +39,9 @@ func TestDefaultConfigLoads(t *testing.T) {
 	if cfg.Terminal.Style != "panel" {
 		t.Fatalf("unexpected terminal style: %q", cfg.Terminal.Style)
 	}
+	if cfg.Terminal.MaxPromptCharacters != 4096 {
+		t.Fatalf("unexpected terminal prompt limit: %d", cfg.Terminal.MaxPromptCharacters)
+	}
 	if cfg.Cluster.Placement.PerformanceLearning == nil || !*cfg.Cluster.Placement.PerformanceLearning || cfg.Cluster.Placement.MinimumSamples != 3 || cfg.Cluster.Placement.HistoryTTLHours != 168 {
 		t.Fatalf("unexpected placement defaults: %#v", cfg.Cluster.Placement)
 	}
@@ -105,6 +108,15 @@ func TestTerminalStyleIsSelectableAndValidated(t *testing.T) {
 	reloaded.Terminal.Style = "unknown"
 	if err := reloaded.Validate(); err == nil {
 		t.Fatal("unsupported terminal style was accepted")
+	}
+	reloaded.Terminal.Style = "panel"
+	reloaded.Terminal.MaxPromptCharacters = 63
+	if err := reloaded.Validate(); err == nil || !strings.Contains(err.Error(), "max_prompt_characters") {
+		t.Fatal("undersized terminal prompt limit was accepted")
+	}
+	reloaded.Terminal.MaxPromptCharacters = 65537
+	if err := reloaded.Validate(); err == nil || !strings.Contains(err.Error(), "max_prompt_characters") {
+		t.Fatal("oversized terminal prompt limit was accepted")
 	}
 }
 

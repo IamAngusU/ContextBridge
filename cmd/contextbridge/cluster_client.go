@@ -116,6 +116,12 @@ func (c *clusterAPIClient) Jobs(ctx context.Context, limit int) ([]cluster.Job, 
 	return jobs, err
 }
 
+func (c *clusterAPIClient) Protocol(ctx context.Context) (cluster.ProtocolManifest, error) {
+	var manifest cluster.ProtocolManifest
+	_, err := c.doJSON(ctx, http.MethodGet, "/v1/cluster/protocol", nil, &manifest, nil)
+	return manifest, err
+}
+
 func (c *clusterAPIClient) Job(ctx context.Context, jobID string) (cluster.Job, error) {
 	if err := validateClusterClientID(jobID); err != nil {
 		return cluster.Job{}, err

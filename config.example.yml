@@ -14,6 +14,7 @@ runtime:
 
 terminal:
   style: panel # panel or classic; applies to interactive terminals only
+  max_prompt_characters: 4096 # bounded interactive `send`; relay byte limits still apply
 
 portable_resources:
   enabled: true # bounded marker discovery only; never auto-runs removable-drive code

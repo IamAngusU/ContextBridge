@@ -29,7 +29,7 @@ const (
 	ansiPurple                = "\x1b[35m"
 	ansiBlue                  = "\x1b[34m"
 	maximumVisiblePoolNodes   = 8
-	maximumConsolePromptRunes = 512
+	maximumConsolePromptRunes = 4096
 	maximumConsoleActionQueue = 16
 )
 
@@ -39,6 +39,7 @@ const (
 type ConsoleIntent struct {
 	Action   string
 	Argument string
+	Submit   ConsoleSubmitOptions
 }
 
 const (
@@ -88,6 +89,14 @@ type PoolNode struct {
 	Models         []cluster.ModelCapability
 }
 
+// FeatureState is a compact, non-secret runtime/configuration toggle. The
+// stable short labels are explained by the console help instead of consuming
+// a full status row per setting.
+type FeatureState struct {
+	Label   string
+	Enabled bool
+}
+
 // ServiceSnapshot is the read-only subset shown by an attached console. It
 // reflects a service status response, not inferred worker or job events.
 type ServiceSnapshot struct {
@@ -106,6 +115,7 @@ type ServiceSnapshot struct {
 	ResourcePacks    []resourcepacks.Pack
 	JobsTotal        uint64
 	JobsFailed       uint64
+	Features         []FeatureState
 	GPU              string
 	GPUUtilization   int
 }
@@ -162,6 +172,7 @@ type Session struct {
 	commandNoticeHelp  bool
 	workActions        bool
 	commandIntents     chan ConsoleIntent
+	commandLimits      ConsoleCommandLimits
 	closedState        bool
 	selectionActiveFn  func() bool
 }
@@ -222,6 +233,9 @@ func (s *Session) EnableWorkActions() bool {
 		return false
 	}
 	s.workActions = true
+	if s.commandLimits.MaxPromptCharacters == 0 {
+		s.commandLimits = defaultConsoleCommandLimits()
+	}
 	if s.commandIntents == nil {
 		s.commandIntents = make(chan ConsoleIntent, maximumConsoleActionQueue)
 	}
@@ -229,6 +243,18 @@ func (s *Session) EnableWorkActions() bool {
 		s.renderPanelLocked()
 	}
 	return true
+}
+
+// ConfigureCommandLimits installs the local/operator and relay-advertised
+// bounds used by live guidance and submit validation. Zero fields retain safe
+// defaults; the relay remains authoritative when its policy is stricter.
+func (s *Session) ConfigureCommandLimits(limits ConsoleCommandLimits) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.commandLimits = normalizeConsoleCommandLimits(limits)
+	if s.panelStarted {
+		s.renderPanelLocked()
+	}
 }
 
 // CommandIntents returns the typed action stream. It is nil until work actions
@@ -303,7 +329,7 @@ func (s *Session) SetCommandInput(value string) {
 	// This is editor state, not a label. Preserve intentional leading and
 	// trailing spaces so the cursor advances on the keypress that inserted
 	// them. Trimming here made a typed space appear only after the next rune.
-	s.commandInput = cleanTerminalInput(value, maximumConsolePromptRunes)
+	s.commandInput = cleanTerminalInput(value, s.commandInputLimitLocked())
 	if s.panelStarted {
 		s.renderPanelLocked()
 	}
@@ -364,7 +390,12 @@ func (s *Session) HandleCommand(command string) bool {
 		}
 		s.commandNotice = s.changeNodeDetailsLocked(strings.ToLower(fields[0]), action, target)
 	case "send":
-		s.emitWorkIntentLocked(ConsoleIntentSend, commandArgument(command), true)
+		intent, message, ok := s.parseSendIntentLocked(command)
+		if !ok {
+			s.commandNotice = message
+			break
+		}
+		s.emitConsoleIntentLocked(intent)
 	case "jobs":
 		if len(fields) != 1 {
 			s.commandNotice = "jobs takes no arguments"
@@ -377,7 +408,11 @@ func (s *Session) HandleCommand(command string) bool {
 			break
 		}
 		action := map[string]string{"job": ConsoleIntentJob, "result": ConsoleIntentResult, "cancel": ConsoleIntentCancel}[strings.ToLower(fields[0])]
-		s.emitWorkIntentLocked(action, fields[1], true)
+		if err := validateConsoleJobID(fields[1]); err != "" {
+			s.commandNotice = err
+			break
+		}
+		s.emitConsoleIntentLocked(ConsoleIntent{Action: action, Argument: fields[1]})
 	default:
 		s.commandNotice = "Unknown command: " + cleanTerminalLabel(fields[0], 40) + " · help lists all commands"
 	}
@@ -403,10 +438,17 @@ func (s *Session) emitWorkIntentLocked(action, argument string, required bool) {
 		s.commandNotice = action + " requires " + map[string]string{ConsoleIntentSend: "text", ConsoleIntentJob: "a job ID", ConsoleIntentResult: "a job ID", ConsoleIntentCancel: "a job ID"}[action]
 		return
 	}
-	intent := ConsoleIntent{Action: action, Argument: argument}
+	s.emitConsoleIntentLocked(ConsoleIntent{Action: action, Argument: argument})
+}
+
+func (s *Session) emitConsoleIntentLocked(intent ConsoleIntent) {
+	if !s.workActions || s.commandIntents == nil {
+		s.commandNotice = "Work actions unavailable · add a scoped producer credential with console --token, CONTEXTBRIDGE_CLUSTER_TOKEN, or cluster.client_token"
+		return
+	}
 	select {
 	case s.commandIntents <- intent:
-		s.commandNotice = "Accepted " + action + " action · relay policy and ownership still apply"
+		s.commandNotice = "Accepted " + intent.Action + " action · relay policy and ownership still apply"
 	default:
 		s.commandNotice = "Console action queue is busy · wait for an earlier action to finish"
 	}
@@ -427,6 +469,7 @@ func (s *Session) commandHelpLocked() string {
 		lines = append(lines,
 			"WORK ACTIONS · scoped relay policy and ownership apply",
 			"send TEXT                    Submit one plaintext text job and follow it",
+			"send [FLAGS] -- TEXT         Add bounded provider/model/session routing controls",
 			"jobs                         List your recent jobs",
 			"job ID                       Inspect one owned job",
 			"result ID                    Show one owned retained text result",
@@ -441,6 +484,7 @@ func (s *Session) commandHelpLocked() string {
 		lines = append(lines, "Ctrl+C                        Stop this foreground service")
 	}
 	lines = append(lines, "HOST COMMANDS · run `contextbridge help` in CMD, PowerShell, or another terminal")
+	lines = append(lines, "INDICATORS · RLY relay · WRK worker · UPD updates · RAG retrieval · PCK resource packs · EAS engine autostart")
 	return strings.Join(lines, "\n")
 }
 
@@ -504,28 +548,24 @@ func (s *Session) commandGuideLinesLocked() []string {
 		if !s.workActions {
 			return []string{"send is unavailable here · attach with `contextbridge console` and a scoped producer token"}
 		}
-		return []string{"send TEXT · submit one plaintext text job; relay policy and ownership apply"}
+		return s.sendCommandGuideLocked(raw)
 	case "jobs":
 		return []string{"jobs · list recent jobs owned by this producer credential"}
-	case "job":
-		return []string{"job ID · inspect authoritative state for one owned job"}
-	case "result":
-		return []string{"result ID · show one owned retained plaintext result"}
-	case "cancel":
-		return []string{"cancel ID · request cancellation; provider execution may already be running"}
+	case "job", "result", "cancel":
+		return s.jobCommandGuideLocked(command, raw)
 	case "exit", "quit", "q", ":q":
 		if s.commandClosesView {
 			return []string{"exit · close this view only; service and jobs continue"}
 		}
 		return []string{"exit does not stop an owning service · use Ctrl+C deliberately"}
 	default:
-		return []string{"not a bounded console command · type help for the accepted vocabulary", "host commands run in CMD, PowerShell, or another shell"}
+		return []string{ansiRed + "Invalid · not a bounded console command" + ansiReset, "type help for the accepted vocabulary · host commands run in another shell"}
 	}
 }
 
 func (s *Session) commandDisplayLinesLocked() ([]string, bool) {
 	if s.commandInput != "" {
-		return s.commandGuideLinesLocked(), true
+		return s.commandGuideLinesLocked(), false
 	}
 	return s.commandNoticeLinesLocked(), s.commandNotice == "" || s.commandNoticeHelp
 }
@@ -1500,6 +1540,22 @@ func colorModelLoadState(value string, loaded bool) string {
 	return value
 }
 
+func featureIndicatorLabel(features []FeatureState) string {
+	parts := make([]string, 0, len(features))
+	for _, feature := range features {
+		label := cleanTerminalLabel(strings.ToUpper(feature.Label), 8)
+		if label == "" {
+			continue
+		}
+		if feature.Enabled {
+			parts = append(parts, ansiGreen+label+ansiReset)
+		} else {
+			parts = append(parts, ansiDim+label+ansiReset)
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
 func colorDelimitedModelState(value, state, color string) string {
 	needle := " · " + state
 	index := strings.LastIndex(value, needle)
@@ -1588,6 +1644,9 @@ func (s *Session) renderPanelLocked() {
 		for _, value := range s.serviceLines {
 			rows = append(rows, "  | ·  "+line(value))
 		}
+	}
+	if s.observing && len(s.observed.Features) > 0 {
+		rows = append(rows, "  | ·  "+featureIndicatorLabel(s.observed.Features))
 	}
 	rows = gap(rows)
 	rows = append(rows, panelSection("CONNECTION", width))

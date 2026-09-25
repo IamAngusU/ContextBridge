@@ -38,6 +38,12 @@ type consoleStatus struct {
 		JobsTotal  uint64 `json:"jobs_total"`
 		JobsFailed uint64 `json:"jobs_failed"`
 	} `json:"metrics"`
+	Updates struct {
+		Enabled bool `json:"enabled"`
+	} `json:"updates"`
+	RAG struct {
+		Enabled bool `json:"enabled"`
+	} `json:"rag"`
 }
 
 func consoleCommand(args []string) error {
@@ -58,8 +64,12 @@ func consoleCommand(args []string) error {
 	session.EnableCommands()
 	actionToken, actionSource := consoleActionCredential(cfg, *token)
 	if actionToken != "" && session.EnableWorkActions() {
+		actionClient := newClusterAPIClient(clusterBaseURL(cfg), actionToken)
+		limitCtx, cancelLimits := context.WithTimeout(ctx, 2*time.Second)
+		session.ConfigureCommandLimits(consoleCommandLimits(limitCtx, actionClient, cfg))
+		cancelLimits()
 		session.Banner(version, "bounded live client · producer credential from "+actionSource+" · host commands are never executed")
-		go runConsoleActions(ctx, newClusterAPIClient(clusterBaseURL(cfg), actionToken), session.CommandIntents(), session)
+		go runConsoleActions(ctx, actionClient, session.CommandIntents(), session)
 	} else {
 		reason := "configure a scoped producer credential for work actions"
 		if actionToken != "" {
@@ -91,7 +101,7 @@ func consoleCommand(args []string) error {
 			}
 			session.ObserveServiceUnavailable("local service not reachable; retrying")
 		} else {
-			session.ObserveService(toServiceSnapshot(status))
+			session.ObserveService(toServiceSnapshot(status, cfg))
 		}
 		select {
 		case <-ctx.Done():
@@ -132,13 +142,34 @@ func fetchConsoleStatus(ctx context.Context, client *http.Client, cfg config.Con
 	return status, nil
 }
 
-func toServiceSnapshot(status consoleStatus) terminalui.ServiceSnapshot {
+func toServiceSnapshot(status consoleStatus, configs ...config.Config) terminalui.ServiceSnapshot {
 	snapshot := terminalui.ServiceSnapshot{
 		Version: status.Version, Queued: status.Queued, Completed: status.Completed, ActiveJobs: status.ActiveJobs,
 		AdapterConnected: status.Adapter.Connected, ActiveEndpoints: status.Adapter.ActiveEndpoints, BusyEndpoints: status.Adapter.BusyEndpoints,
 		JobsTotal: status.Metrics.JobsTotal, JobsFailed: status.Metrics.JobsFailed,
 		ResourcePacks: append([]resourcepacks.Pack(nil), status.Runtime.Packs...),
 	}
+	features := []terminalui.FeatureState{
+		{Label: "UPD", Enabled: status.Updates.Enabled},
+		{Label: "RAG", Enabled: status.RAG.Enabled},
+	}
+	if len(configs) > 0 {
+		cfg := configs[0]
+		engineAutostart := false
+		for _, engine := range cfg.Engines {
+			engineAutostart = engineAutostart || engine.AutoStart
+		}
+		portable := cfg.Portable.Enabled != nil && *cfg.Portable.Enabled
+		features = []terminalui.FeatureState{
+			{Label: "RLY", Enabled: cfg.Cluster.Relay.Enabled},
+			{Label: "WRK", Enabled: cfg.Cluster.Worker.Enabled},
+			{Label: "UPD", Enabled: status.Updates.Enabled},
+			{Label: "RAG", Enabled: status.RAG.Enabled},
+			{Label: "PCK", Enabled: portable},
+			{Label: "EAS", Enabled: engineAutostart},
+		}
+	}
+	snapshot.Features = features
 	for _, endpoint := range status.Adapter.Endpoints {
 		snapshot.Endpoints = append(snapshot.Endpoints, cluster.AdapterSessionCapability{
 			EndpointID: endpoint.ID, Profile: endpoint.Profile, State: endpoint.State,

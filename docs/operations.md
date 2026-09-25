@@ -137,11 +137,40 @@ and explains why. Piped or redirected console input also remains read-only.
 
 ```text
 cb › send Summarize why durable idempotency matters in two sentences.
+cb › send --provider ollama --model auto --egress local_only -- Summarize this locally.
 cb › jobs
 cb › job job_...
 cb › result job_...
 cb › cancel job_...
 ```
+
+The composer uses one structured grammar, not shell parsing. `send TEXT` is the
+short path. `send [FLAGS] -- TEXT` enables bounded routing flags:
+`--provider`, `--model`, `--group`, `--session`, `--profile`, `--reasoning`,
+`--egress`, `--max-cost-usd`, `--new-session`, and
+`--new-session-per-job`. Provider-specific flags disappear from the suggested
+next set when they cannot apply. The displayed `[Length X · allowed 1–Y]`
+bound comes from `terminal.max_prompt_characters`; `[Payload X/Y bytes]` uses
+the authenticated relay protocol manifest and accounts for the prompt's exact
+JSON/UTF-8 encoding. Yellow means incomplete, red means rejected, and ordinary
+terminal text means the current input is ready. The relay validates the final
+request again and remains authoritative.
+
+The compact service flags are configuration/runtime evidence, not inferred
+marketing claims: `RLY` relay, `WRK` worker, `UPD` verified updates, `RAG`
+retrieval, `PCK` portable resource-pack discovery, and `EAS` at least one
+configured engine with autostart. Green is enabled; dim grey is disabled.
+
+The local character guard defaults to 4096 and can be changed without
+recompiling:
+
+```yaml
+terminal:
+  max_prompt_characters: 4096
+```
+
+Values from 64 through 65536 are accepted. This guard cannot widen a stricter
+relay byte limit.
 
 `send` creates one bounded plaintext text job through the normal relay admission
 path. Relay policy, ownership, queue/rate limits, egress rules and cost policy

@@ -41,6 +41,31 @@ func consoleActionCredential(cfg config.Config, explicit string) (token, source 
 	return "", ""
 }
 
+func consoleCommandLimits(ctx context.Context, client *clusterAPIClient, cfg config.Config) terminalui.ConsoleCommandLimits {
+	limits := terminalui.ConsoleCommandLimits{
+		MaxPromptCharacters: cfg.Terminal.MaxPromptCharacters,
+		SessionProvider:     "adapter",
+	}
+	request, err := buildClusterTextSubmitRequest(clusterTextJobOptions{
+		Source: "console", Output: bridge.OutputSpec{Mode: "text", MaxBytes: 1 << 20}, MaxAttempts: 1,
+	})
+	if err == nil && len(request.Payload) >= 2 {
+		// Prompt is a required JSON string field. Subtract the encoded empty
+		// string ("") so the renderer can calculate the exact payload size for
+		// every typed prompt, including JSON escaping and UTF-8.
+		limits.PayloadOverheadBytes = len(request.Payload) - 2
+	}
+	if client != nil {
+		if manifest, err := client.Protocol(ctx); err == nil && manifest.Schema == cluster.ProtocolManifestV1 {
+			maximum := manifest.Limits.MaximumConfiguredJobPayloadBytes
+			if maximum > 0 && maximum <= int64(^uint(0)>>1) {
+				limits.MaxPayloadBytes = int(maximum)
+			}
+		}
+	}
+	return limits
+}
+
 func runConsoleActions(ctx context.Context, client *clusterAPIClient, intents <-chan terminalui.ConsoleIntent, session *terminalui.Session) {
 	if client == nil || intents == nil || session == nil {
 		return
@@ -64,7 +89,7 @@ func handleConsoleIntent(parent context.Context, client *clusterAPIClient, inten
 	defer cancel()
 	switch intent.Action {
 	case terminalui.ConsoleIntentSend:
-		job, err := submitConsoleText(ctx, client, intent.Argument)
+		job, err := submitConsoleIntent(ctx, client, intent)
 		if err != nil {
 			session.SetCommandNotice("Send rejected · " + consoleActionError(err))
 			return
@@ -111,12 +136,20 @@ func handleConsoleIntent(parent context.Context, client *clusterAPIClient, inten
 }
 
 func submitConsoleText(ctx context.Context, client *clusterAPIClient, prompt string) (cluster.Job, error) {
+	return submitConsoleIntent(ctx, client, terminalui.ConsoleIntent{Action: terminalui.ConsoleIntentSend, Argument: prompt})
+}
+
+func submitConsoleIntent(ctx context.Context, client *clusterAPIClient, intent terminalui.ConsoleIntent) (cluster.Job, error) {
 	idempotencyKey, err := consoleIdempotencyKey()
 	if err != nil {
 		return cluster.Job{}, err
 	}
 	request, err := buildClusterTextSubmitRequest(clusterTextJobOptions{
-		Source: "console", Prompt: prompt,
+		Source: "console", Prompt: intent.Argument,
+		Provider: intent.Submit.Provider, Group: intent.Submit.Group, Model: intent.Submit.Model,
+		SessionID: intent.Submit.SessionID, AdapterProfile: intent.Submit.Profile, Reasoning: intent.Submit.Reasoning,
+		Egress: intent.Submit.Egress, MaxCostUSD: intent.Submit.MaxCostUSD,
+		AdapterFreshSession: intent.Submit.FreshSession, AdapterEphemeralSession: intent.Submit.EphemeralSession,
 		Output: bridge.OutputSpec{Mode: "text", MaxBytes: 1 << 20}, MaxAttempts: 1,
 	})
 	if err != nil {

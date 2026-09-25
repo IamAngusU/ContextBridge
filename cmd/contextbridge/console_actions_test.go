@@ -14,6 +14,7 @@ import (
 	"github.com/IamAngusU/ContextBridge/internal/bridge"
 	"github.com/IamAngusU/ContextBridge/internal/cluster"
 	"github.com/IamAngusU/ContextBridge/internal/config"
+	"github.com/IamAngusU/ContextBridge/internal/terminalui"
 )
 
 func TestConsoleActionCredentialNeverFallsBackToRelayAdmin(t *testing.T) {
@@ -33,6 +34,54 @@ func TestConsoleActionCredentialNeverFallsBackToRelayAdmin(t *testing.T) {
 	}
 	if token, source := consoleActionCredential(cfg, "explicit-producer"); token != "explicit-producer" || source != "--token" {
 		t.Fatalf("explicit credential resolution = %q %q", token, source)
+	}
+}
+
+func TestConsoleCommandLimitsUseConfigAndAuthenticatedRelayManifest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/cluster/protocol" || r.Header.Get("Authorization") != "Bearer producer" {
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(cluster.ProtocolManifest{
+			Schema: cluster.ProtocolManifestV1,
+			Limits: cluster.ProtocolLimits{MaximumConfiguredJobPayloadBytes: 8192},
+		})
+	}))
+	defer server.Close()
+	cfg := config.Config{Terminal: config.Terminal{MaxPromptCharacters: 777}}
+	limits := consoleCommandLimits(context.Background(), newClusterAPIClient(server.URL, "producer"), cfg)
+	if limits.MaxPromptCharacters != 777 || limits.MaxPayloadBytes != 8192 || limits.PayloadOverheadBytes < 1 || limits.SessionProvider != "adapter" {
+		t.Fatalf("console command limits = %#v", limits)
+	}
+}
+
+func TestConsoleIntentMapsOnlyTypedRoutingFields(t *testing.T) {
+	var submitted cluster.SubmitRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&submitted); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(cluster.Job{ID: "job-routed", Status: cluster.JobQueued})
+	}))
+	defer server.Close()
+	intent := terminalui.ConsoleIntent{
+		Action: terminalui.ConsoleIntentSend, Argument: "bounded prompt",
+		Submit: terminalui.ConsoleSubmitOptions{
+			Provider: "adapter", Model: "model-a", Group: "pool-a", SessionID: "session-a",
+			Profile: "profile-a", Reasoning: "high", Egress: "remote_allowed", MaxCostUSD: 0.25,
+			FreshSession: true, EphemeralSession: true,
+		},
+	}
+	job, err := submitConsoleIntent(context.Background(), newClusterAPIClient(server.URL, "producer"), intent)
+	if err != nil || job.ID != "job-routed" {
+		t.Fatalf("submit routed intent = %#v err=%v", job, err)
+	}
+	if submitted.Requirements.Provider != "adapter" || submitted.Requirements.Model != "model-a" || submitted.Requirements.Group != "pool-a" ||
+		submitted.Requirements.SessionID != "session-a" || submitted.Requirements.AdapterProfile != "profile-a" || submitted.Requirements.Reasoning != "high" ||
+		submitted.Requirements.Egress != "remote_allowed" || submitted.Requirements.MaxCostUSD != 0.25 || !submitted.Requirements.AdapterFreshSession || !submitted.Requirements.AdapterEphemeralSession {
+		t.Fatalf("typed routing fields were not preserved: %#v", submitted.Requirements)
 	}
 }
 

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Made the panel command composer state-aware instead of a static help block.
+  It now validates the configured prompt-character bound and the authenticated
+  relay's advertised encoded-payload limit while typing, shows incomplete
+  input in yellow and invalid input in red, derives provider/model/profile/
+  reasoning choices from the live service snapshot, removes already used or
+  incompatible next flags, and sends the exact typed routing options only
+  after the same parser accepts them. The configurable
+  `terminal.max_prompt_characters` guard defaults to 4096, while the relay
+  remains authoritative for its byte limit. Compact `RLY`, `WRK`, `UPD`,
+  `RAG`, `PCK`, and engine-autostart (`EAS`) indicators now expose meaningful
+  effective feature state in the service section (green on, dim off).
 - Fixed the panel command editor hiding a newly typed leading or trailing space
   until the next character. The command area now preserves editor whitespace,
   shows compact context-sensitive syntax while typing, keeps command feedback

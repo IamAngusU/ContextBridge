@@ -61,7 +61,8 @@ type Runtime struct {
 }
 
 type Terminal struct {
-	Style string `yaml:"style"`
+	Style               string `yaml:"style"`
+	MaxPromptCharacters int    `yaml:"max_prompt_characters,omitempty"`
 }
 
 // PortableResources enables bounded discovery of declarative resource-pack
@@ -459,6 +460,9 @@ func (c Config) Validate() error {
 	}
 	if c.Terminal.Style != "" && c.Terminal.Style != "classic" && c.Terminal.Style != "panel" {
 		return errors.New("terminal.style must be classic or panel")
+	}
+	if c.Terminal.MaxPromptCharacters < 0 || c.Terminal.MaxPromptCharacters > 65536 || (c.Terminal.MaxPromptCharacters > 0 && c.Terminal.MaxPromptCharacters < 64) {
+		return errors.New("terminal.max_prompt_characters must be between 64 and 65536 when set")
 	}
 	if c.Runtime.HardwareRefreshSeconds < 0 || c.Runtime.HardwareRefreshSeconds > 86400 {
 		return errors.New("runtime.hardware_refresh_seconds must be between 1 and 86400 when set")
@@ -1101,6 +1105,9 @@ func applyDefaults(cfg *Config, base string) {
 	if cfg.Terminal.Style == "" {
 		cfg.Terminal.Style = "panel"
 	}
+	if cfg.Terminal.MaxPromptCharacters == 0 {
+		cfg.Terminal.MaxPromptCharacters = 4096
+	}
 	if cfg.Portable.Enabled == nil {
 		enabled := true
 		cfg.Portable.Enabled = &enabled
@@ -1435,6 +1442,7 @@ runtime:
 
 terminal:
   style: panel # panel or classic; applies to interactive terminals only
+  max_prompt_characters: 4096 # bounded interactive send; relay byte limits still apply
 
 portable_resources:
   enabled: true # bounded marker discovery only; never auto-runs removable-drive code
