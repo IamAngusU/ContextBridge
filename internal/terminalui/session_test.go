@@ -606,7 +606,7 @@ func TestPanelCommandsPreserveInputAndToggleNodeDetails(t *testing.T) {
 	if !strings.Contains(latest, ansiRed+"91%"+ansiReset) || !strings.Contains(plain, "+-- COMMAND") {
 		t.Fatalf("detail color or command box missing: %s", latest)
 	}
-	if !strings.Contains(plain, "exit = close only this view") || !strings.Contains(plain, backgroundServiceStopCommand()) {
+	if !strings.Contains(plain, "exit: close view") || !strings.Contains(plain, backgroundServiceStopCommand()) {
 		t.Fatalf("command footer does not distinguish view exit from the exact managed-service stop command: %s", plain)
 	}
 	session.nextSection = "TEST"
@@ -687,6 +687,41 @@ func TestHelpCommandRendersReadableRowsInsteadOfOneClippedLine(t *testing.T) {
 	}
 	if got := strings.Count(plain, "  | help | ?"); got != 1 {
 		t.Fatalf("help output was duplicated or flattened: count=%d\n%s", got, plain)
+	}
+}
+
+func TestCommandEditorPreservesSpacesAndShowsContextInsteadOfStickyHelp(t *testing.T) {
+	var output bytes.Buffer
+	session := &Session{out: &output, interactive: true, style: "panel", widthFn: func() int { return 100 }, heightFn: func() int { return 30 },
+		jobs: map[string]jobState{}, adapterSelections: map[int]adapterSelection{}, localModels: map[string]localModelSelection{}}
+	session.EnableCommands()
+	session.Banner("v0.test", "console")
+	session.HandleCommand("help")
+	session.SetCommandInput(" details ")
+	if session.commandInput != " details " {
+		t.Fatalf("live editor trimmed intentional spaces: %q", session.commandInput)
+	}
+	frames := strings.Split(output.String(), "\x1b[H\x1b[2J")
+	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(frames[len(frames)-1], "")
+	if !strings.Contains(plain, "cb ›  details ▌") || !strings.Contains(plain, "details NODE") {
+		t.Fatalf("live editor lost spaces or contextual details guide:\n%s", plain)
+	}
+	if strings.Contains(plain, "CONSOLE · bounded ContextBridge client") {
+		t.Fatalf("sticky full help displaced contextual typing guidance:\n%s", plain)
+	}
+}
+
+func TestEmptyCommandKeepsCompactHint(t *testing.T) {
+	var output bytes.Buffer
+	session := &Session{out: &output, interactive: true, style: "panel", widthFn: func() int { return 100 }, heightFn: func() int { return 30 },
+		jobs: map[string]jobState{}, adapterSelections: map[int]adapterSelection{}, localModels: map[string]localModelSelection{}}
+	session.EnableCommands()
+	session.Banner("v0.test", "console")
+	session.HandleCommand("   ")
+	frames := strings.Split(output.String(), "\x1b[H\x1b[2J")
+	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(frames[len(frames)-1], "")
+	if strings.Contains(plain, "CONSOLE · bounded ContextBridge client") || !strings.Contains(plain, "help · details N · gpus N · models N · clear") {
+		t.Fatalf("empty Enter expanded help instead of keeping the compact guide:\n%s", plain)
 	}
 }
 
@@ -835,7 +870,7 @@ func TestForegroundServiceCommandsCannotAccidentallyCloseTheirOwner(t *testing.T
 	}
 	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(output.String(), "")
 	if !strings.Contains(plain, "Foreground service remains active") || !strings.Contains(plain, "Ctrl+C stops it") || !strings.Contains(plain, "contextbridge console") ||
-		!strings.Contains(plain, "Ctrl+C = stop this foreground service") {
+		!strings.Contains(plain, "Ctrl+C stops foreground service") {
 		t.Fatalf("foreground exit did not explain the safe lifecycle: %s", plain)
 	}
 	if strings.Contains(plain, backgroundServiceStopCommand()) {

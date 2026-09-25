@@ -94,6 +94,26 @@ func TestConsoleLineEditorPreservesTypedTextAndControlCommands(t *testing.T) {
 	}
 }
 
+func TestConsoleLineEditorPublishesSpaceImmediately(t *testing.T) {
+	commands := make(chan string, 2)
+	edits := []string{}
+	readConsoleCommands(bufio.NewReader(strings.NewReader("send x\r")), commands, func(value string) {
+		edits = append(edits, value)
+	})
+	for range commands {
+	}
+	found := false
+	for _, edit := range edits {
+		if edit == "send " {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("space key was not published until a later character: %#v", edits)
+	}
+}
+
 func TestAdjacentConfigPathPrefersOwnInstallation(t *testing.T) {
 	directory := t.TempDir()
 	executable := filepath.Join(directory, "contextbridge.exe")

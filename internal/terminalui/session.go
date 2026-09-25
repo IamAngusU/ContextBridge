@@ -159,6 +159,7 @@ type Session struct {
 	serviceStopCommand string
 	commandInput       string
 	commandNotice      string
+	commandNoticeHelp  bool
 	workActions        bool
 	commandIntents     chan ConsoleIntent
 	closedState        bool
@@ -250,6 +251,7 @@ func (s *Session) SetCommandNotice(notice string) {
 		return
 	}
 	s.commandNotice = cleanTerminalMultiline(notice, 16, 4096)
+	s.commandNoticeHelp = false
 	s.renderCommandResultLocked()
 }
 
@@ -298,7 +300,10 @@ func (s *Session) LiveCommandEditor() bool {
 func (s *Session) SetCommandInput(value string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.commandInput = cleanTerminalLabel(value, 512)
+	// This is editor state, not a label. Preserve intentional leading and
+	// trailing spaces so the cursor advances on the keypress that inserted
+	// them. Trimming here made a typed space appear only after the next rune.
+	s.commandInput = cleanTerminalInput(value, maximumConsolePromptRunes)
 	if s.panelStarted {
 		s.renderPanelLocked()
 	}
@@ -313,10 +318,14 @@ func (s *Session) HandleCommand(command string) bool {
 	s.commandInput = ""
 	fields := strings.Fields(command)
 	if len(fields) == 0 {
-		s.commandNotice = s.commandHelpLocked()
+		// Empty Enter is a no-op. Keeping the compact hint avoids replacing the
+		// live view with a large help block after an accidental keypress.
+		s.commandNotice = ""
+		s.commandNoticeHelp = false
 		s.renderCommandResultLocked()
 		return false
 	}
+	s.commandNoticeHelp = false
 	switch strings.ToLower(fields[0]) {
 	case "exit", "quit", "q", ":q":
 		if s.commandClosesView {
@@ -325,6 +334,7 @@ func (s *Session) HandleCommand(command string) bool {
 		s.commandNotice = "Foreground service remains active · Ctrl+C stops it; `contextbridge console` is detachable."
 	case "help", "?":
 		s.commandNotice = s.commandHelpLocked()
+		s.commandNoticeHelp = true
 	case "clear", "cls":
 		s.history = nil
 		s.historyTotal = 0
@@ -435,14 +445,89 @@ func (s *Session) commandHelpLocked() string {
 }
 
 func (s *Session) commandHintLocked() string {
-	commands := "view controls · help · details N · clear"
+	commands := "help · details N · gpus N · models N · clear"
 	if s.workActions {
-		commands = "bounded client · help · send TEXT · jobs · details N · clear"
+		commands = "send TEXT · jobs · job ID · result ID · cancel ID · details N"
 	}
 	if s.commandClosesView {
 		return commands + " · exit"
 	}
 	return commands + " · Ctrl+C stops the foreground service"
+}
+
+// commandGuideLinesLocked replaces the old always-visible help wall with a
+// small guide for the command currently being typed. It deliberately derives
+// suggestions only from the bounded command vocabulary and never repeats a
+// send prompt, job result, credential, or arbitrary user content.
+func (s *Session) commandGuideLinesLocked() []string {
+	raw := strings.TrimLeftFunc(s.commandInput, unicode.IsSpace)
+	if raw == "" {
+		return []string{s.commandHintLocked()}
+	}
+	fields := strings.Fields(raw)
+	if len(fields) == 0 {
+		return []string{s.commandHintLocked()}
+	}
+	command := strings.ToLower(fields[0])
+	available := []string{"help", "clear", "details", "gpus", "models"}
+	if s.workActions {
+		available = append(available, "send", "jobs", "job", "result", "cancel")
+	}
+	if s.commandClosesView {
+		available = append(available, "exit")
+	}
+	matches := make([]string, 0, len(available))
+	exact := false
+	for _, candidate := range available {
+		if candidate == command {
+			exact = true
+		}
+		if strings.HasPrefix(candidate, command) {
+			matches = append(matches, candidate)
+		}
+	}
+	if !exact && len(matches) > 0 {
+		return []string{"matches · " + strings.Join(matches, " · ") + " · finish the command before pressing Enter"}
+	}
+	switch command {
+	case "help", "?":
+		return []string{"help · show the complete bounded command reference"}
+	case "clear", "cls":
+		return []string{"clear · remove visible session history only; service and jobs continue"}
+	case "details":
+		return []string{"details NODE | details show|hide NODE | details none", "NODE accepts its visible number, name, or all"}
+	case "gpus":
+		return []string{"gpus NODE | gpus show|hide NODE | gpus none", "changes only per-device GPU detail rows"}
+	case "models":
+		return []string{"models NODE | models show|hide NODE | models none", "changes only model detail rows"}
+	case "send":
+		if !s.workActions {
+			return []string{"send is unavailable here · attach with `contextbridge console` and a scoped producer token"}
+		}
+		return []string{"send TEXT · submit one plaintext text job; relay policy and ownership apply"}
+	case "jobs":
+		return []string{"jobs · list recent jobs owned by this producer credential"}
+	case "job":
+		return []string{"job ID · inspect authoritative state for one owned job"}
+	case "result":
+		return []string{"result ID · show one owned retained plaintext result"}
+	case "cancel":
+		return []string{"cancel ID · request cancellation; provider execution may already be running"}
+	case "exit", "quit", "q", ":q":
+		if s.commandClosesView {
+			return []string{"exit · close this view only; service and jobs continue"}
+		}
+		return []string{"exit does not stop an owning service · use Ctrl+C deliberately"}
+	default:
+		return []string{"not a bounded console command · type help for the accepted vocabulary", "host commands run in CMD, PowerShell, or another shell"}
+	}
+}
+
+func (s *Session) commandDisplayLinesLocked() ([]string, bool) {
+	if s.commandInput != "" {
+		return s.commandGuideLinesLocked(), true
+	}
+	return s.commandNoticeLinesLocked(), s.commandNotice == "" || s.commandNoticeHelp
 }
 
 func (s *Session) commandNoticeLinesLocked() []string {
@@ -465,9 +550,15 @@ func (s *Session) commandNoticeLinesLocked() []string {
 
 func (s *Session) commandLifecycleHintLocked() string {
 	if s.commandClosesView {
-		return "exit = close only this view; service and jobs continue running"
+		if s.serviceStopCommand != "" {
+			return "exit: close view · service/jobs stay active · shell stop: " + s.serviceStopCommand
+		}
+		return "exit: close view only · service and jobs stay active"
 	}
-	return "exit = service remains active; Ctrl+C = stop this foreground service"
+	if s.serviceStopCommand != "" {
+		return "Ctrl+C: stop foreground · background shell stop: " + s.serviceStopCommand
+	}
+	return "Ctrl+C stops foreground service"
 }
 
 func backgroundServiceStopCommand() string {
@@ -476,10 +567,6 @@ func backgroundServiceStopCommand() string {
 
 func backgroundServiceStopCommandForOS(_ string) string {
 	return backgroundServiceStopCommand()
-}
-
-func (s *Session) commandServiceStopHintLocked() string {
-	return "Stop the background service (in CMD/shell)"
 }
 
 func (s *Session) renderCommandResultLocked() {
@@ -1075,6 +1162,16 @@ func cleanTerminalLabel(value string, limit int) string {
 		}
 		return r
 	}, strings.TrimSpace(value))
+	return truncateRunes(value, limit)
+}
+
+func cleanTerminalInput(value string, limit int) string {
+	value = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, value)
 	return truncateRunes(value, limit)
 }
 
@@ -1710,13 +1807,11 @@ func (s *Session) renderPanelLocked() {
 		}
 	}
 	commandNoticeLines := []string{}
+	commandNoticeDim := true
 	commandReserve := 0
 	if s.commandEnabled {
-		commandNoticeLines = s.commandNoticeLinesLocked()
-		commandReserve = len(commandNoticeLines) + 4 // heading, input, results, lifecycle, border
-		if s.serviceStopCommand != "" {
-			commandReserve += 2 // stop label and exact command
-		}
+		commandNoticeLines, commandNoticeDim = s.commandDisplayLinesLocked()
+		commandReserve = len(commandNoticeLines) + 4 // heading, input, lifecycle, border
 	}
 	tailReserve := 5 + len(statusDetails) + commandReserve // status plus a boxed history row
 	if spacious {
@@ -1781,15 +1876,13 @@ func (s *Session) renderPanelLocked() {
 			"  | "+line("cb › "+s.commandInput+"▌"),
 		)
 		for _, noticeLine := range commandNoticeLines {
-			rows = append(rows, "  | "+ansiDim+line(noticeLine)+ansiReset)
+			if commandNoticeDim {
+				rows = append(rows, "  | "+ansiDim+line(noticeLine)+ansiReset)
+			} else {
+				rows = append(rows, "  | "+line(noticeLine))
+			}
 		}
 		rows = append(rows, "  | "+ansiDim+line(s.commandLifecycleHintLocked())+ansiReset)
-		if s.serviceStopCommand != "" {
-			rows = append(rows,
-				"  | "+ansiDim+line(s.commandServiceStopHintLocked())+ansiReset,
-				"  |   "+ansiDim+line(s.serviceStopCommand)+ansiReset,
-			)
-		}
 		rows = append(rows, panelBorder(width))
 	}
 	// A heavily zoomed or split terminal can be only a handful of rows tall.
@@ -1809,14 +1902,18 @@ func (s *Session) renderPanelLocked() {
 			)
 			notices := commandNoticeLines
 			noticeCapacity := max(1, height-len(compactRows)-1)
-			if len(notices) > noticeCapacity && noticeCapacity == 1 {
+			if len(notices) > noticeCapacity && noticeCapacity == 1 && s.commandInput == "" && s.commandNoticeHelp {
 				notices = []string{s.commandHintLocked()}
 			}
 			for index, noticeLine := range notices {
 				if index == noticeCapacity {
 					break
 				}
-				compactRows = append(compactRows, "  | "+ansiDim+line(noticeLine)+ansiReset)
+				if commandNoticeDim {
+					compactRows = append(compactRows, "  | "+ansiDim+line(noticeLine)+ansiReset)
+				} else {
+					compactRows = append(compactRows, "  | "+line(noticeLine))
+				}
 			}
 			compactRows = append(compactRows, panelBorder(width))
 		} else {

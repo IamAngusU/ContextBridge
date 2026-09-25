@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Fixed the panel command editor hiding a newly typed leading or trailing space
+  until the next character. The command area now preserves editor whitespace,
+  shows compact context-sensitive syntax while typing, keeps command feedback
+  visually distinct from hints, treats empty Enter as a no-op instead of
+  expanding the full help wall, and folds lifecycle/stop guidance into one
+  concise footer.
 - Turned `contextbridge console` into a bounded interactive pool client when an
   explicit scoped producer credential is available. Its typed `send`, `jobs`,
   `job`, `result`, and `cancel` actions reuse normal relay admission, ownership,
