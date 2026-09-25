@@ -101,6 +101,13 @@ Your local relay queues the request, your worker runs a compatible installed mod
 
 Commands use the installer-created configuration automatically. For a custom installation, append `--config /path/to/config.yml`. Read [install.ps1](install.ps1) / [install.sh](install.sh) before executing them, or use the [release archives](https://github.com/IamAngusU/ContextBridge/releases/latest).
 
+To change what an installed device does without memorizing role flags, run
+`contextbridge guide` in a real terminal. It asks for the intended role, derives
+safe existing/default values, requests only unresolved connection data, shows a
+redacted provenance summary, and saves nothing until you confirm. Scripts, CI,
+MCP and redirected input never prompt; use deterministic `cluster configure`
+flags there. See [Guided CLI setup](docs/guided-setup.md).
+
 If you cloned the repository or used GitHub's **Code -> Download ZIP**, run the
 checked-out installer directly:
 

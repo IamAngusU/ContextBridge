@@ -177,7 +177,7 @@ func checkClusterFiles(cfg config.Config, add func(string, string, string, strin
 			add("ok", "worker relay connection", detail, "")
 		}
 	} else {
-		add("warn", "cluster worker", "disabled on this device", "Use `contextbridge cluster configure --mode worker|all` when this device should contribute CPU, GPU, or a adapter endpoint.")
+		add("warn", "cluster worker", "disabled on this device", "Run `contextbridge guide` in a terminal, or use `contextbridge cluster configure --mode worker|all` for deterministic automation.")
 	}
 }
 

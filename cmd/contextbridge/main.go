@@ -75,6 +75,8 @@ func main() {
 		err = statusCommand(os.Args[2:])
 	case "doctor":
 		err = doctorCommand(os.Args[2:])
+	case "guide":
+		err = guideCommand(os.Args[2:])
 	case "hardware":
 		err = hardwareCommand(os.Args[2:])
 	case "models":
@@ -151,6 +153,7 @@ Usage:
   contextbridge dashboard [--config path] [--no-open]
   contextbridge status [--config path] [--json]
   contextbridge doctor [--config path] [--json]
+  contextbridge guide [--config path]
   contextbridge hardware [--json]
   contextbridge models [--config path] [--json]
   contextbridge resources [--config path] [--json]
@@ -1643,26 +1646,46 @@ func routingScoreSummary(components cluster.RoutingScoreComponents) string {
 }
 
 func clusterConfigureCommand(args []string) error {
+	return clusterConfigureCommandWithIO(args, os.Stdin, os.Stdout, interactiveFiles(os.Stdin, os.Stdout), false)
+}
+
+func clusterConfigureCommandWithIO(args []string, input io.Reader, output io.Writer, terminal, chooseMode bool) error {
 	flags := flag.NewFlagSet("cluster configure", flag.ContinueOnError)
 	path := flags.String("config", defaultConfigPath(), "config path")
-	mode := flags.String("mode", "local", "local, client/sender, relay, worker, or all")
+	mode := flags.String("mode", "", "local, client/sender, relay, worker, or all")
 	relayURL := flags.String("relay-url", "", "public relay URL for this worker")
 	publicURL := flags.String("public-url", "", "public HTTPS URL of this relay")
-	name := flags.String("name", "auto", "worker node name")
+	name := flags.String("name", "", "worker node name")
 	listen := flags.String("listen", "", "relay listen address or auto")
+	interactive := flags.Bool("interactive", chooseMode, "guide unresolved human inputs in a real terminal")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	nameWasSet := false
+	provided := map[string]bool{}
 	flags.Visit(func(option *flag.Flag) {
-		if option.Name == "name" {
-			nameWasSet = true
-		}
+		provided[option.Name] = true
 	})
 	cfg, err := config.Load(*path)
 	if err != nil {
 		return err
 	}
+	if *interactive {
+		if !terminal {
+			return errors.New("guided configuration requires an interactive terminal; use explicit cluster configure flags for scripts, pipes, CI, MCP, or services")
+		}
+		apply, err := guideClusterConfiguration(input, output, cfg, mode, relayURL, publicURL, name, listen, provided, chooseMode)
+		if err != nil {
+			return err
+		}
+		if !apply {
+			fmt.Fprintln(output, "Cancelled. No configuration was changed.")
+			return nil
+		}
+	}
+	if strings.TrimSpace(*mode) == "" {
+		*mode = "local"
+	}
+	nameWasSet := provided["name"] || (*interactive && strings.TrimSpace(*name) != "")
 	configuredMode := strings.ToLower(strings.TrimSpace(*mode))
 	if configuredMode == "sender" {
 		configuredMode = "client"
@@ -1718,19 +1741,19 @@ func clusterConfigureCommand(args []string) error {
 	if err := config.Save(*path, cfg); err != nil {
 		return err
 	}
-	fmt.Printf("Cluster mode saved: %s\n", configuredMode)
+	fmt.Fprintf(output, "Cluster mode saved: %s\n", configuredMode)
 	if configuredMode == "client" {
-		fmt.Println("This device can submit and observe work but will not accept worker assignments after the service restarts.")
-		fmt.Println("The saved worker identity was retained, so switching back to worker mode does not require re-pairing when the relay is unchanged.")
+		fmt.Fprintln(output, "This device can submit and observe work but will not accept worker assignments after the service restarts.")
+		fmt.Fprintln(output, "The saved worker identity was retained, so switching back to worker mode does not require re-pairing when the relay is unchanged.")
 		if strings.TrimSpace(cfg.Cluster.ClientToken) == "" {
-			fmt.Println("Next: create a scoped producer token on the relay, then run contextbridge cluster login --token-file <path>.")
+			fmt.Fprintln(output, "Next: create a scoped producer token on the relay, then run contextbridge cluster login --token-file <path>.")
 		}
 	}
 	if cfg.Cluster.Worker.Enabled {
 		if _, identityErr := configuredWorker(cfg); identityErr != nil {
-			fmt.Println("Next: contextbridge pair --config", *path)
+			fmt.Fprintln(output, "Next: contextbridge pair --config", *path)
 		} else {
-			fmt.Println("Existing worker identity retained. Restart ContextBridge to rejoin the pool as a worker.")
+			fmt.Fprintln(output, "Existing worker identity retained. Restart ContextBridge to rejoin the pool as a worker.")
 		}
 	}
 	return nil

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Added `contextbridge guide` and opt-in `cluster configure --interactive` for
+  bounded, TTY-only device-role setup. The guide resolves explicit flags,
+  existing config, supported environment values and safe defaults before it
+  asks for missing input; then shows a redacted provenance summary and writes
+  only after confirmation. Pipes, CI, MCP, services and redirected I/O never
+  prompt, and secure pairing remains a separate explicit trust step.
+- Added a first-class secure offline-LAN bootstrap with persistent Ed25519 TLS
+  identity, TLS 1.3, a public join bundle, exact relay-origin SPKI pinning and
+  explicit pairing. Loopback administration remains separate, generic LAN
+  cleartext stays rejected, and discovery is not treated as trust.
 - Added relay-owned failure-aware placement. Matching node/provider/model
   routes receive a bounded recent-failure penalty, open a short exponentially
   capped circuit after repeated transient failures, recover through a

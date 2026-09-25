@@ -12,6 +12,10 @@ described as vendor integrations here.
   a worker pool, and repeatable health checks.
 - [Pools and placement](pools-and-placement.md): topologies, capacity,
   capability evidence, and failure semantics.
+- [Secure offline LAN pools](offline-lan.md): explicit pinned trust for
+  Internet-free multi-machine operation.
+- [Guided CLI setup](guided-setup.md): bounded human prompts without changing
+  deterministic automation behavior.
 - [ADR 0001: fenced single-leader consensus](adr/0001-fenced-single-leader-consensus.md):
   accepted HA architecture, replicated-state boundary, alternatives, and proof
   gates; the implementation is not yet claimed.

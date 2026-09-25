@@ -8,7 +8,7 @@ import (
 
 var completionRootCommands = []string{
 	"init", "serve", "run", "stop", "console", "submit", "schedule", "result", "review",
-	"health", "dashboard", "status", "doctor", "hardware", "models", "resources", "uninstall",
+	"health", "dashboard", "status", "doctor", "guide", "hardware", "models", "resources", "uninstall",
 	"pull", "runtime", "mcp", "integrate", "benchmark", "verification", "relay", "pair", "worker", "cluster", "route", "selftest", "update", "completion", "version", "help",
 }
 
@@ -78,6 +78,7 @@ $script:ContextBridgeOptions = @{
     'dashboard' = @('--config','--no-open')
     'status' = @('--config','--json')
     'doctor' = @('--config','--json')
+    'guide' = @('--config')
     'hardware' = @('--json')
     'models' = @('--config','--json','--discover')
     'resources' = @('--config','--json')
@@ -106,7 +107,7 @@ $script:ContextBridgeOptions = @{
 	'cluster receipt' = @('show','export','verify','keygen','--config','--token','--out','--file','--signing-key','--trust-key','--offline','--private-out','--public-out','--key-id','--issuer')
     'route explain' = @('--config','--file','--job','--token','--json')
 	'selftest' = @('--config','--providers','--local-model','--run','--dry-run','--image','--image-profile','--artifacts','--keep-artifacts','--timeout','--job-timeout','--poll')
-    'cluster configure' = @('--config','--mode','--relay-url','--public-url','--name','--listen')
+    'cluster configure' = @('--config','--mode','--relay-url','--public-url','--name','--listen','--interactive')
     'cluster dashboard' = @('--config','--no-open')
     'cluster pipeline' = @('--config','--name','--file')
     'cluster login' = @('--config','--token-file')
@@ -119,7 +120,7 @@ $script:ContextBridgeValueOptions = @{
     '--provider' = @('adapter','ollama','nuextract','jina')
 
     '--reasoning' = @('instant','medium','high','xhigh','pro','max')
-    '--mode' = @('local','relay','worker','all')
+    '--mode' = @('local','client','relay','worker','all')
     '--role' = @('producer','observer')
 }
 $script:ContextBridgeTakesValue = @(
@@ -207,9 +208,9 @@ _contextbridge_complete() {
     --provider) candidates="adapter ollama nuextract jina" ;;
 
     --reasoning) candidates="instant medium high xhigh pro max" ;;
-    --mode) candidates="local relay worker all" ;;
+    --mode) candidates="local client relay worker all" ;;
     --role) candidates="producer observer" ;;
-    --wait|--e2ee|--stream|--json|--follow|--pipeline|--show-token|--check|--live|--no-open|--topmost|--image|--new-session|--new-session-per-job|--foreground-new-session|--run|--dry-run|--keep-artifacts|--no-updates|--discover|--force|--relay-only|--require-artifact|--require-evidence) boolean_previous=1 ;;
+    --wait|--e2ee|--stream|--json|--follow|--pipeline|--interactive|--show-token|--check|--live|--no-open|--topmost|--image|--new-session|--new-session-per-job|--foreground-new-session|--run|--dry-run|--keep-artifacts|--no-updates|--discover|--force|--relay-only|--require-artifact|--require-evidence) boolean_previous=1 ;;
   esac
   if [ -n "${candidates:-}" ]; then
     COMPREPLY=( $(compgen -W "$candidates" -- "$current") )
@@ -232,7 +233,7 @@ _contextbridge_complete() {
 	  "cluster node") candidates="drain resume --config --token --json" ;;
 	  "cluster protocol") candidates="--config --token --json" ;;
 	  "cluster conformance") candidates="relay worker resilience --config --token --node --json" ;;
-      "cluster configure") candidates="--config --mode --relay-url --public-url --name --listen" ;;
+      "cluster configure") candidates="--config --mode --relay-url --public-url --name --listen --interactive" ;;
       "cluster dashboard") candidates="--config --no-open" ;;
       "cluster pipeline") candidates="--config --name --file" ;;
       "cluster login") candidates="--config --token-file" ;;
@@ -247,7 +248,7 @@ _contextbridge_complete() {
       benchmark) candidates="--json --samples --warmup --database-jobs --idle-duration --binary" ;;
       "schedule add") candidates="--config --file" ;;
       "schedule "*) candidates="--config --file" ;;
-      init|serve|console|result|health|pull|relay) candidates="--config" ;;
+      init|serve|console|result|health|guide|pull|relay) candidates="--config" ;;
       run) candidates="--config --slots --topmost" ;;
       stop) candidates="--config --force" ;;
       uninstall) candidates="--config --install-dir --purge --force --yes --dry-run" ;;
@@ -273,7 +274,7 @@ _contextbridge_complete() {
 	elif [[ "$option_key" == "cluster receipt" && "$COMP_CWORD" -eq 3 ]]; then
 	  candidates="show export verify keygen"
   elif [ "$COMP_CWORD" -eq 1 ]; then
-    candidates="init serve run stop uninstall console submit schedule result review health dashboard status doctor hardware models resources pull runtime mcp integrate benchmark verification relay pair worker cluster route selftest update completion version help"
+    candidates="init serve run stop uninstall console submit schedule result review health dashboard status doctor guide hardware models resources pull runtime mcp integrate benchmark verification relay pair worker cluster route selftest update completion version help"
   elif [ "$COMP_CWORD" -eq 2 ]; then
     case "$command" in
       schedule) candidates="add list show pause resume run delete" ;;
@@ -315,6 +316,7 @@ root=(
     'dashboard:Open the local dashboard'
     'status:Show local status'
     'doctor:Check setup and connectivity'
+    'guide:Interactively choose and configure this device role'
     'hardware:Show detected hardware'
     'models:Show model inventory'
     'resources:Show detected portable resource packs'
@@ -442,7 +444,7 @@ case "$words[2]" in
 		fi
 		_arguments "${config[@]}" '--token[Producer, observer, or admin token]:token:' '--out[New receipt JSON file]:receipt file:_files' '--file[Receipt JSON file]:receipt file:_files' '--signing-key[Operator receipt-signing private key]:key file:_files' '--trust-key[Explicitly trusted receipt public key]:key file:_files' '--offline[Verify a signed receipt without relay access]' '--private-out[New private receipt-signing key]:key file:_files' '--public-out[New public receipt trust key]:key file:_files' '--key-id[Signer key identifier]:ID:' '--issuer[Signer issuer name]:name:' '*:job ID:'
 		;;
-      configure) _arguments "${config[@]}" '--mode[Cluster mode]:mode:(local relay worker all)' '--relay-url[Public relay URL]:URL:' '--public-url[Public HTTPS relay URL]:URL:' '--name[Worker node name]:name:' '--listen[Relay listen address]:address:' ;;
+      configure) _arguments "${config[@]}" '--mode[Cluster mode]:mode:(local client relay worker all)' '--relay-url[Public relay URL]:URL:' '--public-url[Public HTTPS relay URL]:URL:' '--name[Worker node name]:name:' '--listen[Relay listen address]:address:' '--interactive[Guide unresolved values in a real terminal]' ;;
 	  dashboard) _arguments "${config[@]}" '--no-open[Print URL without opening a page viewer]' ;;
       pipeline) _arguments "${config[@]}" '--name[Pipeline name]:name:' '--file[Pipeline input JSON]:input file:_files' ;;
       login) _arguments "${config[@]}" '--token-file[Producer token file]:token file:_files' ;;
@@ -483,7 +485,7 @@ case "$words[2]" in
     fi
     ;;
 	selftest) _arguments "${config[@]}" '--providers[Checks to run]:providers:' '--local-model[Specific local model]:model:' '--run[Run live checks]' '--dry-run[Readiness checks only]' '--image[Also verify one image]' '--image-profile[Adapter profile for image verification]:profile:' '--artifacts[Artifact directory]:directory:_directories' '--keep-artifacts[Keep temporary artifacts]' '--timeout[Capacity wait timeout]:duration:' '--job-timeout[Per-job timeout]:duration:' '--poll[Polling interval]:duration:' ;;
-  init|serve|console|health|pull|relay) _arguments "${config[@]}" '*:argument:' ;;
+  init|serve|console|health|guide|pull|relay) _arguments "${config[@]}" '*:argument:' ;;
   run) _arguments "${config[@]}" '--slots[Session worker job limit]:slots:' '--topmost[Keep the Windows console above other windows]' ;;
   stop) _arguments "${config[@]}" '--force[Stop even while jobs are active]' ;;
   uninstall) _arguments "${config[@]}" '--install-dir[Installation directory when automatic discovery is unavailable]:directory:_directories' '--purge[Also remove locally managed configuration and data]' '--force[Allow shutdown with active jobs or unreadable configuration]' '--yes[Confirm the displayed plan non-interactively]' '--dry-run[Show the exact plan without removing anything]' ;;
