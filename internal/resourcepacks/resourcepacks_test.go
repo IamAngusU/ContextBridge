@@ -46,6 +46,36 @@ func TestManifestCannotPublishRemoteEndpointOrCommands(t *testing.T) {
 	}
 }
 
+func TestServiceEndpointAcceptsPassiveTypedExecutionMetadata(t *testing.T) {
+	root := t.TempDir()
+	manifest := `{"schema_version":1,"id":"example.toolbox","name":"Toolbox","endpoints":[{"id":"control","type":"service","url":"http://127.0.0.1:4310","health_path":"/api/status","capability_path":"/api/node/capabilities","execute_path":"/api/node/execute","capabilities":["tools","typed-execution","workflows","artifact-lineage"]}]}`
+	if err := os.WriteFile(filepath.Join(root, MarkerName), []byte(manifest), 0600); err != nil {
+		t.Fatal(err)
+	}
+	packs, err := Discover(Settings{Enabled: true, ScanRoots: []string{root}, MaxPacks: 8})
+	if err != nil || len(packs) != 1 || len(packs[0].Endpoints) != 1 {
+		t.Fatalf("service metadata was not discovered: %#v, %v", packs, err)
+	}
+	endpoint := packs[0].Endpoints[0]
+	if endpoint.CapabilityPath != "/api/node/capabilities" || endpoint.ExecutePath != "/api/node/execute" {
+		t.Fatalf("bounded passive paths were lost: %#v", endpoint)
+	}
+	// The paths remain metadata. Resolve never turns a service endpoint into an
+	// OpenAI-compatible execution route merely because it advertises tools.
+	if _, ok := Resolve(packs, "example.toolbox", "control", "openai_compatible"); ok {
+		t.Fatal("service metadata widened into an incompatible execution engine")
+	}
+
+	unsafe := `{"schema_version":1,"id":"example.toolbox","name":"Toolbox","endpoints":[{"id":"control","type":"service","url":"http://127.0.0.1:4310","execute_path":"/api/../admin"}]}`
+	if err := os.WriteFile(filepath.Join(root, MarkerName), []byte(unsafe), 0600); err != nil {
+		t.Fatal(err)
+	}
+	packs, err = Discover(Settings{Enabled: true, ScanRoots: []string{root}, MaxPacks: 8})
+	if err != nil || len(packs) != 0 {
+		t.Fatalf("unsafe service path was accepted: %#v, %v", packs, err)
+	}
+}
+
 func TestHotPlugAbsenceAndChangedMountPath(t *testing.T) {
 	root := t.TempDir()
 	first := filepath.Join(root, "volume-a", MarkerName)

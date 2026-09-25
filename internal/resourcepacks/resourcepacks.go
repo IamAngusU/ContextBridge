@@ -40,12 +40,14 @@ type Manifest struct {
 }
 
 type Endpoint struct {
-	ID           string   `json:"id"`
-	Type         string   `json:"type"`
-	URL          string   `json:"url"`
-	HealthPath   string   `json:"health_path,omitempty"`
-	Model        string   `json:"model,omitempty"`
-	Capabilities []string `json:"capabilities,omitempty"`
+	ID             string   `json:"id"`
+	Type           string   `json:"type"`
+	URL            string   `json:"url"`
+	HealthPath     string   `json:"health_path,omitempty"`
+	CapabilityPath string   `json:"capability_path,omitempty"`
+	ExecutePath    string   `json:"execute_path,omitempty"`
+	Model          string   `json:"model,omitempty"`
+	Capabilities   []string `json:"capabilities,omitempty"`
 }
 
 type Pack struct {
@@ -258,12 +260,17 @@ func validateManifest(manifest Manifest) error {
 		if err := validateLoopbackURL(endpoint.URL); err != nil {
 			return err
 		}
-		if endpoint.HealthPath != "" && (!strings.HasPrefix(endpoint.HealthPath, "/") || strings.Contains(endpoint.HealthPath, "..") || len(endpoint.HealthPath) > 160) {
-			return errors.New("invalid health path")
+		for label, path := range map[string]string{"health": endpoint.HealthPath, "capability": endpoint.CapabilityPath, "execute": endpoint.ExecutePath} {
+			if path != "" && (!strings.HasPrefix(path, "/") || strings.Contains(path, "..") || strings.ContainsAny(path, "?#") || len(path) > 160) {
+				return fmt.Errorf("invalid %s path", label)
+			}
+		}
+		if endpoint.Type != "service" && (endpoint.CapabilityPath != "" || endpoint.ExecutePath != "") {
+			return errors.New("capability and execute paths require a service endpoint")
 		}
 		for _, capability := range endpoint.Capabilities {
 			switch strings.ToLower(strings.TrimSpace(capability)) {
-			case "text", "vision", "embedding", "tools", "audio", "image", "video", "retrieval":
+			case "text", "vision", "embedding", "tools", "audio", "image", "video", "retrieval", "typed-execution", "workflows", "artifact-lineage":
 			default:
 				return errors.New("unsupported endpoint capability")
 			}

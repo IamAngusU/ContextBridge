@@ -46,6 +46,26 @@ The manifest is discovery metadata, not permission to start code. The runtime
 must already be running through an operator-reviewed launcher or managed
 service. This keeps media insertion from becoming execution.
 
+A passive local toolbox may additionally describe bounded service metadata:
+
+```json
+{
+  "id": "control-api",
+  "type": "service",
+  "url": "http://127.0.0.1:4310",
+  "health_path": "/api/status",
+  "capability_path": "/api/node/capabilities",
+  "execute_path": "/api/node/execute",
+  "capabilities": ["tools", "typed-execution", "workflows", "artifact-lineage"]
+}
+```
+
+The paths must be absolute URL paths without traversal, query, or fragment;
+they are accepted only on a loopback `service` endpoint. ContextBridge reports
+them as capability metadata but does not invoke an execute path merely because
+media advertised one. A separate operator-reviewed integration and normal job
+policy remain required.
+
 Inspect detected packs with:
 
 ```sh

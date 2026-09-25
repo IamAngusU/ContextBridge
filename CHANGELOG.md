@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Extended passive portable `service` endpoint metadata with bounded
+  loopback-only capability and execute paths plus typed-execution, workflow,
+  and artifact-lineage capability labels. These fields make richer local
+  toolboxes discoverable without granting permission to launch or call them;
+  unsafe paths and attempts to attach service-only fields to model APIs remain
+  rejected.
 - Made the panel command composer state-aware instead of a static help block.
   It now validates the configured prompt-character bound and the authenticated
   relay's advertised encoded-payload limit while typing, shows incomplete
