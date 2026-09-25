@@ -2151,12 +2151,8 @@ func clusterSubmitCommand(args []string) error {
 		input.AssignmentID = reservation.Assignment.ID
 		input.AssignmentSecret = reservation.Secret
 	}
-	var job cluster.Job
-	headers := http.Header{}
-	if *idempotencyKey != "" {
-		headers.Set("Idempotency-Key", *idempotencyKey)
-	}
-	responseHeaders, err := clusterPOSTHeaders(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/jobs?compact=1", *token, input, &job, headers)
+	client := newClusterAPIClient(clusterBaseURL(cfg), *token)
+	job, responseHeaders, err := client.SubmitWithMetadata(context.Background(), input, *idempotencyKey)
 	if err != nil {
 		return err
 	}
@@ -2187,7 +2183,8 @@ func clusterSubmitCommand(args []string) error {
 			return ctx.Err()
 		case <-time.After(500 * time.Millisecond):
 		}
-		if err := clusterGET(ctx, clusterBaseURL(cfg)+"/v1/cluster/jobs/"+url.PathEscape(job.ID)+"?compact=1", *token, &job); err != nil {
+		job, err = client.Job(ctx, job.ID)
+		if err != nil {
 			return err
 		}
 		if *sealed {

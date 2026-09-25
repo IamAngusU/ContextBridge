@@ -9,7 +9,9 @@
   commands; remain disabled for redirected/non-TTY input; cap automatic event
   followers; keep prompt/result content out of global history; and preserve
   plaintext idempotency and honest cancellation/E2EE wording. Without a
-  producer credential the same console stays read-only.
+  producer credential the same console stays read-only. The console,
+  `cluster chat`, and `cluster submit` now share the same typed text-job and
+  submit/read client core instead of drifting across separate wire contracts.
 - Added bounded performance-aware placement. Successful fenced jobs build a
   relay-owned smoothed runtime estimate per node and opaque execution route;
   after a configurable minimum sample count it becomes one additive routing

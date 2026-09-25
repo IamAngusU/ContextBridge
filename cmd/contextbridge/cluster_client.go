@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/IamAngusU/ContextBridge/internal/bridge"
 	"github.com/IamAngusU/ContextBridge/internal/cluster"
 )
 
@@ -27,6 +28,26 @@ type clusterAPIError struct {
 	Body       string
 }
 
+type clusterTextJobOptions struct {
+	Source                  string
+	Prompt                  string
+	SessionID               string
+	Provider                string
+	Group                   string
+	Model                   string
+	AdapterProfile          string
+	Reasoning               string
+	Egress                  string
+	MaxCostUSD              float64
+	ImageBase64             string
+	ImageMediaType          string
+	Metadata                map[string]interface{}
+	Output                  bridge.OutputSpec
+	AdapterFreshSession     bool
+	AdapterEphemeralSession bool
+	MaxAttempts             int
+}
+
 func (e *clusterAPIError) Error() string {
 	return fmt.Sprintf("relay returned %s: %s", e.Status, e.Body)
 }
@@ -36,14 +57,54 @@ func newClusterAPIClient(baseURL, token string) *clusterAPIClient {
 	return &clusterAPIClient{baseURL: baseURL, token: strings.TrimSpace(token)}
 }
 
+// buildClusterTextSubmitRequest is the one plaintext text-job builder shared
+// by cluster chat and the bounded console. E2EE callers transform its payload
+// only after the relay returns an authenticated one-time assignment.
+func buildClusterTextSubmitRequest(options clusterTextJobOptions) (cluster.SubmitRequest, error) {
+	source := strings.TrimSpace(options.Source)
+	payload, err := json.Marshal(bridge.Job{
+		Source: source, Task: "generation", Prompt: options.Prompt,
+		SessionID: options.SessionID, AdapterProfile: options.AdapterProfile,
+		Model: options.Model, Reasoning: options.Reasoning, MaxCostUSD: options.MaxCostUSD,
+		ImageBase64: options.ImageBase64, ImageMediaType: options.ImageMediaType,
+		Metadata: options.Metadata, Output: options.Output,
+	})
+	if err != nil {
+		return cluster.SubmitRequest{}, err
+	}
+	requirements := cluster.Requirements{
+		Task: "generation", Provider: options.Provider, AdapterProfile: options.AdapterProfile,
+		Group: options.Group, SessionID: options.SessionID, Model: options.Model,
+		Egress: options.Egress, MaxCostUSD: options.MaxCostUSD,
+		Vision: options.ImageBase64 != "",
+	}
+	if strings.EqualFold(options.Provider, "adapter") {
+		requirements.Reasoning = options.Reasoning
+		requirements.AdapterFreshSession = options.AdapterFreshSession
+		requirements.AdapterEphemeralSession = options.AdapterEphemeralSession
+	}
+	return cluster.SubmitRequest{
+		ContractVersion: cluster.JobContractV1,
+		Source:          source,
+		Requirements:    requirements,
+		Payload:         payload,
+		MaxAttempts:     options.MaxAttempts,
+	}, nil
+}
+
 func (c *clusterAPIClient) Submit(ctx context.Context, input cluster.SubmitRequest, idempotencyKey string) (cluster.Job, error) {
+	job, _, err := c.SubmitWithMetadata(ctx, input, idempotencyKey)
+	return job, err
+}
+
+func (c *clusterAPIClient) SubmitWithMetadata(ctx context.Context, input cluster.SubmitRequest, idempotencyKey string) (cluster.Job, http.Header, error) {
 	var job cluster.Job
 	headers := make(http.Header)
 	if strings.TrimSpace(idempotencyKey) != "" {
 		headers.Set("Idempotency-Key", strings.TrimSpace(idempotencyKey))
 	}
-	err := c.doJSON(ctx, http.MethodPost, "/v1/cluster/jobs?compact=1", input, &job, headers)
-	return job, err
+	responseHeaders, err := c.doJSON(ctx, http.MethodPost, "/v1/cluster/jobs?compact=1", input, &job, headers)
+	return job, responseHeaders, err
 }
 
 func (c *clusterAPIClient) Jobs(ctx context.Context, limit int) ([]cluster.Job, error) {
@@ -51,7 +112,7 @@ func (c *clusterAPIClient) Jobs(ctx context.Context, limit int) ([]cluster.Job, 
 		return nil, fmt.Errorf("job list limit must be between 1 and 100")
 	}
 	var jobs []cluster.Job
-	err := c.doJSON(ctx, http.MethodGet, "/v1/cluster/jobs?limit="+strconv.Itoa(limit), nil, &jobs, nil)
+	_, err := c.doJSON(ctx, http.MethodGet, "/v1/cluster/jobs?limit="+strconv.Itoa(limit), nil, &jobs, nil)
 	return jobs, err
 }
 
@@ -60,7 +121,7 @@ func (c *clusterAPIClient) Job(ctx context.Context, jobID string) (cluster.Job, 
 		return cluster.Job{}, err
 	}
 	var job cluster.Job
-	err := c.doJSON(ctx, http.MethodGet, "/v1/cluster/jobs/"+url.PathEscape(jobID)+"?compact=1", nil, &job, nil)
+	_, err := c.doJSON(ctx, http.MethodGet, "/v1/cluster/jobs/"+url.PathEscape(jobID)+"?compact=1", nil, &job, nil)
 	return job, err
 }
 
@@ -75,7 +136,7 @@ func (c *clusterAPIClient) Events(ctx context.Context, jobID string, after uint6
 	query.Set("after", strconv.FormatUint(after, 10))
 	query.Set("limit", strconv.Itoa(limit))
 	var page cluster.JobEventPage
-	err := c.doJSON(ctx, http.MethodGet, "/v1/cluster/jobs/"+url.PathEscape(jobID)+"/events?"+query.Encode(), nil, &page, nil)
+	_, err := c.doJSON(ctx, http.MethodGet, "/v1/cluster/jobs/"+url.PathEscape(jobID)+"/events?"+query.Encode(), nil, &page, nil)
 	return page, err
 }
 
@@ -84,7 +145,7 @@ func (c *clusterAPIClient) Cancel(ctx context.Context, jobID string) (cluster.Jo
 		return cluster.Job{}, err
 	}
 	var job cluster.Job
-	err := c.doJSON(ctx, http.MethodDelete, "/v1/cluster/jobs/"+url.PathEscape(jobID), nil, &job, nil)
+	_, err := c.doJSON(ctx, http.MethodDelete, "/v1/cluster/jobs/"+url.PathEscape(jobID), nil, &job, nil)
 	return job, err
 }
 
@@ -106,9 +167,9 @@ func validateClusterClientID(value string) error {
 	return nil
 }
 
-func (c *clusterAPIClient) doJSON(ctx context.Context, method, path string, input, output interface{}, headers http.Header) error {
+func (c *clusterAPIClient) doJSON(ctx context.Context, method, path string, input, output interface{}, headers http.Header) (http.Header, error) {
 	if c == nil || c.baseURL == "" || c.token == "" {
-		return fmt.Errorf("relay URL and scoped credential are required")
+		return nil, fmt.Errorf("relay URL and scoped credential are required")
 	}
 	var body *bytes.Reader
 	if input == nil {
@@ -116,13 +177,13 @@ func (c *clusterAPIClient) doJSON(ctx context.Context, method, path string, inpu
 	} else {
 		raw, err := json.Marshal(input)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		body = bytes.NewReader(raw)
 	}
 	request, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	request.Header.Set("Authorization", "Bearer "+c.token)
 	if input != nil {
@@ -135,25 +196,25 @@ func (c *clusterAPIClient) doJSON(ctx context.Context, method, path string, inpu
 	}
 	response, err := clusterHTTPClient(c.baseURL).Do(request)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer response.Body.Close()
 	raw, err := readClusterAPIResponse(response.Body)
 	if err != nil {
-		return err
+		return response.Header.Clone(), err
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		message := strings.TrimSpace(string(raw))
 		if len(message) > 2048 {
 			message = message[:2048] + "…"
 		}
-		return &clusterAPIError{StatusCode: response.StatusCode, Status: response.Status, Body: message}
+		return response.Header.Clone(), &clusterAPIError{StatusCode: response.StatusCode, Status: response.Status, Body: message}
 	}
 	if output == nil {
-		return nil
+		return response.Header.Clone(), nil
 	}
 	if err := json.Unmarshal(raw, output); err != nil {
-		return fmt.Errorf("invalid relay response: %w", err)
+		return response.Header.Clone(), fmt.Errorf("invalid relay response: %w", err)
 	}
-	return nil
+	return response.Header.Clone(), nil
 }

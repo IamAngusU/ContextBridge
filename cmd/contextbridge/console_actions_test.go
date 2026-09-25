@@ -36,6 +36,42 @@ func TestConsoleActionCredentialNeverFallsBackToRelayAdmin(t *testing.T) {
 	}
 }
 
+func TestSharedTextJobBuilderPreservesChatRoutingAndOutputContract(t *testing.T) {
+	request, err := buildClusterTextSubmitRequest(clusterTextJobOptions{
+		Source: "terminal-chat", Prompt: "inspect", SessionID: "session-a",
+		Provider: "adapter", Group: "private", Model: "model-a", AdapterProfile: "profile-a",
+		Reasoning: "high", Egress: "local_only", MaxCostUSD: 0.25,
+		ImageBase64: "aW1hZ2U=", ImageMediaType: "image/png",
+		Metadata:            map[string]interface{}{"bounded": true},
+		Output:              bridge.OutputSpec{Mode: "text", MaxBytes: 4096, Artifacts: true, MinImages: 1},
+		AdapterFreshSession: true, AdapterEphemeralSession: true, MaxAttempts: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.ContractVersion != cluster.JobContractV1 || request.Source != "terminal-chat" || request.MaxAttempts != 1 ||
+		request.Requirements.Task != "generation" || request.Requirements.Provider != "adapter" || request.Requirements.Group != "private" ||
+		request.Requirements.Model != "model-a" || request.Requirements.AdapterProfile != "profile-a" || request.Requirements.Reasoning != "high" ||
+		!request.Requirements.Vision || !request.Requirements.AdapterFreshSession || !request.Requirements.AdapterEphemeralSession ||
+		request.Requirements.Egress != "local_only" || request.Requirements.MaxCostUSD != 0.25 {
+		t.Fatalf("shared request lost routing contract: %#v", request)
+	}
+	var job bridge.Job
+	if err := json.Unmarshal(request.Payload, &job); err != nil {
+		t.Fatal(err)
+	}
+	if job.Prompt != "inspect" || job.SessionID != "session-a" || job.ImageMediaType != "image/png" || job.Output.MinImages != 1 || !job.Output.Artifacts || job.MaxCostUSD != 0.25 {
+		t.Fatalf("shared request lost payload/output contract: %#v", job)
+	}
+	local, err := buildClusterTextSubmitRequest(clusterTextJobOptions{Provider: "ollama", Reasoning: "must-not-route", Output: bridge.OutputSpec{Mode: "text"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if local.Requirements.Reasoning != "" || local.Requirements.AdapterFreshSession || local.Requirements.AdapterEphemeralSession {
+		t.Fatalf("adapter-only requirements leaked onto a local route: %#v", local.Requirements)
+	}
+}
+
 func TestClusterAPIClientUsesScopedPathsIdempotencyAndOwnershipToken(t *testing.T) {
 	var mu sync.Mutex
 	requests := []string{}

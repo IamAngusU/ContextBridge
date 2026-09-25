@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"math"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -369,33 +368,21 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 	if s.requireImage {
 		minimumImages = max(1, s.minImages)
 	}
-	payload, err := json.Marshal(bridge.Job{
-		Source: "terminal-chat", Task: "generation", Prompt: prompt,
-		SessionID: s.sessionID, AdapterProfile: s.profile, Model: s.model, Reasoning: s.reasoning,
-		MaxCostUSD:  s.maxCostUSD,
+	input, err := buildClusterTextSubmitRequest(clusterTextJobOptions{
+		Source: "terminal-chat", Prompt: prompt, SessionID: s.sessionID,
+		Provider: s.provider, Group: s.group, Model: s.model, AdapterProfile: s.profile,
+		Reasoning: s.reasoning, Egress: s.egress, MaxCostUSD: s.maxCostUSD,
 		ImageBase64: s.imageBase64, ImageMediaType: s.imageMediaType,
-		Metadata: s.jobMetadata(),
-		Output:   bridge.OutputSpec{Mode: "text", MaxBytes: 1 << 20, Artifacts: s.artifactDir != "", MaxArtifactBytes: 12 << 20, MinArtifacts: minimum, MinImages: minimumImages},
+		Metadata:            s.jobMetadata(),
+		Output:              bridge.OutputSpec{Mode: "text", MaxBytes: 1 << 20, Artifacts: s.artifactDir != "", MaxArtifactBytes: 12 << 20, MinArtifacts: minimum, MinImages: minimumImages},
+		AdapterFreshSession: s.newSession || s.newSessionPerJob, AdapterEphemeralSession: s.newSessionPerJob,
+		MaxAttempts: 1,
 	})
 	if err != nil {
 		return err
 	}
-	requirements := cluster.Requirements{Task: "generation", Provider: s.provider, AdapterProfile: s.profile, Group: s.group, SessionID: s.sessionID}
-	requirements.Egress = s.egress
-	requirements.MaxCostUSD = s.maxCostUSD
-	requirements.Vision = s.imageBase64 != ""
-	requirements.Model = s.model
-	if strings.EqualFold(s.provider, "adapter") {
-		requirements.Reasoning = s.reasoning
-		requirements.AdapterFreshSession = s.newSession || s.newSessionPerJob
-		requirements.AdapterEphemeralSession = s.newSessionPerJob
-	}
-	input := cluster.SubmitRequest{
-		Source:       "terminal-chat",
-		Requirements: requirements,
-		Payload:      payload,
-		MaxAttempts:  1,
-	}
+	requirements := input.Requirements
+	payload := input.Payload
 	shared := ""
 	encryptionContext := cluster.EncryptionContext{}
 	if s.e2ee {
@@ -421,8 +408,9 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 		input.AssignmentID = reservation.Assignment.ID
 		input.AssignmentSecret = reservation.Secret
 	}
-	var job cluster.Job
-	if err := clusterPOST(ctx, s.relayURL+"/v1/cluster/jobs?compact=1", s.token, input, &job); err != nil {
+	client := newClusterAPIClient(s.relayURL, s.token)
+	job, err := client.Submit(ctx, input, "")
+	if err != nil {
 		return err
 	}
 	if s.e2ee {
@@ -445,7 +433,8 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 			return ctx.Err()
 		case <-time.After(450 * time.Millisecond):
 		}
-		if err := clusterGET(ctx, s.relayURL+"/v1/cluster/jobs/"+url.PathEscape(job.ID)+"?compact=1", s.token, &job); err != nil {
+		job, err = client.Job(ctx, job.ID)
+		if err != nil {
 			return err
 		}
 		if s.e2ee {

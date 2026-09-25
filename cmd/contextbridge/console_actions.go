@@ -115,19 +115,12 @@ func submitConsoleText(ctx context.Context, client *clusterAPIClient, prompt str
 	if err != nil {
 		return cluster.Job{}, err
 	}
-	payload, err := json.Marshal(bridge.Job{
-		Source: "console", Task: "generation", Prompt: prompt,
-		Output: bridge.OutputSpec{Mode: "text", MaxBytes: 1 << 20},
+	request, err := buildClusterTextSubmitRequest(clusterTextJobOptions{
+		Source: "console", Prompt: prompt,
+		Output: bridge.OutputSpec{Mode: "text", MaxBytes: 1 << 20}, MaxAttempts: 1,
 	})
 	if err != nil {
 		return cluster.Job{}, err
-	}
-	request := cluster.SubmitRequest{
-		ContractVersion: cluster.JobContractV1,
-		Source:          "console",
-		Requirements:    cluster.Requirements{Task: "generation"},
-		Payload:         payload,
-		MaxAttempts:     1,
 	}
 	job, err := client.Submit(ctx, request, idempotencyKey)
 	if err == nil || ctx.Err() != nil {
