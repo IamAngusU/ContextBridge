@@ -220,7 +220,7 @@ func TestClusterRouteExplainSupportsPreviewAndDurableJobDecision(t *testing.T) {
 				ID: "route_preview", Preview: true, Requirements: request.Requirements,
 				SelectedNodeID: "node-a", SelectedNodeName: "Node A",
 				Candidates: []cluster.RoutingCandidateDecision{
-					{NodeID: "node-a", NodeName: "Node A", Eligible: true, Score: 12, ScoreComponents: cluster.RoutingScoreComponents{RecentFailures: 12}},
+					{NodeID: "node-a", NodeName: "Node A", Eligible: true, Score: 12, ScoreComponents: cluster.RoutingScoreComponents{RecentFailures: 12}, RecoveryProbation: true},
 					{NodeID: "node-b", NodeName: "Node B", RejectionReasons: []string{"route_circuit_open"}, FailureStreak: 3, CircuitOpenUntil: time.Date(2026, time.September, 25, 12, 0, 0, 0, time.UTC)},
 				},
 			})
@@ -282,7 +282,7 @@ func TestClusterRouteExplainSupportsPreviewAndDurableJobDecision(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(raw)
-	for _, wanted := range []string{"Route preview · no job was submitted", "Selected  [Node A · node-a]", "failures +12.00", "route_circuit_open · failures 3 · retry after 2026-09-25T12:00:00Z", `"job_id":"job-a"`} {
+	for _, wanted := range []string{"Route preview · no job was submitted", "Selected  [Node A · node-a]", "failures +12.00 · single recovery probe", "route_circuit_open · failures 3 · retry after 2026-09-25T12:00:00Z", `"job_id":"job-a"`} {
 		if !strings.Contains(text, wanted) {
 			t.Fatalf("route output missing %q: %s", wanted, text)
 		}

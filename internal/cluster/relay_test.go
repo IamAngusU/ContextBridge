@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	bolt "go.etcd.io/bbolt"
 )
 
 func readTestAuthority(t *testing.T, connection *websocket.Conn) RelayAuthority {
@@ -218,11 +219,22 @@ func TestRelayCancelBeforeDispatchReleasesAdapterSessionLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	requirements := Requirements{Task: "generation", Provider: "adapter", AdapterProfile: "profile-one", SessionID: "cancel-before-dispatch"}
+	now := time.Now().UTC()
+	routeKey, provider, model := routingHealthKey(requirements)
+	if err := relay.store.db.Update(func(tx *bolt.Tx) error {
+		return putJSON(tx.Bucket(bucketNodes), "node-a", Node{ID: "node-a", Connected: true, LastSeen: now, RoutingHealth: []RoutingHealth{{
+			RouteKey: routeKey, Provider: provider, Model: model, ConsecutiveFailures: routingFailureThreshold,
+			LastFailureAt: now.Add(-time.Minute), CircuitOpenUntil: now.Add(-time.Second),
+		}}})
+	}); err != nil {
+		t.Fatal(err)
+	}
 	job, err := relay.store.CreateJob(SubmitRequest{OwnerSubject: "producer-a", Requirements: requirements, Payload: json.RawMessage(`{}`)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	job, err = relay.store.AssignAdapterJob(job.ID, "node-a", 42, false)
+	decision := RoutingDecision{Requirements: requirements, RouteKey: routeKey, SelectedNodeID: "node-a", Candidates: []RoutingCandidateDecision{{NodeID: "node-a", Eligible: true}}}
+	job, err = relay.store.AssignAdapterJobWithDecision(job.ID, "node-a", 42, false, decision)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,6 +258,10 @@ func TestRelayCancelBeforeDispatchReleasesAdapterSessionLock(t *testing.T) {
 	}
 	if worker.beginDispatch(job.ID, job.Attempt) {
 		t.Fatal("cancelled pre-dispatch reservation still began dispatch")
+	}
+	node, err := relay.store.GetNode("node-a")
+	if err != nil || len(node.RoutingHealth) != 1 || node.RoutingHealth[0].ProbeJobID != "" || routingHealthState(node.RoutingHealth[0], time.Now().UTC()) != 2 {
+		t.Fatalf("pre-dispatch cancellation did not release probe back to probation: %#v, %v", node.RoutingHealth, err)
 	}
 }
 

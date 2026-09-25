@@ -867,7 +867,18 @@ func TestCompleteJobRetriesOnlyProvenPreExecutionWorkerRefusal(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	job, err := store.CreateJob(SubmitRequest{Requirements: Requirements{Task: "generation"}, Payload: json.RawMessage(`{}`), MaxAttempts: 3})
+	requirements := Requirements{Task: "generation"}
+	routeKey, provider, model := routingHealthKey(requirements)
+	now := time.Now().UTC()
+	if err := store.db.Update(func(tx *bolt.Tx) error {
+		return putJSON(tx.Bucket(bucketNodes), "node-a", Node{ID: "node-a", RoutingHealth: []RoutingHealth{{
+			RouteKey: routeKey, Provider: provider, Model: model, ConsecutiveFailures: routingFailureThreshold,
+			LastFailureAt: now.Add(-time.Minute), CircuitOpenUntil: now.Add(-time.Second),
+		}}})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.CreateJob(SubmitRequest{Requirements: requirements, Payload: json.RawMessage(`{}`), MaxAttempts: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -881,6 +892,10 @@ func TestCompleteJobRetriesOnlyProvenPreExecutionWorkerRefusal(t *testing.T) {
 	}
 	if requeued.Status != JobQueued || requeued.Attempt != 1 || requeued.AssignedNode != "" || requeued.Error != "" || requeued.FailureCode != "" || requeued.RoutingDecision != nil {
 		t.Fatalf("proven pre-execution refusal was not cleanly requeued: %#v", requeued)
+	}
+	node, err := store.GetNode("node-a")
+	if err != nil || len(node.RoutingHealth) != 1 || node.RoutingHealth[0].ProbeJobID != "" || routingHealthState(node.RoutingHealth[0], time.Now().UTC()) != 2 {
+		t.Fatalf("pre-execution retry did not release probe back to probation: %#v, %v", node.RoutingHealth, err)
 	}
 	queued, err := store.QueuedJobs(10)
 	if err != nil || len(queued) != 1 || queued[0].ID != job.ID {

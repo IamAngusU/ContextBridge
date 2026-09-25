@@ -34,15 +34,16 @@ type RoutingScoreComponents struct {
 // evidence needed to audit a placement decision without copying a worker's
 // complete hardware or adapter-session inventory into every job.
 type RoutingCandidateDecision struct {
-	NodeID           string                 `json:"node_id"`
-	NodeName         string                 `json:"node_name,omitempty"`
-	Eligible         bool                   `json:"eligible"`
-	RejectionReasons []string               `json:"rejection_reasons,omitempty"`
-	Score            float64                `json:"score,omitempty"`
-	ScoreComponents  RoutingScoreComponents `json:"score_components,omitempty"`
-	EvidenceAgeMS    int64                  `json:"evidence_age_ms"`
-	FailureStreak    uint32                 `json:"failure_streak,omitempty"`
-	CircuitOpenUntil time.Time              `json:"circuit_open_until,omitempty"`
+	NodeID            string                 `json:"node_id"`
+	NodeName          string                 `json:"node_name,omitempty"`
+	Eligible          bool                   `json:"eligible"`
+	RejectionReasons  []string               `json:"rejection_reasons,omitempty"`
+	Score             float64                `json:"score,omitempty"`
+	ScoreComponents   RoutingScoreComponents `json:"score_components,omitempty"`
+	EvidenceAgeMS     int64                  `json:"evidence_age_ms"`
+	FailureStreak     uint32                 `json:"failure_streak,omitempty"`
+	CircuitOpenUntil  time.Time              `json:"circuit_open_until,omitempty"`
+	RecoveryProbation bool                   `json:"recovery_probation,omitempty"`
 }
 
 // RoutingDecision is a point-in-time explanation. The relay adds ID, JobID,
@@ -53,6 +54,7 @@ type RoutingDecision struct {
 	JobID               string                     `json:"job_id,omitempty"`
 	Preview             bool                       `json:"preview,omitempty"`
 	Requirements        Requirements               `json:"requirements"`
+	RouteKey            string                     `json:"route_key,omitempty"`
 	PolicyDecision      *PolicyDecision            `json:"policy_decision,omitempty"`
 	EstimatedVRAMBytes  uint64                     `json:"estimated_vram_bytes,omitempty"`
 	Candidates          []RoutingCandidateDecision `json:"candidates"`
@@ -131,12 +133,14 @@ func rankWithDecisionForOwner(nodes []Node, requirements Requirements, estimated
 		if node.Capabilities.Running >= capacity {
 			reasons = appendUniqueReason(reasons, "worker_at_capacity")
 		}
-		health, hasHealth := routingHealthForOwner(node, requirements, ownerSubject)
+		health, hasHealth := routingHealthForOwnerAt(node, requirements, ownerSubject, now)
 		if hasHealth {
 			candidateDecision.FailureStreak = health.ConsecutiveFailures
 			if health.CircuitOpenUntil.After(now) {
 				candidateDecision.CircuitOpenUntil = health.CircuitOpenUntil
 				reasons = appendUniqueReason(reasons, "route_circuit_open")
+			} else if routingHealthState(health, now) == 2 {
+				candidateDecision.RecoveryProbation = true
 			}
 		}
 		if len(reasons) > 0 {
@@ -202,9 +206,10 @@ func rankWithDecisionForOwner(nodes []Node, requirements Requirements, estimated
 		return candidates[i].Node.ID < candidates[j].Node.ID
 	})
 	sortRoutingCandidateDecisions(decisions)
+	routeKey, _, _ := routingHealthKey(requirements)
 	decision := RoutingDecision{
 		Requirements: requirements, EstimatedVRAMBytes: estimatedVRAM, CandidateCount: len(decisions),
-		Candidates: decisions, CreatedAt: now,
+		RouteKey: routeKey, Candidates: decisions, CreatedAt: now,
 	}
 	if len(candidates) > 0 {
 		decision.SelectedNodeID = candidates[0].Node.ID

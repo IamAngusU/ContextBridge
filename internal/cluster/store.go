@@ -81,6 +81,7 @@ var (
 	ErrOwnerPipelineCapacity       = errors.New("producer active pipeline capacity is full")
 	ErrNodePublicKeyMismatch       = errors.New("node public key differs from paired identity")
 	ErrNodeDraining                = errors.New("node is draining")
+	ErrRouteProbeInFlight          = errors.New("route recovery probe is already in flight")
 	ErrAssignmentFenceMismatch     = errors.New("assignment fence does not match the current durable assignment")
 	ErrAdapterSessionBusy          = errors.New("adapter session already has an active job or reservation")
 	ErrIdempotencyConflict         = errors.New("idempotency key was already used for a different request")
@@ -699,7 +700,7 @@ func mergeStoredNodeState(node *Node, existing Node) {
 	}
 }
 
-func recordNodeRoutingOutcomeTx(tx *bolt.Tx, nodeID string, requirements Requirements, ownerSubject string, success bool, failureCode string, now time.Time) error {
+func recordNodeRoutingOutcomeTx(tx *bolt.Tx, nodeID string, requirements Requirements, ownerSubject, admittedRouteKey, jobID string, success bool, failureCode string, now time.Time) error {
 	if strings.TrimSpace(nodeID) == "" {
 		return nil
 	}
@@ -710,8 +711,115 @@ func recordNodeRoutingOutcomeTx(tx *bolt.Tx, nodeID string, requirements Require
 		}
 		return err
 	}
-	recordRoutingOutcomeForOwner(&node, requirements, ownerSubject, success, failureCode, now)
+	recordRoutingOutcomeForOwnerRoute(&node, requirements, ownerSubject, admittedRouteKey, jobID, success, failureCode, now)
 	return putJSON(tx.Bucket(bucketNodes), node.ID, node)
+}
+
+// claimRoutingRecoveryProbeTx is the linearization point for half-open routes.
+// Ranking is necessarily advisory; this durable transaction guarantees that
+// only one queued job can become the recovery probe for each applicable global
+// or producer-scoped route record.
+func claimRoutingRecoveryProbeTx(tx *bolt.Tx, node *Node, requirements Requirements, ownerSubject, jobID, admittedRouteKey string, now time.Time) (bool, error) {
+	if node == nil || node.ID == "" {
+		return false, nil
+	}
+	routeKey, _, _ := routingHealthKey(requirements)
+	if validRoutingHealthRouteKey(admittedRouteKey) {
+		routeKey = admittedRouteKey
+	}
+	ownerScope := routingHealthOwnerScope(ownerSubject)
+	probation := make([]int, 0, 2)
+	for index := range node.RoutingHealth {
+		health := &node.RoutingHealth[index]
+		if health.RouteKey != routeKey || health.OwnerScope != "" && health.OwnerScope != ownerScope || routingHealthState(*health, now) != 2 {
+			continue
+		}
+		if health.ProbeJobID != "" && health.ProbeJobID != jobID {
+			var existing Job
+			err := getJSON(tx.Bucket(bucketJobs), health.ProbeJobID, &existing)
+			if err == nil {
+				return false, ErrRouteProbeInFlight
+			}
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return false, err
+			}
+			health.ProbeJobID = ""
+			health.ProbeOwnerScope = ""
+		}
+		probation = append(probation, index)
+	}
+	if len(probation) == 0 {
+		return false, nil
+	}
+	for _, index := range probation {
+		node.RoutingHealth[index].ProbeJobID = jobID
+		node.RoutingHealth[index].ProbeOwnerScope = ownerScope
+	}
+	return true, nil
+}
+
+func resolveRoutingRecoveryProbeTx(tx *bolt.Tx, nodeID, jobID, failureCode string, now time.Time) (bool, error) {
+	if strings.TrimSpace(nodeID) == "" || strings.TrimSpace(jobID) == "" {
+		return false, nil
+	}
+	var node Node
+	if err := getJSON(tx.Bucket(bucketNodes), nodeID, &node); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	resolved := false
+	for index := range node.RoutingHealth {
+		health := &node.RoutingHealth[index]
+		if health.ProbeJobID != jobID {
+			continue
+		}
+		health.ProbeJobID = ""
+		health.ProbeOwnerScope = ""
+		if trackRoutingFailure(failureCode) {
+			applyRoutingProbeFailure(health, failureCode, now)
+		}
+		resolved = true
+	}
+	if !resolved {
+		return false, nil
+	}
+	return true, putJSON(tx.Bucket(bucketNodes), node.ID, node)
+}
+
+func routingRecoveryProbeExistsTx(tx *bolt.Tx, nodeID, jobID string) (bool, error) {
+	if strings.TrimSpace(nodeID) == "" || strings.TrimSpace(jobID) == "" {
+		return false, nil
+	}
+	var node Node
+	if err := getJSON(tx.Bucket(bucketNodes), nodeID, &node); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	for _, health := range node.RoutingHealth {
+		if health.ProbeJobID == jobID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// ResolveRoutingRecoveryProbe releases a probe only after the relay has proof
+// that execution never began or has ended on the explicitly named node. Using
+// that evidence node prevents a late result from an older assignment attempt
+// from releasing a newer probe for the same job ID on another node. A tracked
+// failure reopens the circuit; an empty failure leaves the route in probation.
+func (s *Store) ResolveRoutingRecoveryProbe(nodeID, jobID, failureCode string) (bool, error) {
+	resolved := false
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		var err error
+		resolved, err = resolveRoutingRecoveryProbeTx(tx, nodeID, jobID, failureCode, time.Now().UTC())
+		return err
+	})
+	return resolved, err
 }
 
 func (s *Store) GetNode(id string) (Node, error) {
@@ -1757,6 +1865,13 @@ func (s *Store) assignJob(id, nodeID string, adapter *adapterAssignment, decisio
 		if node.Draining {
 			return ErrNodeDraining
 		}
+		now := time.Now().UTC()
+		if decision != nil && decision.RouteKey != "" {
+			expectedRouteKey, _, _ := routingHealthKey(decision.Requirements)
+			if !validRoutingHealthRouteKey(decision.RouteKey) || decision.RouteKey != expectedRouteKey {
+				return errors.New("routing decision route identity is invalid")
+			}
+		}
 		if adapter != nil {
 			if !strings.EqualFold(job.Requirements.Provider, "adapter") {
 				return errors.New("adapter endpoint selection requires provider adapter")
@@ -1774,7 +1889,20 @@ func (s *Store) assignJob(id, nodeID string, adapter *adapterAssignment, decisio
 			job.Requirements.AdapterPrincipal = adapter.Principal
 			job.Requirements.AdapterSessionRecovery = adapter.SessionRecovery
 		}
-		if err := acquireAdapterSessionLockTx(tx, job.OwnerSubject, job.Requirements, adapterSessionLockJob, job.ID, time.Time{}, time.Now().UTC(), adapterSessionNeedsLockTx(tx, job.Requirements, nodeID)); err != nil {
+		admittedRouteKey := ""
+		if decision != nil {
+			admittedRouteKey = decision.RouteKey
+		}
+		probeClaimed, err := claimRoutingRecoveryProbeTx(tx, &node, job.Requirements, job.OwnerSubject, job.ID, admittedRouteKey, now)
+		if err != nil {
+			return err
+		}
+		if probeClaimed {
+			if err := putJSON(tx.Bucket(bucketNodes), node.ID, node); err != nil {
+				return err
+			}
+		}
+		if err := acquireAdapterSessionLockTx(tx, job.OwnerSubject, job.Requirements, adapterSessionLockJob, job.ID, time.Time{}, now, adapterSessionNeedsLockTx(tx, job.Requirements, nodeID)); err != nil {
 			return err
 		}
 		job.Status = JobAssigned
@@ -1789,7 +1917,7 @@ func (s *Store) assignJob(id, nodeID string, adapter *adapterAssignment, decisio
 			job.AssignmentFence = nil
 		}
 		job.Progress = nil
-		job.AssignedAt = time.Now().UTC()
+		job.AssignedAt = now
 		job.UpdatedAt = job.AssignedAt
 		if decision != nil {
 			if decision.SelectedNodeID != "" && decision.SelectedNodeID != nodeID {
@@ -1995,6 +2123,12 @@ func (s *Store) completeJobWithFailure(id, nodeID string, attempt int, fence *As
 		}
 		failureCode = normalizedWorkerFailureCode(failureCode, jobError)
 		if preExecutionRetryAllowed(job, result, sealed, usage, jobError, reportedFailureCode, failureCode, execution) {
+			// A proven pre-execution refusal may reroute this job and clears its
+			// AssignedNode below. Release any recovery probe on the old node first;
+			// the refusal is not evidence that the unhealthy route recovered.
+			if _, err := resolveRoutingRecoveryProbeTx(tx, job.AssignedNode, job.ID, "", time.Now().UTC()); err != nil {
+				return err
+			}
 			job.Status = JobQueued
 			job.Error = ""
 			job.FailureCode = ""
@@ -2105,7 +2239,7 @@ func (s *Store) completeJobWithFailure(id, nodeID string, attempt int, fence *As
 				node.CostUSD = saturatingCostAdd(node.CostUSD, usage.EstimatedCostUSD)
 				node.CostKnownJobs = saturatingUint64Add(node.CostKnownJobs, usage.CostKnownJobs)
 				node.CostUnknownJobs = saturatingUint64Add(node.CostUnknownJobs, usage.CostUnknownJobs)
-				recordRoutingOutcomeForOwner(&node, job.Requirements, job.OwnerSubject, job.Status == JobCompleted, job.FailureCode, job.FinishedAt)
+				recordRoutingOutcomeForOwnerRoute(&node, job.Requirements, job.OwnerSubject, jobRoutingHealthRouteKey(job), job.ID, job.Status == JobCompleted, job.FailureCode, job.FinishedAt)
 				if err := putJSON(tx.Bucket(bucketNodes), node.ID, node); err != nil {
 					return err
 				}
@@ -2125,6 +2259,13 @@ func (s *Store) completeJobWithFailure(id, nodeID string, attempt int, fence *As
 		return appendPipelineStepEventTx(tx, s, job, stepType)
 	})
 	return job, err
+}
+
+func jobRoutingHealthRouteKey(job Job) string {
+	if job.RoutingDecision != nil && validRoutingHealthRouteKey(job.RoutingDecision.RouteKey) {
+		return job.RoutingDecision.RouteKey
+	}
+	return ""
 }
 
 func validateAssignmentFence(job Job, reported *AssignmentFence) error {
@@ -2220,6 +2361,19 @@ func (s *Store) RequeueNode(nodeID, reason string) ([]Job, error) {
 				return nil
 			}
 			if job.Status == JobCancelled {
+				now := time.Now().UTC()
+				activeProbe, err := routingRecoveryProbeExistsTx(tx, job.AssignedNode, job.ID)
+				if err != nil {
+					return err
+				}
+				if activeProbe {
+					if err := recordNodeRoutingOutcomeTx(tx, job.AssignedNode, job.Requirements, "", jobRoutingHealthRouteKey(job), job.ID, false, FailureExecutionStateAmbiguous, now); err != nil {
+						return err
+					}
+					if _, err := resolveRoutingRecoveryProbeTx(tx, job.AssignedNode, job.ID, FailureExecutionStateAmbiguous, now); err != nil {
+						return err
+					}
+				}
 				return releaseAdapterSessionLockTx(tx, job.OwnerSubject, job.Requirements, adapterSessionLockJob, job.ID)
 			}
 			if job.Status != JobAssigned && job.Status != JobRunning {
@@ -2256,7 +2410,10 @@ func (s *Store) RequeueNode(nodeID, reason string) ([]Job, error) {
 			if err := appendPipelineStepEventTx(tx, s, change.job, "pipeline.step.ambiguous"); err != nil {
 				return err
 			}
-			if err := recordNodeRoutingOutcomeTx(tx, change.job.AssignedNode, change.job.Requirements, "", false, change.job.FailureCode, change.job.FinishedAt); err != nil {
+			if err := recordNodeRoutingOutcomeTx(tx, change.job.AssignedNode, change.job.Requirements, "", jobRoutingHealthRouteKey(change.job), change.job.ID, false, change.job.FailureCode, change.job.FinishedAt); err != nil {
+				return err
+			}
+			if _, err := resolveRoutingRecoveryProbeTx(tx, change.job.AssignedNode, change.job.ID, change.job.FailureCode, change.job.FinishedAt); err != nil {
 				return err
 			}
 		}
@@ -2300,7 +2457,25 @@ func (s *Store) RecoverRelayRestart(reason string) ([]Job, error) {
 		changes := []pending{}
 		if err := jobs.ForEach(func(key, value []byte) error {
 			var job Job
-			if json.Unmarshal(value, &job) != nil || (job.Status != JobAssigned && job.Status != JobRunning) {
+			if json.Unmarshal(value, &job) != nil {
+				return nil
+			}
+			if job.Status == JobCancelled {
+				activeProbe, err := routingRecoveryProbeExistsTx(tx, job.AssignedNode, job.ID)
+				if err != nil {
+					return err
+				}
+				if activeProbe {
+					if err := recordNodeRoutingOutcomeTx(tx, job.AssignedNode, job.Requirements, "", jobRoutingHealthRouteKey(job), job.ID, false, FailureExecutionStateAmbiguous, now); err != nil {
+						return err
+					}
+					if _, err := resolveRoutingRecoveryProbeTx(tx, job.AssignedNode, job.ID, FailureExecutionStateAmbiguous, now); err != nil {
+						return err
+					}
+				}
+				return releaseAdapterSessionLockTx(tx, job.OwnerSubject, job.Requirements, adapterSessionLockJob, job.ID)
+			}
+			if job.Status != JobAssigned && job.Status != JobRunning {
 				return nil
 			}
 			job.Error = reason
@@ -2333,6 +2508,12 @@ func (s *Store) RecoverRelayRestart(reason string) ([]Job, error) {
 				return err
 			}
 			if err := appendPipelineStepEventTx(tx, s, change.job, "pipeline.step.ambiguous"); err != nil {
+				return err
+			}
+			if err := recordNodeRoutingOutcomeTx(tx, change.job.AssignedNode, change.job.Requirements, "", jobRoutingHealthRouteKey(change.job), change.job.ID, false, change.job.FailureCode, change.job.FinishedAt); err != nil {
+				return err
+			}
+			if _, err := resolveRoutingRecoveryProbeTx(tx, change.job.AssignedNode, change.job.ID, change.job.FailureCode, change.job.FinishedAt); err != nil {
 				return err
 			}
 		}
@@ -2412,7 +2593,7 @@ func (s *Store) RecoverStaleJobs(now time.Time, sealedWait, execution time.Durat
 				return err
 			}
 			if item.eventType == "job.ambiguous" {
-				if err := recordNodeRoutingOutcomeTx(tx, item.job.AssignedNode, item.job.Requirements, item.job.OwnerSubject, false, item.job.FailureCode, item.job.FinishedAt); err != nil {
+				if err := recordNodeRoutingOutcomeTx(tx, item.job.AssignedNode, item.job.Requirements, item.job.OwnerSubject, jobRoutingHealthRouteKey(item.job), item.job.ID, false, item.job.FailureCode, item.job.FinishedAt); err != nil {
 					return err
 				}
 			}
@@ -2979,6 +3160,30 @@ func (s *Store) Overview() (Overview, error) {
 	})
 	overview.Usage.CostStatus = aggregateCostStatus(overview.Usage.CostKnownJobs, overview.Usage.CostUnknownJobs, overview.Usage.CostStatus, "")
 	return overview, err
+}
+
+// retainedJobMetrics returns only detailed job records that still exist in
+// the jobs bucket. Unlike Overview it deliberately excludes historical totals
+// and lifetime node counters so Prometheus metrics named "retained" can fall
+// after a retention sweep exactly as documented.
+func (s *Store) retainedJobMetrics() (map[string]uint64, Usage, error) {
+	states := map[string]uint64{}
+	var usage Usage
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketJobs).ForEach(func(_, value []byte) error {
+			var job Job
+			if err := json.Unmarshal(value, &job); err != nil {
+				return err
+			}
+			states[job.Status] = saturatingUint64Add(states[job.Status], 1)
+			usage.InputTokens = saturatingUint64Add(usage.InputTokens, job.Usage.InputTokens)
+			usage.OutputTokens = saturatingUint64Add(usage.OutputTokens, job.Usage.OutputTokens)
+			usage.TotalTokens = saturatingUint64Add(usage.TotalTokens, job.Usage.TotalTokens)
+			usage.ComputeMS = saturatingUint64Add(usage.ComputeMS, job.Usage.ComputeMS)
+			return nil
+		})
+	})
+	return states, usage, err
 }
 
 func (s *Store) SavePipelineRun(run PipelineRun) error {

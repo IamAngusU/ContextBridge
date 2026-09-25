@@ -197,6 +197,14 @@ type workerReservation struct {
 	fence           *AssignmentFence
 }
 
+type workerReservationTerminalState uint8
+
+const (
+	workerReservationMissing workerReservationTerminalState = iota
+	workerReservationPreDispatch
+	workerReservationDispatched
+)
+
 func newWorkerConnection(conn *websocket.Conn, capacity int) *workerConnection {
 	capacity = boundedWorkerCapacity(capacity)
 	return &workerConnection{conn: conn, capacity: capacity, inFlight: map[string]workerReservation{}}
@@ -216,18 +224,26 @@ func (w *workerConnection) reserve(jobID string) bool {
 }
 
 func (w *workerConnection) markStoreTerminal(jobID string) bool {
+	return w.markStoreTerminalState(jobID) == workerReservationDispatched
+}
+
+func (w *workerConnection) markStoreTerminalState(jobID string) workerReservationTerminalState {
 	w.stateMu.Lock()
 	defer w.stateMu.Unlock()
 	reservation, exists := w.inFlight[jobID]
-	if exists {
-		reservation.storeTerminal = true
-		w.inFlight[jobID] = reservation
+	if !exists {
+		return workerReservationMissing
 	}
+	reservation.storeTerminal = true
+	w.inFlight[jobID] = reservation
 	// A capacity reservation is created before the durable assignment. It is
-	// not execution evidence until dispatchStarted is set. Returning false in
-	// that pre-dispatch window prevents a phantom worker cancel; beginDispatch
-	// will observe storeTerminal and suppress the job frame itself.
-	return exists && reservation.dispatchStarted
+	// not execution evidence until dispatchStarted is set. Distinguishing that
+	// state from a missing reservation lets cancellation release a route probe
+	// only when the relay can prove no worker execution began.
+	if reservation.dispatchStarted {
+		return workerReservationDispatched
+	}
+	return workerReservationPreDispatch
 }
 
 func (w *workerConnection) beginDispatch(jobID string, attempt int, fences ...*AssignmentFence) bool {
@@ -866,16 +882,22 @@ func (r *Relay) handleCancel(w http.ResponseWriter, req *http.Request) {
 	// side-effecting worker execution has stopped. Retain the occupied slot
 	// until the matching result or disconnect while excluding this reservation
 	// from future stale-record scans.
-	if r.markWorkerReservationTerminal(job.AssignedNode, job.ID) {
+	reservationState := r.markWorkerReservationTerminalState(job.AssignedNode, job.ID)
+	if reservationState == workerReservationDispatched {
 		// AssignedNode can also be an E2EE queue binding that has never been
 		// dispatched. Only a live reservation proves there is worker execution
 		// to cancel; otherwise a phantom cancel could poison the worker's bounded
 		// cancel-before-dispatch cache.
 		r.cancelWorkerExecution(job)
 	} else {
-		// No dispatch can still be running: either this was only an encrypted
-		// queue binding, or markStoreTerminal won the pre-dispatch race and made
-		// beginDispatch fail closed. The logical session can be used again.
+		// A pre-dispatch reservation or queued encrypted binding proves no provider
+		// action began. A missing reservation for an already assigned job does not:
+		// treat that case as ambiguous and reopen the route circuit fail-closed.
+		failureCode := ""
+		if reservationState == workerReservationMissing && existing.Status != JobQueued {
+			failureCode = FailureExecutionStateAmbiguous
+		}
+		_, _ = r.store.ResolveRoutingRecoveryProbe(job.AssignedNode, job.ID, failureCode)
 		_, _ = r.store.ReleaseAdapterSessionJobLock(job.ID)
 	}
 	writeJSON(w, http.StatusOK, job)
@@ -1358,6 +1380,10 @@ func (r *Relay) handleWorker(w http.ResponseWriter, req *http.Request) {
 			final := job.Status == JobCompleted || job.Status == JobFailed || job.Status == JobCancelled
 			executionEnded := completeErr == nil || (final && job.AssignedNode == node.ID && job.Attempt == message.Attempt && assignmentFencePointersEqual(job.AssignmentFence, message.Fence)) || worker.matchesDispatch(message.JobID, message.Attempt, message.Fence)
 			if executionEnded {
+				// A producer cancellation is only a logical terminal state. The
+				// matching fenced result is the first proof that worker execution
+				// actually ended, so only now may its route probe be released.
+				_, _ = r.store.ResolveRoutingRecoveryProbe(node.ID, message.JobID, "")
 				_, _ = r.store.ReleaseAdapterSessionJobLock(message.JobID)
 				worker.release(message.JobID)
 				r.signalDispatch()
@@ -1503,6 +1529,10 @@ func (r *Relay) dispatch() {
 					rejectRoutingCandidate(&decision, candidate.Node.ID, "worker_draining")
 					continue
 				}
+				if errors.Is(assignErr, ErrRouteProbeInFlight) {
+					rejectRoutingCandidate(&decision, candidate.Node.ID, "route_probe_in_flight")
+					continue
+				}
 				break
 			}
 			// Cancellation may win after the slot reservation but before the
@@ -1591,16 +1621,20 @@ func (r *Relay) hasStaleRecoveryCandidates() bool {
 }
 
 func (r *Relay) markWorkerReservationTerminal(nodeID, jobID string) bool {
+	return r.markWorkerReservationTerminalState(nodeID, jobID) == workerReservationDispatched
+}
+
+func (r *Relay) markWorkerReservationTerminalState(nodeID, jobID string) workerReservationTerminalState {
 	if nodeID == "" || jobID == "" {
-		return false
+		return workerReservationMissing
 	}
 	r.mu.RLock()
 	worker := r.workers[nodeID]
 	r.mu.RUnlock()
 	if worker != nil {
-		return worker.markStoreTerminal(jobID)
+		return worker.markStoreTerminalState(jobID)
 	}
-	return false
+	return workerReservationMissing
 }
 
 func (r *Relay) maintenanceDue(now time.Time) bool {

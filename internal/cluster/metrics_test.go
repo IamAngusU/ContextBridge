@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	bolt "go.etcd.io/bbolt"
 )
 
 func TestMetricsRequiresObserverAndUsesOnlyBoundedAggregateLabels(t *testing.T) {
@@ -43,6 +45,14 @@ func TestMetricsRequiresObserverAndUsesOnlyBoundedAggregateLabels(t *testing.T) 
 		}
 	}
 	if _, err := relay.store.SetNodeDraining(node.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := relay.store.db.Update(func(tx *bolt.Tx) error {
+		return putJSON(tx.Bucket(bucketHistoricalTotals), string(keyPrunedJobTotals), historicalJobTotals{
+			JobsByState: map[string]uint64{JobFailed: 900},
+			Usage:       Usage{InputTokens: 700, OutputTokens: 800, TotalTokens: 1500, ComputeMS: 999000},
+		})
+	}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -83,9 +93,17 @@ func TestMetricsRequiresObserverAndUsesOnlyBoundedAggregateLabels(t *testing.T) 
 				"contextbridge_jobs{state=\"queued\"} 0",
 				"contextbridge_jobs{state=\"failed\"} 3",
 				"contextbridge_routing_circuits_open 1",
+				"contextbridge_routing_circuits_probation 0",
+				"contextbridge_retained_compute_seconds 0.000",
+				"contextbridge_retained_job_tokens{direction=\"total\"} 0",
 			} {
 				if !strings.Contains(body, expected) {
 					t.Fatalf("metrics missing %q: %s", expected, body)
+				}
+			}
+			for _, forbidden := range []string{"contextbridge_jobs{state=\"failed\"} 903", "contextbridge_retained_compute_seconds 999.000", "contextbridge_retained_job_tokens{direction=\"total\"} 1500"} {
+				if strings.Contains(body, forbidden) {
+					t.Fatalf("retained metrics included lifetime history %q: %s", forbidden, body)
 				}
 			}
 			if contentType := response.Header().Get("Content-Type"); !strings.Contains(contentType, "text/plain") {

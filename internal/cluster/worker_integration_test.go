@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	bolt "go.etcd.io/bbolt"
 )
 
 func TestWorkerRelayParallelCapacityEndToEnd(t *testing.T) {
@@ -297,8 +299,24 @@ func TestWorkerCancelsLocalExecutionWhenRelayConnectionDrops(t *testing.T) {
 		node, loadErr := relay.store.GetNode(nodeID)
 		return loadErr == nil && node.Connected
 	}, "worker did not connect")
+	requirements := Requirements{Task: "generation", Provider: "adapter"}
+	routeKey, provider, model := routingHealthKey(requirements)
+	if err := relay.store.db.Update(func(tx *bolt.Tx) error {
+		var node Node
+		if err := getJSON(tx.Bucket(bucketNodes), nodeID, &node); err != nil {
+			return err
+		}
+		now := time.Now().UTC()
+		node.RoutingHealth = []RoutingHealth{{
+			RouteKey: routeKey, Provider: provider, Model: model, ConsecutiveFailures: routingFailureThreshold,
+			LastFailureAt: now.Add(-time.Minute), CircuitOpenUntil: now.Add(-time.Second),
+		}}
+		return putJSON(tx.Bucket(bucketNodes), node.ID, node)
+	}); err != nil {
+		t.Fatal(err)
+	}
 	job, err := relay.store.CreateJob(SubmitRequest{
-		Requirements: Requirements{Task: "generation", Provider: "adapter"},
+		Requirements: requirements,
 		Payload:      json.RawMessage(`{"route":"default","prompt":"cancel me","output":{"mode":"text"}}`),
 	})
 	if err != nil {
@@ -327,6 +345,10 @@ func TestWorkerCancelsLocalExecutionWhenRelayConnectionDrops(t *testing.T) {
 		failed, loadErr := relay.store.GetJob(job.ID)
 		return loadErr == nil && failed.Status == JobFailed && strings.Contains(failed.Error, "explicit resubmission required")
 	}, "disconnected execution was not failed closed")
+	node, err := relay.store.GetNode(nodeID)
+	if err != nil || len(node.RoutingHealth) != 1 || node.RoutingHealth[0].ProbeJobID != "" || !node.RoutingHealth[0].CircuitOpenUntil.After(time.Now().UTC()) {
+		t.Fatalf("disconnect did not release and reopen the recovery probe: %#v, %v", node.RoutingHealth, err)
+	}
 }
 
 func TestRelayCancellationInterruptsAssignedWorkerExecution(t *testing.T) {
@@ -420,8 +442,24 @@ func TestRelayCancellationInterruptsAssignedWorkerExecution(t *testing.T) {
 		node, loadErr := relay.store.GetNode(nodeID)
 		return loadErr == nil && node.Connected
 	}, "worker did not connect")
+	requirements := Requirements{Task: "generation", Provider: "adapter"}
+	routeKey, provider, model := routingHealthKey(requirements)
+	if err := relay.store.db.Update(func(tx *bolt.Tx) error {
+		var node Node
+		if err := getJSON(tx.Bucket(bucketNodes), nodeID, &node); err != nil {
+			return err
+		}
+		now := time.Now().UTC()
+		node.RoutingHealth = []RoutingHealth{{
+			RouteKey: routeKey, Provider: provider, Model: model, ConsecutiveFailures: routingFailureThreshold,
+			LastFailureAt: now.Add(-time.Minute), CircuitOpenUntil: now.Add(-time.Second),
+		}}
+		return putJSON(tx.Bucket(bucketNodes), node.ID, node)
+	}); err != nil {
+		t.Fatal(err)
+	}
 	job, err := relay.store.CreateJob(SubmitRequest{
-		Requirements: Requirements{Task: "generation", Provider: "adapter"},
+		Requirements: requirements,
 		Payload:      json.RawMessage(`{"route":"default","prompt":"cancel me explicitly","output":{"mode":"text"}}`),
 	})
 	if err != nil {
@@ -461,6 +499,10 @@ func TestRelayCancellationInterruptsAssignedWorkerExecution(t *testing.T) {
 	if cancelled.Status != JobCancelled {
 		t.Fatalf("job status = %q, want %q", cancelled.Status, JobCancelled)
 	}
+	waitFor(t, 3*time.Second, func() bool {
+		node, loadErr := relay.store.GetNode(nodeID)
+		return loadErr == nil && len(node.RoutingHealth) == 1 && node.RoutingHealth[0].ProbeJobID == "" && routingHealthState(node.RoutingHealth[0], time.Now().UTC()) == 2
+	}, "matching cancellation result did not release probe back to probation")
 }
 
 func TestMaintenanceTimeoutInterruptsHungWorkerExecution(t *testing.T) {

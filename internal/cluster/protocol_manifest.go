@@ -49,6 +49,7 @@ func CurrentProtocolManifest(configuredJobBytes int64) ProtocolManifest {
 			"producer_scoped_idempotency",
 			"relay_conformance_v1",
 			"relay_role_health_v1",
+			"routing_recovery_probation_v1",
 			"stable_runtime_failure_codes",
 			"worker_conformance_report_v1",
 		},

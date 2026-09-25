@@ -60,19 +60,32 @@ without submitting provider work. The selected job stores rejection reasons
 and additive score components so placement is inspectable later.
 
 Recent transient failures are relay-owned placement evidence. A matching
-node/provider/model route receives a bounded soft penalty after the first
-failure. Three consecutive infrastructure failures within ten minutes open a
-30-second circuit; repeated failed probes increase the cooldown, capped at 15
-minutes. Producer-triggered evidence is keyed by an opaque producer scope, so
+execution route receives a bounded soft penalty after the first failure. Route
+identity is an opaque fingerprint over the provider/model/task selection and,
+for adapters, the profile, reasoning, and session constraints. Independent
+adapter profiles and sessions therefore cannot poison each other, while raw
+session identifiers never enter routing-health records. Three consecutive
+infrastructure failures within ten minutes open a 30-second circuit; repeated
+failed probes increase the cooldown, capped at 15 minutes.
+
+After cooldown, the route enters recovery probation. Ranking may select it,
+but the durable assignment transaction grants exactly one in-flight probe for
+the applicable global or producer scope. Concurrent jobs use another eligible
+route or remain queued; they do not form a recovery stampede. A successful
+probe clears the circuit. A failed probe atomically reopens it with increased
+backoff. Cancelling a dispatched probe does not release its single-flight
+lease by itself: the matching fenced worker result or connection teardown must
+first prove that execution ended. A cancellation that wins before dispatch can
+release immediately. Producer-triggered evidence is keyed by an opaque
+producer scope, so
 one producer cannot open or penalize another producer's route. Relay-observed
 node disconnects use a separate global scope because they affect every caller.
-A successful result closes the matching producer circuit and any global
-circuit for that route. Producer-policy, budget, artifact, cancellation,
-capacity, and planned-drain failures do not poison route health. Workers cannot
-forge or clear this state through a heartbeat. `route explain` exposes
-`failure_streak`, `circuit_open_until`, and the stable rejection reason
-`route_circuit_open`, without exposing provider error text, owner scopes, or
-another producer's route labels.
+Producer-policy, budget, artifact, cancellation, capacity, and planned-drain
+failures do not poison route health. Workers cannot forge or clear this state
+through a heartbeat. `route explain` exposes `failure_streak`,
+`circuit_open_until`, `recovery_probation`, and the stable rejection reasons
+`route_circuit_open` / `route_probe_in_flight`, without exposing provider error
+text, owner scopes, or another producer's route labels.
 
 ## Draining a worker
 
@@ -131,9 +144,9 @@ heartbeat receipt, not a time-synchronization guarantee.
 Administrators and read-only observers may scrape `GET /metrics` with the
 same bearer authentication as the relay API. Producers and anonymous callers
 are denied. The endpoint exports only fixed-cardinality pool aggregates:
-node/slot/job state, open-circuit count, retained compute time, and retained
-token counts. It never uses tenant, job, node, provider, model, prompt, or
-error text as a metric label.
+node/slot/job state, open/probation circuit counts, retained compute time, and
+retained token counts. It never uses tenant, job, node, provider, model,
+prompt, or error text as a metric label.
 
 ```sh
 curl -fsS \

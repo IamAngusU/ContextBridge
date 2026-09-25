@@ -305,6 +305,26 @@ func TestRoutingDecisionCannotBeAttachedToAnotherNode(t *testing.T) {
 	}
 }
 
+func TestRoutingDecisionRejectsForgedRouteIdentity(t *testing.T) {
+	store, err := OpenStore(t.TempDir() + "/relay.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	requirements := Requirements{Task: "generation", Provider: "ollama", Model: "model-a"}
+	job, err := store.CreateJob(SubmitRequest{Requirements: requirements, Payload: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision := RoutingDecision{
+		Requirements: requirements, RouteKey: strings.Repeat("a", 64), SelectedNodeID: "node-a",
+		Candidates: []RoutingCandidateDecision{{NodeID: "node-a", Eligible: true}},
+	}
+	if _, err := store.AssignJobWithDecision(job.ID, "node-a", decision); err == nil || !strings.Contains(err.Error(), "route identity") {
+		t.Fatalf("forged routing identity was accepted: %v", err)
+	}
+}
+
 func TestRoutingDecisionRequiresSelectedEligibleCandidate(t *testing.T) {
 	store, err := OpenStore(t.TempDir() + "/relay.db")
 	if err != nil {

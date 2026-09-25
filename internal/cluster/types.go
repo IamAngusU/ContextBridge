@@ -222,18 +222,29 @@ type Node struct {
 	RoutingHealth []RoutingHealth `json:"routing_health,omitempty"`
 }
 
-// RoutingHealth is keyed by an opaque producer scope plus normalized provider
-// and model labels from an admitted job. An empty owner scope is reserved for
-// relay-observed node-wide failures. It never contains provider error text,
-// prompts, tenant identifiers, or other unbounded worker-controlled data.
+// RoutingHealth is keyed by an opaque producer scope plus an opaque execution
+// route fingerprint. Provider and model remain only as bounded operator-facing
+// diagnostics. An empty owner scope is reserved for relay-observed node-wide
+// failures. It never contains provider error text, prompts, tenant identifiers,
+// session identifiers, or other unbounded worker-controlled data.
 type RoutingHealth struct {
-	OwnerScope          string    `json:"owner_scope,omitempty"`
+	OwnerScope string `json:"owner_scope,omitempty"`
+	// RouteKey is an opaque relay-derived fingerprint of the execution route.
+	// It keeps adapter profiles, reasoning modes, endpoint/session constraints,
+	// and task kinds independent without persisting their potentially sensitive
+	// or attacker-controlled raw values in relay health state.
+	RouteKey            string    `json:"route_key"`
 	Provider            string    `json:"provider"`
 	Model               string    `json:"model"`
 	ConsecutiveFailures uint32    `json:"consecutive_failures"`
 	LastFailureCode     string    `json:"last_failure_code,omitempty"`
 	LastFailureAt       time.Time `json:"last_failure_at,omitempty"`
 	CircuitOpenUntil    time.Time `json:"circuit_open_until,omitempty"`
+	// ProbeJobID is a durable relay-owned single-flight lease while a route is
+	// in recovery probation. ProbeOwnerScope identifies which producer may
+	// resolve a node-wide probe without exposing the producer identity.
+	ProbeJobID      string `json:"probe_job_id,omitempty"`
+	ProbeOwnerScope string `json:"probe_owner_scope,omitempty"`
 }
 
 type Usage struct {

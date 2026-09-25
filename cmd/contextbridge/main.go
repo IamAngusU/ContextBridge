@@ -1593,7 +1593,11 @@ func printRoutingDecision(decision cluster.RoutingDecision) {
 	fmt.Println("]")
 	for _, candidate := range decision.Candidates {
 		if candidate.Eligible {
-			fmt.Printf("  ✓ %s  [score %.2f]  %s\n", emptyLabel(candidate.NodeName, candidate.NodeID), candidate.Score, routingScoreSummary(candidate.ScoreComponents))
+			detail := routingScoreSummary(candidate.ScoreComponents)
+			if candidate.RecoveryProbation {
+				detail += " · single recovery probe"
+			}
+			fmt.Printf("  ✓ %s  [score %.2f]  %s\n", emptyLabel(candidate.NodeName, candidate.NodeID), candidate.Score, detail)
 			continue
 		}
 		details := append([]string(nil), candidate.RejectionReasons...)

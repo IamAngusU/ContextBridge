@@ -115,6 +115,21 @@ func (s *Store) PruneRetention(now time.Time, policy RetentionPolicy) (Retention
 	}
 	cutoff := now.Add(-policy.MaxAge)
 	err := s.db.Update(func(tx *bolt.Tx) error {
+		activeProbeJobs := map[string]struct{}{}
+		if err := tx.Bucket(bucketNodes).ForEach(func(_, value []byte) error {
+			var node Node
+			if err := json.Unmarshal(value, &node); err != nil {
+				return err
+			}
+			for _, health := range node.RoutingHealth {
+				if health.ProbeJobID != "" {
+					activeProbeJobs[health.ProbeJobID] = struct{}{}
+				}
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
 		jobKeep, err := newestTerminalJobs(tx.Bucket(bucketJobs), cutoff, policy.MaxTerminalJobs)
 		if err != nil {
 			return err
@@ -141,6 +156,9 @@ func (s *Store) PruneRetention(now time.Time, policy RetentionPolicy) (Retention
 				return errors.New("job record key does not match its id")
 			}
 			if !terminalJobStatus(job.Status) {
+				continue
+			}
+			if _, activeProbe := activeProbeJobs[job.ID]; activeProbe {
 				continue
 			}
 			// A cancelled adapter execution can remain active until its matching

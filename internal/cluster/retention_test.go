@@ -156,6 +156,36 @@ func TestRetentionPrunesOnlyDetailedTerminalHistoryAndKeepsLifetimeTotals(t *tes
 	}
 }
 
+func TestRetentionKeepsCancelledRoutingRecoveryProbeUntilExecutionEnds(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
+	job := retentionJob("cancelled-route-probe", JobCancelled, now.Add(-40*24*time.Hour), 1)
+	job.AssignedNode = "node-a"
+	putRetentionJob(t, store, job)
+	if err := store.db.Update(func(tx *bolt.Tx) error {
+		return putJSON(tx.Bucket(bucketNodes), "node-a", Node{ID: "node-a", RoutingHealth: []RoutingHealth{{
+			RouteKey: strings.Repeat("a", 64), ProbeJobID: job.ID, ConsecutiveFailures: routingFailureThreshold,
+		}}})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	policy := RetentionPolicy{MaxAge: 30 * 24 * time.Hour, MaxTerminalJobs: 1, MaxEvents: 1, MaxTerminalPipelineRuns: 1, MaxSessionPlacements: 1}
+	removed, err := store.PruneRetention(now, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed.Jobs != 0 {
+		t.Fatalf("retention pruned an execution-bound probe: %#v", removed)
+	}
+	if _, err := store.GetJob(job.ID); err != nil {
+		t.Fatalf("execution-bound probe tombstone was removed: %v", err)
+	}
+}
+
 func TestRetentionBoundsSessionPlacementsByAgeAndCount(t *testing.T) {
 	store, err := OpenStore(filepath.Join(t.TempDir(), "relay.db"))
 	if err != nil {
