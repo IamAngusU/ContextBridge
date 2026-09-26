@@ -66,6 +66,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: bash scripts/test-reference-clients.sh
 
+  release-readme-compatibility:
+    name: Published release and README compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: pwsh -NoProfile -File scripts/test-release-readme-compatibility.ps1
+
   release-reproducibility:
     name: Reproducible release and SBOM
     runs-on: ubuntu-latest
