@@ -168,6 +168,27 @@ func TestPerformanceLearningRequiresFreshBoundedEvidence(t *testing.T) {
 	}
 }
 
+func TestPlacementLearningDoesNotReviveExpiredAggregateState(t *testing.T) {
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	requirements := Requirements{Task: "generation", Provider: "ollama", Model: "same"}
+	node := Node{ID: "node"}
+	for index := 0; index < 5; index++ {
+		recordRoutingPerformance(&node, requirements, "", 40000, now.Add(-30*24*time.Hour+time.Duration(index)*time.Minute), "idle:cold")
+	}
+	recordRoutingPerformance(&node, requirements, "", 1000, now, "idle:cold")
+	policy := DefaultPlacementPolicy()
+	if _, ok := routingPerformanceEstimateFor(node, requirements, "idle:cold", policy, now.Add(time.Minute)); ok {
+		t.Fatal("one fresh completion revived expired placement evidence")
+	}
+	for index := 0; index < int(policy.MinimumSamples)-1; index++ {
+		recordRoutingPerformance(&node, requirements, "", 1000, now.Add(time.Duration(index+1)*time.Second), "idle:cold")
+	}
+	estimate, ok := routingPerformanceEstimateFor(node, requirements, "idle:cold", policy, now.Add(time.Minute))
+	if !ok || estimate.Samples != policy.MinimumSamples || estimate.EWMAComputeMS != 1000 {
+		t.Fatalf("fresh placement evidence was unavailable or contaminated: %#v ok=%v", estimate, ok)
+	}
+}
+
 func TestPerformanceEWMAIsBoundedAndRecordsAreCapped(t *testing.T) {
 	now := time.Now().UTC()
 	node := Node{}

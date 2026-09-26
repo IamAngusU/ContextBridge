@@ -75,6 +75,80 @@ func TestHistoricalRuntimeEstimateRequiresFreshBoundedSuccessfulEvidence(t *test
 	}
 }
 
+func TestExpiredRuntimeSamplesCannotBeRevivedByOneFreshCompletion(t *testing.T) {
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	requirements := Requirements{Task: "generation", Provider: "ollama", Model: "qwen-test"}
+	node := Node{ID: "node-estimate"}
+	for index := 0; index < MinimumRuntimeEstimateSamples; index++ {
+		// These deliberately extreme values must never influence a fresh
+		// distribution after their individual timestamps expire.
+		recordRoutingPerformance(&node, requirements, "", 90000+uint64(index), now.Add(-30*24*time.Hour+time.Duration(index)*time.Minute), "idle:warm")
+	}
+	job := Job{Status: JobAssigned, Requirements: requirements, AssignedNode: node.ID}
+	if got := EstimateJobRuntimeAt(job, node, DefaultPlacementPolicy(), now); got.Status != "unavailable" {
+		t.Fatalf("expired distribution produced an estimate: %#v", got)
+	}
+
+	recordRoutingPerformance(&node, requirements, "", 1000, now.Add(-4*time.Minute), "idle:warm")
+	if got := EstimateJobRuntimeAt(job, node, DefaultPlacementPolicy(), now); got.Status != "unavailable" {
+		t.Fatalf("one fresh completion revived expired route evidence: %#v", got)
+	}
+	routeKey, _, _ := routingHealthKey(requirements)
+	job.RoutingDecision = &RoutingDecision{
+		RouteKey: routeKey, SelectedNodeID: node.ID,
+		Candidates: []RoutingCandidateDecision{{NodeID: node.ID, Eligible: true, PerformanceContext: "idle:warm"}},
+	}
+	if got := EstimateJobRuntimeAt(job, node, DefaultPlacementPolicy(), now); got.Status != "unavailable" {
+		t.Fatalf("one fresh completion revived expired load-profile evidence: %#v", got)
+	}
+
+	for index, duration := range []uint64{1100, 1200, 1300, 1400} {
+		recordRoutingPerformance(&node, requirements, "", duration, now.Add(time.Duration(index-3)*time.Minute), "idle:warm")
+	}
+	estimate := EstimateJobRuntimeAt(job, node, DefaultPlacementPolicy(), now)
+	if estimate.Status != "available" || estimate.Samples != 5 || estimate.TotalP50MS != 1200 || estimate.TotalP90MS != 1400 {
+		t.Fatalf("fresh distribution was unavailable or contaminated by expired outliers: %#v", estimate)
+	}
+}
+
+func TestRuntimeSampleFreshnessSurvivesStoreRestart(t *testing.T) {
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	requirements := Requirements{Task: "generation", Provider: "ollama", Model: "qwen-test"}
+	node := Node{ID: "node-persisted"}
+	for index := 0; index < MinimumRuntimeEstimateSamples; index++ {
+		recordRoutingPerformance(&node, requirements, "", 90000, now.Add(-30*24*time.Hour+time.Duration(index)*time.Minute), "")
+	}
+	recordRoutingPerformance(&node, requirements, "", 1000, now, "")
+
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.Update(func(tx *bolt.Tx) error {
+		return putJSON(tx.Bucket(bucketNodes), node.ID, node)
+	}); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	nodes, err := store.ListNodes()
+	if err != nil || len(nodes) != 1 {
+		t.Fatalf("persisted node unavailable after restart: nodes=%#v err=%v", nodes, err)
+	}
+	job := Job{Status: JobAssigned, Requirements: requirements, AssignedNode: node.ID}
+	if got := EstimateJobRuntimeAt(job, nodes[0], DefaultPlacementPolicy(), now.Add(time.Minute)); got.Status != "unavailable" {
+		t.Fatalf("restart revived expired duration evidence: %#v", got)
+	}
+}
+
 func TestRoutingDurationHistoryIsBoundedAndCopied(t *testing.T) {
 	values := []uint64{99, 0}
 	for index := 1; index <= MaximumRoutingDurationSamples+10; index++ {
@@ -87,6 +161,22 @@ func TestRoutingDurationHistoryIsBoundedAndCopied(t *testing.T) {
 	bounded[0] = 1
 	if values[len(values)-MaximumRoutingDurationSamples] == 1 {
 		t.Fatal("bounded duration history retained caller alias")
+	}
+}
+
+func TestTimestampedRoutingDurationHistoryIsBoundedAndCopied(t *testing.T) {
+	now := time.Now().UTC()
+	values := []RoutingDurationSample{{ComputeMS: 99}, {CompletedAt: now}}
+	for index := 1; index <= MaximumRoutingDurationSamples+10; index++ {
+		values = append(values, RoutingDurationSample{ComputeMS: uint64(index), CompletedAt: now.Add(time.Duration(index) * time.Second)})
+	}
+	bounded := boundedRoutingDurationSamples(values)
+	if len(bounded) != MaximumRoutingDurationSamples || bounded[0].ComputeMS != 11 || bounded[len(bounded)-1].ComputeMS != MaximumRoutingDurationSamples+10 {
+		t.Fatalf("unexpected bounded timestamped history: %#v", bounded)
+	}
+	bounded[0].ComputeMS = 1
+	if values[len(values)-MaximumRoutingDurationSamples].ComputeMS == 1 {
+		t.Fatal("bounded timestamped history retained caller alias")
 	}
 }
 

@@ -115,25 +115,34 @@ func runtimeDistributionFor(node Node, job Job, policy PlacementPolicy, now time
 		}
 		if validRoutingPerformanceContext(contextClass) {
 			for _, profile := range record.LoadProfiles {
-				if profile.ContextClass == contextClass && freshRuntimeDistribution(profile.RecentSuccessMS, profile.LastCompletedAt, minimum, policy.HistoryTTL, now) {
-					return runtimeDistribution{values: boundedDurationSamples(profile.RecentSuccessMS), lastCompletedAt: profile.LastCompletedAt, profile: "node_route_load"}, true
+				if profile.ContextClass == contextClass {
+					if values, lastCompletedAt, ok := freshRuntimeDistribution(profile.RecentSuccessSamples, minimum, policy.HistoryTTL, now); ok {
+						return runtimeDistribution{values: values, lastCompletedAt: lastCompletedAt, profile: "node_route_load"}, true
+					}
 				}
 			}
 		}
-		if freshRuntimeDistribution(record.RecentSuccessMS, record.LastCompletedAt, minimum, policy.HistoryTTL, now) {
-			return runtimeDistribution{values: boundedDurationSamples(record.RecentSuccessMS), lastCompletedAt: record.LastCompletedAt, profile: "node_route"}, true
+		if values, lastCompletedAt, ok := freshRuntimeDistribution(record.RecentSuccessSamples, minimum, policy.HistoryTTL, now); ok {
+			return runtimeDistribution{values: values, lastCompletedAt: lastCompletedAt, profile: "node_route"}, true
 		}
 	}
 	return runtimeDistribution{}, false
 }
 
-func freshRuntimeDistribution(values []uint64, lastCompletedAt time.Time, minimum int, ttl time.Duration, now time.Time) bool {
-	values = boundedDurationSamples(values)
-	if len(values) < minimum || lastCompletedAt.IsZero() {
-		return false
+func freshRuntimeDistribution(samples []RoutingDurationSample, minimum int, ttl time.Duration, now time.Time) ([]uint64, time.Time, bool) {
+	samples = freshRoutingDurationSamples(samples, ttl, now)
+	if len(samples) < minimum {
+		return nil, time.Time{}, false
 	}
-	age := now.Sub(lastCompletedAt)
-	return age >= 0 && age <= ttl
+	values := make([]uint64, 0, len(samples))
+	var lastCompletedAt time.Time
+	for _, sample := range samples {
+		values = append(values, sample.ComputeMS)
+		if sample.CompletedAt.After(lastCompletedAt) {
+			lastCompletedAt = sample.CompletedAt
+		}
+	}
+	return values, lastCompletedAt, true
 }
 
 func durationQuantile(sorted []uint64, percentile int) uint64 {
