@@ -55,6 +55,9 @@ func TestProtocolManifestIsDeterministicAndNamesPublicBoundaries(t *testing.T) {
 	if !containsString(first.Features, "authoritative_pipeline_events_v1") {
 		t.Fatalf("authoritative pipeline event feature is not advertised: %#v", first.Features)
 	}
+	if !containsString(first.Features, "bounded_execution_event_sse_v1") || first.Limits.MaximumExecutionEventStreams != maximumExecutionEventStreams || first.Limits.MaximumEventStreamsPerSubject != maximumEventStreamsPerSubject {
+		t.Fatalf("bounded event SSE feature is not advertised: %#v %#v", first.Features, first.Limits)
+	}
 }
 
 func containsString(values []string, wanted string) bool {

@@ -13,6 +13,36 @@ job identities:
 GET /v1/cluster/pipeline-runs/RUN_ID/events?after=SEQUENCE&limit=100
 ```
 
+Applications that need live delivery can watch the same durable records over
+bounded server-sent events (SSE):
+
+```text
+GET /v1/cluster/jobs/JOB_ID/events/stream?after=SEQUENCE
+GET /v1/cluster/pipeline-runs/RUN_ID/events/stream?after=SEQUENCE
+Accept: text/event-stream
+```
+
+Each execution event uses its durable sequence as the SSE `id` and its stable
+event type as the SSE `event`. Reconnect with either `after=N` or the standard
+`Last-Event-ID: N` header; an explicit query cursor takes precedence. The
+stream closes after a terminal lifecycle event or after a bounded 30-second
+watch window, so clients reconnect instead of consuming an immortal relay
+goroutine. It emits keepalive comments, never synthetic progress.
+
+If retention removed events before the requested cursor, the response sets
+`X-ContextBridge-Event-Gap: true` and emits one `contextbridge.gap` transport
+control record before replaying the oldest retained execution event. That
+control record is not an execution event and has no event sequence. Clients
+must use the terminal Job or PipelineRun record as the ultimate truth after a
+gap. At most 64 event watches are live per relay and at most eight per token
+subject; excess requests receive `503` plus `Retry-After` rather than letting
+one credential or many slow clients create unbounded memory or goroutines.
+
+SSE is only an additive delivery surface. It applies the same bearer-token,
+role and producer-ownership checks as bounded polling, contains the same
+content-minimizing event JSON, and does not stream incremental result content
+(which remains a separate contract).
+
 The endpoint accepts administrator and observer credentials. A producer may
 read only events for its own job. Responses use `contextbridge.event.v1` and a
 relay-assigned monotonic sequence per job:

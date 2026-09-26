@@ -71,6 +71,8 @@ const (
 	maximumWorkerControlBytes     = 64 << 10
 	maximumJobHistoryPage         = 200
 	jobHistoryWriteTimeout        = 10 * time.Second
+	maximumExecutionEventStreams  = 64
+	maximumEventStreamsPerSubject = 8
 	maximumWorkerReconnects       = 12
 	workerReconnectWindow         = time.Minute
 	maximumHeartbeatBurst         = 1000
@@ -79,31 +81,34 @@ const (
 )
 
 type Relay struct {
-	cfg             RelayConfig
-	store           *Store
-	authority       RelayAuthority
-	logger          *log.Logger
-	mu              sync.RWMutex
-	workers         map[string]*workerConnection
-	rateMu          sync.Mutex
-	rate            map[string]*rateWindow
-	rateLastSweep   time.Time
-	workerRateMu    sync.Mutex
-	workerRate      map[string]*rateWindow
-	workerRateSweep time.Time
-	wake            chan struct{}
-	maintenanceMu   sync.Mutex
-	nextMaintenance time.Time
-	retentionMu     sync.Mutex
-	nextRetention   time.Time
-	fairnessMu      sync.Mutex
-	lastOwner       map[int]string
-	queueScanAfter  []byte
-	lifecycleMu     sync.RWMutex
-	lifecycleCtx    context.Context
-	pipelineWG      sync.WaitGroup
-	admissionMu     sync.RWMutex
-	quiescing       bool
+	cfg              RelayConfig
+	store            *Store
+	authority        RelayAuthority
+	logger           *log.Logger
+	mu               sync.RWMutex
+	workers          map[string]*workerConnection
+	rateMu           sync.Mutex
+	rate             map[string]*rateWindow
+	rateLastSweep    time.Time
+	workerRateMu     sync.Mutex
+	workerRate       map[string]*rateWindow
+	workerRateSweep  time.Time
+	wake             chan struct{}
+	maintenanceMu    sync.Mutex
+	nextMaintenance  time.Time
+	retentionMu      sync.Mutex
+	nextRetention    time.Time
+	fairnessMu       sync.Mutex
+	lastOwner        map[int]string
+	queueScanAfter   []byte
+	lifecycleMu      sync.RWMutex
+	lifecycleCtx     context.Context
+	pipelineWG       sync.WaitGroup
+	admissionMu      sync.RWMutex
+	quiescing        bool
+	eventStreamSlots chan struct{}
+	eventStreamMu    sync.Mutex
+	eventStreams     map[string]int
 }
 
 type heartbeatRateWindow struct {
@@ -437,7 +442,7 @@ func NewRelay(cfg RelayConfig, logger *log.Logger) (*Relay, error) {
 	if logger == nil {
 		logger = log.Default()
 	}
-	return &Relay{cfg: cfg, store: store, authority: authority, logger: logger, workers: map[string]*workerConnection{}, rate: map[string]*rateWindow{}, workerRate: map[string]*rateWindow{}, wake: make(chan struct{}, 1), nextRetention: now.Add(cfg.RetentionSweep), lastOwner: map[int]string{}}, nil
+	return &Relay{cfg: cfg, store: store, authority: authority, logger: logger, workers: map[string]*workerConnection{}, rate: map[string]*rateWindow{}, workerRate: map[string]*rateWindow{}, wake: make(chan struct{}, 1), nextRetention: now.Add(cfg.RetentionSweep), lastOwner: map[int]string{}, eventStreamSlots: make(chan struct{}, maximumExecutionEventStreams), eventStreams: map[string]int{}}, nil
 }
 
 func applyRetentionDefaults(cfg *RelayConfig) error {
@@ -505,6 +510,7 @@ func (r *Relay) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/cluster/contracts/validate", r.authorize("admin", "producer")(r.handleContractValidate))
 	mux.HandleFunc("GET /v1/cluster/jobs/{id}", r.authorize("admin", "observer", "producer")(r.handleJob))
 	mux.HandleFunc("GET /v1/cluster/jobs/{id}/events", r.authorize("admin", "observer", "producer")(r.handleJobEvents))
+	mux.HandleFunc("GET /v1/cluster/jobs/{id}/events/stream", r.authorize("admin", "observer", "producer")(r.handleJobEventStream))
 	mux.HandleFunc("GET /v1/cluster/jobs/{id}/route", r.authorize("admin", "observer", "producer")(r.handleJobRoute))
 	mux.HandleFunc("DELETE /v1/cluster/jobs/{id}", r.authorize("admin", "producer")(r.handleCancel))
 	mux.HandleFunc("POST /v1/cluster/assign", r.authorize("admin", "producer")(r.handleReserve))
@@ -515,6 +521,7 @@ func (r *Relay) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/cluster/pipelines/{name}/run", r.authorize("admin", "producer")(r.handlePipelineRun))
 	mux.HandleFunc("GET /v1/cluster/pipeline-runs/{id}", r.authorize("admin", "observer", "producer")(r.handlePipelineRunStatus))
 	mux.HandleFunc("GET /v1/cluster/pipeline-runs/{id}/events", r.authorize("admin", "observer", "producer")(r.handlePipelineRunEvents))
+	mux.HandleFunc("GET /v1/cluster/pipeline-runs/{id}/events/stream", r.authorize("admin", "observer", "producer")(r.handlePipelineRunEventStream))
 	return secureHeaders(mux)
 }
 

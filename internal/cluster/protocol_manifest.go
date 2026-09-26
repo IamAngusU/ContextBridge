@@ -27,6 +27,8 @@ type ProtocolLimits struct {
 	MaximumRoutingHealthPerOwner     int   `json:"maximum_routing_health_records_per_owner"`
 	MaximumRoutingPerformanceRecords int   `json:"maximum_routing_performance_records"`
 	MaximumRoutingLoadProfiles       int   `json:"maximum_routing_load_profiles_per_route"`
+	MaximumExecutionEventStreams     int   `json:"maximum_execution_event_streams"`
+	MaximumEventStreamsPerSubject    int   `json:"maximum_execution_event_streams_per_subject"`
 }
 
 func CurrentProtocolManifest(configuredJobBytes int64) ProtocolManifest {
@@ -41,6 +43,7 @@ func CurrentProtocolManifest(configuredJobBytes int64) ProtocolManifest {
 			"assignment_fencing_v1",
 			"authoritative_job_events_v1",
 			"authoritative_pipeline_events_v1",
+			"bounded_execution_event_sse_v1",
 			"content_minimizing_execution_receipts",
 			"durable_execution_policy_v1",
 			"durable_worker_drain_v1",
@@ -75,6 +78,8 @@ func CurrentProtocolManifest(configuredJobBytes int64) ProtocolManifest {
 			MaximumRoutingHealthPerOwner:     MaximumRoutingHealthRecordsPerOwner,
 			MaximumRoutingPerformanceRecords: MaximumRoutingPerformanceRecords,
 			MaximumRoutingLoadProfiles:       MaximumRoutingLoadProfilesPerRoute,
+			MaximumExecutionEventStreams:     maximumExecutionEventStreams,
+			MaximumEventStreamsPerSubject:    maximumEventStreamsPerSubject,
 		},
 	}
 }
