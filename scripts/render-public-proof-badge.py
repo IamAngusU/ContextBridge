@@ -21,7 +21,7 @@ import urllib.request
 from pathlib import Path
 
 BADGE_DESIGN_SOURCE = "IamAngusU/Badges"
-BADGE_DESIGN_SOURCE_COMMIT = "000735f88f3258b183db7221eb46213941a2bc52"
+BADGE_DESIGN_SOURCE_COMMIT = "4b262f6afbbbc2bc1b22370ae2cde547c19fd9d8"
 TEMPLATE_PATH = (
     Path(__file__).resolve().parents[1]
     / "docs"
@@ -90,10 +90,10 @@ def render_segments(statuses: list[str]) -> str:
         statuses = ["neutral"]
     left = 101.0
     right = 456.0
-    gap = 4.0
+    gap = 8.0
     segment = (right - left - gap * (len(statuses) - 1)) / len(statuses)
     if segment < 3:
-        gap = 1.5
+        gap = 3.0
         segment = (right - left - gap * (len(statuses) - 1)) / len(statuses)
     if segment <= 0:
         raise SystemExit("too many CI jobs for the public proof rail")
