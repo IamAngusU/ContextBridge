@@ -15,18 +15,27 @@ import (
 )
 
 const (
-	MarkerName       = ".contextbridge-pack.json"
-	SidecarDirectory = ".contextbridge-resources"
+	MarkerName        = ".contextbridge-pack.json"
+	SidecarDirectory  = ".contextbridge-resources"
+	maxEntriesPerRoot = 512
 )
 
-const maximumManifestBytes int64 = 64 << 10
+const (
+	maximumManifestBytes     int64 = 64 << 10
+	defaultMaxScanCandidates       = 4096
+	maximumMaxScanCandidates       = 32768
+	maximumReturnedPacks           = 128
+)
+
+var ErrScanCandidateLimit = errors.New("portable resource scan candidate limit reached")
 
 var safeID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 type Settings struct {
-	Enabled   bool
-	ScanRoots []string
-	MaxPacks  int
+	Enabled           bool
+	ScanRoots         []string
+	MaxPacks          int
+	MaxScanCandidates int
 }
 
 type Manifest struct {
@@ -69,6 +78,23 @@ func Discover(settings Settings) ([]Pack, error) {
 	if settings.MaxPacks <= 0 {
 		settings.MaxPacks = 32
 	}
+	if settings.MaxPacks > maximumReturnedPacks {
+		return nil, fmt.Errorf("portable resource max packs exceeds %d", maximumReturnedPacks)
+	}
+	if settings.MaxScanCandidates <= 0 {
+		settings.MaxScanCandidates = defaultMaxScanCandidates
+	}
+	if settings.MaxScanCandidates > maximumMaxScanCandidates {
+		return nil, fmt.Errorf("portable resource max scan candidates exceeds %d", maximumMaxScanCandidates)
+	}
+	remainingCandidates := settings.MaxScanCandidates
+	takeCandidate := func() error {
+		if remainingCandidates == 0 {
+			return fmt.Errorf("%w (%d)", ErrScanCandidateLimit, settings.MaxScanCandidates)
+		}
+		remainingCandidates--
+		return nil
+	}
 	roots := append([]string(nil), settings.ScanRoots...)
 	explicit := len(roots) > 0
 	if !explicit {
@@ -101,25 +127,30 @@ func Discover(settings Settings) ([]Pack, error) {
 			}
 			continue
 		}
-		candidates := []string{absolute}
-		entries, readErr := os.ReadDir(absolute)
+		if err := takeCandidate(); err != nil {
+			return nil, err
+		}
+		if pack, ok := readPack(absolute); ok {
+			packs = append(packs, pack)
+		}
+		entries, limited, readErr := readDirectoryBounded(absolute, maxEntriesPerRoot)
+		if limited {
+			return nil, fmt.Errorf("%w: root %s exceeds %d direct entries", ErrScanCandidateLimit, absolute, maxEntriesPerRoot)
+		}
 		if readErr == nil {
-			for index, entry := range entries {
-				if index >= 512 {
-					break
-				}
+			for _, entry := range entries {
 				if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
 					continue
 				}
-				candidates = append(candidates, filepath.Join(absolute, entry.Name()))
+				if err := takeCandidate(); err != nil {
+					return nil, err
+				}
+				pack, ok := readPack(filepath.Join(absolute, entry.Name()))
+				if !ok {
+					continue
+				}
+				packs = append(packs, pack)
 			}
-		}
-		for _, candidate := range candidates {
-			pack, ok := readPack(candidate)
-			if !ok {
-				continue
-			}
-			packs = append(packs, pack)
 		}
 		// A sealed or checksum-verified resource tree must not be modified merely
 		// to advertise it. Such volumes can keep bounded sidecar manifests at the
@@ -130,16 +161,19 @@ func Discover(settings Settings) ([]Pack, error) {
 		if sidecarErr != nil || !sidecarInfo.IsDir() || sidecarInfo.Mode()&os.ModeSymlink != 0 {
 			continue
 		}
-		sidecars, sidecarReadErr := os.ReadDir(sidecarRoot)
+		sidecars, limited, sidecarReadErr := readDirectoryBounded(sidecarRoot, maxEntriesPerRoot)
+		if limited {
+			return nil, fmt.Errorf("%w: sidecar directory %s exceeds %d entries", ErrScanCandidateLimit, sidecarRoot, maxEntriesPerRoot)
+		}
 		if sidecarReadErr != nil {
 			continue
 		}
-		for index, entry := range sidecars {
-			if index >= 512 {
-				break
-			}
+		for _, entry := range sidecars {
 			if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !strings.EqualFold(filepath.Ext(entry.Name()), ".json") {
 				continue
+			}
+			if err := takeCandidate(); err != nil {
+				return nil, err
 			}
 			pack, ok := readSidecarPack(absolute, filepath.Join(sidecarRoot, entry.Name()))
 			if !ok {
@@ -152,7 +186,9 @@ func Discover(settings Settings) ([]Pack, error) {
 	// ambiguity, never as ordering authority: every manifest claiming the same
 	// case-insensitive ID is visible for diagnostics but ineligible for routing.
 	// Discovery remains bounded by the configured roots, 512 direct children
-	// per root, 512 sidecars per root, and MaxPacks returned diagnostics.
+	// per root, 512 sidecars per root, MaxScanCandidates inspected candidates,
+	// and MaxPacks returned diagnostics. Exhausting the global work envelope
+	// fails closed rather than presenting a partial identity set as exhaustive.
 	identityCounts := make(map[string]int, len(packs))
 	for _, pack := range packs {
 		identityCounts[strings.ToLower(pack.ID)]++
@@ -173,6 +209,27 @@ func Discover(settings Settings) ([]Pack, error) {
 		packs = packs[:settings.MaxPacks]
 	}
 	return packs, nil
+}
+
+// readDirectoryBounded avoids os.ReadDir's whole-directory materialization.
+// One extra entry makes truncation observable so discovery never treats a
+// partial untrusted identity set as complete.
+func readDirectoryBounded(path string, maximum int) ([]os.DirEntry, bool, error) {
+	// #nosec G304 -- path is an operator-selected or OS-enumerated root already
+	// Lstat-verified as a real non-symlink directory by Discover.
+	directory, err := os.Open(path)
+	if err != nil {
+		return nil, false, err
+	}
+	defer directory.Close()
+	entries, err := directory.ReadDir(maximum + 1)
+	if errors.Is(err, io.EOF) {
+		err = nil
+	}
+	if len(entries) > maximum {
+		return entries[:maximum], true, err
+	}
+	return entries, false, err
 }
 
 func Resolve(packs []Pack, packID, endpointID, engineType string) (Endpoint, bool) {
@@ -227,6 +284,8 @@ func readManifest(marker string) (Manifest, bool) {
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() <= 0 || info.Size() > maximumManifestBytes {
 		return Manifest{}, false
 	}
+	// #nosec G304 -- marker is derived only from a validated scan root/direct
+	// child or a fixed sidecar entry and is rechecked as a regular non-symlink.
 	file, err := os.Open(marker)
 	if err != nil {
 		return Manifest{}, false

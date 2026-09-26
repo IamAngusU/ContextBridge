@@ -1105,9 +1105,10 @@ func resourcesCommand(args []string) error {
 	}
 	enabled := cfg.Portable.Enabled != nil && *cfg.Portable.Enabled
 	packs, err := resourcepacks.Discover(resourcepacks.Settings{
-		Enabled:   enabled,
-		ScanRoots: append([]string(nil), cfg.Portable.ScanRoots...),
-		MaxPacks:  cfg.Portable.MaxPacks,
+		Enabled:           enabled,
+		ScanRoots:         append([]string(nil), cfg.Portable.ScanRoots...),
+		MaxPacks:          cfg.Portable.MaxPacks,
+		MaxScanCandidates: cfg.Portable.MaxScanCandidates,
 	})
 	if err != nil {
 		return err

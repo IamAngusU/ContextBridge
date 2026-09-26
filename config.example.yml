@@ -20,6 +20,7 @@ portable_resources:
   enabled: true # bounded marker discovery only; never auto-runs removable-drive code
   scan_roots: [] # empty = local fixed/removable volumes and common mount roots
   max_packs: 32
+  max_scan_candidates: 4096 # hard global work bound; exhaustion fails closed
 
 updates:
   enabled: null # off by default; enable from the dashboard or CLI

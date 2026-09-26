@@ -15,6 +15,13 @@ Discovery deliberately:
 - quarantines every case-insensitive duplicate pack ID instead of selecting a
   first match.
 
+`portable_resources.max_packs` limits returned packs. The independent
+`portable_resources.max_scan_candidates` (default 4096, maximum 32768) limits
+the total marker/sidecar candidates inspected across all roots. Reaching that
+work envelope is an explicit error and yields no partial pack set, because a
+later candidate could otherwise reveal an identity collision that changes
+which pack is safe to route.
+
 A drive letter is neither identity nor authority. Duplicate identity is
 ambiguous, so all colliding packs remain visible as diagnostics but none can be
 resolved for execution.

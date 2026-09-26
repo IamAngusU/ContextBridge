@@ -217,6 +217,17 @@ func LoadLANJoinBundle(path string) (LANJoinBundle, error) {
 	if err != nil {
 		return LANJoinBundle{}, err
 	}
+	return parseLANJoinBundle(raw, time.Now().UTC())
+}
+
+// parseLANJoinBundle keeps the transferred trust document's strict parser
+// independently fuzzable. The file-facing wrapper above remains responsible
+// for regular-file and symlink checks; this helper repeats the byte bound so a
+// future in-memory caller cannot accidentally bypass it.
+func parseLANJoinBundle(raw []byte, now time.Time) (LANJoinBundle, error) {
+	if len(raw) == 0 || int64(len(raw)) > maximumLANJoinBundleBytes {
+		return LANJoinBundle{}, errors.New("LAN join bundle is empty or exceeds its size limit")
+	}
 	var bundle LANJoinBundle
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
@@ -230,7 +241,7 @@ func LoadLANJoinBundle(path string) (LANJoinBundle, error) {
 		}
 		return LANJoinBundle{}, fmt.Errorf("parse LAN join bundle: %w", err)
 	}
-	if err := ValidateLANJoinBundle(bundle, time.Now().UTC()); err != nil {
+	if err := ValidateLANJoinBundle(bundle, now); err != nil {
 		return LANJoinBundle{}, err
 	}
 	return bundle, nil

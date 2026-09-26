@@ -69,9 +69,10 @@ type Terminal struct {
 // manifests on local fixed/removable volumes. A manifest may publish local
 // endpoints, but it can never ask ContextBridge to execute a program.
 type PortableResources struct {
-	Enabled   *bool    `yaml:"enabled" json:"enabled"`
-	ScanRoots []string `yaml:"scan_roots,omitempty" json:"scan_roots,omitempty"`
-	MaxPacks  int      `yaml:"max_packs,omitempty" json:"max_packs,omitempty"`
+	Enabled           *bool    `yaml:"enabled" json:"enabled"`
+	ScanRoots         []string `yaml:"scan_roots,omitempty" json:"scan_roots,omitempty"`
+	MaxPacks          int      `yaml:"max_packs,omitempty" json:"max_packs,omitempty"`
+	MaxScanCandidates int      `yaml:"max_scan_candidates,omitempty" json:"max_scan_candidates,omitempty"`
 }
 
 type Route struct {
@@ -483,6 +484,9 @@ func (c Config) Validate() error {
 	}
 	if c.Portable.MaxPacks < 1 || c.Portable.MaxPacks > 128 {
 		return errors.New("portable_resources.max_packs must be between 1 and 128")
+	}
+	if c.Portable.MaxScanCandidates < 1 || c.Portable.MaxScanCandidates > 32768 {
+		return errors.New("portable_resources.max_scan_candidates must be between 1 and 32768")
 	}
 	if len(c.Portable.ScanRoots) > 32 {
 		return errors.New("portable_resources.scan_roots accepts at most 32 paths")
@@ -1148,6 +1152,9 @@ func applyDefaults(cfg *Config, base string) {
 	if cfg.Portable.MaxPacks == 0 {
 		cfg.Portable.MaxPacks = 32
 	}
+	if cfg.Portable.MaxScanCandidates == 0 {
+		cfg.Portable.MaxScanCandidates = 4096
+	}
 	for index, root := range cfg.Portable.ScanRoots {
 		if strings.TrimSpace(root) != "" && !filepath.IsAbs(root) {
 			cfg.Portable.ScanRoots[index] = filepath.Join(base, root)
@@ -1484,6 +1491,7 @@ portable_resources:
   enabled: true # bounded marker discovery only; never auto-runs removable-drive code
   scan_roots: [] # empty = local fixed/removable volumes and common mount roots
   max_packs: 32
+  max_scan_candidates: 4096 # hard global work bound; exhaustion fails closed
 
 updates:
   enabled: null # off by default; enable from the dashboard or CLI

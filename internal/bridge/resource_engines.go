@@ -11,7 +11,12 @@ import (
 
 func resourcePackSettings(cfg config.Config) resourcepacks.Settings {
 	enabled := cfg.Portable.Enabled != nil && *cfg.Portable.Enabled
-	return resourcepacks.Settings{Enabled: enabled, ScanRoots: append([]string(nil), cfg.Portable.ScanRoots...), MaxPacks: cfg.Portable.MaxPacks}
+	return resourcepacks.Settings{
+		Enabled:           enabled,
+		ScanRoots:         append([]string(nil), cfg.Portable.ScanRoots...),
+		MaxPacks:          cfg.Portable.MaxPacks,
+		MaxScanCandidates: cfg.Portable.MaxScanCandidates,
+	}
 }
 
 func discoverResourcePacks(cfg config.Config) []resourcepacks.Pack {

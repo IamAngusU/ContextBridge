@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
@@ -81,6 +82,93 @@ func TestLANJoinBundleIsStrictAndHostBound(t *testing.T) {
 	if _, err := LoadLANJoinBundle(path); err == nil {
 		t.Fatal("multiple JSON values were accepted")
 	}
+}
+
+func TestLANJoinBundleTrustMutationsFailClosed(t *testing.T) {
+	now := time.Date(2026, time.September, 26, 8, 0, 0, 0, time.UTC)
+	directory := t.TempDir()
+	trust, err := EnsureLANTLSIdentity(filepath.Join(directory, "cert.pem"), filepath.Join(directory, "key.pem"), "127.0.0.1", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := LANJoinBundle{Version: LANJoinBundleVersion, RelayURL: "https://127.0.0.1:32151", Trust: trust, CreatedAt: now}
+	if err := ValidateLANJoinBundle(valid, now); err != nil {
+		t.Fatalf("valid bundle rejected: %v", err)
+	}
+	cases := map[string]LANJoinBundle{
+		"version":     valid,
+		"relay-host":  valid,
+		"fingerprint": valid,
+		"certificate": valid,
+	}
+	mutated := cases["version"]
+	mutated.Version++
+	cases["version"] = mutated
+	mutated = cases["relay-host"]
+	mutated.RelayURL = "https://localhost:32151"
+	cases["relay-host"] = mutated
+	mutated = cases["fingerprint"]
+	mutated.Trust.SPKISHA256 = "sha256:" + strings.Repeat("0", 64)
+	cases["fingerprint"] = mutated
+	mutated = cases["certificate"]
+	mutated.Trust.CertificatePEM = strings.Replace(mutated.Trust.CertificatePEM, "CERTIFICATE", "CERTIFICATX", 1)
+	cases["certificate"] = mutated
+	for name, bundle := range cases {
+		t.Run(name, func(t *testing.T) {
+			if err := ValidateLANJoinBundle(bundle, now); err == nil {
+				t.Fatal("trust-bearing mutation was accepted")
+			}
+		})
+	}
+}
+
+func FuzzParseLANJoinBundle(f *testing.F) {
+	now := time.Date(2026, time.September, 26, 8, 0, 0, 0, time.UTC)
+	directory := f.TempDir()
+	trust, err := EnsureLANTLSIdentity(filepath.Join(directory, "cert.pem"), filepath.Join(directory, "key.pem"), "127.0.0.1", now)
+	if err != nil {
+		f.Fatal(err)
+	}
+	bundle := LANJoinBundle{Version: LANJoinBundleVersion, RelayURL: "https://127.0.0.1:32151", Trust: trust, CreatedAt: now}
+	valid, err := json.Marshal(bundle)
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(valid)
+	f.Add(append(append([]byte(nil), valid...), []byte(`{"extra":true}`)...))
+	f.Add([]byte(`{"version":1,"relay_url":"http://127.0.0.1:32151"}`))
+	f.Add([]byte(`null`))
+	f.Fuzz(func(t *testing.T, raw []byte) {
+		parsed, err := parseLANJoinBundle(raw, now)
+		if err != nil {
+			return
+		}
+		if err := ValidateLANJoinBundle(parsed, now); err != nil {
+			t.Fatalf("parser returned an invalid trust document: %v", err)
+		}
+	})
+}
+
+func FuzzPinnedLANRelayTrust(f *testing.F) {
+	now := time.Date(2026, time.September, 26, 8, 0, 0, 0, time.UTC)
+	directory := f.TempDir()
+	trust, err := EnsureLANTLSIdentity(filepath.Join(directory, "cert.pem"), filepath.Join(directory, "key.pem"), "127.0.0.1", now)
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add("https://127.0.0.1:32151", trust.CertificatePEM, trust.SPKISHA256)
+	f.Add("http://127.0.0.1:32151", trust.CertificatePEM, trust.SPKISHA256)
+	f.Add("https://localhost:32151", trust.CertificatePEM, trust.SPKISHA256)
+	f.Add("https://127.0.0.1:32151", trust.CertificatePEM, "sha256:"+strings.Repeat("0", 64))
+	f.Fuzz(func(t *testing.T, relayURL, certificatePEM, fingerprint string) {
+		config, err := relayTLSConfig(relayURL, RelayTrust{CertificatePEM: certificatePEM, SPKISHA256: fingerprint}, now)
+		if err != nil {
+			return
+		}
+		if config.MinVersion != tls.VersionTLS13 || config.ServerName == "" || config.RootCAs == nil {
+			t.Fatalf("accepted trust returned a weakened TLS config: %#v", config)
+		}
+	})
 }
 
 func TestValidateLANListenerEndpointRejectsContradictions(t *testing.T) {

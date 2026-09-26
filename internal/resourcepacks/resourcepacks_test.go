@@ -1,8 +1,11 @@
 package resourcepacks
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -223,5 +226,82 @@ func TestDuplicateDiagnosticsCannotCrowdOutValidPack(t *testing.T) {
 	}
 	if _, ok := Resolve(packs, "portable.valid", "api", "service"); !ok {
 		t.Fatal("the bounded valid pack was not routable")
+	}
+}
+
+func TestDiscoveryCandidateBudgetFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"first", "second"} {
+		if err := os.Mkdir(filepath.Join(root, name), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	packs, err := Discover(Settings{
+		Enabled:           true,
+		ScanRoots:         []string{root},
+		MaxPacks:          1,
+		MaxScanCandidates: 1,
+	})
+	if !errors.Is(err, ErrScanCandidateLimit) {
+		t.Fatalf("candidate exhaustion was not observable: packs=%#v err=%v", packs, err)
+	}
+	if len(packs) != 0 {
+		t.Fatalf("partial discovery escaped a failed-closed scan: %#v", packs)
+	}
+}
+
+func TestDiscoveryPerRootEntryLimitIsObservable(t *testing.T) {
+	root := t.TempDir()
+	for index := 0; index <= maxEntriesPerRoot; index++ {
+		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("entry-%04d", index)), []byte("not a manifest"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	packs, err := Discover(Settings{
+		Enabled:           true,
+		ScanRoots:         []string{root},
+		MaxPacks:          1,
+		MaxScanCandidates: defaultMaxScanCandidates,
+	})
+	if !errors.Is(err, ErrScanCandidateLimit) || !strings.Contains(err.Error(), "direct entries") {
+		t.Fatalf("per-root truncation was not reported: packs=%#v err=%v", packs, err)
+	}
+	if len(packs) != 0 {
+		t.Fatalf("partial discovery escaped a truncated root: %#v", packs)
+	}
+}
+
+func TestDiscoveryRejectsInvalidProgrammaticBounds(t *testing.T) {
+	if _, err := Discover(Settings{Enabled: true, MaxPacks: maximumReturnedPacks + 1}); err == nil {
+		t.Fatal("oversized return bound was accepted")
+	}
+	if _, err := Discover(Settings{Enabled: true, MaxPacks: 1, MaxScanCandidates: maximumMaxScanCandidates + 1}); err == nil {
+		t.Fatal("oversized scan bound was accepted")
+	}
+}
+
+func BenchmarkDiscoverCandidateBudget(b *testing.B) {
+	for _, count := range []int{32, 128, 512} {
+		b.Run(fmt.Sprintf("candidates_%d", count), func(b *testing.B) {
+			root := b.TempDir()
+			for index := 0; index < count; index++ {
+				directory := filepath.Join(root, fmt.Sprintf("pack-%04d", index))
+				if err := os.Mkdir(directory, 0700); err != nil {
+					b.Fatal(err)
+				}
+				manifest := fmt.Sprintf(`{"schema_version":1,"id":"portable.%04d","name":"Portable"}`, index)
+				if err := os.WriteFile(filepath.Join(directory, MarkerName), []byte(manifest), 0600); err != nil {
+					b.Fatal(err)
+				}
+			}
+			settings := Settings{Enabled: true, ScanRoots: []string{root}, MaxPacks: 1, MaxScanCandidates: count + 1}
+			b.ResetTimer()
+			for iteration := 0; iteration < b.N; iteration++ {
+				packs, err := Discover(settings)
+				if err != nil || len(packs) != 1 {
+					b.Fatalf("discover = %d packs, %v", len(packs), err)
+				}
+			}
+		})
 	}
 }
