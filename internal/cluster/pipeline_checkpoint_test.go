@@ -21,7 +21,7 @@ func TestPipelineCheckpointFailureStopsBeforeExternalFollowup(t *testing.T) {
 	checkpointErr := errors.New("injected running checkpoint failure")
 	var failed atomic.Bool
 	relay.store.savePipelineRunTestHook = func(saved PipelineRun) error {
-		if saved.Status == "running" && len(saved.Steps) == 1 && failed.CompareAndSwap(false, true) {
+		if saved.Status == "running" && len(saved.Steps) == 1 && saved.Steps[0].Status == JobCompleted && failed.CompareAndSwap(false, true) {
 			return checkpointErr
 		}
 		return nil

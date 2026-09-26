@@ -31,6 +31,34 @@ func TestReadClusterAPIResponseAcceptsExactLimitAndRejectsOneByteMore(t *testing
 	}
 }
 
+func TestFormatActivityProjectionIsBoundedHonestAndUsesAuthoritativeTime(t *testing.T) {
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	projection := cluster.ActivityProjection{
+		Schema: cluster.ActivityProjectionV1, GroupID: "run-a", Kind: "pipeline", Name: "release", State: "running", CreatedAt: now.Add(-89 * time.Minute),
+		Items: []cluster.ActivityItem{
+			{ID: "publish", JobID: "job-a", State: "ambiguous", StartedAt: now.Add(-68 * time.Second), FinishedAt: now},
+			{ID: "render", JobID: "job-b", State: cluster.JobRunning, StartedAt: now.Add(-83 * time.Minute)},
+		},
+		Summary: cluster.ActivitySummary{Active: 1, Completed: 7, Ambiguous: 1}, DetailOverflow: 4, HistoryComplete: false,
+	}
+	got := formatActivityProjection(projection, now)
+	for _, want := range []string{
+		"WORK · pipeline release · running · 01h29m",
+		"? publish · ambiguous · 01m08s",
+		"● render · running · 01h23m",
+		"+ 4 more active/exception rows",
+		"✓ 7+ earlier steps completed",
+		"no exact missing count is inferred",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("activity view is missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "%") || strings.Contains(strings.ToLower(got), " eta ") {
+		t.Fatalf("activity view invented progress or ETA: %s", got)
+	}
+}
+
 func TestClusterSubmitUsesCompactResponsesForSubmitAndPoll(t *testing.T) {
 	var compactSubmit atomic.Bool
 	var compactPoll atomic.Bool

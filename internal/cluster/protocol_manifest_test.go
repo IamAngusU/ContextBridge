@@ -58,6 +58,9 @@ func TestProtocolManifestIsDeterministicAndNamesPublicBoundaries(t *testing.T) {
 	if !containsString(first.Features, "bounded_execution_event_sse_v1") || first.Limits.MaximumExecutionEventStreams != maximumExecutionEventStreams || first.Limits.MaximumEventStreamsPerSubject != maximumEventStreamsPerSubject {
 		t.Fatalf("bounded event SSE feature is not advertised: %#v %#v", first.Features, first.Limits)
 	}
+	if !containsString(first.Features, "bounded_active_work_projection_v1") {
+		t.Fatalf("bounded active-work projection is not advertised: %#v", first.Features)
+	}
 }
 
 func containsString(values []string, wanted string) bool {

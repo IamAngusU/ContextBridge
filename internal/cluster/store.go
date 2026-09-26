@@ -1448,6 +1448,21 @@ func (s *Store) GetJob(id string) (Job, error) {
 	return job, err
 }
 
+// GetJobSummary decodes only bounded lifecycle/routing metadata. Activity and
+// status projections must not allocate multi-megabyte prompt/result bodies
+// merely to render a child state.
+func (s *Store) GetJobSummary(id string) (Job, error) {
+	var record jobHistoryRecord
+	err := s.db.View(func(tx *bolt.Tx) error {
+		raw := tx.Bucket(bucketJobs).Get([]byte(id))
+		if raw == nil {
+			return os.ErrNotExist
+		}
+		return json.Unmarshal(raw, &record)
+	})
+	return record.Job(), err
+}
+
 // RecentSessionNode returns the worker most recently used by this producer's
 // logical session. A session is only an affinity hint: the relay can still use
 // another compatible worker when the previous one is offline.

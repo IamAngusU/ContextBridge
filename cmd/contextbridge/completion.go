@@ -109,7 +109,7 @@ $script:ContextBridgeOptions = @{
 	'selftest' = @('--config','--providers','--local-model','--run','--dry-run','--image','--image-profile','--artifacts','--keep-artifacts','--timeout','--job-timeout','--poll')
     'cluster configure' = @('--config','--mode','--relay-url','--public-url','--name','--listen','--interactive')
     'cluster dashboard' = @('--config','--no-open')
-    'cluster pipeline' = @('--config','--name','--file')
+    'cluster pipeline' = @('activity','--config','--name','--file','--token','--json')
     'cluster login' = @('--config','--token-file')
     'cluster token' = @('--config','--role','--subject','--groups','--lifetime-hours','--max-queued-jobs','--max-jobs-per-hour','--providers','--egress')
 	'cluster pairing' = @('--config','--approve','--deny')
@@ -235,7 +235,7 @@ _contextbridge_complete() {
 	  "cluster conformance") candidates="relay worker resilience --config --token --node --json" ;;
       "cluster configure") candidates="--config --mode --relay-url --public-url --name --listen --interactive" ;;
       "cluster dashboard") candidates="--config --no-open" ;;
-      "cluster pipeline") candidates="--config --name --file" ;;
+      "cluster pipeline") candidates="activity --config --name --file --token --json" ;;
       "cluster login") candidates="--config --token-file" ;;
       "cluster token") candidates="--config --role --subject --groups --lifetime-hours --max-queued-jobs --max-jobs-per-hour --providers --egress" ;;
       "cluster pairing") candidates="--config --approve --deny" ;;
@@ -447,7 +447,16 @@ case "$words[2]" in
 		;;
       configure) _arguments "${config[@]}" '--mode[Cluster mode]:mode:(local client relay worker all)' '--relay-url[Public relay URL]:URL:' '--public-url[Public HTTPS relay URL]:URL:' '--name[Worker node name]:name:' '--listen[Relay listen address]:address:' '--interactive[Guide unresolved values in a real terminal]' ;;
 	  dashboard) _arguments "${config[@]}" '--no-open[Print URL without opening a page viewer]' ;;
-      pipeline) _arguments "${config[@]}" '--name[Pipeline name]:name:' '--file[Pipeline input JSON]:input file:_files' ;;
+      pipeline)
+        if (( CURRENT == 4 )); then
+          _values 'pipeline action or option' activity
+        fi
+        if [[ "$words[4]" == "activity" ]]; then
+          _arguments "${config[@]}" '--token[Producer, observer, or admin token]:token:' '--json[Print versioned activity projection]' '1:pipeline run ID:'
+        else
+          _arguments "${config[@]}" '--name[Pipeline name]:name:' '--file[Pipeline input JSON]:input file:_files'
+        fi
+        ;;
       login) _arguments "${config[@]}" '--token-file[Producer token file]:token file:_files' ;;
 	  token) _arguments "${config[@]}" '--role[Token role]:role:(producer observer)' '--subject[Token label]:label:' '--groups[Comma-separated scheduling groups]:groups:' '--lifetime-hours[Credential lifetime; 0 never expires]:hours:' '--max-queued-jobs[Producer queued-job limit]:count:' '--max-jobs-per-hour[Durable hourly admission limit]:count:' '--providers[Comma-separated provider allowlist]:providers:' '--egress[Producer egress ceiling]:egress:(local_only)' ;;
       pairing) _arguments "${config[@]}" '--approve[Approve pairing code]:code:' '--deny[Deny pairing code]:code:' ;;

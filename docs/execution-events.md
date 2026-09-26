@@ -104,6 +104,9 @@ contextbridge cluster events JOB_ID --after 12 --follow
 
 # Follow the durable lifecycle of a whole pipeline and all of its steps.
 contextbridge cluster events RUN_ID --pipeline --follow
+
+# Show one bounded, content-minimizing active-work group.
+contextbridge cluster pipeline activity RUN_ID
 ```
 
 `--follow` is bounded polling, not an invented streaming claim. Each request
@@ -166,3 +169,11 @@ disabled for encrypted jobs; no E2EE payload is exposed through this endpoint.
 
 The global `/v1/cluster/events` feed remains an operator-facing history and is
 not a substitute for this atomically committed per-job contract.
+
+`GET /v1/cluster/pipeline-runs/RUN_ID/activity` exposes the same explicit
+pipeline/child-job relationships as a bounded `contextbridge.activity.v1`
+projection. It expands active and exceptional children, collapses completed
+successes into an exact count when retained state proves that count, and emits
+at most eight detail rows plus an overflow count. Prompt, result and advisory
+worker-progress content are excluded. Jobs are never grouped merely because
+their source strings, providers, prompts or timing look similar.

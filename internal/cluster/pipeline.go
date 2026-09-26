@@ -102,6 +102,84 @@ func (r *Relay) handlePipelineRunStatus(w http.ResponseWriter, req *http.Request
 	writeJSON(w, http.StatusOK, run)
 }
 
+func (r *Relay) handlePipelineRunActivity(w http.ResponseWriter, req *http.Request) {
+	run, complete, err := r.pipelineRunWithCurrentSteps(req.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, errors.New("pipeline run not found"))
+		return
+	}
+	if record, ok := tokenRecord(req.Context()); ok && record.Role == "producer" && run.OwnerSubject != record.Subject {
+		writeError(w, http.StatusForbidden, errors.New("pipeline run belongs to another producer"))
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, ProjectPipelineActivity(run, complete))
+}
+
+func (r *Relay) pipelineRunWithCurrentSteps(id string) (PipelineRun, bool, error) {
+	run, err := r.store.GetPipelineRun(id)
+	if err != nil {
+		return PipelineRun{}, false, err
+	}
+	complete := true
+	knownJobs := make(map[string]struct{}, len(run.Steps))
+	validated := make([]Job, 0, len(run.Steps))
+	for _, snapshot := range run.Steps {
+		if !pipelineChildBelongsToRun(snapshot, run) {
+			complete = false
+			continue
+		}
+		current, getErr := r.store.GetJobSummary(snapshot.ID)
+		if getErr != nil {
+			complete = false
+			current = snapshot
+		} else if !pipelineChildBelongsToRun(current, run) {
+			complete = false
+			continue
+		}
+		validated = append(validated, current)
+		knownJobs[current.ID] = struct{}{}
+	}
+	run.Steps = validated
+	// A child job and its pipeline.step.queued event commit atomically before
+	// the executor can checkpoint the child ID into PipelineRun. Merge that
+	// bounded authoritative event window so a concurrent read cannot briefly
+	// claim an exact empty activity group while admission is already durable.
+	events, eventsErr := r.store.ListPipelineEvents(run.ID, 0, 500)
+	if eventsErr != nil {
+		complete = false
+	} else {
+		if events.Gap {
+			complete = false
+		}
+		for _, event := range events.Events {
+			if event.JobID == "" || event.StepID == "" {
+				continue
+			}
+			if _, exists := knownJobs[event.JobID]; exists {
+				continue
+			}
+			current, getErr := r.store.GetJobSummary(event.JobID)
+			if getErr != nil {
+				complete = false
+				continue
+			}
+			if !pipelineChildBelongsToRun(current, run) {
+				complete = false
+				continue
+			}
+			run.Steps = append(run.Steps, current)
+			knownJobs[event.JobID] = struct{}{}
+		}
+	}
+	return run, complete, nil
+}
+
+func pipelineChildBelongsToRun(job Job, run PipelineRun) bool {
+	return strings.TrimSpace(job.ID) != "" && strings.TrimSpace(job.Step) != "" &&
+		job.ParentID == run.ID && job.Pipeline == run.Pipeline && job.OwnerSubject == run.OwnerSubject
+}
+
 func (r *Relay) handlePipelineRunEvents(w http.ResponseWriter, req *http.Request) {
 	run, err := r.store.GetPipelineRun(req.PathValue("id"))
 	if err != nil {
@@ -190,9 +268,18 @@ func (r *Relay) executePipeline(parent context.Context, run PipelineRun, pipelin
 				r.failPipeline(&run, err)
 				return
 			}
+			run.Steps = append(run.Steps, job)
+			if err := r.store.SavePipelineRun(run); err != nil {
+				cancelled, cancelErr := r.store.CancelJob(job.ID)
+				if cancelErr == nil {
+					run.Steps[len(run.Steps)-1] = cancelled
+				}
+				r.failPipeline(&run, fmt.Errorf("save active checkpoint for step %s: %w", step.Name, err))
+				return
+			}
 			r.signalDispatch()
 			job, err = r.waitJob(ctx, job.ID, step.TimeoutSeconds)
-			run.Steps = append(run.Steps, job)
+			run.Steps[len(run.Steps)-1] = job
 			if err != nil {
 				r.failPipeline(&run, fmt.Errorf("step %s: %w", step.Name, err))
 				return

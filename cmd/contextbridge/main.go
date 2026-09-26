@@ -1923,6 +1923,9 @@ func clusterDashboardCommand(args []string) error {
 }
 
 func clusterPipelineCommand(args []string) error {
+	if len(args) > 0 && args[0] == "activity" {
+		return clusterPipelineActivityCommand(args[1:])
+	}
 	flags := flag.NewFlagSet("cluster pipeline", flag.ContinueOnError)
 	path := flags.String("config", defaultConfigPath(), "config path")
 	name := flags.String("name", "", "pipeline name")
@@ -1959,6 +1962,83 @@ func clusterPipelineCommand(args []string) error {
 			return fmt.Errorf("pipeline %s failed%s: %s", run.ID, pipelineTimingSuffix(run, time.Now().UTC()), run.Error)
 		}
 	}
+}
+
+func clusterPipelineActivityCommand(args []string) error {
+	flags := flag.NewFlagSet("cluster pipeline activity", flag.ContinueOnError)
+	path := flags.String("config", defaultConfigPath(), "config path")
+	token := flags.String("token", "", "producer, observer, or admin token; defaults to the configured client token")
+	asJSON := flags.Bool("json", false, "print the versioned activity projection as JSON")
+	if err := parseInterspersedFlags(flags, args); err != nil {
+		return err
+	}
+	if flags.NArg() != 1 || strings.TrimSpace(flags.Arg(0)) == "" {
+		return errors.New("usage: contextbridge cluster pipeline activity RUN_ID [--json]")
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	if *token == "" {
+		*token = clusterClientToken(cfg, "")
+	}
+	var projection cluster.ActivityProjection
+	target := clusterBaseURL(cfg) + "/v1/cluster/pipeline-runs/" + url.PathEscape(strings.TrimSpace(flags.Arg(0))) + "/activity"
+	if err := clusterGET(context.Background(), target, *token, &projection); err != nil {
+		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(projection)
+	}
+	fmt.Println(formatActivityProjection(projection, time.Now().UTC()))
+	return nil
+}
+
+func formatActivityProjection(projection cluster.ActivityProjection, now time.Time) string {
+	run := cluster.PipelineRun{Status: projection.State, CreatedAt: projection.CreatedAt, FinishedAt: projection.FinishedAt}
+	heading := fmt.Sprintf("WORK · %s %s · %s", emptyLabel(projection.Kind, "group"), emptyLabel(projection.Name, projection.GroupID), emptyLabel(projection.State, "unknown"))
+	if timing := cluster.AuthoritativePipelineTimingAt(run, now); timing.ElapsedAvailable {
+		heading += " · " + terminalui.CompactDuration(timing.Elapsed)
+	}
+	lines := []string{heading}
+	for _, item := range projection.Items {
+		status := item.State
+		symbol := "○"
+		switch status {
+		case "ambiguous":
+			symbol = "?"
+			status = cluster.JobFailed
+		case cluster.JobFailed:
+			symbol = "!"
+		case cluster.JobCancelled:
+			symbol = "×"
+		case cluster.JobRunning:
+			symbol = "●"
+		case cluster.JobAssigned:
+			symbol = "◐"
+		}
+		job := cluster.Job{Status: status, CreatedAt: item.CreatedAt, AssignedAt: item.AssignedAt, StartedAt: item.StartedAt, FinishedAt: item.FinishedAt}
+		timing := cluster.AuthoritativeJobTimingAt(job, now)
+		row := fmt.Sprintf("%s %s · %s", symbol, emptyLabel(item.ID, item.JobID), item.State)
+		if timing.ElapsedAvailable {
+			row += " · " + terminalui.CompactDuration(timing.Elapsed)
+		}
+		lines = append(lines, row)
+	}
+	if projection.DetailOverflow > 0 {
+		lines = append(lines, fmt.Sprintf("+ %d more active/exception rows", projection.DetailOverflow))
+	}
+	if projection.Summary.Completed > 0 {
+		count := fmt.Sprintf("%d", projection.Summary.Completed)
+		if !projection.HistoryComplete {
+			count += "+"
+		}
+		lines = append(lines, fmt.Sprintf("✓ %s earlier steps completed", count))
+	}
+	if !projection.HistoryComplete {
+		lines = append(lines, "! earlier child detail is incomplete; no exact missing count is inferred")
+	}
+	return strings.Join(lines, "\n")
 }
 
 func pipelineTimingSuffix(run cluster.PipelineRun, now time.Time) string {

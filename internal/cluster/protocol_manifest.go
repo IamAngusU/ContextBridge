@@ -43,6 +43,7 @@ func CurrentProtocolManifest(configuredJobBytes int64) ProtocolManifest {
 			"assignment_fencing_v1",
 			"authoritative_job_events_v1",
 			"authoritative_pipeline_events_v1",
+			"bounded_active_work_projection_v1",
 			"bounded_execution_event_sse_v1",
 			"content_minimizing_execution_receipts",
 			"durable_execution_policy_v1",
