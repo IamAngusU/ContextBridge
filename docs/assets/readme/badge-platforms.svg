@@ -1,1 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="206" height="34" viewBox="0 0 206 34" role="img" aria-labelledby="title"><title id="title">Windows, Linux and macOS</title><style>.bg{fill:#f6f5f1;stroke:#deddd7}.fg{fill:#242421}.icon{stroke:#242421;fill:none;stroke-linecap:round;stroke-linejoin:round}@media(prefers-color-scheme:dark){.bg{fill:#242622;stroke:#44473f}.fg{fill:#f1f0e9}.icon{stroke:#f1f0e9}}</style><path class="bg" d="M13 1H193C204.4 1 205 1.6 205 13V21C205 32.4 204.4 33 193 33H13C1.6 33 1 32.4 1 21V13C1 1.6 1.6 1 13 1Z"/><path class="icon" stroke-width="1.5" d="M11 10h16v12H11zM15 26h8m-4-4v4"/><text class="fg" x="37" y="21.5" font-family="Arial,Helvetica,sans-serif" font-size="12.5" font-weight="600">Win / Linux / macOS</text></svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="231" height="48" viewBox="0 0 231 48" role="img" aria-label="ContextBridge supports Windows, Linux and macOS" data-badge-system="IamAngusU/Badges" data-badge-layout="metadata">
+  <title>ContextBridge supports Windows, Linux and macOS</title>
+  <style>.badge-bg{fill:#fff;stroke:#dfe3e9}.badge-fg{fill:#11151b}.badge-muted{fill:#667085}.badge-icon{stroke:#11151b}.badge-icon{fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}@media(prefers-color-scheme:dark){.badge-bg{fill:#0b0f14;stroke:#303741}.badge-fg{fill:#f7f8fa}.badge-muted{fill:#949eac}.badge-icon{stroke:#f7f8fa}}</style>
+  <rect class="badge-bg" x="1" y="1" width="229" height="46" rx="14"/>
+  <g class="badge-icon" transform="translate(14 12)" aria-hidden="true">
+    <rect x="3" y="4" width="18" height="13" rx="1.5"/><path d="M8 21h8m-4-4v4"/>
+  </g>
+  <text class="badge-muted" x="48" y="18.5" font-family="Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,Helvetica,sans-serif" font-size="8.8" font-weight="700" letter-spacing="1.2">PLATFORMS</text>
+  <text class="badge-fg" x="48" y="35.5" font-family="Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,Helvetica,sans-serif" font-size="15.5" font-weight="720">Win · Linux · macOS</text>
+</svg>

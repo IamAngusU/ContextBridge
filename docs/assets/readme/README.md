@@ -16,6 +16,13 @@ No CB command runs during rendering. No external fonts, network requests,
 credentials, generated metrics or simulated terminal results are used.
 The renderer owns only `command-desk.svg` and `command-desk-mobile.svg`.
 
+The four repository metadata badges (`badge-release.svg`, `badge-core.svg`,
+`badge-interfaces.svg`, and `badge-platforms.svg`) are exported passive SVG
+artifacts from the maintainer's badge system. They share one adaptive
+ContextBridge metadata layout with a bounded built-in icon vocabulary. The
+public README depends only on the committed SVG copies, not on a private
+runtime service or token.
+
 ## Presentation references
 
 - [GitHub responsive pictures](https://docs.github.com/en/get-started/writing-on-github/getting-started-with-writing-and-formatting-on-github/quickstart-for-writing-on-github#adding-an-image-to-suit-your-visitors): theme-aware artwork and useful alternative text.

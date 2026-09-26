@@ -10,10 +10,10 @@
 <p align="center">Own the compute. Route the work.<br>Connect local models, private machines and model APIs without replacing them.</p>
 
 <p align="center">
-  <a href="https://github.com/IamAngusU/ContextBridge/releases/latest"><img src="docs/assets/readme/badge-release.svg" height="34" alt="Download the latest release"></a>
-  <a href="LICENSING.md"><img src="docs/assets/readme/badge-core.svg" height="34" alt="Core: AGPL-3.0-only"></a>
-  <a href="docs/compatibility.md"><img src="docs/assets/readme/badge-interfaces.svg" height="34" alt="Defined integration surfaces: Apache-2.0"></a>
-  <a href="docs/operations.md"><img src="docs/assets/readme/badge-platforms.svg" height="34" alt="Windows, Linux and macOS"></a>
+  <a href="https://github.com/IamAngusU/ContextBridge/releases/latest"><img src="docs/assets/readme/badge-release.svg" height="38" alt="Download the latest release"></a>
+  <a href="LICENSING.md"><img src="docs/assets/readme/badge-core.svg" height="38" alt="Core: AGPL-3.0-only"></a>
+  <a href="docs/compatibility.md"><img src="docs/assets/readme/badge-interfaces.svg" height="38" alt="Defined integration surfaces: Apache-2.0"></a>
+  <a href="docs/operations.md"><img src="docs/assets/readme/badge-platforms.svg" height="38" alt="Windows, Linux and macOS"></a>
   <a href="https://github.com/angusu-de/ContextBridge/actions/workflows/ci.yml"><img src="https://raw.githubusercontent.com/angusu-de/ContextBridge/ci-proof/proof/public-proof.svg" height="42" alt="Public CI mirror proof"></a>
 </p>
 <p align="center"><sub>Public CI mirror: <a href="https://github.com/angusu-de/ContextBridge">separate GitHub account</a>, same maintainer · live status uses the ContextBridge badge-system design · reproducibility proof, not a third-party audit.</sub></p>
