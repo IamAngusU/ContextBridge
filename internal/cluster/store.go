@@ -26,6 +26,8 @@ var (
 	bucketJobOwnerIndex       = []byte("job_owner_index_v1")
 	bucketStoreMeta           = []byte("store_meta")
 	bucketQueue               = []byte("queue")
+	bucketQueueJobIndex       = []byte("queue_job_index_v1")
+	bucketQueueCounts         = []byte("queue_counts_v1")
 	bucketNodes               = []byte("nodes")
 	bucketTokens              = []byte("tokens")
 	bucketPairings            = []byte("pairings")
@@ -45,7 +47,7 @@ var (
 	keyJobContractVersion     = []byte("job_contract_version")
 	jobContractVersion        = []byte("1")
 	keyQueueIndexVersion      = []byte("queue_index_version")
-	queueIndexVersion         = []byte("2")
+	queueIndexVersion         = []byte("3")
 	keyClusterID              = []byte("cluster_id_v1")
 	keyRelayEpoch             = []byte("relay_epoch_v1")
 )
@@ -53,7 +55,7 @@ var (
 func requiredStoreBuckets() [][]byte {
 	return [][]byte{
 		bucketJobs, bucketJobIndex, bucketJobOwnerIndex, bucketStoreMeta,
-		bucketQueue, bucketNodes, bucketTokens, bucketPairings, bucketPairCodes,
+		bucketQueue, bucketQueueJobIndex, bucketQueueCounts, bucketNodes, bucketTokens, bucketPairings, bucketPairCodes,
 		bucketAssignments, bucketEvents, bucketJobEvents, bucketPipelineEvents, bucketPipelineRuns, bucketSessionPlacements,
 		bucketAdapterSessionLocks, bucketJobIdempotency, bucketJobIdempotencyByJob, bucketProducerRateWindows,
 		bucketHistoricalTotals,
@@ -1010,7 +1012,7 @@ func (s *Store) createJob(request SubmitRequest, maxQueued int, limits ProducerL
 		if err := putJobOwnerIndex(tx.Bucket(bucketJobOwnerIndex), job); err != nil {
 			return err
 		}
-		if err := putQueueEntry(tx.Bucket(bucketQueue), job); err != nil {
+		if err := putQueueEntry(tx, job); err != nil {
 			return err
 		}
 		if idempotencyKey != "" {
@@ -1330,7 +1332,7 @@ func (s *Store) consumeReservationAdmitted(id, secret string, sealed *SealedEnve
 		if err := putJobOwnerIndex(tx.Bucket(bucketJobOwnerIndex), job); err != nil {
 			return err
 		}
-		if err := putQueueEntry(tx.Bucket(bucketQueue), job); err != nil {
+		if err := putQueueEntry(tx, job); err != nil {
 			return err
 		}
 		if idempotencyKey != "" {
@@ -1429,27 +1431,15 @@ func countAndCleanQueue(tx *bolt.Tx) (int, error) {
 }
 
 func queueCounts(tx *bolt.Tx, owner string) (total, owned int, err error) {
-	queue := tx.Bucket(bucketQueue)
-	jobs := tx.Bucket(bucketJobs)
-	cursor := queue.Cursor()
-	for key, value := cursor.First(); key != nil; key, value = cursor.Next() {
-		entry, decodeErr := queueEntryFromValue(jobs, value)
-		if decodeErr != nil {
-			return 0, 0, decodeErr
-		}
-		raw := jobs.Get([]byte(entry.JobID))
-		if raw == nil {
-			if err := cursor.Delete(); err != nil {
-				return 0, 0, err
-			}
-			continue
-		}
-		total++
-		if entry.OwnerSubject == owner {
-			owned++
-		}
+	counts := tx.Bucket(bucketQueueCounts)
+	total, err = queueCounter(counts, queueTotalCounterKey())
+	if err != nil {
+		return 0, 0, err
 	}
-	return total, owned, nil
+	if owner != "" {
+		owned, err = queueCounter(counts, queueOwnerCounterKey(owner))
+	}
+	return total, owned, err
 }
 
 func (s *Store) GetJob(id string) (Job, error) {
@@ -1952,7 +1942,7 @@ func (s *Store) assignJob(id, nodeID string, adapter *adapterAssignment, decisio
 		if err := putJSON(tx.Bucket(bucketJobs), id, job); err != nil {
 			return err
 		}
-		if err := deleteQueueEntry(tx.Bucket(bucketQueue), id); err != nil {
+		if err := deleteQueueEntry(tx, id); err != nil {
 			return err
 		}
 		if job.RoutingDecision != nil {
@@ -2066,7 +2056,7 @@ func (s *Store) CancelJob(id string) (Job, error) {
 			job.SealedResult = nil
 			job.Progress = nil
 		}
-		if err := deleteQueueEntry(tx.Bucket(bucketQueue), id); err != nil {
+		if err := deleteQueueEntry(tx, id); err != nil {
 			return err
 		}
 		if err := putJSON(tx.Bucket(bucketJobs), id, job); err != nil {
@@ -2155,7 +2145,7 @@ func (s *Store) completeJobWithFailure(id, nodeID string, attempt int, fence *As
 			if err := putJSON(tx.Bucket(bucketJobs), id, job); err != nil {
 				return err
 			}
-			if err := putQueueEntry(tx.Bucket(bucketQueue), job); err != nil {
+			if err := putQueueEntry(tx, job); err != nil {
 				return err
 			}
 			if err := appendAuthoritativeJobEventTx(tx, s, job, "job.retrying"); err != nil {
@@ -2402,7 +2392,7 @@ func (s *Store) RequeueNode(nodeID, reason string) ([]Job, error) {
 			job.UpdatedAt = time.Now().UTC()
 			job.Status = JobFailed
 			job.FinishedAt = job.UpdatedAt
-			if err := deleteQueueEntry(tx.Bucket(bucketQueue), job.ID); err != nil {
+			if err := deleteQueueEntry(tx, job.ID); err != nil {
 				return err
 			}
 			if err := releaseAdapterSessionLockTx(tx, job.OwnerSubject, job.Requirements, adapterSessionLockJob, job.ID); err != nil {
@@ -2502,7 +2492,7 @@ func (s *Store) RecoverRelayRestart(reason string) ([]Job, error) {
 			job.UpdatedAt = now
 			job.FinishedAt = now
 			job.Progress = nil
-			if err := deleteQueueEntry(tx.Bucket(bucketQueue), job.ID); err != nil {
+			if err := deleteQueueEntry(tx, job.ID); err != nil {
 				return err
 			}
 			if err := releaseAdapterSessionLockTx(tx, job.OwnerSubject, job.Requirements, adapterSessionLockJob, job.ID); err != nil {
@@ -2574,7 +2564,7 @@ func (s *Store) RecoverStaleJobs(now time.Time, sealedWait, execution time.Durat
 				job.Status, job.Error, job.FinishedAt = JobFailed, "encrypted worker reservation expired; explicit resubmission required", now
 				job.FailureCode = FailureEncryptedReservationExpired
 			}
-			if err := deleteQueueEntry(tx.Bucket(bucketQueue), job.ID); err != nil {
+			if err := deleteQueueEntry(tx, job.ID); err != nil {
 				return err
 			}
 			if staleBound {
@@ -2659,61 +2649,64 @@ func (s *Store) QueuedJobsFair(limit int) ([]Job, error) {
 // cursor only after a successful dispatch, preventing a deep queue from
 // winning every repeated one-slot scan.
 func (s *Store) QueuedJobsFairAfter(limit int, afterOwner map[int]string) ([]Job, error) {
-	jobs, _, _, err := s.QueuedJobsFairPage(limit, 0, afterOwner)
+	if limit <= 0 || limit > 5000 {
+		limit = 100
+	}
+	selectionLimit := boundedQueueScanSize(limit, -1)
+	if selectionLimit > 5000 {
+		selectionLimit = 5000
+	}
+	jobs, _, _, err := s.QueuedJobsFairPage(selectionLimit, 0, afterOwner)
+	if len(jobs) > limit {
+		jobs = jobs[:limit]
+	}
 	return jobs, err
 }
 
-// QueuedJobsFairPage returns a rotating window over the complete fair order.
-// Dispatch uses this to make progress past a large prefix of temporarily
-// incompatible jobs without sacrificing owner round-robin within priorities.
+// QueuedJobsFairPage returns a bounded rotating scan. Its working memory is
+// proportional to the requested page, never to the complete durable queue.
+// The integer offset API is retained for callers/tests; the relay hot path uses
+// QueuedJobsFairWindow and an opaque Bolt key so it does not re-walk a prefix.
 func (s *Store) QueuedJobsFairPage(limit, offset int, afterOwner map[int]string) ([]Job, int, int, error) {
 	if limit <= 0 || limit > 5000 {
 		limit = 100
 	}
-	all := []Job{}
-	ordered := []Job{}
-	result := []Job{}
+	var result []Job
+	var total, scanned int
 	err := s.db.View(func(tx *bolt.Tx) error {
-		jobs := tx.Bucket(bucketJobs)
-		cursor := tx.Bucket(bucketQueue).Cursor()
-		for key, value := cursor.First(); key != nil; key, value = cursor.Next() {
-			entry, err := queueEntryFromValue(jobs, value)
-			if err != nil {
-				return err
-			}
-			projection := Job{ID: entry.JobID, OwnerSubject: entry.OwnerSubject, Priority: entry.Priority, Requirements: entry.Requirements, PolicyDecision: entry.PolicyDecision, AssignedNode: entry.AssignedNode}
-			if entry.Sealed {
-				projection.SealedPayload = &SealedEnvelope{}
-			}
-			all = append(all, projection)
+		queue := tx.Bucket(bucketQueue)
+		var err error
+		total, err = queueCounter(tx.Bucket(bucketQueueCounts), queueTotalCounterKey())
+		if err != nil {
+			return err
 		}
-		ordered = make([]Job, 0, len(all))
-		for start := 0; start < len(all); {
-			end := start + 1
-			for end < len(all) && all[end].Priority == all[start].Priority {
-				end++
-			}
-			appendFairPriorityTier(&ordered, all[start:end], len(all), afterOwner[all[start].Priority])
-			start = end
-		}
-		if len(ordered) == 0 {
+		if total == 0 {
 			return nil
 		}
-		normalizedOffset := offset % len(ordered)
+		normalizedOffset := offset % total
 		if normalizedOffset < 0 {
-			normalizedOffset += len(ordered)
+			normalizedOffset += total
 		}
-		count := min(limit, len(ordered))
-		result = make([]Job, 0, count)
-		for index := 0; index < count; index++ {
-			result = append(result, ordered[(normalizedOffset+index)%len(ordered)])
+		cursor := queue.Cursor()
+		key, value := cursor.First()
+		for skipped := 0; skipped < normalizedOffset && key != nil; skipped++ {
+			key, value = cursor.Next()
 		}
+		window, count, err := collectFairQueueWindow(tx, cursor, key, value, min(limit, total), nil)
+		if err != nil {
+			return err
+		}
+		scanned = count
+		projections := make([]Job, 0, len(window))
+		for _, item := range window {
+			projections = append(projections, item.job)
+		}
+		result = fairQueueWindow(projections, limit, afterOwner)
 		return nil
 	})
 	if err != nil {
 		return nil, 0, 0, err
 	}
-	total := len(ordered)
 	if total == 0 {
 		return nil, 0, 0, nil
 	}
@@ -2721,7 +2714,130 @@ func (s *Store) QueuedJobsFairPage(limit, offset int, afterOwner map[int]string)
 	if offset < 0 {
 		offset += total
 	}
-	return result, total, (offset + min(limit, total)) % total, nil
+	return result, total, (offset + scanned) % total, nil
+}
+
+// QueuedJobsFairWindow is the relay dispatch hot path. afterKey is the last
+// queue key inspected by the previous call. The scan wraps once and stops at a
+// strict bounded budget, so a million-job configured queue cannot create a
+// million-entry allocation or an ever-growing prefix walk.
+func (s *Store) QueuedJobsFairWindow(limit int, afterKey []byte, afterOwner map[int]string) ([]Job, []byte, error) {
+	if limit <= 0 || limit > 5000 {
+		limit = 100
+	}
+	var result []Job
+	var next []byte
+	err := s.db.View(func(tx *bolt.Tx) error {
+		queue := tx.Bucket(bucketQueue)
+		cursor := queue.Cursor()
+		key, value := queueCursorAfter(cursor, afterKey)
+		// The resume key must correspond to the complete candidate set returned
+		// to dispatch. Scanning a larger hidden suffix would skip candidates that
+		// did not fit in this page.
+		window, _, err := collectFairQueueWindow(tx, cursor, key, value, limit, afterKey)
+		if err != nil {
+			return err
+		}
+		if len(window) > 0 {
+			next = append([]byte(nil), window[len(window)-1].key...)
+		}
+		projections := make([]Job, 0, len(window))
+		for _, item := range window {
+			projections = append(projections, item.job)
+		}
+		result = fairQueueWindow(projections, limit, afterOwner)
+		return nil
+	})
+	return result, next, err
+}
+
+type fairQueueItem struct {
+	key []byte
+	job Job
+}
+
+func boundedQueueScanSize(limit, total int) int {
+	scan := limit * 4
+	if scan < 256 {
+		scan = 256
+	}
+	if scan > 20_000 {
+		scan = 20_000
+	}
+	if total >= 0 && scan > total {
+		scan = total
+	}
+	return scan
+}
+
+func queueCursorAfter(cursor *bolt.Cursor, afterKey []byte) ([]byte, []byte) {
+	if len(afterKey) == 0 {
+		return cursor.First()
+	}
+	key, value := cursor.Seek(afterKey)
+	if key != nil && bytes.Equal(key, afterKey) {
+		key, value = cursor.Next()
+	}
+	if key == nil {
+		return cursor.First()
+	}
+	return key, value
+}
+
+func collectFairQueueWindow(tx *bolt.Tx, cursor *bolt.Cursor, key, value []byte, scanLimit int, stopAfter []byte) ([]fairQueueItem, int, error) {
+	if key == nil || scanLimit <= 0 {
+		return nil, 0, nil
+	}
+	jobs := tx.Bucket(bucketJobs)
+	start := append([]byte(nil), key...)
+	window := make([]fairQueueItem, 0, scanLimit)
+	wrapped := false
+	for len(window) < scanLimit && key != nil {
+		entry, err := queueEntryFromValue(jobs, value)
+		if err != nil {
+			return nil, len(window), err
+		}
+		projection := Job{ID: entry.JobID, OwnerSubject: entry.OwnerSubject, Priority: entry.Priority, Requirements: entry.Requirements, PolicyDecision: entry.PolicyDecision, AssignedNode: entry.AssignedNode}
+		if entry.Sealed {
+			projection.SealedPayload = &SealedEnvelope{}
+		}
+		window = append(window, fairQueueItem{key: append([]byte(nil), key...), job: projection})
+		key, value = cursor.Next()
+		if key == nil && !wrapped {
+			key, value = cursor.First()
+			wrapped = true
+		}
+		if key != nil && bytes.Equal(key, start) {
+			break
+		}
+		if wrapped && len(stopAfter) > 0 && key != nil && bytes.Compare(key, stopAfter) > 0 {
+			break
+		}
+	}
+	return window, len(window), nil
+}
+
+func fairQueueWindow(window []Job, limit int, afterOwner map[int]string) []Job {
+	if len(window) == 0 || limit <= 0 {
+		return nil
+	}
+	priorities := make([]int, 0)
+	byPriority := make(map[int][]Job)
+	for _, job := range window {
+		if _, exists := byPriority[job.Priority]; !exists {
+			priorities = append(priorities, job.Priority)
+		}
+		byPriority[job.Priority] = append(byPriority[job.Priority], job)
+	}
+	sort.Sort(sort.Reverse(sort.IntSlice(priorities)))
+	result := make([]Job, 0, min(limit, len(window)))
+	for _, priority := range priorities {
+		appendFairPriorityTier(&result, byPriority[priority], limit, afterOwner[priority])
+		if len(result) == limit {
+			break
+		}
+	}
+	return result
 }
 
 func appendFairPriorityTier(target *[]Job, tier []Job, limit int, afterOwner string) {
@@ -3509,12 +3625,49 @@ func queueKey(job Job) []byte {
 	return []byte(fmt.Sprintf("%03d:%020d:%s", 100-job.Priority, job.CreatedAt.UnixNano(), job.ID))
 }
 
-func putQueueEntry(bucket *bolt.Bucket, job Job) error {
+func putQueueEntry(tx *bolt.Tx, job Job) error {
+	bucket := tx.Bucket(bucketQueue)
+	index := tx.Bucket(bucketQueueJobIndex)
+	counts := tx.Bucket(bucketQueueCounts)
+	key := queueKey(job)
 	value, err := json.Marshal(queueEntry{JobID: job.ID, OwnerSubject: job.OwnerSubject, Priority: job.Priority, Requirements: job.Requirements, PolicyDecision: job.PolicyDecision, AssignedNode: job.AssignedNode, Sealed: job.SealedPayload != nil})
 	if err != nil {
 		return err
 	}
-	return bucket.Put(queueKey(job), value)
+	if previousKey := index.Get([]byte(job.ID)); previousKey != nil {
+		previousValue := bucket.Get(previousKey)
+		if previousValue == nil {
+			return errors.New("queue job index points to a missing entry")
+		}
+		previous, decodeErr := queueEntryFromValue(tx.Bucket(bucketJobs), previousValue)
+		if decodeErr != nil {
+			return decodeErr
+		}
+		if !bytes.Equal(previousKey, key) {
+			if err := bucket.Delete(previousKey); err != nil {
+				return err
+			}
+		}
+		if previous.OwnerSubject != job.OwnerSubject {
+			if err := adjustQueueCounter(counts, queueOwnerCounterKey(previous.OwnerSubject), -1); err != nil {
+				return err
+			}
+			if err := adjustQueueCounter(counts, queueOwnerCounterKey(job.OwnerSubject), 1); err != nil {
+				return err
+			}
+		}
+	} else {
+		if err := adjustQueueCounter(counts, queueTotalCounterKey(), 1); err != nil {
+			return err
+		}
+		if err := adjustQueueCounter(counts, queueOwnerCounterKey(job.OwnerSubject), 1); err != nil {
+			return err
+		}
+	}
+	if err := bucket.Put(key, value); err != nil {
+		return err
+	}
+	return index.Put([]byte(job.ID), key)
 }
 
 func queueEntryFromValue(jobs *bolt.Bucket, value []byte) (queueEntry, error) {
@@ -3606,25 +3759,106 @@ func ensureQueueIndex(tx *bolt.Tx) error {
 			return err
 		}
 	}
+	jobIndex := tx.Bucket(bucketQueueJobIndex)
+	counts := tx.Bucket(bucketQueueCounts)
+	if err := clearBucket(jobIndex); err != nil {
+		return err
+	}
+	if err := clearBucket(counts); err != nil {
+		return err
+	}
+	cursor = queue.Cursor()
+	for key, value := cursor.First(); key != nil; key, value = cursor.Next() {
+		entry, err := queueEntryFromValue(jobs, value)
+		if err != nil {
+			return err
+		}
+		if err := jobIndex.Put([]byte(entry.JobID), append([]byte(nil), key...)); err != nil {
+			return err
+		}
+		if err := adjustQueueCounter(counts, queueTotalCounterKey(), 1); err != nil {
+			return err
+		}
+		if err := adjustQueueCounter(counts, queueOwnerCounterKey(entry.OwnerSubject), 1); err != nil {
+			return err
+		}
+	}
 	return meta.Put(keyQueueIndexVersion, queueIndexVersion)
 }
 
-func deleteQueueEntry(bucket *bolt.Bucket, jobID string) error {
+func deleteQueueEntry(tx *bolt.Tx, jobID string) error {
+	bucket := tx.Bucket(bucketQueue)
+	index := tx.Bucket(bucketQueueJobIndex)
+	key := index.Get([]byte(jobID))
+	if key == nil {
+		return nil
+	}
+	entry, err := queueEntryFromValue(tx.Bucket(bucketJobs), bucket.Get(key))
+	if err != nil {
+		return err
+	}
+	if entry.JobID != jobID {
+		return errors.New("queue job index does not match its entry")
+	}
+	if err := bucket.Delete(key); err != nil {
+		return err
+	}
+	if err := index.Delete([]byte(jobID)); err != nil {
+		return err
+	}
+	counts := tx.Bucket(bucketQueueCounts)
+	if err := adjustQueueCounter(counts, queueTotalCounterKey(), -1); err != nil {
+		return err
+	}
+	return adjustQueueCounter(counts, queueOwnerCounterKey(entry.OwnerSubject), -1)
+}
+
+func clearBucket(bucket *bolt.Bucket) error {
 	cursor := bucket.Cursor()
-	for key, value := cursor.First(); key != nil; key, value = cursor.Next() {
-		entryID := string(value)
-		if len(value) > 0 && value[0] == '{' {
-			var entry queueEntry
-			if err := json.Unmarshal(value, &entry); err != nil {
-				return err
-			}
-			entryID = entry.JobID
-		}
-		if entryID == jobID {
-			return bucket.Delete(key)
+	for key, _ := cursor.First(); key != nil; key, _ = cursor.Next() {
+		if err := cursor.Delete(); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func queueTotalCounterKey() []byte { return []byte{0} }
+
+func queueOwnerCounterKey(owner string) []byte {
+	return append([]byte{1}, []byte(owner)...)
+}
+
+func queueCounter(bucket *bolt.Bucket, key []byte) (int, error) {
+	raw := bucket.Get(key)
+	if len(raw) == 0 {
+		return 0, nil
+	}
+	if len(raw) != 8 {
+		return 0, errors.New("durable queue counter is invalid")
+	}
+	count := binary.BigEndian.Uint64(raw)
+	if count > 1_000_000 {
+		return 0, errors.New("durable queue counter exceeds the supported maximum")
+	}
+	return int(count), nil
+}
+
+func adjustQueueCounter(bucket *bolt.Bucket, key []byte, delta int) error {
+	current, err := queueCounter(bucket, key)
+	if err != nil {
+		return err
+	}
+	next := current + delta
+	if next < 0 || next > 1_000_000 {
+		return errors.New("durable queue counter would leave the supported range")
+	}
+	if next == 0 {
+		return bucket.Delete(key)
+	}
+	raw := make([]byte, 8)
+	binary.BigEndian.PutUint64(raw, uint64(next))
+	return bucket.Put(key, raw)
 }
 
 func cleanLabel(value string, limit int) string {

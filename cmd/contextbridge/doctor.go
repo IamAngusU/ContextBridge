@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -133,6 +134,9 @@ func checkClusterFiles(cfg config.Config, add func(string, string, string, strin
 			add("ok", "cluster relay", "online at "+target, "")
 		}
 		if cfg.Cluster.Relay.LAN.Enabled {
+			if lanListenIsWildcard(cfg.Cluster.Relay.LAN.Listen) {
+				add("warn", "offline LAN relay exposure", "listener "+cfg.Cluster.Relay.LAN.Listen+" accepts traffic on every matching interface", "Bind cluster.relay.lan.listen to the intended LAN IP, or retain the wildcard only as an explicit operator decision.")
+			}
 			parsed, parseErr := url.Parse(cfg.Cluster.Relay.LAN.PublicURL)
 			if parseErr != nil {
 				add("fail", "offline LAN relay", parseErr.Error(), "Run `contextbridge cluster lan init` again with an explicit LAN address.")
@@ -179,6 +183,15 @@ func checkClusterFiles(cfg config.Config, add func(string, string, string, strin
 	} else {
 		add("warn", "cluster worker", "disabled on this device", "Run `contextbridge guide` in a terminal, or use `contextbridge cluster configure --mode worker|all` for deterministic automation.")
 	}
+}
+
+func lanListenIsWildcard(value string) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(value))
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && ip.IsUnspecified()
 }
 
 func doctorProviderReady(provider string, status doctorStatus) bool {

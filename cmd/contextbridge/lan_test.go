@@ -54,6 +54,47 @@ func TestClusterLANInitCreatesReusablePublicBundleAndPrivateIdentity(t *testing.
 	}
 }
 
+func TestClusterLANInitDefaultsToAdvertisedInterface(t *testing.T) {
+	directory := t.TempDir()
+	configPath := filepath.Join(directory, "config.yml")
+	if err := config.Default(configPath); err != nil {
+		t.Fatal(err)
+	}
+	bundlePath := filepath.Join(directory, "join.json")
+	if err := clusterLANInitCommand([]string{"--config", configPath, "--advertise-host", "192.168.44.20", "--out", bundlePath}); err != nil {
+		t.Fatal(err)
+	}
+	configured, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := configured.Cluster.Relay.LAN.Listen; got != "192.168.44.20:32151" {
+		t.Fatalf("safe LAN listen = %q, want selected interface", got)
+	}
+}
+
+func TestClusterLANInitRejectsContradictoryConcreteListen(t *testing.T) {
+	directory := t.TempDir()
+	configPath := filepath.Join(directory, "config.yml")
+	if err := config.Default(configPath); err != nil {
+		t.Fatal(err)
+	}
+	err := clusterLANInitCommand([]string{"--config", configPath, "--listen", "192.168.44.21:32151", "--advertise-host", "192.168.44.20", "--out", filepath.Join(directory, "join.json")})
+	if err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("contradictory listen error = %v", err)
+	}
+}
+
+func TestLANListenAdvertisementAllowsOnlyExplicitWildcard(t *testing.T) {
+	wildcard, err := validateLANListenAdvertisement("0.0.0.0:32151", "192.168.44.20")
+	if err != nil || !wildcard {
+		t.Fatalf("explicit wildcard = %v, %v", wildcard, err)
+	}
+	if _, err := validateLANListenAdvertisement("127.0.0.1:32151", "cb.home.arpa"); err == nil {
+		t.Fatal("loopback listener advertised as LAN DNS name")
+	}
+}
+
 func TestClusterClientUsesTrustBoundToWorkerIdentity(t *testing.T) {
 	pinnedClusterClients = sync.Map{}
 	t.Cleanup(func() { pinnedClusterClients = sync.Map{} })

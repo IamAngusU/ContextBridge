@@ -46,6 +46,38 @@ type LANJoinBundle struct {
 	CreatedAt time.Time  `json:"created_at"`
 }
 
+// ValidateLANListenerEndpoint rejects a concrete listener that cannot serve
+// the endpoint written into a join bundle. A wildcard remains an explicit
+// advanced choice; callers should surface its broader exposure to operators.
+func ValidateLANListenerEndpoint(listen, publicURL string) error {
+	listenHost, _, err := net.SplitHostPort(strings.TrimSpace(listen))
+	if err != nil {
+		return errors.New("LAN listener must be a host:port address")
+	}
+	listenIP := net.ParseIP(strings.Trim(strings.TrimSpace(listenHost), "[]"))
+	if listenIP == nil {
+		return errors.New("LAN listener host must be an IP address")
+	}
+	parsed, err := url.Parse(strings.TrimSpace(publicURL))
+	if err != nil || parsed.Hostname() == "" {
+		return errors.New("LAN public URL is invalid")
+	}
+	if listenIP.IsUnspecified() {
+		return nil
+	}
+	advertised := parsed.Hostname()
+	if advertisedIP := net.ParseIP(advertised); advertisedIP != nil {
+		if !listenIP.Equal(advertisedIP) {
+			return fmt.Errorf("LAN listener host %s does not match advertised endpoint %s", listenHost, advertised)
+		}
+		return nil
+	}
+	if listenIP.IsLoopback() && !strings.EqualFold(advertised, "localhost") {
+		return errors.New("a loopback LAN listener cannot advertise a non-loopback DNS endpoint")
+	}
+	return nil
+}
+
 func EnsureLANTLSIdentity(certificatePath, privateKeyPath, advertisedHost string, now time.Time) (RelayTrust, error) {
 	certificatePath, privateKeyPath, advertisedHost, err := normalizeLANTLSIdentityInputs(certificatePath, privateKeyPath, advertisedHost)
 	if err != nil {

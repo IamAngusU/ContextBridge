@@ -648,27 +648,12 @@ func (p *Processor) openAICompatibleEmbedding(ctx context.Context, job Job, engi
 		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
 		return Output{}, fmt.Errorf("openai-compatible embeddings returned %s: %s", response.Status, strings.TrimSpace(string(body)))
 	}
-	var answer struct {
-		Data []struct {
-			Embedding []float32 `json:"embedding"`
-			Index     int       `json:"index"`
-		} `json:"data"`
-		Usage struct {
-			PromptTokens uint64 `json:"prompt_tokens"`
-			TotalTokens  uint64 `json:"total_tokens"`
-		} `json:"usage"`
-	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 64<<20)).Decode(&answer); err != nil {
+	embeddings, usage, err := decodeOpenAIEmbeddingResponse(response.Body)
+	if err != nil {
 		return Output{}, err
 	}
-	embeddings := make([][]float32, len(answer.Data))
-	for _, item := range answer.Data {
-		if item.Index >= 0 && item.Index < len(embeddings) {
-			embeddings[item.Index] = item.Embedding
-		}
-	}
 	output, err := embeddingOutput(embeddings, job.TenantID, provider, model, time.Since(started))
-	output.InputTokens, output.TotalTokens = answer.Usage.PromptTokens, answer.Usage.TotalTokens
+	output.InputTokens, output.TotalTokens = usage.PromptTokens, usage.TotalTokens
 	return output, err
 }
 
@@ -960,15 +945,12 @@ func (p *Processor) ollamaEmbedding(ctx context.Context, job Job, engine config.
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return Output{}, fmt.Errorf("ollama embeddings returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
-	var answer struct {
-		Embeddings      [][]float32 `json:"embeddings"`
-		PromptEvalCount uint64      `json:"prompt_eval_count"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<20)).Decode(&answer); err != nil {
+	embeddings, promptTokens, err := decodeOllamaEmbeddingResponse(resp.Body)
+	if err != nil {
 		return Output{}, err
 	}
-	output, err := embeddingOutput(answer.Embeddings, job.TenantID, "ollama", model, time.Since(started))
-	output.InputTokens, output.TotalTokens = answer.PromptEvalCount, answer.PromptEvalCount
+	output, err := embeddingOutput(embeddings, job.TenantID, "ollama", model, time.Since(started))
+	output.InputTokens, output.TotalTokens = promptTokens, promptTokens
 	return output, err
 }
 
@@ -1014,27 +996,12 @@ func (p *Processor) llamaCPP(parent context.Context, job Job, route config.Route
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 			return Output{}, fmt.Errorf("llama.cpp embeddings returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
 		}
-		var answer struct {
-			Data []struct {
-				Embedding []float32 `json:"embedding"`
-				Index     int       `json:"index"`
-			} `json:"data"`
-			Usage struct {
-				PromptTokens uint64 `json:"prompt_tokens"`
-				TotalTokens  uint64 `json:"total_tokens"`
-			} `json:"usage"`
-		}
-		if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<20)).Decode(&answer); err != nil {
+		embeddings, usage, err := decodeOpenAIEmbeddingResponse(resp.Body)
+		if err != nil {
 			return Output{}, err
 		}
-		embeddings := make([][]float32, len(answer.Data))
-		for _, item := range answer.Data {
-			if item.Index >= 0 && item.Index < len(embeddings) {
-				embeddings[item.Index] = item.Embedding
-			}
-		}
 		output, err := embeddingOutput(embeddings, job.TenantID, "llama_cpp", model, time.Since(started))
-		output.InputTokens, output.TotalTokens = answer.Usage.PromptTokens, answer.Usage.TotalTokens
+		output.InputTokens, output.TotalTokens = usage.PromptTokens, usage.TotalTokens
 		return output, err
 	}
 	prompt := trustedPrompt(job)
@@ -1103,7 +1070,7 @@ func embeddingOutput(embeddings [][]float32, tenant, provider, model string, lat
 		return Output{}, errors.New("embedding engine returned no vectors")
 	}
 	dimensions := len(embeddings[0])
-	if dimensions > 32768 || len(embeddings) > 256 {
+	if dimensions > maximumEmbeddingDimensions || len(embeddings) > maximumEmbeddingVectors {
 		return Output{}, errors.New("embedding output exceeds protocol limits")
 	}
 	for _, vector := range embeddings {

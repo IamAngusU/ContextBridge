@@ -1,8 +1,10 @@
 package vectorstore
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -123,5 +125,48 @@ func TestLocalUpsertCancellationAndPersistFailureAreAtomic(t *testing.T) {
 	}
 	if reloaded.Count() != 1 {
 		t.Fatalf("failed persistence changed durable count to %d", reloaded.Count())
+	}
+}
+
+func TestLocalSearchKeepsOnlyBoundedTopK(t *testing.T) {
+	store := &Local{max: 10000, data: map[string]map[string]record{"tenant": {}}}
+	for index := 0; index < 5000; index++ {
+		id := fmt.Sprintf("doc-%04d", index)
+		store.data["tenant"][id] = record{Document: Document{ID: id}, Vector: []float32{float32(index), 1}}
+	}
+	matches, err := store.Search(context.Background(), "tenant", []float32{1, 0}, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 3 {
+		t.Fatalf("top-k result count = %d", len(matches))
+	}
+	for index := 1; index < len(matches); index++ {
+		if matchBetter(matches[index], matches[index-1]) {
+			t.Fatalf("matches are not in best-first order: %#v", matches)
+		}
+	}
+}
+
+func TestBoundedStoreWriterStopsBeforeOversizedSerialization(t *testing.T) {
+	var destination bytes.Buffer
+	writer := &boundedStoreWriter{writer: &destination, remaining: 8}
+	written, err := writer.Write([]byte("123456789"))
+	if !errors.Is(err, errLocalVectorStoreTooLarge) || written != 8 || destination.String() != "12345678" {
+		t.Fatalf("bounded write = %d, %q, %v", written, destination.String(), err)
+	}
+	if written, err = writer.Write([]byte("x")); !errors.Is(err, errLocalVectorStoreTooLarge) || written != 0 {
+		t.Fatalf("write after limit = %d, %v", written, err)
+	}
+}
+
+func TestDecodeLocalVectorStoreRejectsMultipleValues(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "vectors.json")
+	if err := os.WriteFile(path, []byte(`{} {}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var target map[string]map[string]record
+	if err := decodeLocalVectorStore(path, &target); err == nil {
+		t.Fatal("multiple JSON values accepted")
 	}
 }

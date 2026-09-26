@@ -83,6 +83,21 @@ func TestLANJoinBundleIsStrictAndHostBound(t *testing.T) {
 	}
 }
 
+func TestValidateLANListenerEndpointRejectsContradictions(t *testing.T) {
+	if err := ValidateLANListenerEndpoint("192.168.10.2:32151", "https://192.168.10.2:32151"); err != nil {
+		t.Fatalf("matching LAN endpoint rejected: %v", err)
+	}
+	if err := ValidateLANListenerEndpoint("0.0.0.0:32151", "https://192.168.10.2:32151"); err != nil {
+		t.Fatalf("explicit wildcard rejected: %v", err)
+	}
+	if err := ValidateLANListenerEndpoint("192.168.10.3:32151", "https://192.168.10.2:32151"); err == nil {
+		t.Fatal("contradictory concrete LAN endpoint accepted")
+	}
+	if err := ValidateLANListenerEndpoint("127.0.0.1:32151", "https://cb.home.arpa:32151"); err == nil {
+		t.Fatal("loopback listener advertised as LAN DNS endpoint")
+	}
+}
+
 func TestLoadLANTLSIdentityNeverCreatesMissingTrustMaterial(t *testing.T) {
 	directory := t.TempDir()
 	certificatePath := filepath.Join(directory, "cert.pem")

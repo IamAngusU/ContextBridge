@@ -56,6 +56,38 @@ func TestQueueMetadataAvoidsDecodingUnselectedPayloads(t *testing.T) {
 	}
 }
 
+func TestFairQueueWindowStopsBeforeUnselectedCorruptTail(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "cluster.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for index := 0; index < 300; index++ {
+		if _, err := store.CreateJob(SubmitRequest{ID: fmt.Sprintf("bounded-%03d", index), OwnerSubject: fmt.Sprintf("owner-%d", index%8), Payload: json.RawMessage(`{}`)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var corruptKey []byte
+	if err := store.db.Update(func(tx *bolt.Tx) error {
+		queue := tx.Bucket(bucketQueue)
+		key, _ := queue.Cursor().Last()
+		corruptKey = append([]byte(nil), key...)
+		return queue.Put(key, []byte(`{"job_id":`))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	page, next, err := store.QueuedJobsFairWindow(200, nil, nil)
+	if err != nil || len(page) != 200 || len(next) == 0 {
+		t.Fatalf("bounded first page = %d jobs, next %x, err %v", len(page), next, err)
+	}
+	if bytes.Equal(next, corruptKey) {
+		t.Fatal("bounded scan advanced across an unreturned corrupt tail")
+	}
+	if _, _, err := store.QueuedJobsFairWindow(200, next, nil); err == nil {
+		t.Fatal("selected corrupt queue entry was not rejected")
+	}
+}
+
 func TestQueueMetadataMigratesLegacyIDValues(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cluster.db")
 	store, err := OpenStore(path)

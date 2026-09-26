@@ -758,6 +758,9 @@ func (c Config) Validate() error {
 			if err := cluster.ValidateRelayURL(c.Cluster.Relay.LAN.PublicURL); err != nil || !strings.HasPrefix(strings.ToLower(c.Cluster.Relay.LAN.PublicURL), "https://") {
 				return errors.New("cluster.relay.lan.public_url must be an absolute HTTPS URL")
 			}
+			if err := cluster.ValidateLANListenerEndpoint(c.Cluster.Relay.LAN.Listen, c.Cluster.Relay.LAN.PublicURL); err != nil {
+				return fmt.Errorf("cluster.relay.lan endpoint: %w", err)
+			}
 			if strings.TrimSpace(c.Cluster.Relay.LAN.CertificateFile) == "" || strings.TrimSpace(c.Cluster.Relay.LAN.PrivateKeyFile) == "" {
 				return errors.New("cluster.relay.lan certificate_file and private_key_file are required")
 			}
@@ -1213,7 +1216,10 @@ func applyDefaults(cfg *Config, base string) {
 		cfg.Cluster.Relay.Listen = "127.0.0.1:32150"
 	}
 	if cfg.Cluster.Relay.LAN.Listen == "" {
-		cfg.Cluster.Relay.LAN.Listen = "0.0.0.0:32151"
+		// Enabling LAN manually without running the explicit initialization
+		// ceremony must not expose the relay on every interface. `cluster lan
+		// init` replaces this host with the selected advertised LAN address.
+		cfg.Cluster.Relay.LAN.Listen = "127.0.0.1:32151"
 	}
 	if cfg.Cluster.Relay.LAN.CertificateFile == "" {
 		cfg.Cluster.Relay.LAN.CertificateFile = filepath.Join(cfg.Storage.Directory, "lan", "relay-cert.pem")
@@ -1583,7 +1589,7 @@ cluster:
     public_url: ""
     lan:
       enabled: false
-      listen: 0.0.0.0:32151
+      listen: 127.0.0.1:32151
       public_url: ""
       certificate_file: ./data/lan/relay-cert.pem
       private_key_file: ./data/lan/relay-key.pem

@@ -49,6 +49,7 @@ func clusterLANInitCommand(args []string) error {
 	if flags.NArg() != 0 {
 		return errors.New("cluster lan init does not accept positional arguments")
 	}
+	explicitListen := commandFlagSpecified(args, "listen")
 	cfg, err := config.Load(*path)
 	if err != nil {
 		return err
@@ -69,6 +70,16 @@ func clusterLANInitCommand(args []string) error {
 	*advertiseHost = strings.Trim(strings.TrimSpace(*advertiseHost), "[]")
 	if parsed := net.ParseIP(*advertiseHost); parsed != nil && !parsed.IsPrivate() && !parsed.IsLinkLocalUnicast() && !parsed.IsLoopback() {
 		return errors.New("--advertise-host IP must be private, link-local, or loopback")
+	}
+	if !explicitListen {
+		// The generated join bundle names exactly one reachable LAN endpoint, so
+		// the safe default is to expose TLS on that interface only. Keep the
+		// configured/default port, but never inherit a wildcard host implicitly.
+		*listen = net.JoinHostPort(*advertiseHost, port)
+	}
+	wildcardListen, err := validateLANListenAdvertisement(*listen, *advertiseHost)
+	if err != nil {
+		return err
 	}
 	relayURL := "https://" + net.JoinHostPort(*advertiseHost, port)
 	trust, err := cluster.EnsureLANTLSIdentity(cfg.Cluster.Relay.LAN.CertificateFile, cfg.Cluster.Relay.LAN.PrivateKeyFile, *advertiseHost, time.Now().UTC())
@@ -96,10 +107,40 @@ func clusterLANInitCommand(args []string) error {
 	fmt.Println("  Relay:", relayURL)
 	fmt.Println("  Identity:", trust.SPKISHA256)
 	fmt.Println("  Join bundle:", *out)
+	if wildcardListen {
+		fmt.Println("  WARNING: explicit wildcard listener exposes the LAN TLS service on every matching network interface")
+	}
 	fmt.Println("Transfer the join bundle through a trusted local channel, restart ContextBridge, then run on the other device:")
 	fmt.Printf("  contextbridge cluster lan join --bundle %q\n", *out)
 	fmt.Println("Discovery is not trust. A changed bundle or TLS identity is rejected.")
 	return nil
+}
+
+func commandFlagSpecified(args []string, name string) bool {
+	wanted := "--" + name
+	for _, argument := range args {
+		if argument == "--" {
+			return false
+		}
+		if argument == wanted || strings.HasPrefix(argument, wanted+"=") {
+			return true
+		}
+	}
+	return false
+}
+
+func validateLANListenAdvertisement(listen, advertiseHost string) (bool, error) {
+	if err := cluster.ValidateLANListenerEndpoint(listen, "https://"+net.JoinHostPort(strings.Trim(strings.TrimSpace(advertiseHost), "[]"), mustLANPort(listen))); err != nil {
+		return false, err
+	}
+	host, _, _ := net.SplitHostPort(strings.TrimSpace(listen))
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && ip.IsUnspecified(), nil
+}
+
+func mustLANPort(listen string) string {
+	_, port, _ := net.SplitHostPort(strings.TrimSpace(listen))
+	return port
 }
 
 func clusterLANJoinCommand(args []string) error {

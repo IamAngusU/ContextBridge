@@ -421,7 +421,7 @@ func deleteJobIndexes(tx *bolt.Tx, job Job) error {
 			return err
 		}
 	}
-	return deleteQueueEntry(tx.Bucket(bucketQueue), job.ID)
+	return deleteQueueEntry(tx, job.ID)
 }
 
 func readHistoricalJobTotals(bucket *bolt.Bucket) (historicalJobTotals, error) {

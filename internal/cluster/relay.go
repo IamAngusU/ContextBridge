@@ -98,7 +98,7 @@ type Relay struct {
 	nextRetention   time.Time
 	fairnessMu      sync.Mutex
 	lastOwner       map[int]string
-	queueScanOffset int
+	queueScanAfter  []byte
 	lifecycleMu     sync.RWMutex
 	lifecycleCtx    context.Context
 	pipelineWG      sync.WaitGroup
@@ -360,6 +360,9 @@ func NewRelay(cfg RelayConfig, logger *log.Logger) (*Relay, error) {
 		}
 		if !strings.HasPrefix(strings.ToLower(cfg.LANPublicURL), "https://") {
 			return nil, errors.New("LAN relay public URL must use HTTPS")
+		}
+		if err := ValidateLANListenerEndpoint(cfg.LANListen, cfg.LANPublicURL); err != nil {
+			return nil, err
 		}
 		parsedLANURL, err := url.Parse(cfg.LANPublicURL)
 		if err != nil {
@@ -1504,12 +1507,12 @@ func (r *Relay) dispatch() {
 		r.runMaintenance(now)
 	}
 	r.pruneRetentionIfDue(now)
-	owners, offset := r.dispatchScanSnapshot()
-	jobs, total, nextOffset, err := r.store.QueuedJobsFairPage(200, offset, owners)
+	owners, afterKey := r.dispatchScanSnapshot()
+	jobs, nextKey, err := r.store.QueuedJobsFairWindow(200, afterKey, owners)
 	if err != nil || len(jobs) == 0 {
 		return
 	}
-	r.recordQueueScan(nextOffset, total)
+	r.recordQueueScan(nextKey)
 	nodes, err := r.routingNodes()
 	if err != nil {
 		return
@@ -1732,23 +1735,19 @@ func (r *Relay) fairnessSnapshot() map[int]string {
 	return result
 }
 
-func (r *Relay) dispatchScanSnapshot() (map[int]string, int) {
+func (r *Relay) dispatchScanSnapshot() (map[int]string, []byte) {
 	r.fairnessMu.Lock()
 	defer r.fairnessMu.Unlock()
 	result := make(map[int]string, len(r.lastOwner))
 	for priority, owner := range r.lastOwner {
 		result[priority] = owner
 	}
-	return result, r.queueScanOffset
+	return result, append([]byte(nil), r.queueScanAfter...)
 }
 
-func (r *Relay) recordQueueScan(next, total int) {
+func (r *Relay) recordQueueScan(next []byte) {
 	r.fairnessMu.Lock()
-	if total <= 0 {
-		r.queueScanOffset = 0
-	} else {
-		r.queueScanOffset = next % total
-	}
+	r.queueScanAfter = append(r.queueScanAfter[:0], next...)
 	r.fairnessMu.Unlock()
 }
 
