@@ -29,8 +29,10 @@ const (
 	ansiPurple                = "\x1b[35m"
 	ansiBlue                  = "\x1b[34m"
 	maximumVisiblePoolNodes   = 8
+	maximumPanelWidth         = 150
 	maximumConsolePromptRunes = 4096
 	maximumConsoleActionQueue = 16
+	localRuntimeDetailKey     = "__local_runtimes__"
 )
 
 // ConsoleIntent is a bounded request from the terminal renderer to its owning
@@ -146,6 +148,7 @@ type Session struct {
 	adapterSelections  map[int]adapterSelection
 	localModels        map[string]localModelSelection
 	localProviders     []string
+	localInventorySeen bool
 	serviceLines       []string
 	connectionLine     string
 	relayHost          string
@@ -464,7 +467,7 @@ func (s *Session) commandHelpLocked() string {
 		"details NODE                 Toggle GPU + model rows (number, name, or all)",
 		"details show|hide NODE       Set GPU + model rows explicitly",
 		"gpus show|hide NODE          Set per-device GPU rows explicitly",
-		"models show|hide NODE        Set model rows explicitly",
+		"models show|hide NODE        Set model rows explicitly (use local for runtimes)",
 		"details | gpus | models none Hide that detail type for every visible node",
 	}
 	if s.workActions {
@@ -545,7 +548,7 @@ func (s *Session) commandGuideLinesLocked() []string {
 	case "gpus":
 		return []string{"gpus NODE | gpus show|hide NODE | gpus none", "changes only per-device GPU detail rows"}
 	case "models":
-		return []string{"models NODE | models show|hide NODE | models none", "changes only model detail rows"}
+		return []string{"models NODE | models local | models show|hide NODE | models none", "local expands runtime inventory; NODE changes worker model rows"}
 	case "send":
 		if !s.workActions {
 			return []string{"send is unavailable here · attach with `contextbridge console` and a scoped producer token"}
@@ -630,8 +633,36 @@ func (s *Session) toggleNodeDetailsLocked(kind, target string) string {
 }
 
 func (s *Session) changeNodeDetailsLocked(kind, action, target string) string {
+	if strings.EqualFold(target, "local") {
+		if kind == "gpus" {
+			return "Local runtime details contain models, not per-device GPU rows; use `gpus NODE`."
+		}
+		if s.nodeDetails == nil {
+			s.nodeDetails = map[string]nodeDetailVisibility{}
+		}
+		visibility := s.nodeDetails[localRuntimeDetailKey]
+		show := action == "show"
+		if action == "toggle" {
+			show = !visibility.models
+		}
+		visibility.models = show
+		s.nodeDetails[localRuntimeDetailKey] = visibility
+		if show {
+			return "Local runtime model details shown."
+		}
+		return "Local runtime model details hidden."
+	}
 	nodes := s.orderedPoolNodesLocked()
 	if len(nodes) == 0 {
+		if strings.EqualFold(target, "all") && action == "hide" && (kind == "models" || kind == "details") {
+			if s.nodeDetails == nil {
+				s.nodeDetails = map[string]nodeDetailVisibility{}
+			}
+			visibility := s.nodeDetails[localRuntimeDetailKey]
+			visibility.models = false
+			s.nodeDetails[localRuntimeDetailKey] = visibility
+			return "Local runtime model details hidden."
+		}
 		return "No pool nodes available."
 	}
 	visibleCount := min(len(nodes), maximumVisiblePoolNodes)
@@ -715,6 +746,21 @@ func nodeDetailKey(node PoolNode) string {
 	return strings.ToLower(node.Name)
 }
 
+func (s *Session) localModelsExpandedLocked() bool {
+	if s.nodeDetails[localRuntimeDetailKey].models {
+		return true
+	}
+	if s.nodeID == "" {
+		return false
+	}
+	for _, node := range s.poolNodes {
+		if node.ID == s.nodeID && s.nodeDetails[nodeDetailKey(node)].models {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Session) orderedPoolNodesLocked() []PoolNode {
 	nodes := append([]PoolNode(nil), s.poolNodes...)
 	sort.Slice(nodes, func(i, j int) bool {
@@ -735,6 +781,7 @@ type historyEntry struct {
 	symbol  string
 	message string
 	details []string
+	repeats int
 }
 
 func New(output *os.File) *Session {
@@ -790,8 +837,11 @@ func (s *Session) Write(data []byte) (int, error) {
 		line := strings.TrimSpace(s.partial[:index])
 		s.partial = s.partial[index+1:]
 		if line != "" {
-			s.recordServiceLineLocked(line)
-			s.nextSection = "SERVICE"
+			section, live := classifyServiceLogLine(line)
+			if live {
+				s.recordServiceLineLocked(line)
+			}
+			s.nextSection = section
 			s.writeEventLocked("·", line)
 		}
 	}
@@ -816,6 +866,7 @@ func (s *Session) HandleWorker(event cluster.WorkerEvent) {
 			s.adapterSelections = map[int]adapterSelection{}
 			s.localProviders = nil
 			s.localModels = map[string]localModelSelection{}
+			s.localInventorySeen = false
 			s.capabilities = cluster.Capabilities{}
 			s.hardware = ""
 			if event.Attempt == 1 || event.Attempt%10 == 0 {
@@ -836,7 +887,7 @@ func (s *Session) HandleWorker(event cluster.WorkerEvent) {
 			message += "s"
 		}
 		if s.retries > 0 {
-			message += fmt.Sprintf(" · recovered after %d retries", s.retries)
+			message += " · " + retryRecoveryLabel(s.retries)
 		}
 		s.nextSection = "CONNECTION"
 		s.writeEventLocked("✓", message)
@@ -977,6 +1028,7 @@ func (s *Session) ObserveServiceUnavailable(reason string) {
 		s.adapterSelections = map[int]adapterSelection{}
 		s.localProviders = nil
 		s.localModels = map[string]localModelSelection{}
+		s.localInventorySeen = false
 	}
 	s.setStatusLocked("Offline", time.Now())
 }
@@ -1138,14 +1190,14 @@ func (s *Session) recordLocalModelsLocked(models []cluster.ModelCapability, prov
 		providerNames = append(providerNames, provider)
 	}
 	sort.Slice(providerNames, func(i, j int) bool { return strings.ToLower(providerNames[i]) < strings.ToLower(providerNames[j]) })
-	previousProviders := strings.Join(s.localProviders, "\x00")
 	s.localProviders = providerNames
 	if !loaded {
 		wasLoaded := false
 		for _, previous := range s.localModels {
 			wasLoaded = wasLoaded || previous.loaded
 		}
-		if wasLoaded || previousProviders != strings.Join(providerNames, "\x00") {
+		firstInventory := !s.localInventorySeen && (len(providerNames) > 0 || len(current) > 0)
+		if wasLoaded || firstInventory {
 			s.nextSection = "LOCAL MODELS"
 			if len(providerNames) == 0 {
 				s.writeEventLocked("◇", "No local provider available")
@@ -1153,12 +1205,14 @@ func (s *Session) recordLocalModelsLocked(models []cluster.ModelCapability, prov
 				s.writeEventLocked("◇", strings.Join(providerNames, ", ")+" available · no model loaded")
 			}
 		}
+		s.localInventorySeen = s.localInventorySeen || len(providerNames) > 0 || len(current) > 0
 		s.localModels = current
 		if s.panelStarted {
 			s.renderPanelLocked()
 		}
 		return
 	}
+	s.localInventorySeen = true
 	keys := make([]string, 0, len(current))
 	for key := range current {
 		keys = append(keys, key)
@@ -1375,7 +1429,7 @@ func (s *Session) panelWidthLocked() int {
 	if width <= 0 {
 		width = 80
 	}
-	return max(12, min(180, width-2))
+	return max(12, min(maximumPanelWidth, width-2))
 }
 
 func panelBorder(width int) string {
@@ -1445,10 +1499,60 @@ func (s *Session) recordServiceLineLocked(line string) {
 
 func (s *Session) addHistoryLocked(symbol, message string, details []string) {
 	copyDetails := append([]string(nil), details...)
-	s.history = append(s.history, historyEntry{when: time.Now(), section: s.nextSection, symbol: symbol, message: message, details: copyDetails})
 	s.historyTotal++
+	now := time.Now()
+	if len(s.history) > 0 {
+		last := &s.history[len(s.history)-1]
+		if last.section == s.nextSection && last.symbol == symbol && last.message == message && equalStrings(last.details, copyDetails) {
+			last.when = now
+			last.repeats++
+			return
+		}
+	}
+	s.history = append(s.history, historyEntry{when: now, section: s.nextSection, symbol: symbol, message: message, details: copyDetails, repeats: 1})
 	if len(s.history) > 10000 {
 		s.history = s.history[len(s.history)-10000:]
+	}
+}
+
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func classifyServiceLogLine(line string) (section string, live bool) {
+	normalized := strings.ToLower(strings.TrimSpace(line))
+	switch {
+	case strings.HasPrefix(normalized, "received job "),
+		strings.HasPrefix(normalized, "completed job "),
+		strings.HasPrefix(normalized, "adapter completed job "),
+		strings.HasPrefix(normalized, "output "):
+		return "JOBS", false
+	case strings.HasPrefix(normalized, "schedule "):
+		return "SCHEDULES", false
+	case strings.HasPrefix(normalized, "pipeline "):
+		return "PIPELINES", false
+	case strings.HasPrefix(normalized, "engine "):
+		return "RUNTIMES", false
+	case strings.Contains(normalized, "update"), strings.HasPrefix(normalized, "staged "), strings.HasPrefix(normalized, "restart handoff"):
+		return "UPDATES", false
+	case strings.HasPrefix(normalized, "version "),
+		strings.HasPrefix(normalized, "routes:"),
+		strings.HasPrefix(normalized, "listening on "),
+		strings.HasPrefix(normalized, "dashboard:"),
+		strings.HasPrefix(normalized, "folder inbox:"),
+		strings.HasPrefix(normalized, "relay listening on "),
+		strings.HasPrefix(normalized, "relay lan listener on "):
+		return "SERVICE", true
+	default:
+		return "SERVICE", false
 	}
 }
 
@@ -1576,6 +1680,17 @@ func localModelPanelRow(value string, loaded bool) string {
 	return "  | " + marker + "  " + colorModelLoadState(value, loaded)
 }
 
+func localModelSummary(ready, loaded int, expanded bool) string {
+	if ready == 0 {
+		return "available · 0 ready · 0 loaded"
+	}
+	label := fmt.Sprintf("available · %d ready · %d loaded", ready, loaded)
+	if !expanded && ready > loaded {
+		label += " · `models local` for full list"
+	}
+	return label
+}
+
 func (s *Session) panelStatusLocked() string {
 	uptime := ""
 	if value, ok := s.serviceUptimeLocked(); ok {
@@ -1600,7 +1715,7 @@ func (s *Session) panelStatusLocked() string {
 		status, _ = s.visibleJobStatusLocked(70)
 	}
 	slots := max(1, s.slots)
-	return fmt.Sprintf("◇ %s %s%s · %d/%d jobs · %d%% · %s", status, compactDuration(time.Since(s.statusSince)), uptime,
+	return fmt.Sprintf("◇ %s %s%s · %d/%d jobs · slot load %d%% · %s", status, compactDuration(time.Since(s.statusSince)), uptime,
 		len(s.jobs), slots, min(100, len(s.jobs)*100/slots), nodeLabel(s.node, s.nodeID, false))
 }
 
@@ -1780,11 +1895,13 @@ func (s *Session) renderPanelLocked() {
 		rows = gap(rows)
 		rows = append(rows, panelSection("[Local · "+provider+"]", width))
 		models := []localModelSelection{}
-		anyLoaded := false
+		loadedCount := 0
 		for _, model := range s.localModels {
 			if strings.EqualFold(model.provider, provider) {
 				models = append(models, model)
-				anyLoaded = anyLoaded || model.loaded
+				if model.loaded {
+					loadedCount++
+				}
 			}
 		}
 		sort.Slice(models, func(i, j int) bool {
@@ -1793,13 +1910,14 @@ func (s *Session) renderPanelLocked() {
 			}
 			return strings.ToLower(models[i].name) < strings.ToLower(models[j].name)
 		})
-		if len(models) == 0 {
-			rows = append(rows, "  | "+ansiDim+"◇  available · no model loaded"+ansiReset)
-		} else {
-			if !anyLoaded {
-				rows = append(rows, "  | "+ansiDim+"◇  available · no model loaded"+ansiReset)
-			}
+		expanded := s.localModelsExpandedLocked()
+		summary := localModelSummary(len(models), loadedCount, expanded)
+		rows = append(rows, "  | "+ansiDim+"◇  "+line(summary)+ansiReset)
+		if len(models) > 0 {
 			for _, model := range models {
+				if !expanded && !model.loaded {
+					continue
+				}
 				state := "ready · not loaded"
 				if model.loaded {
 					state = "loaded"
@@ -1929,7 +2047,11 @@ func (s *Session) renderPanelLocked() {
 		if entry.section != "" {
 			label += "[" + entry.section + "] "
 		}
-		historyLine := line(label + entry.message)
+		message := entry.message
+		if entry.repeats > 1 {
+			message += fmt.Sprintf(" · repeated %d×", entry.repeats)
+		}
+		historyLine := line(label + message)
 		block := []string{"  | " + strings.Replace(historyLine, " "+entry.symbol+" ", " "+coloredSymbol(entry.symbol)+" ", 1)}
 		for _, detail := range entry.details {
 			block = append(block, "  |   +-> "+line(detail))
@@ -2254,7 +2376,9 @@ func colorGPUPercent(value string, utilization int) string {
 	}
 	percentage := fmt.Sprintf("%d%%", utilization)
 	value = strings.Replace(value, percentage, color+percentage+ansiReset, 1)
-	if strings.Contains(value, "GPU aktiv") {
+	if strings.Contains(value, "GPU active") {
+		value = strings.Replace(value, "GPU active", color+"GPU active"+ansiReset, 1)
+	} else if strings.Contains(value, "GPU aktiv") {
 		value = strings.Replace(value, "GPU aktiv", color+"GPU aktiv"+ansiReset, 1)
 	} else if strings.Contains(value, "GPU ready") {
 		value = strings.Replace(value, "GPU ready", ansiDim+"GPU ready"+ansiReset, 1)
@@ -2270,6 +2394,13 @@ func millisecondsDuration(value uint64) time.Duration {
 		return time.Duration(math.MaxInt64)
 	}
 	return time.Duration(value) * time.Millisecond
+}
+
+func retryRecoveryLabel(retries int) string {
+	if retries == 1 {
+		return "recovered after 1 retry"
+	}
+	return fmt.Sprintf("recovered after %d retries", max(0, retries))
 }
 
 func secondsDuration(value uint64) time.Duration {
@@ -2454,24 +2585,31 @@ func capabilityLabel(capability cluster.Capabilities) string {
 		gpu := capability.GPUs[0]
 		maximumUtilization := gpu.Utilization
 		bestFree := gpu.MemoryFree
+		bestTotal := gpu.MemoryTotal
 		for _, candidate := range capability.GPUs[1:] {
 			maximumUtilization = max(maximumUtilization, candidate.Utilization)
-			bestFree = max(bestFree, candidate.MemoryFree)
+			if candidate.MemoryFree > bestFree {
+				bestFree, bestTotal = candidate.MemoryFree, candidate.MemoryTotal
+			}
 		}
 		state := "GPU ready"
 		if maximumUtilization > 0 {
-			state = "GPU aktiv"
+			state = "GPU active"
+		}
+		memory := humanBytes(bestFree) + " VRAM free"
+		if bestTotal > 0 {
+			memory = "VRAM free " + humanBytes(bestFree) + "/" + humanBytes(bestTotal)
 		}
 		if len(capability.GPUs) == 1 {
-			parts = append(parts, fmt.Sprintf("%s · %s · %d%% · %s VRAM free", cleanTerminalLabel(gpu.Name, 40), state, maximumUtilization, humanBytes(bestFree)))
+			parts = append(parts, fmt.Sprintf("%s · %s · %d%% · %s", cleanTerminalLabel(gpu.Name, 40), state, maximumUtilization, memory))
 		} else {
-			parts = append(parts, fmt.Sprintf("%d GPUs · %s · max %d%% · best GPU %s VRAM free", len(capability.GPUs), state, maximumUtilization, humanBytes(bestFree)))
+			parts = append(parts, fmt.Sprintf("%d GPUs · %s · max %d%% · best GPU %s", len(capability.GPUs), state, maximumUtilization, memory))
 		}
 	} else {
 		parts = append(parts, "Zero-GPU")
 	}
 	if capability.MemoryTotal > 0 {
-		parts = append(parts, humanBytes(capability.MemoryFree)+" RAM free")
+		parts = append(parts, "RAM free "+humanBytes(capability.MemoryFree)+"/"+humanBytes(capability.MemoryTotal))
 	}
 	return strings.Join(parts, " · ")
 }

@@ -109,6 +109,53 @@ func TestPanelBannerAndEventHierarchy(t *testing.T) {
 	}
 }
 
+func TestPanelKeepsActivityOutOfLiveServiceState(t *testing.T) {
+	var output bytes.Buffer
+	session := &Session{out: &output, interactive: true, style: "panel", widthFn: func() int { return 120 }, heightFn: func() int { return 40 },
+		jobs: map[string]jobState{}, adapterSelections: map[int]adapterSelection{}, localModels: map[string]localModelSelection{}}
+	session.Banner("v0.test", "local bridge")
+	_, _ = session.Write([]byte("listening on http://127.0.0.1:32145\nreceived job job-1 from test via route local\ncompleted job job-1: text via ollama\n"))
+	frames := strings.Split(output.String(), "\x1b[H\x1b[2J")
+	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(frames[len(frames)-1], "")
+	historyIndex := strings.Index(plain, "+-- HISTORY")
+	if historyIndex < 0 {
+		t.Fatalf("history is missing: %s", plain)
+	}
+	live, history := plain[:historyIndex], plain[historyIndex:]
+	if !strings.Contains(live, "listening on http://127.0.0.1:32145") || strings.Contains(live, "received job") || strings.Contains(live, "completed job") {
+		t.Fatalf("live SERVICE mixed state and activity: %s", live)
+	}
+	if !strings.Contains(history, "[JOBS] received job") || !strings.Contains(history, "[JOBS] completed job") {
+		t.Fatalf("job activity was not retained under HISTORY: %s", history)
+	}
+}
+
+func TestHistoryCoalescesConsecutiveIdenticalEventsWithoutLosingCount(t *testing.T) {
+	var output bytes.Buffer
+	session := &Session{out: &output, interactive: true, style: "panel", widthFn: func() int { return 120 }, heightFn: func() int { return 30 },
+		jobs: map[string]jobState{}, adapterSelections: map[int]adapterSelection{}, localModels: map[string]localModelSelection{}}
+	session.Banner("v0.test", "worker")
+	for range 3 {
+		session.nextSection = "TEST"
+		session.writeEventLocked("◇", "same state")
+	}
+	if len(session.history) != 1 || session.historyTotal != 3 || session.history[0].repeats != 3 {
+		t.Fatalf("history did not coalesce safely: entries=%#v total=%d", session.history, session.historyTotal)
+	}
+	frames := strings.Split(output.String(), "\x1b[H\x1b[2J")
+	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(frames[len(frames)-1], "")
+	if !strings.Contains(plain, "same state · repeated 3×") {
+		t.Fatalf("coalesced count is not visible: %s", plain)
+	}
+}
+
+func TestPanelWidthHasReadableMaximum(t *testing.T) {
+	session := &Session{widthFn: func() int { return 400 }}
+	if got := session.panelWidthLocked(); got != maximumPanelWidth {
+		t.Fatalf("panel width = %d, want readable cap %d", got, maximumPanelWidth)
+	}
+}
+
 func TestNarrowPanelStartsConsistentlyWithBannerMetadata(t *testing.T) {
 	var output bytes.Buffer
 	session := &Session{out: &output, interactive: true, style: "panel", widthFn: func() int { return 40 }, heightFn: func() int { return 20 },
@@ -289,6 +336,15 @@ func TestNonInteractiveSessionDeduplicatesRetryNoise(t *testing.T) {
 	}
 }
 
+func TestRetryRecoveryLabelUsesSingularAndPlural(t *testing.T) {
+	if got := retryRecoveryLabel(1); got != "recovered after 1 retry" {
+		t.Fatalf("singular retry label = %q", got)
+	}
+	if got := retryRecoveryLabel(2); got != "recovered after 2 retries" {
+		t.Fatalf("plural retry label = %q", got)
+	}
+}
+
 func TestProgressPreviewKeepsLatestTextIteration(t *testing.T) {
 	actual := progressPreview("  first\nsecond   third  ", 12)
 	if actual != "…econd third" {
@@ -437,9 +493,16 @@ func TestLocalProviderRemainsVisibleWithoutLoadedModel(t *testing.T) {
 	got := output.String()
 	frames := strings.Split(got, "\x1b[H\x1b[2J")
 	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(frames[len(frames)-1], "")
-	if !strings.Contains(plain, "+-- [Local · ollama]") || !strings.Contains(plain, "loaded-model · loaded") ||
-		strings.Index(plain, "loaded-model · loaded") > strings.Index(plain, "ready-model · ready · not loaded") {
-		t.Fatalf("loaded local model not shown: %s", got)
+	if !strings.Contains(plain, "+-- [Local · ollama]") || !strings.Contains(plain, "2 ready · 1 loaded") ||
+		!strings.Contains(plain, "loaded-model · loaded") || strings.Contains(plain, "ready-model · ready · not loaded") {
+		t.Fatalf("compact local inventory did not keep only loaded models visible: %s", got)
+	}
+	session.changeNodeDetailsLocked("models", "show", "local")
+	session.renderPanelLocked()
+	frames = strings.Split(output.String(), "\x1b[H\x1b[2J")
+	plain = regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(frames[len(frames)-1], "")
+	if !strings.Contains(plain, "ready-model · ready · not loaded") || strings.Index(plain, "loaded-model · loaded") > strings.Index(plain, "ready-model · ready · not loaded") {
+		t.Fatalf("expanded local inventory is missing or not loaded-first: %s", plain)
 	}
 	previous := len(session.history)
 	session.recordLocalModelsLocked(models, []string{"ollama"})
@@ -450,6 +513,25 @@ func TestLocalProviderRemainsVisibleWithoutLoadedModel(t *testing.T) {
 	session.recordLocalModelsLocked(models, []string{"ollama"})
 	if !strings.Contains(output.String(), "ollama available · no model loaded") {
 		t.Fatalf("unload transition should be reported once: %s", output.String())
+	}
+}
+
+func TestTransientUnloadedProviderInventoryDoesNotFloodHistory(t *testing.T) {
+	var output bytes.Buffer
+	session := &Session{out: &output, interactive: true, style: "panel", widthFn: func() int { return 120 }, heightFn: func() int { return 35 },
+		localModels: map[string]localModelSelection{}, jobs: map[string]jobState{}, adapterSelections: map[int]adapterSelection{}}
+	session.Banner("v0.test", "worker")
+	session.recordLocalModelsLocked(nil, []string{"arsenal", "deepseek", "ollama"})
+	initialEntries, initialTotal := len(session.history), session.historyTotal
+	session.recordLocalModelsLocked(nil, []string{"arsenal", "ollama"})
+	session.recordLocalModelsLocked(nil, []string{"arsenal", "deepseek", "ollama"})
+	if len(session.history) != initialEntries || session.historyTotal != initialTotal {
+		t.Fatalf("provider-only heartbeat churn flooded history: entries=%d/%d total=%d/%d", len(session.history), initialEntries, session.historyTotal, initialTotal)
+	}
+	frames := strings.Split(output.String(), "\x1b[H\x1b[2J")
+	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(frames[len(frames)-1], "")
+	if !strings.Contains(plain, "+-- [Local · deepseek]") {
+		t.Fatalf("latest live inventory was not updated: %s", plain)
 	}
 }
 
@@ -474,7 +556,7 @@ func TestPanelLiveGroupsResizeAndHistoryStaySeparate(t *testing.T) {
 		t.Fatalf("session history is missing: %s", latest)
 	}
 	live := latest[:historyIndex]
-	for _, label := range []string{"+-- [profile-one]", "Endpoint 13", "Endpoint 12", "+-- [profile-two]", "Endpoint 11", "+-- [Local · ollama]", "available · no model loaded"} {
+	for _, label := range []string{"+-- [profile-one]", "Endpoint 13", "Endpoint 12", "+-- [profile-two]", "Endpoint 11", "+-- [Local · ollama]", "available · 0 ready · 0 loaded"} {
 		if !strings.Contains(live, label) {
 			t.Fatalf("live area missing %q: %s", label, latest)
 		}
@@ -907,6 +989,31 @@ func TestMultiGPUCompactStatusUsesEveryDevice(t *testing.T) {
 	}
 }
 
+func TestCapabilitySummaryShowsResourceRatiosAndEnglishState(t *testing.T) {
+	label := capabilityLabel(cluster.Capabilities{
+		GPUs:        []cluster.GPUCapability{{Name: "GPU A", Utilization: 20, MemoryFree: 2 << 30, MemoryTotal: 10 << 30}},
+		MemoryFree:  5 << 30,
+		MemoryTotal: 32 << 30,
+	})
+	for _, want := range []string{"GPU active", "VRAM free 2.0 GiB/10.0 GiB", "RAM free 5.0 GiB/32.0 GiB"} {
+		if !strings.Contains(label, want) {
+			t.Fatalf("resource summary is missing %q: %q", want, label)
+		}
+	}
+	if strings.Contains(label, "GPU aktiv") {
+		t.Fatalf("resource summary leaked a hard-coded German state: %q", label)
+	}
+}
+
+func TestForegroundStatusLabelsSlotUtilizationAndUptime(t *testing.T) {
+	session := &Session{status: "Idle", statusSince: time.Now().Add(-time.Minute), startedAt: time.Now().Add(-2 * time.Hour), slots: 4,
+		jobs: map[string]jobState{}, node: "node"}
+	status := session.panelStatusLocked()
+	if !strings.Contains(status, "up 02h00m") || !strings.Contains(status, "slot load 0%") {
+		t.Fatalf("status does not distinguish uptime and slot utilization: %q", status)
+	}
+}
+
 func TestNodeDetailCommandsRejectNodesOutsideVisiblePanel(t *testing.T) {
 	nodes := make([]PoolNode, 9)
 	for index := range nodes {
@@ -989,6 +1096,8 @@ func TestLocalModelRowsColorLoadedAndUnloadedModels(t *testing.T) {
 		{Name: "warm", Provider: "ollama", Loaded: true, Tasks: []string{"generation"}},
 		{Name: "cold", Provider: "ollama", Loaded: false, Tasks: []string{"vision"}},
 	}, []string{"ollama"})
+	session.changeNodeDetailsLocked("models", "show", "local")
+	session.renderPanelLocked()
 	frames := strings.Split(output.String(), "\x1b[H\x1b[2J")
 	latest := frames[len(frames)-1]
 	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(latest, "")
