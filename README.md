@@ -322,6 +322,13 @@ contextbridge cluster token create --role producer --subject my-app --max-jobs-p
 
 This prints token JSON. Store it securely; **never give an application the relay admin token**. The optional limits are stored with the credential and enforced durably by the relay. `--providers ollama --egress local_only` can additionally prevent that credential from selecting a remote route. For a separate CLI client, save the returned JSON as a private **UTF-8** file named `producer-token.json` and transfer it through a secure channel. Do not commit it.
 
+For an application that must never submit cleartext payloads, issue a separate
+credential with `--require-e2ee`. The relay then rejects cleartext admission
+with `privacy.e2ee_required`; a forgotten client flag cannot silently weaken
+that credential. This is payload confidentiality, not relay anonymity or a
+zero-knowledge claim. Use the credential only with clients that implement CB's
+one-time encrypted assignment flow.
+
 List credential metadata or revoke a known token ID without exposing secrets:
 
 ```sh
@@ -432,6 +439,10 @@ contextbridge cluster chat --provider ollama --group private --egress local_only
 ```
 
 `--group private` restricts placement to workers in that group. `--e2ee` encrypts prompt and result payloads between the producer and the reserved worker; the relay still sees coordination metadata. `--egress local_only` is an enforced boundary only when execution policy is enabled and the provider is correctly classified. Worker owners can separately restrict allowed tasks, providers, models, and concurrency. For supported remote providers, `--max-cost-usd` can request a hard cost ceiling; unverifiable pricing fails closed when that ceiling is required.
+
+Operators can make E2EE mandatory for one producer credential with
+`cluster token create --require-e2ee` or `integrate relay --require-e2ee`.
+See the exact [privacy boundary and visibility matrix](docs/privacy.md).
 
 <details>
 <summary><strong>What can I attach today?</strong></summary>
@@ -617,7 +628,7 @@ Acts on **this machine only**, not the whole pool. Active work blocks removal un
 
 ## Open by design. Precise about trust.
 
-Self-hosting is fully functional. CB coordinates existing runtimes; it does not pool VRAM or split a model itself. Optional E2EE protects job payloads, **not coordination metadata**. Configurable policies are not all enabled by default. Ambiguous execution is not silently retried.
+Self-hosting is fully functional. CB coordinates existing runtimes; it does not pool VRAM or split a model itself. Optional or credential-required E2EE protects job payloads, **not coordination metadata**. Configurable policies are not all enabled by default. Ambiguous execution is not silently retried.
 
 Releases include checksums, SBOMs and third-party notices; AGPL releases also publish corresponding source. Build records are explicitly unsigned. Free conformance is separate from the future **ContextBridge Verified** program. [Security](docs/security.md) · [Supply chain](docs/supply-chain.md) · [Verification](docs/verification.md).
 

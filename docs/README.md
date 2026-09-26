@@ -46,6 +46,8 @@ described as vendor integrations here.
 - [Provider-neutral adapters](adapters.md): out-of-tree endpoint contract.
 - [Hosted Relay readiness](hosted-relay.md): what is and is not ready for a
   managed coordination service.
+- [Privacy boundaries](privacy.md): cleartext, optional E2EE,
+  credential-required E2EE, and the coordination metadata a relay still needs.
 - [Job Contract v1 schema](schemas/job-contract-v1.schema.json): reusable
   machine-readable submission boundary.
 - [Verification Statement v1 schema](schemas/verification-statement-v1.schema.json):

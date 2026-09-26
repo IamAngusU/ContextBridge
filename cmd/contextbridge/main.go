@@ -2467,6 +2467,7 @@ func clusterTokenCreateCommand(args []string) error {
 	maxJobsPerHour := flags.Int("max-jobs-per-hour", 0, "durable producer admission limit; 0 disables it")
 	providers := flags.String("providers", "", "comma-separated provider allowlist")
 	egress := flags.String("egress", "", "producer egress ceiling: local_only or empty")
+	requireE2EE := flags.Bool("require-e2ee", false, "reject every cleartext job submitted with this producer credential")
 	if err := parseInterspersedFlags(flags, args); err != nil {
 		return err
 	}
@@ -2480,7 +2481,7 @@ func clusterTokenCreateCommand(args []string) error {
 	var output map[string]interface{}
 	request := map[string]interface{}{
 		"role": *role, "subject": *subject, "groups": splitWorkerList(*groups), "lifetime_hours": *lifetimeHours,
-		"producer_limits": cluster.ProducerLimits{MaxQueuedJobs: *maxQueuedJobs, MaxJobsPerHour: *maxJobsPerHour, Providers: splitWorkerList(*providers), Egress: strings.TrimSpace(*egress)},
+		"producer_limits": cluster.ProducerLimits{MaxQueuedJobs: *maxQueuedJobs, MaxJobsPerHour: *maxJobsPerHour, Providers: splitWorkerList(*providers), Egress: strings.TrimSpace(*egress), RequireE2EE: *requireE2EE},
 	}
 	if err := clusterPOST(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/tokens", cfg.Cluster.Relay.AdminToken, request, &output); err != nil {
 		return err

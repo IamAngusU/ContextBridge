@@ -92,6 +92,7 @@ var (
 	ErrIdempotencyConflict         = errors.New("idempotency key was already used for a different request")
 	ErrWorkerCredentialInvalid     = errors.New("worker credential is revoked, expired, or does not authorize this node")
 	ErrPipelineParentTerminal      = errors.New("pipeline parent no longer authorizes child execution")
+	ErrE2EERequired                = errors.New("producer credential requires an end-to-end encrypted payload")
 )
 
 type reservation struct {
@@ -352,7 +353,7 @@ func (s *Store) CreateTokenWithLimits(role, subject string, groups []string, lif
 }
 
 func validateProducerLimits(role string, limits ProducerLimits) error {
-	if role != "producer" && (limits.MaxQueuedJobs != 0 || limits.MaxJobsPerHour != 0 || len(limits.Providers) != 0 || limits.Egress != "") {
+	if role != "producer" && (limits.MaxQueuedJobs != 0 || limits.MaxJobsPerHour != 0 || len(limits.Providers) != 0 || limits.Egress != "" || limits.RequireE2EE) {
 		return errors.New("producer limits may only be assigned to producer tokens")
 	}
 	if limits.MaxQueuedJobs < 0 || limits.MaxQueuedJobs > maxQueuedJobsPerOwner {
@@ -1162,6 +1163,9 @@ func prepareJob(request SubmitRequest, idempotencyKey, requestHash string, now t
 }
 
 func (s *Store) admitPreparedJobTx(tx *bolt.Tx, job *Job, maxQueued int, limits ProducerLimits, idempotencyKey, requestHash string, now time.Time) (bool, error) {
+	if limits.RequireE2EE && job.SealedPayload == nil {
+		return false, ErrE2EERequired
+	}
 	if idempotencyKey != "" {
 		existing, found, lookupErr := lookupIdempotentJobTx(tx, job.OwnerSubject, idempotencyKey, requestHash)
 		if lookupErr != nil {

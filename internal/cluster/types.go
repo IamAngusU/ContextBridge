@@ -522,6 +522,10 @@ type ProducerLimits struct {
 	MaxJobsPerHour int      `json:"max_jobs_per_hour,omitempty"`
 	Providers      []string `json:"providers,omitempty"`
 	Egress         string   `json:"egress,omitempty"`
+	// RequireE2EE makes payload encryption a credential-bound admission rule,
+	// not a caller convention. It protects prompt/result bytes from the relay;
+	// coordination metadata remains relay-visible by design.
+	RequireE2EE bool `json:"require_e2ee,omitempty"`
 }
 
 type TokenRecord struct {
