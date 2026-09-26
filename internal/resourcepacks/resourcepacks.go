@@ -137,20 +137,21 @@ func Discover(settings Settings) ([]Pack, error) {
 		if limited {
 			return nil, fmt.Errorf("%w: root %s exceeds %d direct entries", ErrScanCandidateLimit, absolute, maxEntriesPerRoot)
 		}
-		if readErr == nil {
-			for _, entry := range entries {
-				if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
-					continue
-				}
-				if err := takeCandidate(); err != nil {
-					return nil, err
-				}
-				pack, ok := readPack(filepath.Join(absolute, entry.Name()))
-				if !ok {
-					continue
-				}
-				packs = append(packs, pack)
+		if readErr != nil {
+			return nil, fmt.Errorf("read portable resource root %s: %w", absolute, readErr)
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+				continue
 			}
+			if err := takeCandidate(); err != nil {
+				return nil, err
+			}
+			pack, ok := readPack(filepath.Join(absolute, entry.Name()))
+			if !ok {
+				continue
+			}
+			packs = append(packs, pack)
 		}
 		// A sealed or checksum-verified resource tree must not be modified merely
 		// to advertise it. Such volumes can keep bounded sidecar manifests at the
@@ -166,7 +167,7 @@ func Discover(settings Settings) ([]Pack, error) {
 			return nil, fmt.Errorf("%w: sidecar directory %s exceeds %d entries", ErrScanCandidateLimit, sidecarRoot, maxEntriesPerRoot)
 		}
 		if sidecarReadErr != nil {
-			continue
+			return nil, fmt.Errorf("read portable resource sidecars %s: %w", sidecarRoot, sidecarReadErr)
 		}
 		for _, entry := range sidecars {
 			if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !strings.EqualFold(filepath.Ext(entry.Name()), ".json") {
