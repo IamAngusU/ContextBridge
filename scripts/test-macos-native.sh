@@ -106,7 +106,8 @@ plutil -lint "$agent" "$update_agent"
 require_contains "bootstrap gui/$(id -u) $agent" "$launchctl_calls" "main LaunchAgent was not bootstrapped"
 require_contains "bootstrap gui/$(id -u) $update_agent" "$launchctl_calls" "update LaunchAgent was not bootstrapped"
 [[ "$(plutil -extract ProgramArguments.0 raw -o - "$agent")" == "$installed" ]] || fail "main LaunchAgent does not decode the installed binary path"
-[[ "$(plutil -extract ProgramArguments.2 raw -o - "$agent")" == "$config" ]] || fail "main LaunchAgent does not decode the installed config path"
+[[ "$(plutil -extract ProgramArguments.2 raw -o - "$agent")" == "--config" ]] || fail "main LaunchAgent does not preserve the config flag"
+[[ "$(plutil -extract ProgramArguments.3 raw -o - "$agent")" == "$config" ]] || fail "main LaunchAgent does not decode the installed config path"
 
 "$installed" serve --config "$config" > "$test_root/service.out" 2> "$test_root/service.err" &
 service_pid="$!"
