@@ -1343,7 +1343,12 @@ func pairCommandWithIO(args []string, input io.Reader, output io.Writer, termina
 	return cluster.PairWorker(ctx, *relayURL, *name, *identityFile, cfg.Cluster.Worker.Groups, func(pair cluster.PairResponse) {
 		_, _ = fmt.Fprintln(output, "Pair this worker")
 		_, _ = fmt.Fprintln(output, "  Code:", pair.UserCode)
-		_, _ = fmt.Fprintln(output, "  Open:", pair.VerificationURI)
+		verificationURL := pair.VerificationURIComplete
+		if verificationURL == "" {
+			verificationURL = pair.VerificationURI
+		}
+		_, _ = fmt.Fprintln(output, "  Open:", verificationURL)
+		_, _ = fmt.Fprintln(output, "Approve this exact code on the relay. No relay admin credential is copied to this worker.")
 		_, _ = fmt.Fprintln(output, "Waiting for approval. The code expires at", pair.ExpiresAt.Local().Format(time.RFC1123))
 	})
 }

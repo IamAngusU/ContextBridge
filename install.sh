@@ -7,6 +7,7 @@ BIN_DIR="${CONTEXTBRIDGE_BIN_DIR:-$HOME/.local/bin}"
 provider="${CONTEXTBRIDGE_PROVIDER:-ask}"
 cluster_mode="${CONTEXTBRIDGE_CLUSTER_MODE:-ask}"
 relay_url="${CONTEXTBRIDGE_RELAY_URL:-}"
+lan_bundle="${CONTEXTBRIDGE_LAN_BUNDLE:-}"
 public_url="${CONTEXTBRIDGE_PUBLIC_URL:-}"
 worker_name="${CONTEXTBRIDGE_WORKER_NAME:-auto}"
 command_name="${CONTEXTBRIDGE_COMMAND:-}"
@@ -106,21 +107,74 @@ esac
 if [ "$cluster_mode" = "sender" ]; then
   cluster_mode="client"
 fi
-if [ "$cluster_mode" = "ask" ] && [ -n "$relay_url" ] && [ -n "$public_url" ]; then
-  echo "Both CONTEXTBRIDGE_RELAY_URL and CONTEXTBRIDGE_PUBLIC_URL were supplied. Set CONTEXTBRIDGE_CLUSTER_MODE explicitly." >&2
+if [ -n "$relay_url" ] && [ -n "$lan_bundle" ]; then
+  echo "Choose either CONTEXTBRIDGE_RELAY_URL or CONTEXTBRIDGE_LAN_BUNDLE, not both." >&2
+  exit 1
+fi
+if [ "$cluster_mode" = "ask" ] && { { [ -n "$relay_url" ] || [ -n "$lan_bundle" ]; } && [ -n "$public_url" ]; }; then
+  echo "Conflicting worker and public relay hints were supplied. Set CONTEXTBRIDGE_CLUSTER_MODE explicitly." >&2
   exit 1
 fi
 if [ "$cluster_mode" = "ask" ] && [ -n "$relay_url" ]; then
   cluster_mode="worker"
   echo "Inferred worker mode from CONTEXTBRIDGE_RELAY_URL."
+elif [ "$cluster_mode" = "ask" ] && [ -n "$lan_bundle" ]; then
+  cluster_mode="worker"
+  echo "Inferred worker mode from CONTEXTBRIDGE_LAN_BUNDLE."
 elif [ "$cluster_mode" = "ask" ] && [ -n "$public_url" ]; then
   cluster_mode="relay"
   echo "Inferred relay mode from CONTEXTBRIDGE_PUBLIC_URL."
 elif [ "$cluster_mode" = "ask" ] && [ "$interactive" = "0" ]; then
   cluster_mode="local"
 fi
-if { [ "$cluster_mode" = "worker" ] || [ "$cluster_mode" = "client" ]; } && [ "$interactive" = "0" ] && [ -z "$relay_url" ]; then
-  echo "A relay URL is required for $cluster_mode mode. Set CONTEXTBRIDGE_RELAY_URL for an unattended install." >&2
+if [ "$cluster_mode" = "ask" ] && [ "$interactive" = "1" ]; then
+  printf '\nWhat do you want to do on this device?\n' >/dev/tty
+  printf '  1) Create a new pool\n     This device coordinates the pool. It can also run AI work.\n' >/dev/tty
+  printf '  2) Join an existing pool\n     Add this device hardware, models, or APIs to a pool.\n' >/dev/tty
+  printf '  3) Use an existing pool\n     Send work without accepting pool jobs on this device.\n' >/dev/tty
+  printf '  4) Use ContextBridge only on this device\n     Keep execution local; no other machine is required.\n' >/dev/tty
+  printf '  5) Advanced setup\n     Choose relay, worker, and client roles yourself.\n' >/dev/tty
+  printf 'You can change this later. Joining another pool requires approval; moving pool authority is a separate protected operation.\n' >/dev/tty
+  printf 'Choose 1, 2, 3, 4, or 5 [4]: ' >/dev/tty
+  read -r cluster_choice </dev/tty || cluster_choice="4"
+  case "${cluster_choice:-4}" in
+    1)
+      printf 'Should this device also run AI work? [Y/n]: ' >/dev/tty
+      read -r run_work </dev/tty || run_work=""
+      case "$(printf '%s' "$run_work" | tr '[:upper:]' '[:lower:]')" in n|no) cluster_mode="relay" ;; *) cluster_mode="all" ;; esac
+      ;;
+    2) cluster_mode="worker" ;;
+    3) cluster_mode="client" ;;
+    5)
+      printf 'Technical roles: local, client, relay, worker, all\nTechnical role [local]: ' >/dev/tty
+      read -r cluster_mode </dev/tty || cluster_mode="local"
+      cluster_mode="${cluster_mode:-local}"
+      [ "$cluster_mode" = "sender" ] && cluster_mode="client"
+      case "$cluster_mode" in local|client|relay|worker|all) ;; *) echo "Technical role must be local, client/sender, relay, worker, or all." >&2; exit 1 ;; esac
+      ;;
+    *) cluster_mode="local" ;;
+  esac
+fi
+if [ "$cluster_mode" = "worker" ] && [ -z "$relay_url" ] && [ -z "$lan_bundle" ] && [ "$interactive" = "1" ]; then
+  printf '\nHow will this device reach the pool?\n' >/dev/tty
+  printf '  1) Private network with a trusted join bundle\n     LAN, VLAN, VPN, or another routed private network.\n' >/dev/tty
+  printf '  2) HTTPS relay URL\n     Connect to the address provided by the pool owner.\n' >/dev/tty
+  printf 'Choose 1 or 2 [1]: ' >/dev/tty
+  read -r connection_choice </dev/tty || connection_choice="1"
+  if [ "${connection_choice:-1}" = "2" ]; then
+    printf 'HTTPS relay URL: ' >/dev/tty
+    read -r relay_url </dev/tty
+  else
+    printf 'Trusted LAN join-bundle path: ' >/dev/tty
+    read -r lan_bundle </dev/tty
+  fi
+fi
+if [ -n "$lan_bundle" ] && [ "$cluster_mode" != "worker" ]; then
+  echo "CONTEXTBRIDGE_LAN_BUNDLE is only valid when this device joins an existing pool as a worker." >&2
+  exit 1
+fi
+if { [ "$cluster_mode" = "worker" ] || [ "$cluster_mode" = "client" ]; } && [ "$interactive" = "0" ] && [ -z "$relay_url" ] && [ -z "$lan_bundle" ]; then
+  echo "A relay URL is required for $cluster_mode mode. Workers may instead set CONTEXTBRIDGE_LAN_BUNDLE." >&2
   exit 1
 fi
 if [ -n "$relay_url" ]; then
@@ -133,11 +187,14 @@ fi
 if [ "$cluster_mode" = "client" ] && [ "$provider" = "ask" ]; then
   provider="later"
   echo "Sender-only mode does not need a local model provider."
+elif [ "$cluster_mode" = "relay" ] && [ "$provider" = "ask" ]; then
+  provider="later"
+  echo "Coordination-only mode does not need a local model provider."
 elif [ "$provider" = "ask" ] && [ "$interactive" = "1" ]; then
-  printf '\nChoose the first local target:\n' >/dev/tty
-  printf '  1) Existing Ollama, with automatic local model detection (recommended)\n' >/dev/tty
-  printf '  2) Managed llama.cpp runtime and a verified GGUF model\n' >/dev/tty
-  printf '  3) Configure it later in YAML\n' >/dev/tty
+  printf '\nAdd execution resources to this device?\n' >/dev/tty
+  printf '  1) Use existing Ollama\n     Detect local Ollama models. Nothing is downloaded.\n' >/dev/tty
+  printf '  2) Install a managed local runtime\n     Install llama.cpp and a verified model.\n' >/dev/tty
+  printf '  3) Skip for now\n     Finish setup without adding a model. You can add one later.\n' >/dev/tty
   printf 'Choose 1, 2, or 3 [1]: ' >/dev/tty
   read -r choice </dev/tty || choice="1"
   case "${choice:-1}" in
@@ -362,21 +419,7 @@ if [ ! -f "$config" ]; then
   "$INSTALL_DIR/contextbridge" init --config "$config"
 fi
 
-if [ "$cluster_mode" = "ask" ] && [ "$interactive" = "1" ]; then
-  printf '\nChoose how this device participates:\n' >/dev/tty
-  printf '  1) Local bridge only (recommended for a first install)\n' >/dev/tty
-  printf '  2) Relay for other devices\n' >/dev/tty
-  printf '  3) Worker for an existing relay\n' >/dev/tty
-  printf '  4) Relay and worker on this device\n' >/dev/tty
-  printf '  5) Sender/client for an existing relay (no pool jobs assigned here)\n' >/dev/tty
-  printf 'Choose 1, 2, 3, 4, or 5 [1]: ' >/dev/tty
-  read -r cluster_choice </dev/tty || cluster_choice="1"
-  case "${cluster_choice:-1}" in 2) cluster_mode="relay" ;; 3) cluster_mode="worker" ;; 4) cluster_mode="all" ;; 5) cluster_mode="client" ;; *) cluster_mode="local" ;; esac
-elif [ "$cluster_mode" = "ask" ]; then
-  cluster_mode="local"
-fi
-
-if { [ "$cluster_mode" = "worker" ] || [ "$cluster_mode" = "client" ]; } && [ -z "$relay_url" ] && [ "$interactive" = "1" ]; then
+if { [ "$cluster_mode" = "worker" ] || [ "$cluster_mode" = "client" ]; } && [ -z "$relay_url" ] && [ -z "$lan_bundle" ] && [ "$interactive" = "1" ]; then
   printf 'Public HTTPS relay URL: ' >/dev/tty
   read -r relay_url </dev/tty
 fi
@@ -384,11 +427,13 @@ if { [ "$cluster_mode" = "relay" ] || [ "$cluster_mode" = "all" ]; } && [ -z "$p
   printf 'Public HTTPS relay URL, or leave empty while configuring the reverse proxy: ' >/dev/tty
   read -r public_url </dev/tty || public_url=""
 fi
-if { [ "$cluster_mode" = "worker" ] || [ "$cluster_mode" = "client" ]; } && [ -z "$relay_url" ]; then
-  echo "A relay URL is required for $cluster_mode mode. Set CONTEXTBRIDGE_RELAY_URL for an unattended install." >&2
+if { [ "$cluster_mode" = "worker" ] || [ "$cluster_mode" = "client" ]; } && [ -z "$relay_url" ] && [ -z "$lan_bundle" ]; then
+  echo "A relay URL is required for $cluster_mode mode. Workers may instead set CONTEXTBRIDGE_LAN_BUNDLE." >&2
   exit 1
 fi
-if [ -n "$relay_url" ] && { [ "$cluster_mode" = "worker" ] || [ "$cluster_mode" = "all" ]; }; then
+if [ "$cluster_mode" = "worker" ] && [ -n "$lan_bundle" ]; then
+  "$INSTALL_DIR/contextbridge" cluster lan join --config "$config" --bundle "$lan_bundle" --name "$worker_name"
+elif [ -n "$relay_url" ] && { [ "$cluster_mode" = "worker" ] || [ "$cluster_mode" = "all" ]; }; then
   "$INSTALL_DIR/contextbridge" cluster configure --config "$config" --mode "$cluster_mode" --relay-url "$relay_url" --name "$worker_name"
 elif [ -n "$relay_url" ]; then
   "$INSTALL_DIR/contextbridge" cluster configure --config "$config" --mode "$cluster_mode" --relay-url "$relay_url"
@@ -399,7 +444,7 @@ elif [ "$cluster_mode" = "relay" ] || [ "$cluster_mode" = "all" ]; then
 else
   "$INSTALL_DIR/contextbridge" cluster configure --config "$config" --mode "$cluster_mode" --name "$worker_name"
 fi
-if [ "$cluster_mode" = "worker" ] || [ "$cluster_mode" = "all" ]; then
+if { [ "$cluster_mode" = "worker" ] && [ -z "$lan_bundle" ]; } || [ "$cluster_mode" = "all" ]; then
   "$INSTALL_DIR/contextbridge" pair --config "$config" --name "$worker_name"
 fi
 

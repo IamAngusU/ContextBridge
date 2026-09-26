@@ -291,7 +291,11 @@ func clusterLANJoinCommand(args []string) error {
 	if err := cluster.PairWorkerWithTrust(ctx, bundle.RelayURL, *name, cfg.Cluster.Worker.IdentityFile, cfg.Cluster.Worker.Groups, bundle.Trust, func(pair cluster.PairResponse) {
 		fmt.Println("Approve this LAN worker on the relay")
 		fmt.Println("  Code:", pair.UserCode)
+		if pair.VerificationURIComplete != "" {
+			fmt.Println("  Open:", pair.VerificationURIComplete)
+		}
 		fmt.Println("  Relay identity:", bundle.Trust.SPKISHA256)
+		fmt.Println("The transferred bundle pins this relay identity. Discovery or reachability alone never grants trust.")
 		fmt.Println("Waiting for approval. The code expires at", pair.ExpiresAt.Local().Format(time.RFC1123))
 	}); err != nil {
 		return err

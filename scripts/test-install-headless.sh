@@ -371,6 +371,34 @@ grep -F -- 'Inferred worker mode from CONTEXTBRIDGE_RELAY_URL.' "$inferred_worke
 grep -F -- "cluster configure --config $inferred_worker/config.yml --mode worker --relay-url https://relay.example.test/contextbridge --name inferred-worker" "$inferred_worker/calls" >/dev/null
 grep -F -- "pair --config $inferred_worker/config.yml --name inferred-worker" "$inferred_worker/calls" >/dev/null
 
+# A trusted LAN bundle is a complete, explicit worker connection method. The
+# installer must pass it to the pinned-TLS join flow and must not also run the
+# public-URL pairing path.
+inferred_lan_worker="$test_root/inferred-lan-worker"
+mkdir -p "$inferred_lan_worker/home"
+printf '{"version":1}\n' > "$inferred_lan_worker/contextbridge-lan-join.json"
+HOME="$inferred_lan_worker/home" \
+  PATH="$fake_bin:$test_system_path" \
+  CONTEXTBRIDGE_HOME="$inferred_lan_worker/share" \
+  CONTEXTBRIDGE_BIN_DIR="$inferred_lan_worker/bin" \
+  CONTEXTBRIDGE_CONFIG="$inferred_lan_worker/config.yml" \
+  CONTEXTBRIDGE_PROVIDER="later" \
+  CONTEXTBRIDGE_CLUSTER_MODE="ask" \
+  CONTEXTBRIDGE_RELAY_URL="" \
+  CONTEXTBRIDGE_LAN_BUNDLE="$inferred_lan_worker/contextbridge-lan-join.json" \
+  CONTEXTBRIDGE_WORKER_NAME="lan-worker" \
+  CONTEXTBRIDGE_NO_COMPLETION="1" \
+  CONTEXTBRIDGE_NO_DASHBOARD="1" \
+  CONTEXTBRIDGE_NONINTERACTIVE="1" \
+  CONTEXTBRIDGE_TEST_CALLS="$inferred_lan_worker/calls" \
+  sh "$root/install.sh" > "$inferred_lan_worker/out"
+grep -F -- 'Inferred worker mode from CONTEXTBRIDGE_LAN_BUNDLE.' "$inferred_lan_worker/out" >/dev/null
+grep -Fqx -- "cluster lan join --config $inferred_lan_worker/config.yml --bundle $inferred_lan_worker/contextbridge-lan-join.json --name lan-worker" "$inferred_lan_worker/calls"
+if grep -F -- 'pair --config' "$inferred_lan_worker/calls" >/dev/null; then
+  echo "LAN bundle installer attempted a second pairing flow" >&2
+  exit 1
+fi
+
 # Sender is a first-class non-execution role. It retains the relay address but
 # must neither pair nor advertise a local provider merely because installer
 # defaults were omitted.
@@ -412,7 +440,7 @@ if HOME="$missing_relay/home" \
   echo "headless worker install unexpectedly accepted an empty relay URL" >&2
   exit 1
 fi
-grep -F -- 'Set CONTEXTBRIDGE_RELAY_URL for an unattended install.' "$missing_relay/err" >/dev/null
+grep -F -- 'Workers may instead set CONTEXTBRIDGE_LAN_BUNDLE.' "$missing_relay/err" >/dev/null
 test ! -e "$missing_relay/bin/contextbridge"
 
 unsafe_relay="$test_root/unsafe-relay"

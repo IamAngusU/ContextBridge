@@ -4,6 +4,7 @@ param(
     [ValidateSet("ask", "local", "client", "sender", "relay", "worker", "all")][string]$ClusterMode = "ask",
     [ValidateSet("jina", "nuextract", "both")][string]$ManagedModel = "jina",
     [string]$RelayUrl = "",
+    [string]$LANBundle = "",
     [string]$PublicUrl = "",
     [string]$NodeName = "auto",
     [string]$CommandName = "",
@@ -26,6 +27,9 @@ if (-not $PSBoundParameters.ContainsKey('ClusterMode') -and $env:CONTEXTBRIDGE_C
 }
 if (-not $PSBoundParameters.ContainsKey('RelayUrl') -and $env:CONTEXTBRIDGE_RELAY_URL) {
     $RelayUrl = $env:CONTEXTBRIDGE_RELAY_URL
+}
+if (-not $PSBoundParameters.ContainsKey('LANBundle') -and $env:CONTEXTBRIDGE_LAN_BUNDLE) {
+    $LANBundle = $env:CONTEXTBRIDGE_LAN_BUNDLE
 }
 if (-not $PSBoundParameters.ContainsKey('PublicUrl') -and $env:CONTEXTBRIDGE_PUBLIC_URL) {
     $PublicUrl = $env:CONTEXTBRIDGE_PUBLIC_URL
@@ -99,15 +103,17 @@ function Resolve-ContextBridgeInstallMode {
     param(
         [Parameter(Mandatory = $true)][string]$Mode,
         [string]$Relay,
+        [string]$Bundle,
         [string]$PublicRelay,
         [bool]$Interactive
     )
     if ($Mode -eq 'sender') { return 'client' }
     if ($Mode -ne 'ask') { return $Mode }
-    if ($Relay -and $PublicRelay) {
-        throw 'Both a worker relay URL and a relay public URL were supplied. Set ClusterMode explicitly.'
+    if (($Relay -and $Bundle) -or (($Relay -or $Bundle) -and $PublicRelay)) {
+        throw 'Conflicting relay URL, LAN bundle, or public relay hints were supplied. Set ClusterMode and one connection method explicitly.'
     }
     if ($Relay) { return 'worker' }
+    if ($Bundle) { return 'worker' }
     if ($PublicRelay) { return 'relay' }
     if (-not $Interactive) { return 'local' }
     return 'ask'
@@ -187,13 +193,71 @@ Muted "A local-first router for local engines, APIs, and trusted worker pools."
 
 $installerInteractive = -not $NonInteractive -and [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
 $requestedClusterMode = $ClusterMode
-$ClusterMode = Resolve-ContextBridgeInstallMode -Mode $ClusterMode -Relay $RelayUrl -PublicRelay $PublicUrl -Interactive $installerInteractive
-if ($requestedClusterMode -eq 'ask' -and $ClusterMode -ne 'ask' -and ($RelayUrl -or $PublicUrl)) {
-    Muted "Inferred $ClusterMode mode from the supplied relay URL."
+$ClusterMode = Resolve-ContextBridgeInstallMode -Mode $ClusterMode -Relay $RelayUrl -Bundle $LANBundle -PublicRelay $PublicUrl -Interactive $installerInteractive
+if ($requestedClusterMode -eq 'ask' -and $ClusterMode -ne 'ask' -and ($RelayUrl -or $LANBundle -or $PublicUrl)) {
+    Muted "Inferred $ClusterMode mode from the supplied connection settings."
+}
+if ($ClusterMode -eq 'ask') {
+    Write-Host ""
+    Write-Host "What do you want to do on this device?"
+    Write-Host "  1) Create a new pool"
+    Muted "     This device coordinates the pool. It can also run AI work."
+    Write-Host "  2) Join an existing pool"
+    Muted "     Add this device's hardware, models, or APIs to a pool."
+    Write-Host "  3) Use an existing pool"
+    Muted "     Send work without accepting pool jobs on this device."
+    Write-Host "  4) Use ContextBridge only on this device"
+    Muted "     Keep execution local; no other machine is required."
+    Write-Host "  5) Advanced setup"
+    Muted "     Choose relay, worker, and client roles yourself."
+    Muted "You can change this later. Joining another pool requires approval; moving pool authority is a separate protected operation."
+    $clusterChoice = Read-Host "Choose 1, 2, 3, 4, or 5 [4]"
+    if (-not $clusterChoice) { $clusterChoice = '4' }
+    if ($clusterChoice -eq '1') {
+        $runWork = Read-Host "Should this device also run AI work? [Y/n]"
+        $ClusterMode = if ($runWork -match '^(n|no)$') { 'relay' } else { 'all' }
+    } elseif ($clusterChoice -eq '2') {
+        $ClusterMode = 'worker'
+    } elseif ($clusterChoice -eq '3') {
+        $ClusterMode = 'client'
+    } elseif ($clusterChoice -eq '5') {
+        Write-Host "Technical roles: local, client, relay, worker, all"
+        $advancedMode = (Read-Host "Technical role [local]").Trim().ToLowerInvariant()
+        if (-not $advancedMode) { $advancedMode = 'local' }
+        if ($advancedMode -notin @('local', 'client', 'sender', 'relay', 'worker', 'all')) {
+            throw 'Technical role must be local, client/sender, relay, worker, or all.'
+        }
+        $ClusterMode = if ($advancedMode -eq 'sender') { 'client' } else { $advancedMode }
+    } else {
+        $ClusterMode = 'local'
+    }
+}
+if ($ClusterMode -eq 'worker' -and -not $RelayUrl -and -not $LANBundle -and $installerInteractive) {
+    Write-Host ""
+    Write-Host "How will this device reach the pool?"
+    Write-Host "  1) Private network with a trusted join bundle"
+    Muted "     LAN, VLAN, VPN, or another routed private network. No public Internet address is required."
+    Write-Host "  2) HTTPS relay URL"
+    Muted "     Connect to the address provided by the pool owner."
+    $connectionChoice = Read-Host "Choose 1 or 2 [1]"
+    if ($connectionChoice -eq '2') {
+        $RelayUrl = Read-Host "HTTPS relay URL"
+    } else {
+        $LANBundle = Read-Host "Trusted LAN join-bundle path"
+    }
+}
+if ($RelayUrl -and $LANBundle) {
+    throw 'Choose either RelayUrl or LANBundle, not both.'
+}
+if ($LANBundle -and $ClusterMode -ne 'worker') {
+    throw 'LANBundle is only valid when this device joins an existing pool as a worker.'
 }
 if ($ClusterMode -eq 'client' -and $Provider -eq 'ask') {
     $Provider = 'later'
     Muted 'Sender-only mode does not need a local model provider.'
+} elseif ($ClusterMode -eq 'relay' -and $Provider -eq 'ask') {
+    $Provider = 'later'
+    Muted 'Coordination-only mode does not need a local model provider.'
 }
 
 $existingCanonicalCommand = Get-Command contextbridge -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -241,10 +305,13 @@ if ($CommandName) {
 
 if ($Provider -eq "ask" -and $installerInteractive) {
     Write-Host ""
-    Write-Host "Choose the first local target:"
-    Write-Host "  1) Existing Ollama, with automatic local model detection (recommended)"
-    Write-Host "  2) Managed llama.cpp runtime and a verified GGUF model"
-    Write-Host "  3) Configure it later in YAML"
+    Write-Host "Add execution resources to this device?"
+    Write-Host "  1) Use existing Ollama"
+    Muted "     Detect local Ollama models. Nothing is downloaded."
+    Write-Host "  2) Install a managed local runtime"
+    Muted "     Install llama.cpp and a verified model."
+    Write-Host "  3) Skip for now"
+    Muted "     Finish setup without adding a model. You can add one later."
     $choice = Read-Host "Choose 1, 2, or 3 [1]"
     if (-not $choice) { $choice = "1" }
     $Provider = if ($choice -eq "2") { "managed" } elseif ($choice -eq "3") { "later" } else { "ollama" }
@@ -430,35 +497,29 @@ if (-not (Test-Path $config)) {
     & $exe init --config $config
 }
 
-if ($ClusterMode -eq "ask") {
-    Write-Host ""
-    Write-Host "Choose how this device participates:"
-    Write-Host "  1) Local bridge only (recommended for a first install)"
-    Write-Host "  2) Relay for other devices"
-    Write-Host "  3) Worker for an existing relay"
-    Write-Host "  4) Relay and worker on this device"
-    Write-Host "  5) Sender/client for an existing relay (no pool jobs assigned here)"
-    $clusterChoice = Read-Host "Choose 1, 2, 3, 4, or 5 [1]"
-    $ClusterMode = if ($clusterChoice -eq "2") { "relay" } elseif ($clusterChoice -eq "3") { "worker" } elseif ($clusterChoice -eq "4") { "all" } elseif ($clusterChoice -eq "5") { "client" } else { "local" }
-}
-$clusterArguments = @("cluster", "configure", "--config", $config, "--mode", $ClusterMode)
-if ($ClusterMode -in @("relay", "all")) { $clusterArguments += @("--listen", "auto") }
-if ($ClusterMode -in @("worker", "client")) {
-    if (-not $RelayUrl -and $installerInteractive) { $RelayUrl = Read-Host "Public HTTPS relay URL" }
-    if (-not $RelayUrl) { throw "A relay URL is required for $ClusterMode mode." }
-    $clusterArguments += @("--relay-url", $RelayUrl)
-    if ($ClusterMode -eq "worker") { $clusterArguments += @("--name", $NodeName) }
-} elseif ($ClusterMode -eq "relay") {
-    if (-not $PublicUrl -and $installerInteractive) { $PublicUrl = Read-Host "Public HTTPS relay URL, or leave empty while configuring the reverse proxy" }
-    if ($PublicUrl) { $clusterArguments += @("--public-url", $PublicUrl) }
-} elseif ($ClusterMode -eq "all") {
-    $clusterArguments += @("--name", $NodeName)
-}
-& $exe @clusterArguments
-if ($LASTEXITCODE -ne 0) { throw "Cluster mode could not be configured." }
-if ($ClusterMode -in @("worker", "all")) {
-    & $exe pair --config $config
-    if ($LASTEXITCODE -ne 0) { throw "Worker pairing did not complete." }
+if ($ClusterMode -eq 'worker' -and $LANBundle) {
+    & $exe cluster lan join --config $config --bundle $LANBundle --name $NodeName
+    if ($LASTEXITCODE -ne 0) { throw 'Trusted LAN join did not complete.' }
+} else {
+    $clusterArguments = @("cluster", "configure", "--config", $config, "--mode", $ClusterMode)
+    if ($ClusterMode -in @("relay", "all")) { $clusterArguments += @("--listen", "auto") }
+    if ($ClusterMode -in @("worker", "client")) {
+        if (-not $RelayUrl -and $installerInteractive) { $RelayUrl = Read-Host "Public HTTPS relay URL" }
+        if (-not $RelayUrl) { throw "A relay URL or trusted LAN bundle is required for $ClusterMode mode." }
+        $clusterArguments += @("--relay-url", $RelayUrl)
+        if ($ClusterMode -eq "worker") { $clusterArguments += @("--name", $NodeName) }
+    } elseif ($ClusterMode -eq "relay") {
+        if (-not $PublicUrl -and $installerInteractive) { $PublicUrl = Read-Host "Public HTTPS relay URL, or leave empty while configuring the reverse proxy" }
+        if ($PublicUrl) { $clusterArguments += @("--public-url", $PublicUrl) }
+    } elseif ($ClusterMode -eq "all") {
+        $clusterArguments += @("--name", $NodeName)
+    }
+    & $exe @clusterArguments
+    if ($LASTEXITCODE -ne 0) { throw "Cluster mode could not be configured." }
+    if ($ClusterMode -in @("worker", "all")) {
+        & $exe pair --config $config
+        if ($LASTEXITCODE -ne 0) { throw "Worker pairing did not complete." }
+    }
 }
 
 if ($Provider -eq "managed") {

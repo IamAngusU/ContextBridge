@@ -76,7 +76,8 @@ No ContextBridge cloud account is required for self-hosting.
 
 ## Get running
 
-For this first run, have **Ollama running with at least one installed text-generation model**. The installer can also set up a managed runtime for other workloads.
+Install ContextBridge first, then choose what this device should do. A relay or
+sender needs no GPU, local model, or Ollama installation.
 
 ### Windows PowerShell
 
@@ -90,12 +91,39 @@ irm https://raw.githubusercontent.com/IamAngusU/ContextBridge/main/install.ps1 |
 curl -fsSL https://raw.githubusercontent.com/IamAngusU/ContextBridge/main/install.sh | sh
 ```
 
-Choose **Existing Ollama**, then **4) Relay and worker on this device**. Leave the public HTTPS URL empty for this local demo. The installer downloads the latest release, checks its published checksum, creates a private configuration and pairs the local worker.
+The installer starts with four plain-language outcomes:
+
+```text
+Create a new pool      coordinate other devices
+Join an existing pool  contribute this device's resources
+Use an existing pool   send work only
+Use only this device   keep execution local
+```
+
+Choose **Use ContextBridge only on this device** for the shortest single-PC
+path. Choose **Create a new pool** when this machine should coordinate other
+devices; CB then asks separately whether it should also run work. Execution
+resources such as Ollama or managed llama.cpp are requested only for devices
+that will actually execute jobs. You can change participation later; joining a
+different pool needs approval, and moving pool authority is a separate
+protected operation.
+
+For **Join an existing pool**, choose either a trusted LAN join bundle for a
+private LAN/VLAN/VPN path or the pool owner's HTTPS relay URL. A join bundle
+pins the exact relay identity; CB never treats discovery or a private IP as
+trust.
+
+The installer downloads the latest release, verifies its published checksum,
+and creates a private configuration.
 
 > [!NOTE]
 > This README tracks current `main`, while the install commands above deliberately download the latest published release. Until the next release catches up, newer main-only commands such as `cluster estimate`, `cluster lan relocate`, and `pair --interactive` require a build from current source. Release/onboarding parity is tracked in #36.
 
-Open a **new terminal**. If the installer did not start the service, run `contextbridge run` and leave that terminal open. In another terminal:
+To run the first real model request, have Ollama running with at least one
+installed text-generation model, or select the managed-runtime path during
+installation. Open a **new terminal**. If the installer did not start the
+service, run `contextbridge run` and leave that terminal open. In another
+terminal:
 
 ```sh
 contextbridge doctor
@@ -107,7 +135,7 @@ Your local relay queues the request, your worker runs a compatible installed mod
 Commands use the installer-created configuration automatically. For a custom installation, append `--config /path/to/config.yml`. Read [install.ps1](install.ps1) / [install.sh](install.sh) before executing them, or use the [release archives](https://github.com/IamAngusU/ContextBridge/releases/latest).
 
 To change what an installed device does without memorizing role flags, run
-`contextbridge guide` in a real terminal. It asks for the intended role, derives
+`contextbridge guide` in a real terminal. It asks for the intended outcome, derives
 safe existing/default values, requests only unresolved connection data, shows a
 redacted provenance summary, and saves nothing until you confirm. Scripts, CI,
 MCP and redirected input never prompt; use deterministic `cluster configure`

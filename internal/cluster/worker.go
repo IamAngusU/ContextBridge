@@ -1802,11 +1802,17 @@ func validatePairResponse(response PairResponse) error {
 	if !validOpaqueSecret(response.DeviceCode, 16, 1024) {
 		return errors.New("relay returned an invalid pairing device code")
 	}
-	if !validRoutingLabel(response.UserCode, 64) {
+	userCode, validUserCode := normalizePairingUserCode(response.UserCode)
+	if !validUserCode || userCode != response.UserCode {
 		return errors.New("relay returned an invalid pairing user code")
 	}
 	if err := validatePairingVerificationURL(response.VerificationURI); err != nil {
 		return fmt.Errorf("relay returned an invalid pairing verification URL: %w", err)
+	}
+	if response.VerificationURIComplete != "" {
+		if err := validatePairingVerificationComplete(response.VerificationURI, response.VerificationURIComplete, response.UserCode); err != nil {
+			return fmt.Errorf("relay returned an invalid complete pairing verification URL: %w", err)
+		}
 	}
 	pollEvery := time.Duration(response.IntervalSeconds) * time.Second
 	if pollEvery < minimumPairPollInterval || pollEvery > maximumPairPollInterval {
@@ -1816,6 +1822,26 @@ func validatePairResponse(response PairResponse) error {
 		return errors.New("relay returned an invalid pairing expiry")
 	}
 	return nil
+}
+
+func validatePairingVerificationComplete(baseValue, completeValue, userCode string) error {
+	base, err := url.Parse(strings.TrimSpace(baseValue))
+	if err != nil {
+		return errors.New("base verification URL is invalid")
+	}
+	complete, err := url.Parse(strings.TrimSpace(completeValue))
+	if err != nil {
+		return errors.New("complete verification URL is invalid")
+	}
+	if complete.Fragment != "pair="+userCode {
+		return errors.New("complete verification URL does not contain the expected one-time code")
+	}
+	base.Fragment = ""
+	complete.Fragment = ""
+	if base.String() != complete.String() {
+		return errors.New("complete verification URL does not match the verification endpoint")
+	}
+	return ValidateRelayURL(complete.String())
 }
 
 func validatePairingVerificationURL(value string) error {

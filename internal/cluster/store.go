@@ -10,11 +10,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	bolt "go.etcd.io/bbolt"
@@ -639,7 +641,11 @@ func (s *Store) CreatePairing(request PairRequest, verificationURI string, lifet
 		}
 		return codes.Put([]byte(pairing.UserCode), []byte(pairing.DeviceCodeHash))
 	})
-	return PairResponse{DeviceCode: deviceCode, UserCode: pairing.UserCode, VerificationURI: verificationURI, ExpiresAt: pairing.ExpiresAt, IntervalSeconds: 5}, err
+	return PairResponse{
+		DeviceCode: deviceCode, UserCode: pairing.UserCode,
+		VerificationURI: verificationURI, VerificationURIComplete: pairingVerificationURIComplete(verificationURI, pairing.UserCode),
+		ExpiresAt: pairing.ExpiresAt, IntervalSeconds: 5,
+	}, err
 }
 
 func (s *Store) ListPairings() ([]Pairing, error) {
@@ -670,7 +676,11 @@ func (s *Store) ListPairings() ([]Pairing, error) {
 }
 
 func (s *Store) DecidePairing(userCode string, approve bool) (Pairing, error) {
-	userCode = strings.ToUpper(strings.TrimSpace(userCode))
+	var valid bool
+	userCode, valid = normalizePairingUserCode(userCode)
+	if !valid {
+		return Pairing{}, os.ErrNotExist
+	}
 	if _, err := s.GarbageCollectPairings(time.Now().UTC()); err != nil {
 		return Pairing{}, err
 	}
@@ -3888,6 +3898,43 @@ func randomUserCode() (string, error) {
 	}
 	code := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(raw)
 	return code[:4] + "-" + code[4:8], nil
+}
+
+func normalizePairingUserCode(value string) (string, bool) {
+	var compact strings.Builder
+	compact.Grow(8)
+	for _, character := range strings.TrimSpace(value) {
+		if unicode.IsSpace(character) || unicode.Is(unicode.Dash, character) {
+			continue
+		}
+		if character >= 'a' && character <= 'z' {
+			character -= 'a' - 'A'
+		}
+		if !((character >= 'A' && character <= 'Z') || (character >= '2' && character <= '7')) {
+			return "", false
+		}
+		compact.WriteRune(character)
+		if compact.Len() > 8 {
+			return "", false
+		}
+	}
+	raw := compact.String()
+	if len(raw) != 8 {
+		return "", false
+	}
+	return raw[:4] + "-" + raw[4:], true
+}
+
+func pairingVerificationURIComplete(verificationURI, userCode string) string {
+	parsed, err := url.Parse(strings.TrimSpace(verificationURI))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return ""
+	}
+	if parsed.Fragment != "" && parsed.Fragment != "pair" {
+		return ""
+	}
+	parsed.Fragment = "pair=" + userCode
+	return parsed.String()
 }
 
 func publicKeyFingerprint(publicKey []byte) string {

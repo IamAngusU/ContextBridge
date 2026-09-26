@@ -41,6 +41,59 @@ func TestGuidedConfigureCompletesOnlyUnresolvedValuesAndConfirms(t *testing.T) {
 	}
 }
 
+func TestGuidedConfigureCreatesCoordinationOnlyPoolFromOutcomeMenu(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yml")
+	if err := config.Default(configPath); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	input := strings.NewReader("1\nno\ny\n")
+	if err := clusterConfigureCommandWithIO([]string{"--config", configPath}, input, &output, true, true); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Cluster.Relay.Enabled || cfg.Cluster.Worker.Enabled {
+		t.Fatalf("guided mode = relay:%v worker:%v, want relay only", cfg.Cluster.Relay.Enabled, cfg.Cluster.Worker.Enabled)
+	}
+	shown := output.String()
+	for _, expected := range []string{
+		"What do you want to do on this device?",
+		"Create a new pool",
+		"Should this device also run AI work?",
+		"purpose    create a pool; coordination only",
+		"role       relay  [prompt]",
+	} {
+		if !strings.Contains(shown, expected) {
+			t.Fatalf("guided output missing %q: %s", expected, shown)
+		}
+	}
+}
+
+func TestGuidedConfigureJoinsPoolFromOutcomeMenu(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yml")
+	if err := config.Default(configPath); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	input := strings.NewReader("2\nhttps://relay.example.test\ny\n")
+	if err := clusterConfigureCommandWithIO([]string{"--config", configPath}, input, &output, true, true); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Cluster.Relay.Enabled || !cfg.Cluster.Worker.Enabled {
+		t.Fatalf("guided mode = relay:%v worker:%v, want worker", cfg.Cluster.Relay.Enabled, cfg.Cluster.Worker.Enabled)
+	}
+	if !strings.Contains(output.String(), "purpose    join an existing pool and run work") {
+		t.Fatalf("guided output did not explain the outcome: %s", output.String())
+	}
+}
+
 func TestGuidedConfigureUsesEnvironmentAfterEmptyConfig(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.yml")
 	if err := config.Default(configPath); err != nil {

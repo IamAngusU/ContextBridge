@@ -172,6 +172,29 @@ func TestPairWorkerRejectsUnsafePollingIntervals(t *testing.T) {
 	}
 }
 
+func TestValidatePairResponseBindsCompleteVerificationURLToCode(t *testing.T) {
+	valid := PairResponse{
+		DeviceCode: "0123456789abcdef", UserCode: "ABCD-EFGH",
+		VerificationURI:         "https://relay.example/dashboard/#pair",
+		VerificationURIComplete: "https://relay.example/dashboard/#pair=ABCD-EFGH",
+		ExpiresAt:               time.Now().Add(time.Hour), IntervalSeconds: 5,
+	}
+	if err := validatePairResponse(valid); err != nil {
+		t.Fatalf("valid response rejected: %v", err)
+	}
+	for _, changed := range []string{
+		"https://relay.example/dashboard/#pair=ZZZZ-ZZZZ",
+		"https://other.example/dashboard/#pair=ABCD-EFGH",
+		"https://relay.example/other/#pair=ABCD-EFGH",
+	} {
+		candidate := valid
+		candidate.VerificationURIComplete = changed
+		if err := validatePairResponse(candidate); err == nil {
+			t.Fatalf("inconsistent complete verification URL accepted: %s", changed)
+		}
+	}
+}
+
 func TestLoadWorkerRejectsOversizedAndInconsistentIdentity(t *testing.T) {
 	oversized := filepath.Join(t.TempDir(), "oversized.json")
 	if err := os.WriteFile(oversized, make([]byte, maximumWorkerIdentityBytes+1), 0600); err != nil {

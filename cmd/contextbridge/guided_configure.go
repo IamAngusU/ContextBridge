@@ -41,7 +41,7 @@ func guideClusterConfiguration(input io.Reader, output io.Writer, cfg config.Con
 	if provided["mode"] {
 		sources["mode"] = "flag"
 	} else if chooseMode {
-		selected, err := promptGuidedChoice(reader, output, "Role", currentClusterMode(cfg), []string{"local", "client", "relay", "worker", "all"})
+		selected, err := promptGuidedMode(reader, output, currentClusterMode(cfg))
 		if err != nil {
 			return false, err
 		}
@@ -148,6 +148,9 @@ func guideClusterConfiguration(input io.Reader, output io.Writer, cfg config.Con
 	if _, err := fmt.Fprintln(output, "\nResolved configuration"); err != nil {
 		return false, err
 	}
+	if _, err := fmt.Fprintf(output, "  purpose    %s\n", guidedModePurpose(configuredMode)); err != nil {
+		return false, err
+	}
 	if _, err := fmt.Fprintf(output, "  role       %s  [%s]\n", configuredMode, sources["mode"]); err != nil {
 		return false, err
 	}
@@ -178,6 +181,120 @@ func guideClusterConfiguration(input io.Reader, output io.Writer, cfg config.Con
 		return false, err
 	}
 	return confirmed, nil
+}
+
+func promptGuidedMode(reader *bufio.Reader, output io.Writer, fallback string) (string, error) {
+	if _, err := fmt.Fprintln(output, "\nWhat do you want to do on this device?"); err != nil {
+		return "", err
+	}
+	lines := []string{
+		"  1) Create a new pool",
+		"     This device coordinates the pool. It can also run AI work.",
+		"  2) Join an existing pool",
+		"     Add this device's hardware, models, or APIs to a pool.",
+		"  3) Use an existing pool",
+		"     Send work without accepting pool jobs on this device.",
+		"  4) Use ContextBridge only on this device",
+		"     Keep execution local; no other machine is required.",
+		"  5) Advanced setup",
+		"     Choose the technical relay, worker, and client roles yourself.",
+		"You can change how this device participates later. Joining another pool requires approval; moving pool authority is a separate protected operation.",
+	}
+	for _, line := range lines {
+		if _, err := fmt.Fprintln(output, line); err != nil {
+			return "", err
+		}
+	}
+
+	defaultChoice := guidedModeChoice(fallback)
+	for attempt := 0; attempt < maximumGuidedPromptAttempts; attempt++ {
+		value, err := promptGuidedLine(reader, output, "Choose 1, 2, 3, 4, or 5 ["+defaultChoice+"]")
+		if err != nil {
+			return "", err
+		}
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value == "" {
+			value = defaultChoice
+		}
+		switch value {
+		case "1", "create", "create pool", "new pool":
+			runWork, confirmErr := promptGuidedYesNo(reader, output, "Should this device also run AI work? [Y/n]", true)
+			if confirmErr != nil {
+				return "", confirmErr
+			}
+			if runWork {
+				return "all", nil
+			}
+			return "relay", nil
+		case "2", "join", "join pool":
+			return "worker", nil
+		case "3", "use", "use pool", "sender":
+			return "client", nil
+		case "4", "local", "local only":
+			return "local", nil
+		case "5", "advanced":
+			return promptGuidedChoice(reader, output, "Technical role", fallback, []string{"local", "client", "relay", "worker", "all"})
+		case "client", "relay", "worker", "all":
+			// Keep the established technical inputs useful for experienced users
+			// and for terminal muscle memory from earlier releases.
+			return value, nil
+		default:
+			if _, err := fmt.Fprintln(output, "Choose 1, 2, 3, 4, or 5. Advanced users may enter local, client, relay, worker, or all."); err != nil {
+				return "", err
+			}
+		}
+	}
+	return "", errors.New("guided setup stopped after three invalid answers; no configuration was changed")
+}
+
+func promptGuidedYesNo(reader *bufio.Reader, output io.Writer, label string, fallback bool) (bool, error) {
+	for attempt := 0; attempt < maximumGuidedPromptAttempts; attempt++ {
+		value, err := promptGuidedLine(reader, output, label)
+		if err != nil {
+			return false, err
+		}
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "":
+			return fallback, nil
+		case "y", "yes":
+			return true, nil
+		case "n", "no":
+			return false, nil
+		default:
+			if _, err := fmt.Fprintln(output, "Choose yes or no."); err != nil {
+				return false, err
+			}
+		}
+	}
+	return false, errors.New("guided setup stopped after three invalid answers; no configuration was changed")
+}
+
+func guidedModeChoice(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "relay", "all":
+		return "1"
+	case "worker":
+		return "2"
+	case "client", "sender":
+		return "3"
+	default:
+		return "4"
+	}
+}
+
+func guidedModePurpose(mode string) string {
+	switch mode {
+	case "all":
+		return "create a pool and run work here"
+	case "relay":
+		return "create a pool; coordination only"
+	case "worker":
+		return "join an existing pool and run work"
+	case "client":
+		return "use an existing pool; sender only"
+	default:
+		return "use ContextBridge only on this device"
+	}
 }
 
 func currentClusterMode(cfg config.Config) string {
