@@ -599,7 +599,11 @@ func relayUptimeSeconds(now, startedAt time.Time) uint64 {
 	if startedAt.IsZero() || now.Before(startedAt) {
 		return 0
 	}
-	return uint64(now.Sub(startedAt) / time.Second)
+	seconds := now.Sub(startedAt) / time.Second
+	if seconds <= 0 {
+		return 0
+	}
+	return uint64(seconds)
 }
 
 // Liveness deliberately proves only that this process can answer HTTP. It
