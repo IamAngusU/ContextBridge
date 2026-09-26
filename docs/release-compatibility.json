@@ -1,0 +1,31 @@
+{
+  "schema": "contextbridge.release-readme-compatibility.v1",
+  "latest_release": "v0.8.0",
+  "release_commands": [
+    {
+      "args": ["doctor", "--help"],
+      "output_must_not_contain": "unknown command"
+    },
+    {
+      "args": ["cluster", "chat", "--help"],
+      "output_must_not_contain": "unknown cluster command"
+    }
+  ],
+  "main_only_commands": [
+    {
+      "args": ["cluster", "estimate", "--help"],
+      "release_output_must_contain": "unknown cluster command estimate",
+      "readme_marker": "<!-- release-compat: main-only: cluster estimate -->"
+    },
+    {
+      "args": ["cluster", "lan", "relocate", "--help"],
+      "release_output_must_contain": "unknown cluster LAN command relocate",
+      "readme_marker": "<!-- release-compat: main-only: cluster lan relocate -->"
+    },
+    {
+      "args": ["pair", "--help"],
+      "release_output_must_not_contain": "-interactive",
+      "readme_marker": "<!-- release-compat: main-only: pair --interactive -->"
+    }
+  ]
+}

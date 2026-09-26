@@ -118,6 +118,11 @@ and creates a private configuration.
 
 > [!NOTE]
 > This README tracks current `main`, while the install commands above deliberately download the latest published release. Until the next release catches up, newer main-only commands such as `cluster estimate`, `cluster lan relocate`, and `pair --interactive` require a build from current source. Release/onboarding parity is tracked in #36.
+> Instructions frozen with the currently published binary remain available in
+> the [v0.8.0 README](https://github.com/IamAngusU/ContextBridge/blob/v0.8.0/README.md)
+> and inside every release archive. CI executes the published binary against
+> the curated onboarding contract, so a newer release cannot silently leave
+> this warning or the main-only labels stale.
 
 To run the first real model request, have Ollama running with at least one
 installed text-generation model, or select the managed-runtime path during
@@ -225,6 +230,11 @@ backend or desktop secret store, never in a public browser bundle.
 
 A **relay** coordinates the pool. A **worker** runs the job. An **application token** lets another client submit work. Workers connect outbound; they need no public inbound ports.
 
+<!-- release-compat: main-only: cluster estimate -->
+> [!NOTE]
+> **Current `main` only:** `cluster estimate` is not part of the currently
+> published v0.8.0 binary. Build current source to use it.
+
 Once a job is assigned, `contextbridge cluster estimate JOB_ID` can show a
 clearly labelled, non-authoritative p50–p90 range learned from this pool's own
 bounded successful history. It shows `unavailable` instead of inventing an ETA
@@ -244,10 +254,18 @@ contextbridge cluster lan join --bundle ./contextbridge-lan-join.json --name hom
 
 The bundle pins the relay certificate; CB does not weaken the boundary to
 cleartext private-network HTTP. See [Secure offline LAN pools](docs/offline-lan.md)
-for approval, firewall, air-gap and WAN-loss behavior. If the relay later gets
-a new private IP or local DNS name, `contextbridge cluster lan relocate`
-creates a same-key relocation bundle; workers accept it only after the live
-new endpoint proves the identity they already pinned.
+for approval, firewall, air-gap and WAN-loss behavior.
+
+<!-- release-compat: main-only: cluster lan relocate -->
+> [!NOTE]
+> **Current `main` only:** `cluster lan relocate` is not part of the currently
+> published v0.8.0 binary. The v0.8.0 LAN identity remains pinned, but this
+> convenience command requires a current-source build.
+
+If the relay later gets a new private IP or local DNS name,
+`contextbridge cluster lan relocate` creates a same-key relocation bundle;
+workers accept it only after the live new endpoint proves the identity they
+already pinned.
 
 <details>
 <summary><strong>Set up a relay, pair another machine and issue an app token</strong></summary>
@@ -275,6 +293,12 @@ contextbridge pair
 ```
 
 Pairing prints a code and waits. In a **second terminal on the relay host**, inspect pending requests and approve the matching code:
+
+<!-- release-compat: main-only: pair --interactive -->
+> [!NOTE]
+> **Current `main` only:** the published v0.8.0 `pair` command requires its
+> explicit flags; the guided `--interactive` form requires a current-source
+> build.
 
 If the device has not been fully configured yet, use
 `contextbridge pair --interactive`; it asks only for the unresolved safe
