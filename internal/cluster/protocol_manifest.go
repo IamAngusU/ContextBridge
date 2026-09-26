@@ -62,6 +62,7 @@ func CurrentProtocolManifest(configuredJobBytes int64) ProtocolManifest {
 			"performance_aware_routing_v1",
 			"prometheus_metrics_v1",
 			"producer_resource_governance_v1",
+			"producer_required_e2ee_v1",
 			"producer_scoped_idempotency",
 			"relay_conformance_v1",
 			"relay_role_health_v1",

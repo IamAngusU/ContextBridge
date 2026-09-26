@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Added credential-bound E2EE admission. Producer credentials issued with
+  `--require-e2ee` reject every cleartext job and the currently unsupported
+  cleartext pipeline path with stable `privacy.e2ee_required` evidence. The
+  protocol manifest advertises the boundary, durable store admission enforces
+  it below HTTP, and documentation explicitly distinguishes payload secrecy
+  from zero knowledge: routing, ownership, timing, policy and usage metadata
+  remain relay-visible.
 - Extended passive portable `service` endpoint metadata with bounded
   loopback-only capability and execute paths plus typed-execution, workflow,
   and artifact-lineage capability labels. These fields make richer local

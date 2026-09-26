@@ -83,7 +83,7 @@ func TestRejectedGlobalQueueAdmissionDoesNotConsumeHourlyQuota(t *testing.T) {
 }
 
 func TestProducerTokenScopesProviderEgressAndQueue(t *testing.T) {
-	record := TokenRecord{Role: "producer", ProducerLimits: ProducerLimits{Providers: []string{"ollama"}, Egress: "local_only"}}
+	record := TokenRecord{Role: "producer", ProducerLimits: ProducerLimits{Providers: []string{"ollama"}, Egress: "local_only", RequireE2EE: true}}
 	requirements := Requirements{Task: "generation"}
 	if err := scopeRequirements(&requirements, record); err != nil {
 		t.Fatal(err)
@@ -104,9 +104,21 @@ func TestProducerTokenScopesProviderEgressAndQueue(t *testing.T) {
 	if _, _, err := store.CreateTokenWithLimits("observer", "observer", nil, time.Hour, ProducerLimits{MaxJobsPerHour: 1}); err == nil {
 		t.Fatal("non-producer token accepted producer limits")
 	}
+	if _, _, err := store.CreateTokenWithLimits("observer", "observer", nil, time.Hour, ProducerLimits{RequireE2EE: true}); err == nil {
+		t.Fatal("non-producer token accepted an E2EE producer requirement")
+	}
 	token, saved, err := store.CreateTokenWithLimits("producer", "website", nil, time.Hour, record.ProducerLimits)
-	if err != nil || token == "" || saved.ProducerLimits.Egress != "local_only" || len(saved.ProducerLimits.Providers) != 1 {
+	if err != nil || token == "" || saved.ProducerLimits.Egress != "local_only" || len(saved.ProducerLimits.Providers) != 1 || !saved.ProducerLimits.RequireE2EE {
 		t.Fatalf("producer limits were not persisted: %#v %v", saved, err)
+	}
+	if _, err := store.CreateJobAdmittedGoverned(governedTestRequest(t, "website", "cleartext"), 10, record.ProducerLimits); !errors.Is(err, ErrE2EERequired) {
+		t.Fatalf("durable admission accepted cleartext under an E2EE-only credential: %v", err)
+	}
+	sealed := governedTestRequest(t, "website", "sealed")
+	sealed.Payload = nil
+	sealed.Sealed = &SealedEnvelope{Algorithm: sealedAlgorithm, Ciphertext: "opaque"}
+	if _, err := store.CreateJobAdmittedGoverned(sealed, 10, record.ProducerLimits); err != nil {
+		t.Fatalf("durable admission rejected a sealed payload: %v", err)
 	}
 }
 
@@ -146,7 +158,7 @@ func TestTokenAPIValidatesAndPersistsProducerLimits(t *testing.T) {
 	defer relay.Close()
 	server := httptest.NewServer(relay.Handler())
 	defer server.Close()
-	body := []byte(`{"role":"producer","subject":"bounded-api","producer_limits":{"max_queued_jobs":2,"max_jobs_per_hour":10,"providers":["ollama"],"egress":"local_only"}}`)
+	body := []byte(`{"role":"producer","subject":"bounded-api","producer_limits":{"max_queued_jobs":2,"max_jobs_per_hour":10,"providers":["ollama"],"egress":"local_only","require_e2ee":true}}`)
 	status, response := relayHTTPTest(t, http.MethodPost, server.URL+"/v1/cluster/tokens", admin, body)
 	if status != http.StatusCreated {
 		t.Fatalf("token API = %d: %s", status, response)
@@ -157,13 +169,39 @@ func TestTokenAPIValidatesAndPersistsProducerLimits(t *testing.T) {
 	if err := json.Unmarshal(response, &created); err != nil {
 		t.Fatal(err)
 	}
-	if created.Record.ProducerLimits.MaxQueuedJobs != 2 || created.Record.ProducerLimits.MaxJobsPerHour != 10 || created.Record.ProducerLimits.Egress != "local_only" {
+	if created.Record.ProducerLimits.MaxQueuedJobs != 2 || created.Record.ProducerLimits.MaxJobsPerHour != 10 || created.Record.ProducerLimits.Egress != "local_only" || !created.Record.ProducerLimits.RequireE2EE {
 		t.Fatalf("token API lost governance: %#v", created.Record)
 	}
 	body = []byte(`{"role":"observer","subject":"observer","producer_limits":{"max_jobs_per_hour":1}}`)
 	status, _ = relayHTTPTest(t, http.MethodPost, server.URL+"/v1/cluster/tokens", admin, body)
 	if status != http.StatusUnprocessableEntity {
 		t.Fatalf("observer producer limits were not rejected: HTTP %d", status)
+	}
+}
+
+func TestE2EEOnlyProducerCannotStartCleartextPipeline(t *testing.T) {
+	const admin = "admin_012345678901234567890123456789012345"
+	relay, err := NewRelay(RelayConfig{
+		Database: filepath.Join(t.TempDir(), "relay.db"), AdminToken: admin, AllowedTasks: []string{"generation"}, MaxJobBytes: 4096,
+		Pipelines: map[string]Pipeline{"linear": {Steps: []PipelineStep{{Name: "one", Requirements: Requirements{Task: "generation", Provider: "ollama"}, Input: `{"prompt":"hello"}`}}}},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+	server := httptest.NewServer(relay.Handler())
+	defer server.Close()
+	token, _, err := relay.store.CreateTokenWithLimits("producer", "sealed-app", nil, time.Hour, ProducerLimits{RequireE2EE: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, response := relayHTTPTest(t, http.MethodPost, server.URL+"/v1/cluster/pipelines/linear/run", token, []byte(`{}`))
+	var problem contractErrorResponse
+	if err := json.Unmarshal(response, &problem); err != nil {
+		t.Fatal(err)
+	}
+	if status != http.StatusForbidden || problem.Code != AdmissionCodeE2EERequired {
+		t.Fatalf("cleartext pipeline with E2EE-only credential = %d %#v", status, problem)
 	}
 }
 

@@ -33,6 +33,7 @@ const (
 	AdmissionCodePayloadInvalid        = "payload.invalid"
 	AdmissionCodePayloadRequired       = "payload.required"
 	AdmissionCodePayloadTooLarge       = "payload.too_large"
+	AdmissionCodeE2EERequired          = "privacy.e2ee_required"
 	AdmissionCodePolicyCostExceeded    = PolicyCodeCostExceeded
 	AdmissionCodePolicyCostRequired    = PolicyCodeCostRequired
 	AdmissionCodePolicyCostUnknown     = PolicyCodeCostUnverifiable
@@ -83,6 +84,7 @@ var stableAdmissionErrorCodes = []string{
 	AdmissionCodePolicyTenant,
 	AdmissionCodePolicyTenantRequired,
 	AdmissionCodePriorityInvalid,
+	AdmissionCodeE2EERequired,
 	AdmissionCodeRequestInvalidJSON,
 	AdmissionCodeRequirementsInvalid,
 	AdmissionCodeRequirementsManaged,
@@ -158,6 +160,9 @@ func (r *Relay) prepareAdmission(input SubmitRequest, record TokenRecord, mode a
 	}
 	if (input.AssignmentID != "" && (input.AssignmentSecret == "" || input.Sealed == nil)) || (input.AssignmentID == "" && input.AssignmentSecret != "") {
 		return SubmitRequest{}, ContractValidation{}, rejectAdmission(http.StatusUnprocessableEntity, AdmissionCodeReservationInvalid, errors.New("assignment_id, assignment_secret, and sealed_payload must be supplied together"))
+	}
+	if record.Role == "producer" && record.ProducerLimits.RequireE2EE && input.Sealed == nil {
+		return SubmitRequest{}, ContractValidation{}, rejectAdmission(http.StatusForbidden, AdmissionCodeE2EERequired, ErrE2EERequired)
 	}
 	if input.ID != "" && !validJobID(input.ID) {
 		return SubmitRequest{}, ContractValidation{}, rejectAdmission(http.StatusUnprocessableEntity, AdmissionCodeJobIDInvalid, errors.New("job id must use 1-128 safe ASCII characters and must not contain '..'"))
@@ -259,6 +264,8 @@ func admissionStoreErrorCode(err error) string {
 		return AdmissionCodeIdempotencyConflict
 	case errors.Is(err, ErrNodeDraining):
 		return AdmissionCodeNodeDraining
+	case errors.Is(err, ErrE2EERequired):
+		return AdmissionCodeE2EERequired
 	default:
 		return ""
 	}

@@ -79,6 +79,7 @@ func integrateCommand(args []string) error {
 	maxJobsPerHour := flags.Int("max-jobs-per-hour", 0, "durable producer admission limit; 0 disables it")
 	providers := flags.String("providers", "", "comma-separated provider allowlist")
 	egress := flags.String("egress", "", "producer egress ceiling: local_only or empty")
+	requireE2EE := flags.Bool("require-e2ee", false, "reject every cleartext job submitted with the relay producer credential")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -101,6 +102,9 @@ func integrateCommand(args []string) error {
 	cfg, err := config.Load(absoluteConfig)
 	if err != nil {
 		return err
+	}
+	if *requireE2EE && target != "relay" {
+		return errors.New("--require-e2ee is available only for relay producer integration")
 	}
 
 	switch target {
@@ -187,7 +191,7 @@ func integrateCommand(args []string) error {
 		if err != nil {
 			return err
 		}
-		limits := cluster.ProducerLimits{MaxQueuedJobs: *maxQueuedJobs, MaxJobsPerHour: *maxJobsPerHour, Providers: splitIntegrationList(*providers), Egress: strings.TrimSpace(*egress)}
+		limits := cluster.ProducerLimits{MaxQueuedJobs: *maxQueuedJobs, MaxJobsPerHour: *maxJobsPerHour, Providers: splitIntegrationList(*providers), Egress: strings.TrimSpace(*egress), RequireE2EE: *requireE2EE}
 		info, err := createRelayIntegrationBundleGoverned(context.Background(), cfg, path, *subject, splitIntegrationList(*groups), *lifetimeHours, limits)
 		if err != nil {
 			return err

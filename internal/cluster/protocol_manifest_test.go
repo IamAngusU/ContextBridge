@@ -37,7 +37,7 @@ func TestProtocolManifestIsDeterministicAndNamesPublicBoundaries(t *testing.T) {
 	if !containsString(first.Features, "durable_worker_drain_v1") || !containsString(first.AdmissionErrorCodes, AdmissionCodeNodeDraining) {
 		t.Fatalf("worker drain contract is not advertised: %#v %#v", first.Features, first.AdmissionErrorCodes)
 	}
-	if !containsString(first.Features, "producer_resource_governance_v1") || !containsString(first.AdmissionErrorCodes, AdmissionCodeCapacityOwnerRate) {
+	if !containsString(first.Features, "producer_resource_governance_v1") || !containsString(first.Features, "producer_required_e2ee_v1") || !containsString(first.AdmissionErrorCodes, AdmissionCodeCapacityOwnerRate) || !containsString(first.AdmissionErrorCodes, AdmissionCodeE2EERequired) {
 		t.Fatalf("producer resource governance contract is not advertised: %#v %#v", first.Features, first.AdmissionErrorCodes)
 	}
 	if !containsString(first.Features, "failure_aware_routing_v1") || !containsString(first.Features, "routing_recovery_probation_v1") || !containsString(first.Features, "performance_aware_routing_v1") || !containsString(first.Features, "load_context_performance_routing_v1") || !containsString(first.Features, "prometheus_metrics_v1") || first.Limits.MaximumRoutingHealthRecords != MaximumRoutingHealthRecords || first.Limits.MaximumRoutingHealthPerOwner != MaximumRoutingHealthRecordsPerOwner || first.Limits.MaximumRoutingPerformanceRecords != MaximumRoutingPerformanceRecords || first.Limits.MaximumRoutingLoadProfiles != MaximumRoutingLoadProfilesPerRoute {

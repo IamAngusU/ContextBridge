@@ -285,11 +285,11 @@ func TestRelayIntegrationIssuesDurableProducerGovernance(t *testing.T) {
 	t.Cleanup(server.Close)
 	cfg := config.Config{Cluster: config.Cluster{Relay: config.ClusterRelay{PublicURL: server.URL, AdminToken: admin}}}
 	path := filepath.Join(t.TempDir(), "bounded.env")
-	want := cluster.ProducerLimits{MaxQueuedJobs: 3, MaxJobsPerHour: 25, Providers: []string{"ollama"}, Egress: "local_only"}
+	want := cluster.ProducerLimits{MaxQueuedJobs: 3, MaxJobsPerHour: 25, Providers: []string{"ollama"}, Egress: "local_only", RequireE2EE: true}
 	if _, err := createRelayIntegrationBundleGoverned(context.Background(), cfg, path, "bounded-app", nil, 24, want); err != nil {
 		t.Fatal(err)
 	}
-	if issued.ProducerLimits.MaxQueuedJobs != want.MaxQueuedJobs || issued.ProducerLimits.MaxJobsPerHour != want.MaxJobsPerHour || issued.ProducerLimits.Egress != want.Egress || len(issued.ProducerLimits.Providers) != 1 || issued.ProducerLimits.Providers[0] != "ollama" {
+	if issued.ProducerLimits.MaxQueuedJobs != want.MaxQueuedJobs || issued.ProducerLimits.MaxJobsPerHour != want.MaxJobsPerHour || issued.ProducerLimits.Egress != want.Egress || len(issued.ProducerLimits.Providers) != 1 || issued.ProducerLimits.Providers[0] != "ollama" || !issued.ProducerLimits.RequireE2EE {
 		t.Fatalf("governance was not sent to the relay: %#v", issued.ProducerLimits)
 	}
 }

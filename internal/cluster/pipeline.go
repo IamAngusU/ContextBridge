@@ -55,6 +55,10 @@ func (r *Relay) handlePipelineRun(w http.ResponseWriter, req *http.Request) {
 	// with another producer using a different group scope).
 	pipeline = clonePipeline(pipeline)
 	record, _ := tokenRecord(req.Context())
+	if record.Role == "producer" && record.ProducerLimits.RequireE2EE {
+		writeErrorCode(w, http.StatusForbidden, AdmissionCodeE2EERequired, errors.New("this producer credential requires E2EE, but pipeline execution does not yet support sealed step payloads"))
+		return
+	}
 	for index := range pipeline.Steps {
 		if err := scopeRequirements(&pipeline.Steps[index].Requirements, record); err != nil {
 			writeError(w, http.StatusForbidden, err)

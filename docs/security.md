@@ -23,6 +23,14 @@ the coordination metadata required to authenticate, schedule, meter, and
 complete a job. Marketing and operator documentation must name the protected
 payloads rather than describe the entire service as zero knowledge.
 
+E2EE can be selected per native cluster job. An administrator can additionally
+issue a producer credential with `require_e2ee`; cleartext job and pipeline
+admission under that credential then fails closed with
+`privacy.e2ee_required`. The credential rule prevents accidental downgrade,
+but it does not hide coordination metadata, the ciphertext length, or content
+from the selected worker and any downstream provider the worker invokes.
+See [Privacy boundaries](privacy.md).
+
 For an E2EE failure, the relay receives only a bounded stable failure code and
 a generic failure label. Provider and local-runtime diagnostic text stays at
 the worker/operator boundary because it can reflect decrypted payload content.

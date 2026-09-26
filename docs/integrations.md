@@ -268,6 +268,15 @@ compute, or cost quotas: unknown provider usage is never treated as zero, and
 those budgets require reservation-grade usage evidence before enforcement can
 be trustworthy.
 
+`--require-e2ee` can bind that producer credential to sealed native job
+admission. The relay rejects cleartext submissions and current cleartext
+pipeline runs with the stable `privacy.e2ee_required` code. Do not enable it
+for the dependency-free examples below: those deliberately demonstrate the
+plain HTTPS job contract and do not implement the one-time E2EE reservation
+flow. E2EE hides payload bytes from the relay, not routing, ownership, timing,
+usage, or policy metadata. It also does not hide decrypted input from a remote
+model provider selected by the worker.
+
 Minimal dependency-free [Python and Node.js server examples](../examples/server-app/README.md)
 show idempotent submission, persisted job IDs, bounded polling and terminal
 result handling. They are server-side examples, not browser/mobile clients.

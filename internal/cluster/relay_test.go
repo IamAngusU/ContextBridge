@@ -456,9 +456,26 @@ func TestRelayDispatchAndEncryptedRoundTrip(t *testing.T) {
 	if err != nil || state != "approved" {
 		t.Fatal("pairing not approved")
 	}
-	producer, _, err := relay.store.CreateToken("producer", "test", []string{"fast"}, time.Hour)
+	producer, _, err := relay.store.CreateTokenWithLimits("producer", "test", []string{"fast"}, time.Hour, ProducerLimits{RequireE2EE: true})
 	if err != nil {
 		t.Fatal(err)
+	}
+	cleartext := []byte(`{"requirements":{"task":"generation","group":"fast"},"payload":{"prompt":"must be rejected"}}`)
+	status, response := relayHTTPTest(t, http.MethodPost, server.URL+"/v1/cluster/jobs", producer, cleartext)
+	var privacyProblem contractErrorResponse
+	if err := json.Unmarshal(response, &privacyProblem); err != nil {
+		t.Fatal(err)
+	}
+	if status != http.StatusForbidden || privacyProblem.Code != AdmissionCodeE2EERequired {
+		t.Fatalf("cleartext admission with an E2EE-only credential = %d %#v", status, privacyProblem)
+	}
+	status, response = relayHTTPTest(t, http.MethodPost, server.URL+"/v1/cluster/contracts/validate", producer, cleartext)
+	privacyProblem = contractErrorResponse{}
+	if err := json.Unmarshal(response, &privacyProblem); err != nil {
+		t.Fatal(err)
+	}
+	if status != http.StatusForbidden || privacyProblem.Code != AdmissionCodeE2EERequired {
+		t.Fatalf("cleartext dry-run with an E2EE-only credential = %d %#v", status, privacyProblem)
 	}
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/cluster/workers/connect"
 	header := http.Header{"Authorization": []string{"Bearer " + nodeToken}}

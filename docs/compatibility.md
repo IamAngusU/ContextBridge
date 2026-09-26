@@ -36,6 +36,7 @@ without sending an inference request.
 | Offline LAN trust | `secure_offline_lan_pinning_v1`, `identity_preserving_lan_relocation_v1`, LAN join bundle v1 | Relay-owned TLS leaf identity, explicitly transferred certificate/SPKI pin, persistent worker binding, same-key live relocation proof, and the same authenticated HTTP/WebSocket protocol without Internet PKI |
 | Pool metrics | `prometheus_metrics_v1`, `GET /metrics` | Authenticated fixed-cardinality aggregates with no tenant, job, node, provider, model, prompt, or error labels |
 | Producer resource governance | `producer_resource_governance_v1`, `capacity.owner_hourly_jobs_full` | Token-bound queue, hourly job, provider and local-egress ceilings; durable fixed-window accounting |
+| Producer-required E2EE | `producer_required_e2ee_v1`, `privacy.e2ee_required` | Token-bound fail-closed rejection of cleartext job and unsupported cleartext pipeline admission; payload confidentiality only, not coordination anonymity |
 | Out-of-tree adapter | `contextbridge.adapter.v2` | Scoped principal, endpoint capability, and per-generation lease capability; no standalone adapter certification suite is claimed yet |
 | Portable resource pack | `.contextbridge-pack.json`, `schema_version: 1` | Bounded discovery and identity validation; discovery is not execution approval |
 
