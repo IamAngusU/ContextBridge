@@ -94,12 +94,19 @@ Bolt transaction changes durable state. This means later executor work can use
 one persisted vocabulary rather than infer graph truth from log messages. The
 checkpoint contract itself still does not dispatch a job.
 
+The store also has one atomic admission primitive for future DAG execution. A
+ready-node transition, governed child job, queue/index records, producer rate
+consumption, authoritative job events and `pipeline.step.queued` event commit
+in one Bolt transaction. An injected event failure rolls all of them back.
+This removes the crash window where a child could exist while the graph still
+claimed the node was merely ready. The public run endpoint remains disabled;
+the primitive is a tested invariant, not a partially enabled executor.
+
 ## What remains before execution can be enabled
 
 The next slices must add and prove:
 
-1. bounded ready-set admission under `max_parallel` and existing producer
-   limits;
+1. bounded ready-set scheduling around the atomic admission primitive;
 2. descendant blocking after failed, cancelled or ambiguous predecessors;
 3. honest treatment of siblings that were already dispatched;
 4. restart tests at every checkpoint, exact usage accounting, and authoritative

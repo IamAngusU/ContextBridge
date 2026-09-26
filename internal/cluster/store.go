@@ -931,23 +931,37 @@ func (s *Store) CreateJobAdmittedIdempotentGoverned(request SubmitRequest, maxQu
 
 func (s *Store) createJob(request SubmitRequest, maxQueued int, limits ProducerLimits, idempotencyKey, requestHash string) (Job, bool, error) {
 	now := time.Now().UTC()
-	if err := request.PolicyDecision.ValidateAllowed(); err != nil {
+	job, err := prepareJob(request, idempotencyKey, requestHash, now)
+	if err != nil {
 		return Job{}, false, err
+	}
+	replayed := false
+	err = s.db.Update(func(tx *bolt.Tx) error {
+		var admitErr error
+		replayed, admitErr = s.admitPreparedJobTx(tx, &job, maxQueued, limits, idempotencyKey, requestHash, now)
+		return admitErr
+	})
+	return job, replayed, err
+}
+
+func prepareJob(request SubmitRequest, idempotencyKey, requestHash string, now time.Time) (Job, error) {
+	if err := request.PolicyDecision.ValidateAllowed(); err != nil {
+		return Job{}, err
 	}
 	contractVersion, err := NormalizeJobContractVersion(request.ContractVersion)
 	if err != nil {
-		return Job{}, false, err
+		return Job{}, err
 	}
 	job := Job{
 		ID: request.ID, ContractVersion: contractVersion, OwnerSubject: cleanLabel(request.OwnerSubject, 120), TenantID: cleanLabel(request.TenantID, 200), Source: cleanLabel(request.Source, 120), Requirements: request.Requirements, PolicyDecision: request.PolicyDecision,
 		Payload: request.Payload, SealedPayload: request.Sealed, Status: JobQueued, Priority: request.Priority,
 		MaxAttempts: request.MaxAttempts, CreatedAt: now, UpdatedAt: now,
-		Pipeline: cleanLabel(request.Pipeline, 120), Step: cleanLabel(request.Step, 120), ParentID: cleanLabel(request.ParentID, 128),
+		Pipeline: cleanLabel(request.Pipeline, 128), Step: cleanLabel(request.Step, 128), ParentID: cleanLabel(request.ParentID, 128),
 	}
 	if job.ID == "" {
 		job.ID = randomID("job")
 	} else if !validJobID(job.ID) {
-		return Job{}, false, errors.New("job id must use 1-128 safe ASCII characters and must not contain '..'")
+		return Job{}, errors.New("job id must use 1-128 safe ASCII characters and must not contain '..'")
 	}
 	if job.MaxAttempts <= 0 {
 		job.MaxAttempts = 3
@@ -956,79 +970,152 @@ func (s *Store) createJob(request SubmitRequest, maxQueued int, limits ProducerL
 		job.MaxAttempts = 10
 	}
 	if job.Priority < -100 || job.Priority > 100 {
-		return Job{}, false, errors.New("priority must be between -100 and 100")
+		return Job{}, errors.New("priority must be between -100 and 100")
 	}
 	if len(job.Payload) == 0 && job.SealedPayload == nil {
-		return Job{}, false, errors.New("payload or sealed_payload is required")
+		return Job{}, errors.New("payload or sealed_payload is required")
 	}
 	if idempotencyKey != "" {
 		if job.OwnerSubject == "" {
-			return Job{}, false, errors.New("authenticated producer is required for idempotency")
+			return Job{}, errors.New("authenticated producer is required for idempotency")
 		}
 		if err := ValidateIdempotencyKey(idempotencyKey); err != nil {
-			return Job{}, false, err
+			return Job{}, err
 		}
 		if len(requestHash) != sha256.Size*2 {
-			return Job{}, false, errors.New("idempotency request hash is invalid")
+			return Job{}, errors.New("idempotency request hash is invalid")
 		}
 	}
-	replayed := false
+	return job, nil
+}
+
+func (s *Store) admitPreparedJobTx(tx *bolt.Tx, job *Job, maxQueued int, limits ProducerLimits, idempotencyKey, requestHash string, now time.Time) (bool, error) {
+	if idempotencyKey != "" {
+		existing, found, lookupErr := lookupIdempotentJobTx(tx, job.OwnerSubject, idempotencyKey, requestHash)
+		if lookupErr != nil {
+			return false, lookupErr
+		}
+		if found {
+			*job = existing
+			return true, nil
+		}
+	}
+	if tx.Bucket(bucketJobs).Get([]byte(job.ID)) != nil {
+		return false, os.ErrExist
+	}
+	if maxQueued > 0 || limits.MaxQueuedJobs > 0 {
+		queued, owned, err := queueCounts(tx, job.OwnerSubject)
+		if err != nil {
+			return false, err
+		}
+		if maxQueued > 0 && queued >= maxQueued {
+			return false, ErrQueueFull
+		}
+		if limits.MaxQueuedJobs > 0 && owned >= limits.MaxQueuedJobs {
+			return false, ErrOwnerQueueCapacity
+		}
+	}
+	if err := consumeProducerRateLimitTx(tx, job.OwnerSubject, limits.MaxJobsPerHour, now); err != nil {
+		return false, err
+	}
+	if err := putJSON(tx.Bucket(bucketJobs), job.ID, *job); err != nil {
+		return false, err
+	}
+	if err := tx.Bucket(bucketJobIndex).Put(jobIndexKey(*job), []byte(job.ID)); err != nil {
+		return false, err
+	}
+	if err := putJobOwnerIndex(tx.Bucket(bucketJobOwnerIndex), *job); err != nil {
+		return false, err
+	}
+	if err := putQueueEntry(tx, *job); err != nil {
+		return false, err
+	}
+	if idempotencyKey != "" {
+		if err := saveIdempotentJobTx(tx, job.OwnerSubject, idempotencyKey, requestHash, job.ID); err != nil {
+			return false, err
+		}
+	}
+	if err := appendAuthoritativeJobEventTx(tx, s, *job, "job.accepted"); err != nil {
+		return false, err
+	}
+	if err := appendAuthoritativeJobEventTx(tx, s, *job, "job.queued"); err != nil {
+		return false, err
+	}
+	if err := appendPipelineStepEventTx(tx, s, *job, "pipeline.step.queued"); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+// CreateDAGChildJobAdmittedGoverned atomically changes one ready DAG node to
+// queued and admits its governed child job. A crash can therefore expose
+// neither a queued child without its graph checkpoint nor a checkpoint without
+// the corresponding job and authoritative events.
+func (s *Store) CreateDAGChildJobAdmittedGoverned(runID, step string, request SubmitRequest, maxQueued int, limits ProducerLimits) (PipelineRun, Job, error) {
+	now := time.Now().UTC()
+	job, err := prepareJob(request, "", "", now)
+	if err != nil {
+		return PipelineRun{}, Job{}, err
+	}
+	var updated PipelineRun
 	err = s.db.Update(func(tx *bolt.Tx) error {
-		if idempotencyKey != "" {
-			existing, found, lookupErr := lookupIdempotentJobTx(tx, job.OwnerSubject, idempotencyKey, requestHash)
-			if lookupErr != nil {
-				return lookupErr
-			}
-			if found {
-				job = existing
-				replayed = true
-				return nil
-			}
+		var run PipelineRun
+		if err := getJSON(tx.Bucket(bucketPipelineRuns), runID, &run); err != nil {
+			return err
 		}
-		if tx.Bucket(bucketJobs).Get([]byte(job.ID)) != nil {
-			return os.ErrExist
+		if run.Status != "running" || run.Graph == nil {
+			return errors.New("DAG run is not active")
 		}
-		if maxQueued > 0 || limits.MaxQueuedJobs > 0 {
-			queued, owned, err := queueCounts(tx, job.OwnerSubject)
-			if err != nil {
-				return err
+		if err := validatePipelineRunGraphState(run); err != nil {
+			return err
+		}
+		if job.ParentID != run.ID || job.Pipeline != run.Pipeline || job.Step != step || job.OwnerSubject != run.OwnerSubject || job.TenantID != run.TenantID {
+			return errors.New("DAG child job context does not match its run")
+		}
+		nodeIndex := -1
+		active := 0
+		for index, node := range run.NodeStates {
+			if node.State == PipelineNodeQueued || node.State == PipelineNodeRunning {
+				active++
 			}
-			if maxQueued > 0 && queued >= maxQueued {
-				return ErrQueueFull
-			}
-			if limits.MaxQueuedJobs > 0 && owned >= limits.MaxQueuedJobs {
-				return ErrOwnerQueueCapacity
+			if node.Step == step {
+				nodeIndex = index
 			}
 		}
-		if err := consumeProducerRateLimitTx(tx, job.OwnerSubject, limits.MaxJobsPerHour, now); err != nil {
+		if nodeIndex < 0 || run.NodeStates[nodeIndex].State != PipelineNodeReady || run.NodeStates[nodeIndex].JobID != "" {
+			return errors.New("DAG step is not ready for admission")
+		}
+		if active >= run.Graph.MaxParallel {
+			return errors.New("DAG max_parallel capacity is full")
+		}
+		if replayed, err := s.admitPreparedJobTx(tx, &job, maxQueued, limits, "", "", now); err != nil {
+			return err
+		} else if replayed {
+			return errors.New("unexpected DAG child replay")
+		}
+		updated = run
+		updated.NodeStates = clonePipelineNodeCheckpoints(run.NodeStates)
+		updated.Steps = append(append([]Job(nil), run.Steps...), job)
+		updated.NodeStates[nodeIndex].State = PipelineNodeQueued
+		updated.NodeStates[nodeIndex].JobID = job.ID
+		updated.NodeStates[nodeIndex].UpdatedAt = now
+		if err := validatePipelineRunGraphState(updated); err != nil {
 			return err
 		}
-		if err := putJSON(tx.Bucket(bucketJobs), job.ID, job); err != nil {
+		if err := validatePipelineRunGraphTransition(run, updated); err != nil {
 			return err
 		}
-		if err := tx.Bucket(bucketJobIndex).Put(jobIndexKey(job), []byte(job.ID)); err != nil {
-			return err
-		}
-		if err := putJobOwnerIndex(tx.Bucket(bucketJobOwnerIndex), job); err != nil {
-			return err
-		}
-		if err := putQueueEntry(tx, job); err != nil {
-			return err
-		}
-		if idempotencyKey != "" {
-			if err := saveIdempotentJobTx(tx, job.OwnerSubject, idempotencyKey, requestHash, job.ID); err != nil {
-				return err
-			}
-		}
-		if err := appendAuthoritativeJobEventTx(tx, s, job, "job.accepted"); err != nil {
-			return err
-		}
-		if err := appendAuthoritativeJobEventTx(tx, s, job, "job.queued"); err != nil {
-			return err
-		}
-		return appendPipelineStepEventTx(tx, s, job, "pipeline.step.queued")
+		return putJSON(tx.Bucket(bucketPipelineRuns), updated.ID, updated)
 	})
-	return job, replayed, err
+	return updated, job, err
+}
+
+func clonePipelineNodeCheckpoints(nodes []PipelineNodeCheckpoint) []PipelineNodeCheckpoint {
+	cloned := append([]PipelineNodeCheckpoint(nil), nodes...)
+	for index := range cloned {
+		cloned[index].DependsOn = append([]string(nil), nodes[index].DependsOn...)
+	}
+	return cloned
 }
 
 func consumeProducerRateLimitTx(tx *bolt.Tx, owner string, maximum int, now time.Time) error {
