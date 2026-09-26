@@ -196,18 +196,18 @@ func TestWorkerHeartbeatCannotForgeRoutingPerformance(t *testing.T) {
 		recordRoutingPerformance(&existing, requirements, "", 40000, now.Add(time.Duration(i)*time.Second), "idle:cold")
 	}
 	incoming := Node{ID: "node", RoutingPerformance: []RoutingPerformance{{
-		RouteKey: "forged", Samples: math.MaxUint32, EWMAComputeMS: 1,
-		LoadProfiles: []RoutingLoadPerformance{{ContextClass: "idle:cold", Samples: math.MaxUint32, EWMAComputeMS: 1}},
+		RouteKey: "forged", Samples: math.MaxUint32, EWMAComputeMS: 1, RecentSuccessMS: []uint64{1},
+		LoadProfiles: []RoutingLoadPerformance{{ContextClass: "idle:cold", Samples: math.MaxUint32, EWMAComputeMS: 1, RecentSuccessMS: []uint64{1}}},
 	}}}
 	mergeStoredNodeState(&incoming, existing)
-	if len(incoming.RoutingPerformance) != 1 || incoming.RoutingPerformance[0].EWMAComputeMS == 1 || len(incoming.RoutingPerformance[0].LoadProfiles) != 1 || incoming.RoutingPerformance[0].LoadProfiles[0].EWMAComputeMS == 1 {
+	if len(incoming.RoutingPerformance) != 1 || incoming.RoutingPerformance[0].EWMAComputeMS == 1 || incoming.RoutingPerformance[0].RecentSuccessMS[0] == 1 || len(incoming.RoutingPerformance[0].LoadProfiles) != 1 || incoming.RoutingPerformance[0].LoadProfiles[0].EWMAComputeMS == 1 || incoming.RoutingPerformance[0].LoadProfiles[0].RecentSuccessMS[0] == 1 {
 		t.Fatalf("worker forged relay-owned performance: %#v", incoming.RoutingPerformance)
 	}
 }
 
 func TestBoundedPerformanceProfilesRejectUnknownAndDuplicateClasses(t *testing.T) {
-	records := []RoutingPerformance{{RouteKey: "route", LoadProfiles: []RoutingLoadPerformance{
-		{ContextClass: "idle:cold", Samples: 3, EWMAComputeMS: 1000},
+	records := []RoutingPerformance{{RouteKey: "route", RecentSuccessMS: []uint64{1000, 1100}, LoadProfiles: []RoutingLoadPerformance{
+		{ContextClass: "idle:cold", Samples: 3, EWMAComputeMS: 1000, RecentSuccessMS: []uint64{1000, 1100}},
 		{ContextClass: "attacker-controlled", Samples: math.MaxUint32, EWMAComputeMS: 1},
 		{ContextClass: "idle:cold", Samples: math.MaxUint32, EWMAComputeMS: 1},
 	}}}
@@ -216,8 +216,13 @@ func TestBoundedPerformanceProfilesRejectUnknownAndDuplicateClasses(t *testing.T
 		t.Fatalf("profile boundary accepted unknown or duplicate classes: %#v", bounded)
 	}
 	bounded[0].LoadProfiles[0].EWMAComputeMS = 2
+	bounded[0].RecentSuccessMS[0] = 2
+	bounded[0].LoadProfiles[0].RecentSuccessMS[0] = 2
 	if records[0].LoadProfiles[0].EWMAComputeMS != 1000 {
 		t.Fatal("bounded profile retained an alias into caller state")
+	}
+	if records[0].RecentSuccessMS[0] != 1000 || records[0].LoadProfiles[0].RecentSuccessMS[0] != 1000 {
+		t.Fatal("bounded duration history retained an alias into caller state")
 	}
 }
 

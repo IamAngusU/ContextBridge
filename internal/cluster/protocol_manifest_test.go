@@ -61,6 +61,9 @@ func TestProtocolManifestIsDeterministicAndNamesPublicBoundaries(t *testing.T) {
 	if !containsString(first.Features, "bounded_active_work_projection_v1") {
 		t.Fatalf("bounded active-work projection is not advertised: %#v", first.Features)
 	}
+	if !containsString(first.Features, "historical_runtime_estimates_v1") || first.Limits.MaximumRoutingDurationSamples != MaximumRoutingDurationSamples {
+		t.Fatalf("bounded historical runtime estimates are not advertised: %#v %#v", first.Features, first.Limits)
+	}
 }
 
 func containsString(values []string, wanted string) bool {

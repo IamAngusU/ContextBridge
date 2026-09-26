@@ -8,6 +8,7 @@ import (
 const (
 	MaximumRoutingPerformanceRecords      = 64
 	MaximumRoutingLoadProfilesPerRoute    = 12
+	MaximumRoutingDurationSamples         = 32
 	routingPerformanceEWMAWeight          = uint64(8)
 	routingPerformanceSourceContext       = "load_context"
 	routingPerformanceSourceRouteBaseline = "route_baseline"
@@ -194,6 +195,7 @@ func recordRoutingPerformance(node *Node, requirements Requirements, admittedRou
 	}
 	record := &node.RoutingPerformance[index]
 	updateRoutingPerformanceSample(&record.Samples, &record.EWMAComputeMS, &record.LastComputeMS, &record.LastCompletedAt, computeMS, completedAt)
+	record.RecentSuccessMS = appendBoundedDuration(record.RecentSuccessMS, computeMS)
 
 	if !validRoutingPerformanceContext(contextClass) {
 		return
@@ -220,6 +222,33 @@ func recordRoutingPerformance(node *Node, requirements Requirements, admittedRou
 	}
 	profile := &record.LoadProfiles[profileIndex]
 	updateRoutingPerformanceSample(&profile.Samples, &profile.EWMAComputeMS, &profile.LastComputeMS, &profile.LastCompletedAt, computeMS, completedAt)
+	profile.RecentSuccessMS = appendBoundedDuration(profile.RecentSuccessMS, computeMS)
+}
+
+func appendBoundedDuration(existing []uint64, value uint64) []uint64 {
+	existing = boundedDurationSamples(existing)
+	if value == 0 {
+		return existing
+	}
+	if len(existing) == MaximumRoutingDurationSamples {
+		copy(existing, existing[1:])
+		existing[len(existing)-1] = value
+		return existing
+	}
+	return append(existing, value)
+}
+
+func boundedDurationSamples(values []uint64) []uint64 {
+	result := make([]uint64, 0, min(len(values), MaximumRoutingDurationSamples))
+	for index := len(values) - 1; index >= 0 && len(result) < MaximumRoutingDurationSamples; index-- {
+		if values[index] != 0 {
+			result = append(result, values[index])
+		}
+	}
+	for left, right := 0, len(result)-1; left < right; left, right = left+1, right-1 {
+		result[left], result[right] = result[right], result[left]
+	}
+	return result
 }
 
 func updateRoutingPerformanceSample(samples *uint32, estimate, last *uint64, lastAt *time.Time, computeMS uint64, completedAt time.Time) {
@@ -317,6 +346,7 @@ func boundedRoutingPerformance(records []RoutingPerformance) []RoutingPerformanc
 	}
 	result := make([]RoutingPerformance, 0, len(records))
 	for _, record := range records {
+		record.RecentSuccessMS = boundedDurationSamples(record.RecentSuccessMS)
 		profiles := make([]RoutingLoadPerformance, 0, min(len(record.LoadProfiles), MaximumRoutingLoadProfilesPerRoute))
 		seenContexts := make(map[string]struct{}, MaximumRoutingLoadProfilesPerRoute)
 		for _, profile := range record.LoadProfiles {
@@ -327,6 +357,7 @@ func boundedRoutingPerformance(records []RoutingPerformance) []RoutingPerformanc
 				continue
 			}
 			seenContexts[profile.ContextClass] = struct{}{}
+			profile.RecentSuccessMS = boundedDurationSamples(profile.RecentSuccessMS)
 			profiles = append(profiles, profile)
 			if len(profiles) == MaximumRoutingLoadProfilesPerRoute {
 				break

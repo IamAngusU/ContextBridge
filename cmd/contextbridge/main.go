@@ -161,11 +161,12 @@ SEND AND INSPECT WORK
                                                Manage durable scheduled work
 
 POOL AND ROUTING
-  contextbridge cluster status|events|node|submit|chat|route|pipeline
+  contextbridge cluster status|events|estimate|node|submit|chat|route|pipeline
                                                Inspect or use a connected pool
   contextbridge cluster agent auto|plan|run   Run bounded agent workflows
   contextbridge cluster pairing|token|login   Manage scoped cluster access
-  contextbridge cluster lan init|join|status  Build an explicitly trusted offline LAN pool
+  contextbridge cluster lan init|relocate|join|status
+                                               Build an explicitly trusted offline LAN pool
   contextbridge selftest                      Check local + pool readiness without AI work
   contextbridge route explain --file JOB.json Explain placement before execution
   contextbridge relay | pair | worker         Run individual cluster components
@@ -229,7 +230,7 @@ func writeCommandGroupHelp(out io.Writer, path []string) bool {
 	case "cluster":
 		help = `Usage: contextbridge cluster COMMAND [options]
 
-Observe:  status, events, node, dashboard, protocol
+Observe:  status, events, estimate, node, dashboard, protocol
 Run:      submit, chat, pipeline, agent, selftest, route
 Trust:    pairing, token, login, lan
 Verify:   contract, receipt, conformance
@@ -240,7 +241,7 @@ Use ` + "`contextbridge cluster COMMAND --help`" + ` for exact flags.
 	case "cluster agent":
 		help = "Usage: contextbridge cluster agent auto|plan|run [options]\n"
 	case "cluster lan":
-		help = "Usage: contextbridge cluster lan init|join|status [options]\n"
+		help = "Usage: contextbridge cluster lan init|relocate|join|status [options]\n"
 	case "cluster node":
 		help = "Usage: contextbridge cluster node drain|resume NODE_ID [options]\n"
 	case "cluster conformance":
@@ -1535,13 +1536,15 @@ func freeLocalAddress() (string, error) {
 
 func clusterCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: contextbridge cluster status|events|node|protocol|conformance|submit|chat|agent|selftest|route|contract|receipt|login|token|pairing|lan")
+		return errors.New("usage: contextbridge cluster status|events|estimate|node|protocol|conformance|submit|chat|agent|selftest|route|contract|receipt|login|token|pairing|lan")
 	}
 	switch args[0] {
 	case "status":
 		return clusterStatusCommand(args[1:])
 	case "events":
 		return clusterEventsCommand(args[1:])
+	case "estimate":
+		return clusterEstimateCommand(args[1:])
 	case "node":
 		return clusterNodeCommand(args[1:])
 	case "protocol":
@@ -1579,6 +1582,66 @@ func clusterCommand(args []string) error {
 	default:
 		return fmt.Errorf("unknown cluster command %s", args[0])
 	}
+}
+
+func clusterEstimateCommand(args []string) error {
+	flags := flag.NewFlagSet("cluster estimate", flag.ContinueOnError)
+	path := flags.String("config", defaultConfigPath(), "config path")
+	token := flags.String("token", "", "producer, observer, or admin token; defaults to the configured client token")
+	asJSON := flags.Bool("json", false, "print the versioned historical estimate as JSON")
+	if err := parseInterspersedFlags(flags, args); err != nil {
+		return err
+	}
+	if flags.NArg() != 1 || strings.TrimSpace(flags.Arg(0)) == "" {
+		return errors.New("usage: contextbridge cluster estimate JOB_ID [--json]")
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	if *token == "" {
+		*token = clusterClientToken(cfg, "")
+	}
+	var estimate cluster.HistoricalRuntimeEstimate
+	target := clusterBaseURL(cfg) + "/v1/cluster/jobs/" + url.PathEscape(strings.TrimSpace(flags.Arg(0))) + "/estimate"
+	if err := clusterGET(context.Background(), target, *token, &estimate); err != nil {
+		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(estimate)
+	}
+	fmt.Println(formatHistoricalRuntimeEstimate(estimate))
+	return nil
+}
+
+func formatHistoricalRuntimeEstimate(estimate cluster.HistoricalRuntimeEstimate) string {
+	if estimate.Status == "unavailable" {
+		return "Historical runtime estimate unavailable · " + emptyLabel(estimate.Reason, "no comparable evidence")
+	}
+	lines := []string{fmt.Sprintf("Historical runtime estimate · %s · %d successful samples · non-authoritative", emptyLabel(estimate.Profile, "comparable route"), estimate.Samples)}
+	if estimate.ElapsedMS > 0 {
+		lines = append(lines, "elapsed · "+terminalui.CompactDuration(durationFromUint64Milliseconds(estimate.ElapsedMS)))
+	}
+	if estimate.TotalP50MS > 0 && estimate.TotalP90MS > 0 {
+		lines = append(lines, "typical total · "+formatDurationRange(estimate.TotalP50MS, estimate.TotalP90MS))
+	}
+	if estimate.RemainingP50MS > 0 && estimate.RemainingP90MS > 0 {
+		lines = append(lines, "estimated remaining · "+formatDurationRange(estimate.RemainingP50MS, estimate.RemainingP90MS))
+	} else if estimate.OutsideTypical {
+		lines = append(lines, "remaining · outside typical range; estimate uncertain")
+	} else if estimate.Status == "uncertain" {
+		lines = append(lines, "remaining · estimate uncertain · "+emptyLabel(estimate.Reason, "insufficient longer runs"))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatDurationRange(lowMS, highMS uint64) string {
+	low := terminalui.CompactDuration(durationFromUint64Milliseconds(lowMS))
+	high := terminalui.CompactDuration(durationFromUint64Milliseconds(highMS))
+	if low == high {
+		return low
+	}
+	return low + "–" + high
 }
 
 func clusterEventsCommand(args []string) error {

@@ -101,6 +101,35 @@ smoothed compute estimate, current load context, whether the estimate came
 from that context or the route baseline, evidence age and additive
 `historical_latency` score used for a decision.
 
+The same successful local evidence can produce a transparent advisory runtime
+range for an already assigned job:
+
+```sh
+contextbridge cluster estimate JOB_ID
+contextbridge cluster estimate JOB_ID --json
+```
+
+Each route and load profile retains at most 32 recent successful execution
+durations. A user-facing estimate requires at least five fresh comparable
+samples (or the operator's higher `minimum_samples` value), reports total
+p50/p90 rather than one average, and is labelled non-authoritative. While a
+job runs, CB recomputes remaining time from only historical runs whose total
+duration is still greater than the authoritative elapsed time. It therefore
+does not count down from a fixed deadline; when too few longer comparisons
+remain, it reports uncertainty, and after the typical range it withdraws the
+remaining-time range entirely.
+
+Failed, cancelled and ambiguous work never enters this successful-duration
+distribution. The API projection contains no route key, prompt, result,
+tenant name or model label, and the public node list still redacts all
+relay-owned route evidence. Disabling `performance_learning` disables both the
+soft placement history and this advisory projection.
+
+This first estimate boundary uses the selected node, opaque route and bounded
+assignment load/model-warmth class. It does not yet learn a separate stable
+pipeline-step profile or normalize text work by measured input/output tokens;
+unknown workload size remains unknown instead of being guessed from content.
+
 Recent transient failures are relay-owned placement evidence. A matching
 execution route receives a bounded soft penalty after the first failure. Route
 identity is an opaque fingerprint over the provider/model/task selection and,

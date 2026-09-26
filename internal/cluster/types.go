@@ -252,6 +252,10 @@ type RoutingPerformance struct {
 	EWMAComputeMS   uint64    `json:"ewma_compute_ms"`
 	LastComputeMS   uint64    `json:"last_compute_ms"`
 	LastCompletedAt time.Time `json:"last_completed_at"`
+	// RecentSuccessMS is a bounded relay-owned distribution of successful
+	// execution durations. It supports transparent user-facing historical
+	// estimates without retaining prompt/result content or an unbounded log.
+	RecentSuccessMS []uint64 `json:"recent_success_ms,omitempty"`
 	// LoadProfiles keep a small set of relay-derived performance curves for
 	// the live load class observed at assignment. The overall fields above
 	// remain the neutral fallback when a class has too little fresh evidence.
@@ -267,6 +271,7 @@ type RoutingLoadPerformance struct {
 	EWMAComputeMS   uint64    `json:"ewma_compute_ms"`
 	LastComputeMS   uint64    `json:"last_compute_ms"`
 	LastCompletedAt time.Time `json:"last_completed_at"`
+	RecentSuccessMS []uint64  `json:"recent_success_ms,omitempty"`
 }
 
 // RoutingHealth is keyed by an opaque producer scope plus an opaque execution

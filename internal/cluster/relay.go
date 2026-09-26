@@ -512,6 +512,7 @@ func (r *Relay) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/cluster/jobs/{id}/events", r.authorize("admin", "observer", "producer")(r.handleJobEvents))
 	mux.HandleFunc("GET /v1/cluster/jobs/{id}/events/stream", r.authorize("admin", "observer", "producer")(r.handleJobEventStream))
 	mux.HandleFunc("GET /v1/cluster/jobs/{id}/route", r.authorize("admin", "observer", "producer")(r.handleJobRoute))
+	mux.HandleFunc("GET /v1/cluster/jobs/{id}/estimate", r.authorize("admin", "observer", "producer")(r.handleJobRuntimeEstimate))
 	mux.HandleFunc("DELETE /v1/cluster/jobs/{id}", r.authorize("admin", "producer")(r.handleCancel))
 	mux.HandleFunc("POST /v1/cluster/assign", r.authorize("admin", "producer")(r.handleReserve))
 	mux.HandleFunc("POST /v1/cluster/routes/explain", r.authorize("admin", "producer")(r.handleRouteExplain))
@@ -888,6 +889,24 @@ func (r *Relay) handleJobRoute(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, job.RoutingDecision)
+}
+
+func (r *Relay) handleJobRuntimeEstimate(w http.ResponseWriter, req *http.Request) {
+	job, err := r.store.GetJob(req.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, errors.New("job not found"))
+		return
+	}
+	if !canReadJob(req.Context(), job) {
+		writeError(w, http.StatusForbidden, errors.New("job belongs to another producer"))
+		return
+	}
+	var node Node
+	if job.AssignedNode != "" {
+		node, _ = r.store.GetNode(job.AssignedNode)
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, EstimateJobRuntimeAt(job, node, r.cfg.Placement, time.Now().UTC()))
 }
 
 func (r *Relay) handleRouteExplain(w http.ResponseWriter, req *http.Request) {

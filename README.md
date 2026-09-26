@@ -170,6 +170,11 @@ and terminal-result handling.
 
 A **relay** coordinates the pool. A **worker** runs the job. An **application token** lets another client submit work. Workers connect outbound; they need no public inbound ports.
 
+Once a job is assigned, `contextbridge cluster estimate JOB_ID` can show a
+clearly labelled, non-authoritative p50–p90 range learned from this pool's own
+bounded successful history. It shows `unavailable` instead of inventing an ETA
+when comparable evidence is sparse, stale, disabled, or already exceeded.
+
 No VPS, public DNS or Internet connection is required for a pool that stays on
 one private LAN. Initialize a relay-owned TLS identity, transfer the public
 join bundle through a trusted local channel, and join the worker:

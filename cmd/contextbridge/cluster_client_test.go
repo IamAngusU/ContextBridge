@@ -59,6 +59,89 @@ func TestFormatActivityProjectionIsBoundedHonestAndUsesAuthoritativeTime(t *test
 	}
 }
 
+func TestFormatHistoricalRuntimeEstimateLabelsAdvisoryEvidence(t *testing.T) {
+	estimate := cluster.HistoricalRuntimeEstimate{
+		Schema: cluster.HistoricalRuntimeEstimateV1, Status: "available", Source: "local_success_history",
+		Profile: "node_route_load", Samples: 27, ElapsedMS: 252000, TotalP50MS: 510000, TotalP90MS: 780000,
+		RemainingP50MS: 258000, RemainingP90MS: 528000,
+	}
+	got := formatHistoricalRuntimeEstimate(estimate)
+	for _, want := range []string{"27 successful samples", "non-authoritative", "elapsed · 04m12s", "typical total · 08m30s–13m00s", "estimated remaining · 04m18s–08m48s"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("runtime estimate is missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "%") || strings.Contains(strings.ToLower(got), "guarantee") {
+		t.Fatalf("runtime estimate implies false precision: %s", got)
+	}
+
+	outside := estimate
+	outside.Status, outside.OutsideTypical, outside.Reason = "outside_typical_range", true, "elapsed_exceeds_typical_history"
+	outside.RemainingP50MS, outside.RemainingP90MS = 0, 0
+	if got := formatHistoricalRuntimeEstimate(outside); !strings.Contains(got, "outside typical range; estimate uncertain") {
+		t.Fatalf("outside-range estimate kept a fake countdown: %s", got)
+	}
+}
+
+func TestClusterEstimateUsesScopedEndpointAndInterspersedFlags(t *testing.T) {
+	var seen atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/cluster/jobs/job-estimate-cli/estimate" || r.Header.Get("Authorization") != "Bearer producer-estimate-token" {
+			http.NotFound(w, r)
+			return
+		}
+		seen.Store(true)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(cluster.HistoricalRuntimeEstimate{
+			Schema: cluster.HistoricalRuntimeEstimateV1, Status: "available", Source: "local_success_history", Profile: "node_route", Samples: 5,
+			TotalP50MS: 1000, TotalP90MS: 3000, RemainingP50MS: 1000, RemainingP90MS: 3000,
+		})
+	}))
+	defer server.Close()
+
+	temporary := t.TempDir()
+	configPath := filepath.Join(temporary, "config.yml")
+	if err := config.Default(configPath); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Cluster.Relay.PublicURL = ""
+	cfg.Cluster.Worker.RelayURL = server.URL
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := os.CreateTemp(temporary, "estimate-output-*.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStdout := os.Stdout
+	os.Stdout = stdout
+	defer func() {
+		os.Stdout = oldStdout
+		_ = stdout.Close()
+	}()
+	if err := clusterEstimateCommand([]string{"job-estimate-cli", "--json", "--config", configPath, "--token", "producer-estimate-token"}); err != nil {
+		t.Fatal(err)
+	}
+	if !seen.Load() {
+		t.Fatal("historical estimate endpoint was not called")
+	}
+	if err := stdout.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(stdout.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var estimate cluster.HistoricalRuntimeEstimate
+	if err := json.Unmarshal(raw, &estimate); err != nil || estimate.Schema != cluster.HistoricalRuntimeEstimateV1 || estimate.Samples != 5 {
+		t.Fatalf("estimate CLI output = %#v err=%v raw=%s", estimate, err, raw)
+	}
+}
+
 func TestClusterSubmitUsesCompactResponsesForSubmitAndPoll(t *testing.T) {
 	var compactSubmit atomic.Bool
 	var compactPoll atomic.Bool

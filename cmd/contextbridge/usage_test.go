@@ -17,7 +17,7 @@ func TestRootUsageIsTaskOrientedAndExplainsConsoleBoundary(t *testing.T) {
 		"LOCAL RESOURCES AND INTEGRATIONS",
 		"OPERATE AND MAINTAIN",
 		"contextbridge guide",
-		"contextbridge cluster lan init|join|status",
+		"contextbridge cluster lan init|relocate|join|status",
 		"contextbridge COMMAND --help",
 		"console is never a host shell",
 		"only bounded work actions such as send/jobs/result/cancel",
@@ -38,9 +38,9 @@ func TestDispatcherHelpDoesNotNeedConfigOrNetwork(t *testing.T) {
 		want string
 	}{
 		{[]string{"schedule"}, "add|list|show|pause|resume|run|delete"},
-		{[]string{"cluster"}, "Observe:  status, events, node"},
+		{[]string{"cluster"}, "Observe:  status, events, estimate, node"},
 		{[]string{"cluster", "agent"}, "agent auto|plan|run"},
-		{[]string{"cluster", "lan"}, "lan init|join|status"},
+		{[]string{"cluster", "lan"}, "lan init|relocate|join|status"},
 		{[]string{"cluster", "receipt"}, "receipt show|export|verify|keygen"},
 	} {
 		var output bytes.Buffer

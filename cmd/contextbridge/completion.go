@@ -18,7 +18,7 @@ var completionSubcommands = map[string][]string{
 	"mcp":          {"serve"},
 	"integrate":    {"openai", "mcp", "relay"},
 	"verification": {"verify"},
-	"cluster":      {"status", "events", "node", "protocol", "conformance", "submit", "chat", "agent", "selftest", "route", "contract", "receipt", "login", "token", "pairing", "configure", "dashboard", "pipeline", "lan"},
+	"cluster":      {"status", "events", "estimate", "node", "protocol", "conformance", "submit", "chat", "agent", "selftest", "route", "contract", "receipt", "login", "token", "pairing", "configure", "dashboard", "pipeline", "lan"},
 	"route":        {"explain"},
 	"update":       {"status", "check", "apply", "enable", "disable", "auto"},
 	"completion":   {"powershell", "bash", "zsh"},
@@ -58,7 +58,7 @@ $script:ContextBridgeSubcommands = @{
     mcp = @('serve')
     integrate = @('openai','mcp','relay')
     verification = @('verify')
-	cluster = @('status','events','node','protocol','conformance','submit','chat','agent','selftest','route','contract','receipt','login','token','pairing','configure','dashboard','pipeline','lan')
+	cluster = @('status','events','estimate','node','protocol','conformance','submit','chat','agent','selftest','route','contract','receipt','login','token','pairing','configure','dashboard','pipeline','lan')
     route = @('explain')
     update = @('status','check','apply','enable','disable','auto')
     completion = @('powershell','bash','zsh')
@@ -95,6 +95,7 @@ $script:ContextBridgeOptions = @{
     'worker' = @('--config','--relay','--identity','--name','--slots','--providers','--models','--tasks','--groups','--no-updates','--topmost')
     'cluster status' = @('--config','--json')
 	'cluster events' = @('--config','--token','--after','--limit','--json','--follow','--pipeline','--poll')
+	'cluster estimate' = @('--config','--token','--json')
 	'cluster node' = @('drain','resume','--config','--token','--json')
 	'cluster protocol' = @('--config','--token','--json')
 	'cluster conformance' = @('relay','worker','resilience','--config','--token','--node','--json')
@@ -240,6 +241,7 @@ _contextbridge_complete() {
       "cluster submit") candidates="--config --file --token --wait --e2ee --stream --artifacts --idempotency-key" ;;
       "cluster status") candidates="--config --json" ;;
 	  "cluster events") candidates="--config --token --after --limit --json --follow --pipeline --poll" ;;
+	  "cluster estimate") candidates="--config --token --json" ;;
 	  "cluster node") candidates="drain resume --config --token --json" ;;
 	  "cluster protocol") candidates="--config --token --json" ;;
 	  "cluster conformance") candidates="relay worker resilience --config --token --node --json" ;;
@@ -299,7 +301,7 @@ _contextbridge_complete() {
       mcp) candidates="serve" ;;
       integrate) candidates="openai mcp relay" ;;
       verification) candidates="verify" ;;
-	  cluster) candidates="status events node protocol conformance submit chat agent selftest route contract receipt login token pairing configure dashboard pipeline lan" ;;
+	  cluster) candidates="status events estimate node protocol conformance submit chat agent selftest route contract receipt login token pairing configure dashboard pipeline lan" ;;
       route) candidates="explain" ;;
       update) candidates="status check apply enable disable auto" ;;
       completion) candidates="powershell bash zsh" ;;
@@ -405,12 +407,13 @@ case "$words[2]" in
     ;;
   cluster)
     if (( CURRENT == 3 )); then
-	  _values 'cluster action' status events node protocol conformance submit chat agent selftest route contract receipt login token pairing configure dashboard pipeline lan
+	  _values 'cluster action' status events estimate node protocol conformance submit chat agent selftest route contract receipt login token pairing configure dashboard pipeline lan
       return
     fi
     case "$words[3]" in
       status) _arguments "${config[@]}" '--json[Print machine-readable JSON]' ;;
 	  events) _arguments "${config[@]}" '--token[Producer, observer, or admin token]:token:' '--after[Resume after this event sequence]:sequence:' '--limit[Events per page, 1-500]:count:' '--json[Print versioned event pages as JSON]' '--follow[Poll until a terminal event is observed]' '--pipeline[Read a pipeline-run stream]' '--poll[Follow polling interval]:duration:' '1:job or run ID:' ;;
+	  estimate) _arguments "${config[@]}" '--token[Producer, observer, or admin token]:token:' '--json[Print versioned historical estimate as JSON]' '1:job ID:' ;;
 	  node)
 		if (( CURRENT == 4 )); then
 		  _values 'node action' drain resume
