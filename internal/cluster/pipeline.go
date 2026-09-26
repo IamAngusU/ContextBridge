@@ -15,13 +15,21 @@ import (
 
 func (r *Relay) handlePipelines(w http.ResponseWriter, _ *http.Request) {
 	type summary struct {
-		Name          string `json:"name"`
-		Steps         int    `json:"steps"`
-		MaxIterations int    `json:"max_iterations"`
+		Name               string `json:"name"`
+		Mode               string `json:"mode"`
+		Steps              int    `json:"steps"`
+		MaxParallel        int    `json:"max_parallel"`
+		MaxIterations      int    `json:"max_iterations"`
+		ExecutionSupported bool   `json:"execution_supported"`
 	}
 	result := make([]summary, 0, len(r.cfg.Pipelines))
 	for name, pipeline := range r.cfg.Pipelines {
-		result = append(result, summary{Name: name, Steps: len(pipeline.Steps), MaxIterations: pipeline.MaxIterations})
+		mode := EffectivePipelineMode(pipeline)
+		parallel := pipeline.MaxParallel
+		if mode == PipelineModeLinear {
+			parallel = 1
+		}
+		result = append(result, summary{Name: name, Mode: mode, Steps: len(pipeline.Steps), MaxParallel: parallel, MaxIterations: pipeline.MaxIterations, ExecutionSupported: mode == PipelineModeLinear})
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
 	writeJSON(w, http.StatusOK, result)
@@ -32,6 +40,14 @@ func (r *Relay) handlePipelineRun(w http.ResponseWriter, req *http.Request) {
 	pipeline, ok := r.cfg.Pipelines[name]
 	if !ok {
 		writeError(w, http.StatusNotFound, errors.New("pipeline not found"))
+		return
+	}
+	if _, err := PlanPipelineGraph(pipeline); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("configured pipeline is invalid: %w", err))
+		return
+	}
+	if EffectivePipelineMode(pipeline) == PipelineModeDAG {
+		writeError(w, http.StatusConflict, errors.New("DAG pipeline contract is valid, but DAG execution is not enabled in this release"))
 		return
 	}
 	// A map value copy still aliases the Steps backing array. Scope a deep copy
@@ -332,6 +348,7 @@ func clonePipeline(pipeline Pipeline) Pipeline {
 	copyPipeline.Steps = make([]PipelineStep, len(pipeline.Steps))
 	copy(copyPipeline.Steps, pipeline.Steps)
 	for index := range copyPipeline.Steps {
+		copyPipeline.Steps[index].DependsOn = append([]string(nil), copyPipeline.Steps[index].DependsOn...)
 		copyPipeline.Steps[index].Requirements = cloneRequirements(copyPipeline.Steps[index].Requirements)
 	}
 	return copyPipeline

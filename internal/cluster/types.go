@@ -602,6 +602,8 @@ type Pricing struct {
 }
 
 type Pipeline struct {
+	Mode              string         `json:"mode,omitempty" yaml:"mode,omitempty"`
+	MaxParallel       int            `json:"max_parallel,omitempty" yaml:"max_parallel,omitempty"`
 	MaxRuntimeSeconds int            `json:"max_runtime_seconds" yaml:"max_runtime_seconds"`
 	MaxIterations     int            `json:"max_iterations" yaml:"max_iterations"`
 	TenantID          string         `json:"tenant_id,omitempty" yaml:"tenant_id,omitempty"`
@@ -610,6 +612,7 @@ type Pipeline struct {
 
 type PipelineStep struct {
 	Name           string       `json:"name" yaml:"name"`
+	DependsOn      []string     `json:"depends_on,omitempty" yaml:"depends_on,omitempty"`
 	Route          string       `json:"route,omitempty" yaml:"route,omitempty"`
 	Requirements   Requirements `json:"requirements" yaml:"requirements"`
 	Input          string       `json:"input" yaml:"input"`

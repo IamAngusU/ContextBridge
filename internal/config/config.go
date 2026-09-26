@@ -890,6 +890,9 @@ func (c Config) Validate() error {
 				return fmt.Errorf("pipeline %s step %s max_iterations exceeds the pipeline limit", name, step.Name)
 			}
 		}
+		if _, err := cluster.PlanPipelineGraph(pipeline); err != nil {
+			return fmt.Errorf("pipeline %s: %w", name, err)
+		}
 	}
 	return nil
 }

@@ -61,6 +61,13 @@ known in advance. Pipeline definitions are operator configuration, have fixed
 step/runtime ceilings, and use the same execution policy and worker contracts
 as single jobs. Prefer this over an agent for stable production workflows.
 
+Existing pipelines are `linear` by default and retain declaration-order
+execution. ContextBridge also validates the bounded `mode: dag` contract at
+configuration load, including dependencies, templates, cycles, fan-in/out and
+deterministic topological order. DAG execution is deliberately not enabled in
+this release; the run endpoint returns a conflict before creating a run or
+child job. See [dag-pipelines.md](dag-pipelines.md).
+
 ## Bounded agents
 
 Use an agent when the model must propose the text-step decomposition. There are

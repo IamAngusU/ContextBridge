@@ -20,6 +20,8 @@ described as vendor integrations here.
   accepted HA architecture, replicated-state boundary, alternatives, and proof
   gates; the implementation is not yet claimed.
 - [Automation](automation.md): schedules, pipelines, and verified follow-ups.
+- [Bounded DAG pipeline contract](dag-pipelines.md): deterministic graph
+  validation and the explicit current execution boundary.
 - [Authoritative execution events](execution-events.md): atomic per-job
   lifecycle, replay cursors, retention gaps, ownership and authority classes.
 - [Portable resources](portable-resources.md): hot-plug packs identified by a

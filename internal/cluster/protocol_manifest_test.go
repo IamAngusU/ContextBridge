@@ -64,6 +64,9 @@ func TestProtocolManifestIsDeterministicAndNamesPublicBoundaries(t *testing.T) {
 	if !containsString(first.Features, "historical_runtime_estimates_v1") || first.Limits.MaximumRoutingDurationSamples != MaximumRoutingDurationSamples {
 		t.Fatalf("bounded historical runtime estimates are not advertised: %#v %#v", first.Features, first.Limits)
 	}
+	if !containsString(first.Features, "dag_pipeline_contract_validation_v1") || first.Limits.MaximumPipelineParallelism != MaximumPipelineParallelism || first.Limits.MaximumPipelineDependencyFan != MaximumPipelineDependencyFan || first.Limits.MaximumPipelineDependencyEdges != MaximumPipelineDependencyEdges {
+		t.Fatalf("bounded DAG validation contract is not advertised: %#v %#v", first.Features, first.Limits)
+	}
 }
 
 func containsString(values []string, wanted string) bool {
