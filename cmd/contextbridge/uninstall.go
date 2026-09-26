@@ -575,7 +575,11 @@ func samePath(left, right string) bool {
 	// can leave installer-owned command links behind. SameFile uses the actual
 	// filesystem identity when both paths exist; nonexistent planned paths keep
 	// the conservative lexical behavior above.
+	// #nosec G703 -- both inputs were normalized with filepath.Abs above and
+	// Stat is used only for read-only filesystem identity comparison. No path
+	// selected here is opened for content access, mutation, or deletion.
 	leftInfo, leftStatErr := os.Stat(leftAbs)
+	// #nosec G703 -- see the paired identity-only Stat justification above.
 	rightInfo, rightStatErr := os.Stat(rightAbs)
 	return leftStatErr == nil && rightStatErr == nil && os.SameFile(leftInfo, rightInfo)
 }
