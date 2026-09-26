@@ -445,14 +445,15 @@ func TestRelayStartupFailsAmbiguousExecutionsAndMarksNodesOffline(t *testing.T) 
 }
 
 func TestPipelineCloneDoesNotMutateSharedRequestScope(t *testing.T) {
-	original := Pipeline{Steps: []PipelineStep{{Name: "one", Requirements: Requirements{RequiredTags: []string{"tag-a"}, PreferredNodes: []string{"node-a"}}}}}
+	original := Pipeline{Steps: []PipelineStep{{Name: "one", Requirements: Requirements{RequiredTags: []string{"tag-a"}, PreferredNodes: []string{"node-a"}, InputImageMediaTypes: []string{"image/png"}}}}}
 	cloned := clonePipeline(original)
 	if err := scopeRequirements(&cloned.Steps[0].Requirements, TokenRecord{Role: "producer", Groups: []string{"group-a"}}); err != nil {
 		t.Fatal(err)
 	}
 	cloned.Steps[0].Requirements.RequiredTags[0] = "changed"
 	cloned.Steps[0].Requirements.PreferredNodes[0] = "changed"
-	if original.Steps[0].Requirements.Group != "" || original.Steps[0].Requirements.RequiredTags[0] != "tag-a" || original.Steps[0].Requirements.PreferredNodes[0] != "node-a" {
+	cloned.Steps[0].Requirements.InputImageMediaTypes[0] = "changed"
+	if original.Steps[0].Requirements.Group != "" || original.Steps[0].Requirements.RequiredTags[0] != "tag-a" || original.Steps[0].Requirements.PreferredNodes[0] != "node-a" || original.Steps[0].Requirements.InputImageMediaTypes[0] != "image/png" {
 		t.Fatalf("request scoping mutated configured pipeline: %#v", original)
 	}
 }

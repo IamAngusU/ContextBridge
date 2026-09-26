@@ -358,6 +358,7 @@ func cloneRequirements(requirements Requirements) Requirements {
 	copyRequirements := requirements
 	copyRequirements.RequiredTags = append([]string(nil), requirements.RequiredTags...)
 	copyRequirements.PreferredNodes = append([]string(nil), requirements.PreferredNodes...)
+	copyRequirements.InputImageMediaTypes = append([]string(nil), requirements.InputImageMediaTypes...)
 	return copyRequirements
 }
 

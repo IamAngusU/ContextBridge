@@ -72,19 +72,37 @@ evidence and a reproducible admission tie-breaker; it does not bypass future
 worker capacity, producer limits or execution policy.
 
 The authenticated protocol manifest advertises
-`dag_pipeline_contract_validation_v1` and its exact fixed limits. It does not
-claim a DAG executor.
+`dag_pipeline_contract_validation_v1`, `durable_dag_checkpoint_contract_v1`
+and the exact fixed limits. It does not claim a DAG executor.
+
+## Durable graph truth
+
+The core also defines the checkpoint record that a future executor must use:
+
+- the normalized operator configuration is bound by SHA-256;
+- a second SHA-256 binds the immutable step/dependency graph and stable
+  topological order;
+- every node has one explicit state: `not_ready`, `ready`, `queued`, `running`,
+  `completed`, `failed`, `cancelled`, `blocked_by_dependency`, or `ambiguous`;
+- a persisted graph, dependency list, topological order and child job identity
+  cannot be replaced later;
+- terminal node states cannot move backwards;
+- checkpoint timestamps cannot move backwards.
+
+Store validation rejects a malformed binding or invalid transition before the
+Bolt transaction changes durable state. This means later executor work can use
+one persisted vocabulary rather than infer graph truth from log messages. The
+checkpoint contract itself still does not dispatch a job.
 
 ## What remains before execution can be enabled
 
 The next slices must add and prove:
 
-1. durable per-node states bound to an immutable graph/config identity;
-2. bounded ready-set admission under `max_parallel` and existing producer
+1. bounded ready-set admission under `max_parallel` and existing producer
    limits;
-3. descendant blocking after failed, cancelled or ambiguous predecessors;
-4. honest treatment of siblings that were already dispatched;
-5. restart tests at every checkpoint, exact usage accounting, and authoritative
+2. descendant blocking after failed, cancelled or ambiguous predecessors;
+3. honest treatment of siblings that were already dispatched;
+4. restart tests at every checkpoint, exact usage accounting, and authoritative
    graph events.
 
 Until those properties exist, linear pipelines are the supported execution

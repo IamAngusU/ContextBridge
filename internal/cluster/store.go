@@ -3336,6 +3336,9 @@ func (s *Store) retainedJobMetrics() (map[string]uint64, Usage, error) {
 }
 
 func (s *Store) SavePipelineRun(run PipelineRun) error {
+	if err := validatePipelineRunGraphState(run); err != nil {
+		return err
+	}
 	if s.savePipelineRunTestHook != nil {
 		if err := s.savePipelineRunTestHook(run); err != nil {
 			return err
@@ -3348,6 +3351,11 @@ func (s *Store) SavePipelineRun(run PipelineRun) error {
 		existed := previousErr == nil
 		if previousErr != nil && !errors.Is(previousErr, os.ErrNotExist) {
 			return fmt.Errorf("read previous pipeline run: %w", previousErr)
+		}
+		if existed {
+			if err := validatePipelineRunGraphTransition(previous, run); err != nil {
+				return err
+			}
 		}
 		if err := putJSON(bucket, run.ID, run); err != nil {
 			return err
@@ -3380,6 +3388,9 @@ func (s *Store) CreatePipelineRunAdmitted(run PipelineRun, maxGlobal, maxOwner i
 	}
 	if run.Status != "running" {
 		return errors.New("an admitted pipeline run must start in running state")
+	}
+	if err := validatePipelineRunGraphState(run); err != nil {
+		return err
 	}
 	return s.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(bucketPipelineRuns)

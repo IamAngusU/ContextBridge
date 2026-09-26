@@ -67,6 +67,9 @@ func TestProtocolManifestIsDeterministicAndNamesPublicBoundaries(t *testing.T) {
 	if !containsString(first.Features, "dag_pipeline_contract_validation_v1") || first.Limits.MaximumPipelineParallelism != MaximumPipelineParallelism || first.Limits.MaximumPipelineDependencyFan != MaximumPipelineDependencyFan || first.Limits.MaximumPipelineDependencyEdges != MaximumPipelineDependencyEdges {
 		t.Fatalf("bounded DAG validation contract is not advertised: %#v %#v", first.Features, first.Limits)
 	}
+	if !containsString(first.Features, "durable_dag_checkpoint_contract_v1") {
+		t.Fatalf("durable DAG checkpoint contract is not advertised: %#v", first.Features)
+	}
 }
 
 func containsString(values []string, wanted string) bool {

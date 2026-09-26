@@ -624,20 +624,41 @@ type PipelineStep struct {
 	MaxIterations  int          `json:"max_iterations,omitempty" yaml:"max_iterations,omitempty"`
 }
 
+type PipelineGraphBinding struct {
+	ContractVersion string   `json:"contract_version"`
+	Mode            string   `json:"mode"`
+	ConfigSHA256    string   `json:"config_sha256"`
+	GraphSHA256     string   `json:"graph_sha256"`
+	MaxParallel     int      `json:"max_parallel"`
+	StepCount       int      `json:"step_count"`
+	EdgeCount       int      `json:"edge_count"`
+	Order           []string `json:"topological_order"`
+}
+
+type PipelineNodeCheckpoint struct {
+	Step      string    `json:"step"`
+	DependsOn []string  `json:"depends_on,omitempty"`
+	State     string    `json:"state"`
+	JobID     string    `json:"job_id,omitempty"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 type PipelineRun struct {
-	ID             string          `json:"id"`
-	Pipeline       string          `json:"pipeline"`
-	OwnerSubject   string          `json:"owner_subject,omitempty"`
-	TenantID       string          `json:"tenant_id,omitempty"`
-	ProducerLimits ProducerLimits  `json:"producer_limits,omitempty"`
-	Status         string          `json:"status"`
-	Input          json.RawMessage `json:"input"`
-	Output         json.RawMessage `json:"output,omitempty"`
-	Steps          []Job           `json:"steps"`
-	Usage          Usage           `json:"usage"`
-	Error          string          `json:"error,omitempty"`
-	CreatedAt      time.Time       `json:"created_at"`
-	FinishedAt     time.Time       `json:"finished_at,omitempty"`
+	ID             string                   `json:"id"`
+	Pipeline       string                   `json:"pipeline"`
+	OwnerSubject   string                   `json:"owner_subject,omitempty"`
+	TenantID       string                   `json:"tenant_id,omitempty"`
+	ProducerLimits ProducerLimits           `json:"producer_limits,omitempty"`
+	Status         string                   `json:"status"`
+	Input          json.RawMessage          `json:"input"`
+	Output         json.RawMessage          `json:"output,omitempty"`
+	Steps          []Job                    `json:"steps"`
+	Usage          Usage                    `json:"usage"`
+	Error          string                   `json:"error,omitempty"`
+	Graph          *PipelineGraphBinding    `json:"graph,omitempty"`
+	NodeStates     []PipelineNodeCheckpoint `json:"node_states,omitempty"`
+	CreatedAt      time.Time                `json:"created_at"`
+	FinishedAt     time.Time                `json:"finished_at,omitempty"`
 }
 
 type Overview struct {

@@ -51,6 +51,7 @@ func CurrentProtocolManifest(configuredJobBytes int64) ProtocolManifest {
 			"bounded_execution_event_sse_v1",
 			"content_minimizing_execution_receipts",
 			"dag_pipeline_contract_validation_v1",
+			"durable_dag_checkpoint_contract_v1",
 			"durable_execution_policy_v1",
 			"durable_worker_drain_v1",
 			"failure_aware_routing_v1",
