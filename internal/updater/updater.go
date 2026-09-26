@@ -139,6 +139,17 @@ func (m *Manager) SetHealthURL(value string) {
 	m.healthURL = value
 }
 
+// RestartCurrentProcess and RollbackFailedStart deliberately use the
+// canonical executable path captured before replacement. On Unix,
+// os.Executable may resolve to the renamed .previous inode after activation.
+func (m *Manager) RestartCurrentProcess() error {
+	return restartCurrentProcessAt(m.executable)
+}
+
+func (m *Manager) RollbackFailedStart(version string) error {
+	return rollbackFailedStartAt(m.executable, version)
+}
+
 // SetIdleCheck supplies a fail-closed runtime check for automatic activation.
 // Explicit `update apply` remains an operator action and does not use it.
 func (m *Manager) SetIdleCheck(check func(context.Context) bool) {
@@ -430,7 +441,7 @@ func (m *Manager) ConfirmInstalled(ctx context.Context, expectedVersion string) 
 		case <-ctx.Done():
 			return nil
 		case <-deadline.C:
-			if err := RollbackFailedStart(expectedVersion); err != nil {
+			if err := m.RollbackFailedStart(expectedVersion); err != nil {
 				return fmt.Errorf("updated service failed health check and rollback failed: %w", err)
 			}
 			return errors.New("updated service failed health check; previous version restored")
@@ -480,10 +491,17 @@ func (m *Manager) latest(ctx context.Context) (Release, error) {
 		if err := decoder.Decode(&releases); err != nil {
 			return Release{}, err
 		}
+		var selected Release
 		for _, release := range releases {
-			if !release.Draft {
-				return release, nil
+			if release.Draft || !managedVersion(release.TagName) {
+				continue
 			}
+			if selected.TagName == "" || newerVersion(selected.TagName, release.TagName) {
+				selected = release
+			}
+		}
+		if selected.TagName != "" {
+			return selected, nil
 		}
 		return Release{}, errors.New("no release is available")
 	}
@@ -846,49 +864,155 @@ func (m *Manager) saveState(state State) error {
 }
 
 func managedVersion(value string) bool {
-	value = strings.TrimPrefix(strings.TrimSpace(value), "v")
-	parts := strings.SplitN(value, "-", 2)
-	numbers := strings.Split(parts[0], ".")
-	if len(numbers) != 3 {
+	_, ok := parseSemanticVersion(value)
+	return ok
+}
+
+func newerVersion(current, candidate string) bool {
+	left, okLeft := parseSemanticVersion(current)
+	right, okRight := parseSemanticVersion(candidate)
+	if !okLeft || !okRight {
 		return false
 	}
-	for _, number := range numbers {
-		if _, err := strconv.Atoi(number); err != nil {
+	for index := range left.core {
+		if right.core[index] != left.core[index] {
+			return right.core[index] > left.core[index]
+		}
+	}
+	return comparePrerelease(left.prerelease, right.prerelease) < 0
+}
+
+type semanticVersion struct {
+	core       [3]uint64
+	prerelease []string
+}
+
+func parseSemanticVersion(value string) (semanticVersion, bool) {
+	var output semanticVersion
+	value = strings.TrimPrefix(strings.TrimSpace(value), "v")
+	if value == "" {
+		return output, false
+	}
+	buildParts := strings.SplitN(value, "+", 2)
+	withoutBuild := buildParts[0]
+	if len(buildParts) == 2 && !validSemanticIdentifiers(buildParts[1], false) {
+		return output, false
+	}
+	parts := strings.SplitN(withoutBuild, "-", 2)
+	numbers := strings.Split(parts[0], ".")
+	if len(numbers) != 3 {
+		return output, false
+	}
+	for index, number := range numbers {
+		if number == "" || (len(number) > 1 && number[0] == '0') {
+			return output, false
+		}
+		parsed, err := strconv.ParseUint(number, 10, 64)
+		if err != nil {
+			return output, false
+		}
+		output.core[index] = parsed
+	}
+	if len(parts) == 2 {
+		if parts[1] == "" {
+			return output, false
+		}
+		for _, identifier := range strings.Split(parts[1], ".") {
+			if identifier == "" {
+				return output, false
+			}
+			numeric := true
+			for _, character := range identifier {
+				if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || character == '-') {
+					return output, false
+				}
+				if character < '0' || character > '9' {
+					numeric = false
+				}
+			}
+			if numeric && len(identifier) > 1 && identifier[0] == '0' {
+				return output, false
+			}
+			if numeric {
+				if _, err := strconv.ParseUint(identifier, 10, 64); err != nil {
+					return output, false
+				}
+			}
+			output.prerelease = append(output.prerelease, identifier)
+		}
+	}
+	return output, true
+}
+
+func validSemanticIdentifiers(value string, rejectNumericLeadingZero bool) bool {
+	if value == "" {
+		return false
+	}
+	for _, identifier := range strings.Split(value, ".") {
+		if identifier == "" {
+			return false
+		}
+		numeric := true
+		for _, character := range identifier {
+			if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || character == '-') {
+				return false
+			}
+			if character < '0' || character > '9' {
+				numeric = false
+			}
+		}
+		if rejectNumericLeadingZero && numeric && len(identifier) > 1 && identifier[0] == '0' {
 			return false
 		}
 	}
 	return true
 }
 
-func newerVersion(current, candidate string) bool {
-	left, okLeft := versionParts(current)
-	right, okRight := versionParts(candidate)
-	if !okLeft || !okRight {
-		return false
+func comparePrerelease(left, right []string) int {
+	if len(left) == 0 && len(right) == 0 {
+		return 0
 	}
-	for index := range left {
-		if right[index] != left[index] {
-			return right[index] > left[index]
+	if len(left) == 0 {
+		return 1
+	}
+	if len(right) == 0 {
+		return -1
+	}
+	limit := len(left)
+	if len(right) < limit {
+		limit = len(right)
+	}
+	for index := 0; index < limit; index++ {
+		leftNumber, leftErr := strconv.ParseUint(left[index], 10, 64)
+		rightNumber, rightErr := strconv.ParseUint(right[index], 10, 64)
+		switch {
+		case leftErr == nil && rightErr == nil:
+			if leftNumber < rightNumber {
+				return -1
+			}
+			if leftNumber > rightNumber {
+				return 1
+			}
+		case leftErr == nil:
+			return -1
+		case rightErr == nil:
+			return 1
+		default:
+			if left[index] < right[index] {
+				return -1
+			}
+			if left[index] > right[index] {
+				return 1
+			}
 		}
 	}
-	return false
-}
-
-func versionParts(value string) ([3]int, bool) {
-	var output [3]int
-	value = strings.TrimPrefix(strings.TrimSpace(value), "v")
-	numbers := strings.Split(strings.SplitN(value, "-", 2)[0], ".")
-	if len(numbers) != 3 {
-		return output, false
+	if len(left) < len(right) {
+		return -1
 	}
-	for index, number := range numbers {
-		parsed, err := strconv.Atoi(number)
-		if err != nil || parsed < 0 {
-			return output, false
-		}
-		output[index] = parsed
+	if len(left) > len(right) {
+		return 1
 	}
-	return output, true
+	return 0
 }
 
 func safeRepositoryPart(value string) bool {

@@ -148,6 +148,132 @@ func TestAdapterRouteTimeoutKeepsSpecificFailure(t *testing.T) {
 	}
 }
 
+func TestClaimedAdapterTimeoutDoesNotFallThroughToFallback(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fallbackCalls int
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fallbackCalls++
+		if r.URL.Path != "/api/generate" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"response": "must not run"})
+	}))
+	defer fallback.Close()
+	cfg := config.Config{
+		Routes: map[string]config.Route{"default": {Provider: "adapter", Fallback: []string{"local"}, TimeoutSeconds: 1}},
+		Engines: map[string]config.Engine{
+			"adapter": {Type: "adapter"},
+			"local":   {Type: "ollama", URL: fallback.URL, Model: "test", TimeoutSeconds: 2},
+		},
+	}
+	result := make(chan Output, 1)
+	go func() {
+		result <- NewProcessor(cfg, store).Process(context.Background(), Job{ID: "claimed-timeout", Prompt: "perform once", Output: OutputSpec{Mode: "text"}})
+	}()
+	deadline := time.Now().Add(time.Second)
+	var work *adapterJob
+	for work == nil && time.Now().Before(deadline) {
+		work = store.NextAdapterJob("", time.Minute)
+		if work == nil {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	if work == nil || !store.MarkAdapterAction(work.Job.ID, work.LeaseGeneration, time.Minute) {
+		t.Fatal("adapter attempt was not claimed at the action boundary")
+	}
+	output := <-result
+	if output.Error != "adapter_timeout_ambiguous" || fallbackCalls != 0 {
+		t.Fatalf("ambiguous adapter attempt fell through to fallback: output=%#v fallback_calls=%d", output, fallbackCalls)
+	}
+}
+
+func TestUnclaimedAdapterTimeoutMayUseConfiguredFallback(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fallbackCalls int
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fallbackCalls++
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"response": "safe fallback"})
+	}))
+	defer fallback.Close()
+	cfg := config.Config{
+		Routes: map[string]config.Route{"default": {Provider: "adapter", Fallback: []string{"local"}, TimeoutSeconds: 1}},
+		Engines: map[string]config.Engine{
+			"adapter": {Type: "adapter"},
+			"local":   {Type: "ollama", URL: fallback.URL, Model: "test", TimeoutSeconds: 2},
+		},
+	}
+	output := NewProcessor(cfg, store).Process(context.Background(), Job{ID: "unclaimed-timeout", Prompt: "safe to retry", Output: OutputSpec{Mode: "text"}})
+	if output.Error != "" || output.Text != "safe fallback" || fallbackCalls != 1 {
+		t.Fatalf("proven pre-action timeout did not use fallback: output=%#v fallback_calls=%d", output, fallbackCalls)
+	}
+}
+
+func TestOutputTokenLimitSkipsIncapableAdapterForCapableFallback(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var receivedLimit int
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		var payload struct {
+			Options map[string]int `json:"options"`
+		}
+		_ = json.NewDecoder(request.Body).Decode(&payload)
+		receivedLimit = payload.Options["num_predict"]
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"response": "bounded", "done_reason": "length", "prompt_eval_count": 1, "eval_count": 2,
+		})
+	}))
+	defer fallback.Close()
+	cfg := config.Config{
+		Routes: map[string]config.Route{"default": {Provider: "adapter", Fallback: []string{"local"}}},
+		Engines: map[string]config.Engine{
+			"adapter": {Type: "adapter"},
+			"local":   {Type: "ollama", URL: fallback.URL, Model: "test", TimeoutSeconds: 2},
+		},
+	}
+	output := NewProcessor(cfg, store).Process(context.Background(), Job{
+		ID: "bounded-fallback", Prompt: "bounded", Output: OutputSpec{Mode: "text", MaxTokens: 2},
+	})
+	if output.Error != "" || output.Text != "bounded" || output.FinishReason != "length" || receivedLimit != 2 {
+		t.Fatalf("token contract did not select and constrain capable fallback: output=%#v limit=%d", output, receivedLimit)
+	}
+	if queued := store.NextAdapterJob("", time.Second); queued != nil {
+		t.Fatalf("incapable adapter received a bounded job: %#v", queued)
+	}
+}
+
+func TestProviderUsageMustBeCompleteAndConsistent(t *testing.T) {
+	prompt, completion, total := uint64(3), uint64(2), uint64(6)
+	if (&providerUsage{PromptTokens: &prompt, CompletionTokens: &completion, TotalTokens: &total}).complete() {
+		t.Fatal("inconsistent provider usage was accepted as authoritative")
+	}
+	total = 5
+	if !(&providerUsage{PromptTokens: &prompt, CompletionTokens: &completion, TotalTokens: &total}).complete() {
+		t.Fatal("complete and internally consistent provider usage was rejected")
+	}
+	prompt, completion, total = ^uint64(0), 1, 0
+	if (&providerUsage{PromptTokens: &prompt, CompletionTokens: &completion, TotalTokens: &total}).complete() {
+		t.Fatal("overflowing provider usage was accepted as authoritative")
+	}
+	prompt, completion, total = 3, 2, 5
+	cacheHit := uint64(4)
+	output := Output{}
+	applyProviderUsage(&output, config.Engine{Costing: config.EngineCosting{Mode: "upper_bound", InputPerMillionUSD: 1}}, &providerUsage{
+		PromptTokens: &prompt, CompletionTokens: &completion, TotalTokens: &total, PromptCacheHitTokens: &cacheHit,
+	})
+	if output.CostStatus != "unknown" || output.EstimatedCostUSD != 0 {
+		t.Fatalf("contradictory cache usage became a known discounted cost: %#v", output)
+	}
+}
+
 func TestSelectOllamaModelUsesSmallestCompatibleModel(t *testing.T) {
 	advertised := map[string][]string{
 		"large-text:latest": {"completion"}, "small-text:latest": {"completion"},

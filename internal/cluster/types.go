@@ -532,6 +532,20 @@ type TokenRecord struct {
 	CreatedAt      time.Time      `json:"created_at"`
 	ExpiresAt      time.Time      `json:"expires_at,omitempty"`
 	Revoked        bool           `json:"revoked"`
+	// AuthHash is populated only for the in-memory result of Authenticate. It
+	// lets a long-lived connection bind later assignment decisions to the exact
+	// credential that authenticated it without retaining the bearer secret.
+	AuthHash string `json:"-"`
+}
+
+// TokenInventory exposes credential metadata to administrators without ever
+// returning bearer values or their hashes. Offset/limit make large stores
+// inspectable through bounded responses.
+type TokenInventory struct {
+	Tokens []TokenRecord `json:"tokens"`
+	Total  int           `json:"total"`
+	Offset int           `json:"offset"`
+	Limit  int           `json:"limit"`
 }
 
 type Event struct {

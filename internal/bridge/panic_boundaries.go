@@ -15,7 +15,9 @@ func (s *Server) recoverSchedulePanic(id, runID string) {
 		return
 	}
 	s.logger.Printf("schedule %s recovered an internal panic:\n%s", id, debug.Stack())
-	s.schedules.finish(id, runID, "failed", internalWorkItemPanic)
+	if err := s.schedules.finish(id, runID, "failed", internalWorkItemPanic); err != nil {
+		s.logger.Printf("schedule %s panic checkpoint could not be stored: %v", id, err)
+	}
 	s.store.AddActivity("scheduled", "Scheduled job failed", runID)
 }
 

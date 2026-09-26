@@ -15,6 +15,16 @@ POLL_SECONDS = 0.5
 TIMEOUT_SECONDS = 60
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Fail closed so bearer credentials never cross a redirect boundary."""
+
+    def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+        return None
+
+
+NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirectHandler())
+
+
 def required_env(name: str) -> str:
     value = os.environ.get(name, "").strip()
     if not value:
@@ -40,7 +50,7 @@ def request_json(method: str, url: str, token: str, body=None, headers=None):
     for name, value in (headers or {}).items():
         request.add_header(name, value)
     try:
-        with urllib.request.urlopen(request, timeout=10) as response:
+        with NO_REDIRECT_OPENER.open(request, timeout=10) as response:
             data = response.read(MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as error:
         detail = error.read(4096).decode("utf-8", "replace")

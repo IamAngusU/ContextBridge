@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -100,8 +101,15 @@ func Discover(settings Settings) ([]Pack, error) {
 	if !explicit {
 		roots = automaticRoots()
 	}
-	sort.Slice(roots, func(i, j int) bool { return strings.ToLower(roots[i]) < strings.ToLower(roots[j]) })
+	sort.Slice(roots, func(i, j int) bool {
+		left, right := strings.ToLower(roots[i]), strings.ToLower(roots[j])
+		if left == right {
+			return roots[i] < roots[j]
+		}
+		return left < right
+	})
 	seenPaths := map[string]bool{}
+	seenRoots := make([]os.FileInfo, 0, len(roots))
 	packs := make([]Pack, 0)
 	for _, root := range roots {
 		root = strings.TrimSpace(root)
@@ -115,11 +123,6 @@ func Discover(settings Settings) ([]Pack, error) {
 			}
 			continue
 		}
-		canonical := strings.ToLower(filepath.Clean(absolute))
-		if seenPaths[canonical] {
-			continue
-		}
-		seenPaths[canonical] = true
 		stat, err := os.Lstat(absolute)
 		if err != nil || !stat.IsDir() || stat.Mode()&os.ModeSymlink != 0 {
 			if explicit && err != nil && !os.IsNotExist(err) {
@@ -127,6 +130,24 @@ func Discover(settings Settings) ([]Pack, error) {
 			}
 			continue
 		}
+		canonical := filepath.Clean(absolute)
+		if runtime.GOOS == "windows" {
+			canonical = strings.ToLower(canonical)
+		}
+		duplicateRoot := seenPaths[canonical]
+		if !duplicateRoot {
+			for _, seen := range seenRoots {
+				if os.SameFile(seen, stat) {
+					duplicateRoot = true
+					break
+				}
+			}
+		}
+		if duplicateRoot {
+			continue
+		}
+		seenPaths[canonical] = true
+		seenRoots = append(seenRoots, stat)
 		if err := takeCandidate(); err != nil {
 			return nil, err
 		}

@@ -23,6 +23,7 @@ const (
 	FailureExecutionStateAmbiguous     = "execution_state_ambiguous"
 	FailureExecutionTimeoutAmbiguous   = "execution_timeout_ambiguous"
 	FailureEncryptedReservationExpired = "encrypted_reservation_expired"
+	FailurePipelineParentTerminal      = "pipeline_parent_terminal"
 )
 
 var stableFailureCodeList = []string{
@@ -35,6 +36,7 @@ var stableFailureCodeList = []string{
 	FailureEncryptedReservationExpired,
 	FailureExecutionStateAmbiguous,
 	FailureExecutionTimeoutAmbiguous,
+	FailurePipelineParentTerminal,
 	FailureProviderRouteUnavailable,
 	FailureWorkerCapacity,
 	FailureWorkerExecutionCancelled,

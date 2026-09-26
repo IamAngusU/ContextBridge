@@ -8,14 +8,20 @@ import (
 	"syscall"
 )
 
+var restartExec = syscall.Exec
+
 func RestartCurrentProcess() error {
 	executable, err := os.Executable()
 	if err != nil {
 		return err
 	}
+	return restartCurrentProcessAt(executable)
+}
+
+func restartCurrentProcessAt(executable string) error {
 	// #nosec G702 -- executable comes from os.Executable, not user input, and
 	// syscall.Exec receives an argv vector directly without a command shell.
-	if err := syscall.Exec(executable, os.Args, os.Environ()); err != nil {
+	if err := restartExec(executable, os.Args, os.Environ()); err != nil {
 		backup := executable + ".previous"
 		failed := executable + ".failed"
 		_ = os.Remove(failed)

@@ -190,11 +190,12 @@ func (r *Relay) endAdmission() {
 }
 
 type workerConnection struct {
-	conn     *websocket.Conn
-	writeMu  sync.Mutex
-	stateMu  sync.Mutex
-	inFlight map[string]workerReservation
-	capacity int
+	conn           *websocket.Conn
+	credentialHash string
+	writeMu        sync.Mutex
+	stateMu        sync.Mutex
+	inFlight       map[string]workerReservation
+	capacity       int
 }
 
 // workerReservation deliberately outlives the persisted job's active state.
@@ -217,9 +218,13 @@ const (
 	workerReservationDispatched
 )
 
-func newWorkerConnection(conn *websocket.Conn, capacity int) *workerConnection {
+func newWorkerConnection(conn *websocket.Conn, capacity int, credentialHash ...string) *workerConnection {
 	capacity = boundedWorkerCapacity(capacity)
-	return &workerConnection{conn: conn, capacity: capacity, inFlight: map[string]workerReservation{}}
+	hash := ""
+	if len(credentialHash) > 0 {
+		hash = credentialHash[0]
+	}
+	return &workerConnection{conn: conn, credentialHash: hash, capacity: capacity, inFlight: map[string]workerReservation{}}
 }
 
 func (w *workerConnection) reserve(jobID string) bool {
@@ -423,7 +428,7 @@ func NewRelay(cfg RelayConfig, logger *log.Logger) (*Relay, error) {
 		store.Close()
 		return nil, fmt.Errorf("acquire relay authority: %w", err)
 	}
-	if err := store.EnsureToken(cfg.AdminToken, "admin", "relay-admin", nil); err != nil {
+	if err := store.EnsureBootstrapAdminToken(cfg.AdminToken); err != nil {
 		store.Close()
 		return nil, err
 	}
@@ -518,7 +523,9 @@ func (r *Relay) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/cluster/assign", r.authorize("admin", "producer")(r.handleReserve))
 	mux.HandleFunc("POST /v1/cluster/routes/explain", r.authorize("admin", "producer")(r.handleRouteExplain))
 	mux.HandleFunc("GET /v1/cluster/workers/connect", r.authorize("node")(r.handleWorker))
+	mux.HandleFunc("GET /v1/cluster/tokens", r.authorize("admin")(r.handleTokens))
 	mux.HandleFunc("POST /v1/cluster/tokens", r.authorize("admin")(r.handleCreateToken))
+	mux.HandleFunc("DELETE /v1/cluster/tokens/{id}", r.authorize("admin")(r.handleRevokeToken))
 	mux.HandleFunc("GET /v1/cluster/pipelines", r.authorize("admin", "observer", "producer")(r.handlePipelines))
 	mux.HandleFunc("POST /v1/cluster/pipelines/{name}/run", r.authorize("admin", "producer")(r.handlePipelineRun))
 	mux.HandleFunc("GET /v1/cluster/pipeline-runs/{id}", r.authorize("admin", "observer", "producer")(r.handlePipelineRunStatus))
@@ -1338,6 +1345,52 @@ func (r *Relay) handleCreateToken(w http.ResponseWriter, req *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]interface{}{"token": token, "record": record})
 }
 
+func (r *Relay) handleTokens(w http.ResponseWriter, req *http.Request) {
+	limit := queryLimit(req, 100, 200)
+	offset := 0
+	if raw := strings.TrimSpace(req.URL.Query().Get("offset")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 || parsed > 1_000_000 {
+			writeError(w, http.StatusBadRequest, errors.New("offset must be an integer from 0 to 1000000"))
+			return
+		}
+		offset = parsed
+	}
+	inventory, err := r.store.ListTokens(offset, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, inventory)
+}
+
+func (r *Relay) handleRevokeToken(w http.ResponseWriter, req *http.Request) {
+	id := strings.TrimSpace(req.PathValue("id"))
+	if !validJobID(id) || !strings.HasPrefix(id, "tok_") {
+		writeError(w, http.StatusBadRequest, errors.New("valid token ID is required"))
+		return
+	}
+	record, authHash, err := r.store.RevokeTokenWithHash(id)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			writeError(w, http.StatusNotFound, err)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if record.Role == "node" && record.Subject != "" {
+		r.mu.RLock()
+		worker := r.workers[record.Subject]
+		r.mu.RUnlock()
+		if worker != nil && worker.credentialHash == authHash {
+			worker.conn.CloseNow()
+			r.disconnectNode(record.Subject, worker)
+		}
+	}
+	writeJSON(w, http.StatusOK, record)
+}
+
 func (r *Relay) handleWorker(w http.ResponseWriter, req *http.Request) {
 	record, ok := tokenRecord(req.Context())
 	if !ok || record.Subject == "" {
@@ -1375,6 +1428,10 @@ func (r *Relay) handleWorker(w http.ResponseWriter, req *http.Request) {
 		conn.Close(websocket.StatusPolicyViolation, "invalid worker hello")
 		return
 	}
+	if !r.store.NodeCredentialValid(record.AuthHash, record.Subject, time.Now().UTC()) {
+		conn.Close(websocket.StatusPolicyViolation, "worker credential expired or was revoked")
+		return
+	}
 	node := *hello.Node
 	node.Name = cleanLabel(node.Name, 100)
 	if node.Name == "" {
@@ -1394,21 +1451,60 @@ func (r *Relay) handleWorker(w http.ResponseWriter, req *http.Request) {
 			node.PublicKey = saved.PublicKey
 		}
 	}
-	if err := r.store.UpsertNodePinned(node); err != nil {
+	previousNode, previousNodeErr := r.store.GetNode(node.ID)
+	if err := r.store.UpsertNodePinnedAuthorized(node, record.AuthHash); err != nil {
 		status := websocket.StatusInternalError
 		message := "node could not be stored"
 		if errors.Is(err, ErrNodePublicKeyMismatch) {
 			status = websocket.StatusPolicyViolation
 			message = "node public key differs from paired identity; re-pair to rotate it"
+		} else if errors.Is(err, ErrWorkerCredentialInvalid) {
+			status = websocket.StatusPolicyViolation
+			message = "worker credential expired or was revoked"
 		}
 		conn.Close(status, message)
 		return
 	}
-	worker := newWorkerConnection(conn, node.Capabilities.MaxConcurrent)
+	worker := newWorkerConnection(conn, node.Capabilities.MaxConcurrent, record.AuthHash)
 	r.mu.Lock()
 	previous := r.workers[node.ID]
 	r.workers[node.ID] = worker
 	r.mu.Unlock()
+	// Close the race between the pre-hello validation and publication in the
+	// live-worker map. A concurrent revocation either observes this connection
+	// and closes it, or commits first and is observed here. If a prior valid
+	// connection exists, restore it rather than letting a revoked replacement
+	// evict it.
+	if !r.store.NodeCredentialValid(worker.credentialHash, node.ID, time.Now().UTC()) {
+		restoredPrevious := false
+		r.mu.Lock()
+		current := r.workers[node.ID]
+		if current == worker || current == nil {
+			if previous != nil && r.store.NodeCredentialValid(previous.credentialHash, node.ID, time.Now().UTC()) {
+				r.workers[node.ID] = previous
+				restoredPrevious = true
+			} else {
+				delete(r.workers, node.ID)
+			}
+		}
+		r.mu.Unlock()
+		if restoredPrevious && previousNodeErr == nil {
+			if restoreErr := r.store.UpsertNode(previousNode); restoreErr != nil {
+				r.logger.Printf("restore preceding worker %s after rejected replacement: %v", node.ID, restoreErr)
+				r.disconnectNode(node.ID, previous)
+			} else if !r.store.NodeCredentialValid(previous.credentialHash, node.ID, time.Now().UTC()) {
+				// Close the symmetric race where the preceding credential was
+				// revoked while it was temporarily absent from the worker map.
+				r.disconnectNode(node.ID, previous)
+			}
+		} else {
+			if disconnectErr := r.store.SetNodeConnected(node.ID, false); disconnectErr != nil {
+				r.logger.Printf("mark rejected worker %s offline: %v", node.ID, disconnectErr)
+			}
+		}
+		conn.Close(websocket.StatusPolicyViolation, "worker credential expired or was revoked")
+		return
+	}
 	if previous != nil {
 		// Do not wait for a close handshake from an unresponsive superseded peer;
 		// the new connection must receive its authority fence before dispatch.
@@ -1445,6 +1541,13 @@ func (r *Relay) handleWorker(w http.ResponseWriter, req *http.Request) {
 		var message WireMessage
 		if json.Unmarshal(raw, &message) != nil || message.Version != ProtocolVersion {
 			continue
+		}
+		// Authentication is not a one-time WebSocket admission decision. A
+		// revoked or expired node must not be able to mutate job state with a
+		// started/progress/result message before its next heartbeat.
+		if !r.store.NodeCredentialValid(worker.credentialHash, node.ID, time.Now().UTC()) {
+			conn.Close(websocket.StatusPolicyViolation, "worker credential expired or was revoked")
+			return
 		}
 		switch message.Type {
 		case "heartbeat":
@@ -1625,9 +1728,9 @@ func (r *Relay) dispatch() {
 			decision.SelectedNodeName = candidate.Node.Name
 			boundRoutingDecision(&decision)
 			if strings.EqualFold(queued.Requirements.Provider, "adapter") {
-				job, assignErr = r.store.AssignAdapterJobFencedWithDecision(queued.ID, candidate.Node.ID, adapterEndpointID, adapterPrincipal, adapterSessionRecovery, decision, r.authority)
+				job, assignErr = r.store.AssignAdapterJobAuthorizedFencedWithDecision(queued.ID, candidate.Node.ID, worker.credentialHash, adapterEndpointID, adapterPrincipal, adapterSessionRecovery, decision, r.authority)
 			} else {
-				job, assignErr = r.store.AssignJobFencedWithDecision(queued.ID, candidate.Node.ID, decision, r.authority)
+				job, assignErr = r.store.AssignJobAuthorizedFencedWithDecision(queued.ID, candidate.Node.ID, worker.credentialHash, decision, r.authority)
 			}
 			if assignErr != nil {
 				worker.release(queued.ID)
@@ -1639,6 +1742,15 @@ func (r *Relay) dispatch() {
 				if errors.Is(assignErr, ErrRouteProbeInFlight) {
 					rejectRoutingCandidate(&decision, candidate.Node.ID, "route_probe_in_flight")
 					continue
+				}
+				if errors.Is(assignErr, ErrWorkerCredentialInvalid) {
+					rejectRoutingCandidate(&decision, candidate.Node.ID, "worker_credential_invalid")
+					worker.conn.CloseNow()
+					r.disconnectNode(candidate.Node.ID, worker)
+					continue
+				}
+				if errors.Is(assignErr, ErrPipelineParentTerminal) {
+					break
 				}
 				break
 			}

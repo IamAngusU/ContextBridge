@@ -78,6 +78,368 @@ func TestWorkerHeartbeatRetainsTokenScopeAndProtocolCapacity(t *testing.T) {
 	}
 }
 
+func TestConfiguredAdminTokenRotationRetiresPreviousBootstrapOnly(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "relay.db")
+	tokenA := "admin_A_012345678901234567890123456789012345"
+	tokenB := "admin_B_012345678901234567890123456789012345"
+	tokenC := "admin_C_012345678901234567890123456789012345"
+	relay, err := NewRelay(RelayConfig{Database: database, AdminToken: tokenA}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	explicit, explicitRecord, err := relay.store.CreateToken("admin", "operator-admin", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := relay.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	relay, err = NewRelay(RelayConfig{Database: database, AdminToken: tokenB}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := relay.store.Authenticate(tokenA); ok {
+		t.Fatal("retired configured bootstrap token remained authorized")
+	}
+	if _, ok := relay.store.Authenticate(tokenB); !ok {
+		t.Fatal("replacement configured bootstrap token was not authorized")
+	}
+	if record, ok := relay.store.Authenticate(explicit); !ok || record.ID != explicitRecord.ID {
+		t.Fatal("explicitly issued administrator was changed by bootstrap rotation")
+	}
+	if err := relay.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	relay, err = NewRelay(RelayConfig{Database: database, AdminToken: tokenC}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+	if _, ok := relay.store.Authenticate(tokenA); ok {
+		t.Fatal("first retired bootstrap token was reactivated")
+	}
+	if _, ok := relay.store.Authenticate(tokenB); ok {
+		t.Fatal("second retired bootstrap token remained authorized")
+	}
+	if _, ok := relay.store.Authenticate(tokenC); !ok {
+		t.Fatal("latest configured bootstrap token was not authorized")
+	}
+}
+
+func TestExplicitTokenRevocationAndInventorySurviveStoreRestart(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "relay.db")
+	store, err := OpenStore(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret, record, err := store.CreateToken("admin", "incident-operator", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RevokeToken(record.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = OpenStore(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, ok := store.Authenticate(secret); ok {
+		t.Fatal("revoked credential reactivated after store restart")
+	}
+	inventory, err := store.ListTokens(0, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, item := range inventory.Tokens {
+		if item.ID == record.ID {
+			found = item.Revoked && item.AuthHash == ""
+		}
+	}
+	if !found {
+		t.Fatalf("durable revoked credential missing from redacted inventory: %#v", inventory)
+	}
+}
+
+func TestBootstrapAdminSecretCannotElevateExistingCredential(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	secret := "shared_secret_012345678901234567890123456789"
+	if err := store.EnsureToken(secret, "producer", "application", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnsureBootstrapAdminToken(secret); err == nil {
+		t.Fatal("existing non-admin credential was silently elevated by bootstrap configuration")
+	}
+	record, ok := store.Authenticate(secret)
+	if !ok || record.Role != "producer" || record.Subject != "application" {
+		t.Fatalf("failed bootstrap collision changed credential authority: %#v ok=%t", record, ok)
+	}
+}
+
+func TestRevokedConnectedWorkerCannotReceiveNewAssignment(t *testing.T) {
+	admin := "admin_012345678901234567890123456789012345"
+	relay, err := NewRelay(RelayConfig{Database: filepath.Join(t.TempDir(), "relay.db"), AdminToken: admin, AllowedTasks: []string{"generation"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+	server := httptest.NewServer(relay.Handler())
+	defer server.Close()
+
+	_, publicKey, err := NewIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeID := "revoked-live-node"
+	nodeToken, tokenRecord, err := relay.store.CreateToken("node", nodeID, nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection := dialTestWorker(t, server.URL, nodeToken)
+	defer connection.CloseNow()
+	node := Node{ID: nodeID, Name: nodeID, PublicKey: publicKey, Capabilities: Capabilities{
+		Providers: []string{"ollama"}, Tasks: []string{"generation"}, MaxConcurrent: 1,
+		Models: []ModelCapability{{Provider: "ollama", Name: "ready", Tasks: []string{"generation"}}},
+	}}
+	if err := connection.Write(context.Background(), websocket.MessageText, mustJSON(WireMessage{Version: ProtocolVersion, Type: "hello", Node: &node})); err != nil {
+		t.Fatal(err)
+	}
+	readTestAuthority(t, connection)
+	waitFor(t, 2*time.Second, func() bool {
+		saved, loadErr := relay.store.GetNode(nodeID)
+		return loadErr == nil && saved.Connected
+	}, "worker did not connect")
+	revokeRequest := httptest.NewRequest(http.MethodDelete, "/v1/cluster/tokens/"+tokenRecord.ID, nil)
+	revokeRequest.Header.Set("Authorization", "Bearer "+admin)
+	revokeResponse := httptest.NewRecorder()
+	relay.Handler().ServeHTTP(revokeResponse, revokeRequest)
+	if revokeResponse.Code != http.StatusOK {
+		t.Fatalf("node revocation returned %d: %s", revokeResponse.Code, revokeResponse.Body.String())
+	}
+	waitFor(t, 2*time.Second, func() bool {
+		saved, loadErr := relay.store.GetNode(nodeID)
+		return loadErr == nil && !saved.Connected
+	}, "revoked node connection was not removed immediately")
+	job, err := relay.store.CreateJob(SubmitRequest{OwnerSubject: "producer", Requirements: Requirements{Provider: "ollama", Model: "ready", Task: "generation"}, Payload: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay.dispatch()
+	stored, err := relay.store.GetJob(job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != JobQueued {
+		t.Fatalf("revoked live worker received job state %s", stored.Status)
+	}
+	readCtx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	if _, raw, readErr := connection.Read(readCtx); readErr == nil {
+		t.Fatalf("revoked worker received a new frame: %s", raw)
+	}
+}
+
+func TestCredentialRevokedBetweenUpgradeAndHelloNeverPublishesWorker(t *testing.T) {
+	admin := "admin_012345678901234567890123456789012345"
+	relay, err := NewRelay(RelayConfig{Database: filepath.Join(t.TempDir(), "relay.db"), AdminToken: admin}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+	server := httptest.NewServer(relay.Handler())
+	defer server.Close()
+
+	_, publicKey, err := NewIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeID := "revoked-before-hello"
+	nodeToken, tokenRecord, err := relay.store.CreateToken("node", nodeID, nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection := dialTestWorker(t, server.URL, nodeToken)
+	defer connection.CloseNow()
+	if err := relay.store.RevokeToken(tokenRecord.ID); err != nil {
+		t.Fatal(err)
+	}
+	node := Node{ID: nodeID, Name: nodeID, PublicKey: publicKey, Capabilities: Capabilities{MaxConcurrent: 1}}
+	if err := connection.Write(context.Background(), websocket.MessageText, mustJSON(WireMessage{Version: ProtocolVersion, Type: "hello", Node: &node})); err != nil {
+		t.Fatal(err)
+	}
+	readCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, _, err := connection.Read(readCtx); err == nil {
+		t.Fatal("worker remained connected after its credential was revoked before hello")
+	}
+	relay.mu.RLock()
+	worker := relay.workers[nodeID]
+	relay.mu.RUnlock()
+	if worker != nil {
+		t.Fatal("revoked pre-hello worker was published in the live worker map")
+	}
+}
+
+func TestRevokedConnectedWorkerCannotCompleteExistingAssignment(t *testing.T) {
+	admin := "admin_012345678901234567890123456789012345"
+	relay, err := NewRelay(RelayConfig{Database: filepath.Join(t.TempDir(), "relay.db"), AdminToken: admin, AllowedTasks: []string{"generation"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+	server := httptest.NewServer(relay.Handler())
+	defer server.Close()
+	_, publicKey, _ := NewIdentity()
+	nodeID := "revoked-result-node"
+	nodeToken, tokenRecord, err := relay.store.CreateToken("node", nodeID, nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection := dialTestWorker(t, server.URL, nodeToken)
+	defer connection.CloseNow()
+	node := Node{ID: nodeID, Name: nodeID, PublicKey: publicKey, Capabilities: Capabilities{
+		Providers: []string{"ollama"}, Tasks: []string{"generation"}, MaxConcurrent: 1,
+		Models: []ModelCapability{{Provider: "ollama", Name: "ready", Tasks: []string{"generation"}}},
+	}}
+	if err := connection.Write(context.Background(), websocket.MessageText, mustJSON(WireMessage{Version: ProtocolVersion, Type: "hello", Node: &node})); err != nil {
+		t.Fatal(err)
+	}
+	readTestAuthority(t, connection)
+	waitFor(t, 2*time.Second, func() bool {
+		saved, loadErr := relay.store.GetNode(nodeID)
+		return loadErr == nil && saved.Connected
+	}, "worker did not connect")
+	job, err := relay.store.CreateJob(SubmitRequest{OwnerSubject: "producer", Requirements: Requirements{Provider: "ollama", Model: "ready", Task: "generation"}, Payload: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay.dispatch()
+	readCtx, cancelRead := context.WithTimeout(context.Background(), 2*time.Second)
+	_, raw, err := connection.Read(readCtx)
+	cancelRead()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var assignment WireMessage
+	if err := json.Unmarshal(raw, &assignment); err != nil || assignment.Type != "job" || assignment.Job == nil {
+		t.Fatalf("worker did not receive assignment: %s err=%v", raw, err)
+	}
+	if err := relay.store.RevokeToken(tokenRecord.ID); err != nil {
+		t.Fatal(err)
+	}
+	report := WireMessage{
+		Version: ProtocolVersion, Type: "result", JobID: assignment.Job.ID, Attempt: assignment.Job.Attempt,
+		Fence: assignment.Job.AssignmentFence, Result: json.RawMessage(`{"text":"must not be accepted"}`),
+	}
+	if err := connection.Write(context.Background(), websocket.MessageText, mustJSON(report)); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 2*time.Second, func() bool {
+		stored, loadErr := relay.store.GetJob(job.ID)
+		return loadErr == nil && stored.Status != JobCompleted
+	}, "revoked worker result was accepted")
+	readCtx, cancelRead = context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelRead()
+	if _, _, err := connection.Read(readCtx); err == nil {
+		t.Fatal("revoked worker connection remained authorized after a result message")
+	}
+	stored, err := relay.store.GetJob(job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status == JobCompleted {
+		t.Fatalf("revoked worker completed job: %#v", stored)
+	}
+}
+
+func TestAuthorizedAssignmentRejectsExpiredCredentialAndAllowsValidCredential(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "cluster.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	authority, err := store.AcquireRelayAuthority()
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeID := "credential-node"
+	if err := store.UpsertNode(Node{ID: nodeID, Name: nodeID}); err != nil {
+		t.Fatal(err)
+	}
+	expiredToken, _, err := store.CreateToken("node", nodeID, nil, time.Nanosecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expired, _ := store.Authenticate(expiredToken)
+	// Authenticate can race a very short expiry, so retain the durable hash
+	// explicitly for the assignment-boundary check.
+	expiredHash := tokenHash(expiredToken)
+	if expired.AuthHash != "" {
+		expiredHash = expired.AuthHash
+	}
+	time.Sleep(time.Millisecond)
+	job, err := store.CreateJob(SubmitRequest{Requirements: Requirements{Task: "generation"}, Payload: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision := RoutingDecision{RouteKey: "", SelectedNodeID: nodeID, Candidates: []RoutingCandidateDecision{{NodeID: nodeID, Eligible: true}}}
+	if _, err := store.AssignJobAuthorizedFencedWithDecision(job.ID, nodeID, expiredHash, decision, authority); !errors.Is(err, ErrWorkerCredentialInvalid) {
+		t.Fatalf("expired credential assignment returned %v", err)
+	}
+	validToken, _, err := store.CreateToken("node", nodeID, nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid, ok := store.Authenticate(validToken)
+	if !ok {
+		t.Fatal("valid node token did not authenticate")
+	}
+	if _, err := store.AssignJobAuthorizedFencedWithDecision(job.ID, nodeID, valid.AuthHash, decision, authority); err != nil {
+		t.Fatalf("valid credential assignment failed: %v", err)
+	}
+}
+
+func TestAuthorizedNodeUpsertRejectsRevokedCredentialWithoutMutation(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "cluster.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	nodeID := "atomic-upsert-node"
+	token, record, err := store.CreateToken("node", nodeID, nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticated, ok := store.Authenticate(token)
+	if !ok {
+		t.Fatal("node credential did not authenticate")
+	}
+	if err := store.RevokeToken(record.ID); err != nil {
+		t.Fatal(err)
+	}
+	_, publicKey, err := NewIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := Node{ID: nodeID, Name: nodeID, PublicKey: publicKey, Connected: true, State: "online"}
+	if err := store.UpsertNodePinnedAuthorized(node, authenticated.AuthHash); !errors.Is(err, ErrWorkerCredentialInvalid) {
+		t.Fatalf("revoked credential upsert returned %v", err)
+	}
+	if stored, err := store.GetNode(nodeID); err == nil {
+		t.Fatalf("revoked credential mutated durable node state: %#v", stored)
+	}
+}
+
 func TestPairedWorkerCannotRotatePublicKeyWithBearer(t *testing.T) {
 	admin := "admin_012345678901234567890123456789012345"
 	relay, err := NewRelay(RelayConfig{Database: filepath.Join(t.TempDir(), "relay.db"), AdminToken: admin}, nil)
@@ -441,6 +803,113 @@ func TestRelayStartupFailsAmbiguousExecutionsAndMarksNodesOffline(t *testing.T) 
 	}
 	if untouched.Status != JobQueued {
 		t.Fatalf("never-dispatched job changed during restart recovery: %#v", untouched)
+	}
+}
+
+func TestFailActivePipelineRunsAtomicallyStopsQueuedChildren(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "cluster.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	run := PipelineRun{ID: "run-restart", Pipeline: "linear", OwnerSubject: "producer-a", Status: "running", CreatedAt: time.Now().UTC()}
+	if err := store.CreatePipelineRunAdmitted(run, 10, 10); err != nil {
+		t.Fatal(err)
+	}
+	child, err := store.CreateJob(SubmitRequest{ParentID: run.ID, Pipeline: run.Pipeline, Step: "first", OwnerSubject: run.OwnerSubject, Requirements: Requirements{Task: "generation"}, Payload: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	independent, err := store.CreateJob(SubmitRequest{OwnerSubject: "producer-b", Requirements: Requirements{Task: "generation"}, Payload: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err := store.FailActivePipelineRuns("relay restarted before pipeline completion")
+	if err != nil || failed != 1 {
+		t.Fatalf("pipeline recovery failed %d run(s): %v", failed, err)
+	}
+	child, err = store.GetJob(child.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if child.Status != JobFailed || child.FailureCode != FailurePipelineParentTerminal {
+		t.Fatalf("orphaned queued child remained executable: %#v", child)
+	}
+	if _, err := store.AssignJob(child.ID, "node-a"); err == nil {
+		t.Fatal("terminal pipeline child became assignable")
+	}
+	independent, err = store.GetJob(independent.ID)
+	if err != nil || independent.Status != JobQueued {
+		t.Fatalf("independent queued job changed during pipeline recovery: %#v, %v", independent, err)
+	}
+	queued, err := store.QueuedJobs(10)
+	if err != nil || len(queued) != 1 || queued[0].ID != independent.ID {
+		t.Fatalf("queue was not repaired atomically: %#v, %v", queued, err)
+	}
+}
+
+func TestAssignmentRejectsQueuedChildAfterParentBecomesTerminal(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "cluster.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	run := PipelineRun{ID: "run-race", Pipeline: "linear", OwnerSubject: "producer-a", Status: "running", CreatedAt: time.Now().UTC()}
+	if err := store.CreatePipelineRunAdmitted(run, 10, 10); err != nil {
+		t.Fatal(err)
+	}
+	child, err := store.CreateJob(SubmitRequest{ParentID: run.ID, Pipeline: run.Pipeline, Step: "first", OwnerSubject: run.OwnerSubject, Requirements: Requirements{Task: "generation"}, Payload: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run.Status = "failed"
+	run.Error = "stopped"
+	run.FinishedAt = time.Now().UTC()
+	if err := store.SavePipelineRun(run); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AssignJob(child.ID, "node-a"); !errors.Is(err, ErrPipelineParentTerminal) {
+		t.Fatalf("terminal-parent assignment returned %v", err)
+	}
+}
+
+func TestTimeoutDisconnectReleasesOnlyMatchingAdapterSessionLock(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "cluster.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	requirements := Requirements{Task: "generation", Provider: "adapter", AdapterProfile: "profile-one", SessionID: "timeout-session"}
+	first, err := store.CreateJob(SubmitRequest{OwnerSubject: "producer-a", Requirements: requirements, Payload: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err = store.AssignAdapterJob(first.ID, "node-a", 41, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.AssignedAt = time.Now().Add(-time.Hour)
+	if err := store.SaveJob(first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecoverStaleJobs(time.Now().UTC(), time.Minute, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if busy, err := store.AdapterSessionBusy("producer-a", requirements, ""); err != nil || !busy {
+		t.Fatalf("timeout released lock before execution ended: busy=%v err=%v", busy, err)
+	}
+	if _, err := store.RequeueNode("node-a", "worker disconnected"); err != nil {
+		t.Fatal(err)
+	}
+	if busy, err := store.AdapterSessionBusy("producer-a", requirements, ""); err != nil || busy {
+		t.Fatalf("disconnect did not release timed-out execution lock: busy=%v err=%v", busy, err)
+	}
+	second, err := store.CreateJob(SubmitRequest{OwnerSubject: "producer-a", Requirements: requirements, Payload: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AssignAdapterJob(second.ID, "node-b", 42, false); err != nil {
+		t.Fatalf("fresh worker could not continue released session: %v", err)
 	}
 }
 

@@ -107,19 +107,22 @@ func TestOpenAICompatibilityNativeIncrementalArrivesBeforeProviderCompletion(t *
 		}
 	}()
 	var providerCompleted atomic.Bool
+	receivedMaxTokens := 0
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		var payload struct {
-			Stream bool `json:"stream"`
+			Stream    bool `json:"stream"`
+			MaxTokens int  `json:"max_tokens"`
 		}
 		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil || !payload.Stream || request.Header.Get("Accept") != "text/event-stream" {
 			http.Error(w, "native stream not requested", http.StatusBadRequest)
 			return
 		}
+		receivedMaxTokens = payload.MaxTokens
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"  STREAM-\"}}]}\n\n")
 		w.(http.Flusher).Flush()
 		<-releaseProvider
-		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"OK  \"}}]}\n\n")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"OK  \"},\"finish_reason\":\"length\"}]}\n\n")
 		_, _ = io.WriteString(w, "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n\n")
 		_, _ = io.WriteString(w, "data: [DONE]\n\n")
 		providerCompleted.Store(true)
@@ -141,7 +144,7 @@ func TestOpenAICompatibilityNativeIncrementalArrivesBeforeProviderCompletion(t *
 	}
 	httpServer := httptest.NewServer(server.Handler())
 	defer httpServer.Close()
-	body := []byte(`{"model":"contextbridge:default","messages":[{"role":"user","content":"stream"}],"stream":true}`)
+	body := []byte(`{"model":"contextbridge:default","messages":[{"role":"user","content":"stream"}],"stream":true,"max_tokens":1}`)
 	request, err := http.NewRequest(http.MethodPost, httpServer.URL+"/openai/v1/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
@@ -176,11 +179,74 @@ func TestOpenAICompatibilityNativeIncrementalArrivesBeforeProviderCompletion(t *
 		t.Fatal(err)
 	}
 	stream := prefix + string(rest)
-	if !strings.Contains(stream, `"content":"STREAM-"`) || !strings.Contains(stream, `"content":"OK"`) || strings.Count(stream, "data: [DONE]") != 1 {
+	if !strings.Contains(stream, `"content":"STREAM-"`) || !strings.Contains(stream, `"content":"OK"`) || !strings.Contains(stream, `"finish_reason":"length"`) || strings.Count(stream, "data: [DONE]") != 1 {
 		t.Fatalf("native stream did not preserve ordered normalized deltas: %s", stream)
 	}
 	if !providerCompleted.Load() {
 		t.Fatal("provider did not finish after stream release")
+	}
+	if receivedMaxTokens != 1 {
+		t.Fatalf("native stream did not forward max_tokens=1: %d", receivedMaxTokens)
+	}
+}
+
+func TestOpenAICompatibilityForwardsSmallTokenLimitAndFinishReason(t *testing.T) {
+	var receivedMaxTokens int
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		var payload struct {
+			MaxTokens int `json:"max_tokens"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		receivedMaxTokens = payload.MaxTokens
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{{"message": map[string]string{"content": "partial"}, "finish_reason": "length"}},
+			"usage":   map[string]int{"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
+		})
+	}))
+	defer provider.Close()
+	directory := t.TempDir()
+	cfg := config.Config{
+		Version: 1, Server: config.Server{Listen: "127.0.0.1:32145", Token: "test-token-that-is-long-enough"},
+		Storage: config.Storage{Directory: directory, Inbox: directory},
+		Routes:  map[string]config.Route{"default": {Provider: "remote"}},
+		Engines: map[string]config.Engine{"remote": {Type: "openai_compatible", URL: provider.URL, Model: "mock", MaxOutputTokens: 1024, Capabilities: []string{"text"}}},
+	}
+	server, err := NewServer(cfg, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	response := authorizedRequest(t, http.MethodPost, httpServer.URL+"/openai/v1/chat/completions", cfg.Server.Token, []byte(`{"model":"contextbridge:default","messages":[{"role":"user","content":"bounded"}],"max_tokens":1}`))
+	defer response.Body.Close()
+	raw, _ := io.ReadAll(response.Body)
+	if response.StatusCode != http.StatusOK || receivedMaxTokens != 1 || !bytes.Contains(raw, []byte(`"finish_reason":"length"`)) {
+		t.Fatalf("token/finish contract failed: HTTP %d max=%d %s", response.StatusCode, receivedMaxTokens, raw)
+	}
+}
+
+func TestOpenAITokenLimitBoundariesRemainSeparateFromByteLimits(t *testing.T) {
+	for _, value := range []int{1, 63, 64, 250000} {
+		job := Job{Prompt: "bounded", Output: OutputSpec{Mode: "text", MaxTokens: value}}
+		if err := validateJob(job); err != nil {
+			t.Fatalf("max_tokens=%d was rejected: %v", value, err)
+		}
+		if job.Output.MaxBytes != 0 {
+			t.Fatalf("max_tokens=%d changed max_bytes=%d", value, job.Output.MaxBytes)
+		}
+	}
+	for _, value := range []int{-1, 250001} {
+		if err := validateJob(Job{Prompt: "bounded", Output: OutputSpec{Mode: "text", MaxTokens: value}}); err == nil {
+			t.Fatalf("invalid max_tokens=%d was accepted", value)
+		}
+	}
+	if got := effectiveOutputTokenLimit(64, 32); got != 32 {
+		t.Fatalf("operator cap did not constrain client request: %d", got)
+	}
+	if got := effectiveOutputTokenLimit(1, 1024); got != 1 {
+		t.Fatalf("small client cap was not preserved: %d", got)
 	}
 }
 

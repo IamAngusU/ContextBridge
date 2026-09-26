@@ -17,6 +17,13 @@ const (
 type embeddingUsage struct {
 	PromptTokens uint64
 	TotalTokens  uint64
+	Present      bool
+	HasPrompt    bool
+	HasTotal     bool
+}
+
+func (usage embeddingUsage) Complete() bool {
+	return usage.Present && usage.HasPrompt && usage.HasTotal && usage.TotalTokens == usage.PromptTokens
 }
 
 type indexedEmbedding struct {
@@ -45,6 +52,7 @@ func decodeOpenAIEmbeddingResponse(reader io.Reader) ([][]float32, embeddingUsag
 			items, err = decodeIndexedEmbeddings(decoder)
 		case "usage":
 			usage, err = decodeEmbeddingUsage(decoder)
+			usage.Present = true
 		default:
 			err = skipJSONValue(decoder, 0)
 		}
@@ -231,8 +239,10 @@ func decodeEmbeddingUsage(decoder *json.Decoder) (embeddingUsage, error) {
 		switch key {
 		case "prompt_tokens":
 			err = decoder.Decode(&usage.PromptTokens)
+			usage.HasPrompt = err == nil
 		case "total_tokens":
 			err = decoder.Decode(&usage.TotalTokens)
+			usage.HasTotal = err == nil
 		default:
 			err = skipJSONValue(decoder, 0)
 		}

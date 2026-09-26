@@ -744,12 +744,40 @@ func huggingFaceMetadata(ctx context.Context, repository, requestedRevision stri
 }
 
 func download(ctx context.Context, url, target, expected string, progress Progress) error {
+	return downloadAttempt(ctx, url, target, expected, progress, true)
+}
+
+type partialDownloadMetadata struct {
+	URL      string `json:"url"`
+	Expected string `json:"expected_sha256"`
+}
+
+func downloadAttempt(ctx context.Context, url, target, expected string, progress Progress, allowFreshRestart bool) error {
 	partial := target + ".partial"
+	metadataPath := partial + ".json"
+	expected = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(expected), "sha256:"))
 	var offset int64
+	metadataReady := false
 	if stat, err := os.Stat(partial); err == nil {
-		offset = stat.Size()
-		if err := validateModelDownloadWindow(offset, -1); err != nil {
-			return fmt.Errorf("partial model exceeds %d GiB download limit", maximumModelDownloadBytes>>30)
+		metadata, metadataErr := readPartialDownloadMetadata(metadataPath)
+		if metadataErr != nil || metadata.URL != url || metadata.Expected != expected {
+			_ = os.Remove(partial)
+			_ = os.Remove(metadataPath)
+		} else {
+			metadataReady = true
+			offset = stat.Size()
+			if err := validateModelDownloadWindow(offset, -1); err != nil {
+				return fmt.Errorf("partial model exceeds %d GiB download limit", maximumModelDownloadBytes>>30)
+			}
+		}
+	} else if os.IsNotExist(err) {
+		_ = os.Remove(metadataPath)
+	} else {
+		return err
+	}
+	if !metadataReady {
+		if err := writePartialDownloadMetadata(metadataPath, partialDownloadMetadata{URL: url, Expected: expected}); err != nil {
+			return err
 		}
 	}
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -761,12 +789,37 @@ func download(ctx context.Context, url, target, expected string, progress Progre
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable && offset > 0 {
+		if expected != "" {
+			actual, hashErr := fileSHA(partial)
+			if hashErr == nil && strings.EqualFold(actual, expected) {
+				if err := os.Rename(partial, target); err != nil {
+					return err
+				}
+				_ = os.Remove(metadataPath)
+				progress("Installed "+filepath.Base(target), offset, offset)
+				return nil
+			}
+		}
+		_ = os.Remove(partial)
+		_ = os.Remove(metadataPath)
+		if allowFreshRestart {
+			_ = resp.Body.Close()
+			return downloadAttempt(ctx, url, target, expected, progress, false)
+		}
+		return errors.New("resumable model download was rejected after a clean restart")
+	}
 	if resp.StatusCode == http.StatusOK && offset > 0 {
 		offset = 0
-		os.Remove(partial)
+		_ = os.Remove(partial)
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 		return fmt.Errorf("download returned %s", resp.Status)
+	}
+	if resp.StatusCode == http.StatusPartialContent {
+		if err := validateDownloadContentRange(resp.Header.Get("Content-Range"), offset, resp.ContentLength); err != nil {
+			return err
+		}
 	}
 	flags := os.O_WRONLY | os.O_CREATE
 	if offset > 0 {
@@ -825,13 +878,74 @@ func download(ctx context.Context, url, target, expected string, progress Progre
 			return err
 		}
 		if !strings.EqualFold(actual, strings.TrimPrefix(expected, "sha256:")) {
+			_ = os.Remove(partial)
+			_ = os.Remove(metadataPath)
 			return fmt.Errorf("SHA256 mismatch for %s", filepath.Base(target))
 		}
 	}
 	if err := os.Rename(partial, target); err != nil {
 		return err
 	}
+	_ = os.Remove(metadataPath)
 	progress("Installed "+filepath.Base(target), received, total)
+	return nil
+}
+
+func readPartialDownloadMetadata(path string) (partialDownloadMetadata, error) {
+	var metadata partialDownloadMetadata
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return metadata, err
+	}
+	if len(raw) > 16<<10 || json.Unmarshal(raw, &metadata) != nil || metadata.URL == "" {
+		return partialDownloadMetadata{}, errors.New("invalid partial model metadata")
+	}
+	return metadata, nil
+}
+
+func writePartialDownloadMetadata(path string, metadata partialDownloadMetadata) error {
+	raw, err := json.Marshal(metadata)
+	if err != nil {
+		return err
+	}
+	temporary := path + ".tmp"
+	if err := os.WriteFile(temporary, raw, 0600); err != nil {
+		return err
+	}
+	if err := os.Rename(temporary, path); err != nil {
+		_ = os.Remove(temporary)
+		return err
+	}
+	return nil
+}
+
+func validateDownloadContentRange(value string, offset, responseBytes int64) error {
+	fields := strings.Fields(strings.TrimSpace(value))
+	if len(fields) != 2 || !strings.EqualFold(fields[0], "bytes") {
+		return errors.New("resumable model response has an invalid Content-Range")
+	}
+	rangeAndTotal := strings.Split(fields[1], "/")
+	if len(rangeAndTotal) != 2 {
+		return errors.New("resumable model response has an invalid Content-Range")
+	}
+	bounds := strings.Split(rangeAndTotal[0], "-")
+	if len(bounds) != 2 {
+		return errors.New("resumable model response has an invalid Content-Range")
+	}
+	start, startErr := strconv.ParseInt(bounds[0], 10, 64)
+	end, endErr := strconv.ParseInt(bounds[1], 10, 64)
+	if startErr != nil || endErr != nil || start != offset || end < start {
+		return errors.New("resumable model response does not start at the requested offset")
+	}
+	if responseBytes >= 0 && end-start+1 != responseBytes {
+		return errors.New("resumable model response length does not match Content-Range")
+	}
+	if rangeAndTotal[1] != "*" {
+		total, err := strconv.ParseInt(rangeAndTotal[1], 10, 64)
+		if err != nil || total <= end || total > maximumModelDownloadBytes {
+			return errors.New("resumable model response has an invalid total length")
+		}
+	}
 	return nil
 }
 

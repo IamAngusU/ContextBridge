@@ -688,10 +688,17 @@ func (s *Store) recordCompletionLocked(id string) {
 	delete(s.completed, oldest)
 }
 
-func (s *Store) Cancel(id string) {
+// Cancel removes a queued adapter attempt and reports whether the adapter had
+// crossed its declared external-action boundary. Callers must preserve an
+// unknown outcome when true and may only fall back when false.
+func (s *Store) Cancel(id string) (actionUnknown bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if item, ok := s.queued[id]; ok {
+		actionUnknown = item.actionUnknown
+	}
 	delete(s.queued, id)
+	return actionUnknown
 }
 
 func (s *Store) Renew(id string, generation uint64, lease time.Duration) bool {

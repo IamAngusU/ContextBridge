@@ -296,6 +296,14 @@ func (r *Relay) executePipeline(parent context.Context, run PipelineRun, pipelin
 			r.signalDispatch()
 			job, err = r.waitJob(ctx, job.ID, step.TimeoutSeconds)
 			run.Steps[len(run.Steps)-1] = job
+			// A terminal child can contain measured usage even when execution
+			// failed. Account for that durable evidence before selecting the
+			// success/failure branch so failed paid work is not reported as free.
+			// Each child is awaited once and checkpointed once, so this remains
+			// exactly-once within the linear executor.
+			if job.ID != "" {
+				mergeUsage(&run.Usage, job.Usage)
+			}
 			if err != nil {
 				r.failPipeline(&run, fmt.Errorf("step %s: %w", step.Name, err))
 				return
@@ -307,7 +315,6 @@ func (r *Relay) executePipeline(parent context.Context, run PipelineRun, pipelin
 			values["previous"] = job.Result
 			values["steps."+step.Name+".output"] = job.Result
 			run.Output = job.Result
-			mergeUsage(&run.Usage, job.Usage)
 			if err := r.store.SavePipelineRun(run); err != nil {
 				r.failPipeline(&run, fmt.Errorf("save checkpoint after step %s: %w", step.Name, err))
 				return

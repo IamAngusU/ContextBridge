@@ -338,7 +338,7 @@ final class ContextBridgeClient
 
     private function validateJobId(string $jobId): void
     {
-        if (preg_match('/^[A-Za-z0-9_-](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9_-])?$/', $jobId) !== 1 || str_contains($jobId, '..')) {
+        if (preg_match('/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/', $jobId) !== 1 || str_contains($jobId, '..')) {
             throw new RuntimeException('Invalid cluster job ID.');
         }
     }

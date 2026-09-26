@@ -120,18 +120,20 @@ func (s *Server) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	maxTokens := input.MaxCompletionTokens
+	if input.MaxTokens < 0 || input.MaxCompletionTokens < 0 {
+		writeOpenAIError(w, http.StatusUnprocessableEntity, "max_tokens must be a positive integer when set", "invalid_request_error")
+		return
+	}
 	if maxTokens <= 0 {
 		maxTokens = input.MaxTokens
 	}
-	maxBytes := 0
 	if maxTokens > 0 {
 		if maxTokens > 250000 {
 			writeOpenAIError(w, http.StatusUnprocessableEntity, "max_tokens exceeds the compatibility limit", "invalid_request_error")
 			return
 		}
-		maxBytes = maxTokens * 4
 	}
-	job := Job{Source: "openai-compatible-api", Route: route, Prompt: prompt, Text: history, Images: images, Output: OutputSpec{Mode: mode, MaxBytes: maxBytes}}
+	job := Job{Source: "openai-compatible-api", Route: route, Prompt: prompt, Text: history, Images: images, Output: OutputSpec{Mode: mode, MaxTokens: maxTokens}}
 	prepareJob(&job)
 	job.SessionID = "openai-" + job.ID
 	job.Metadata = map[string]interface{}{"contextbridge_new_session": true, "contextbridge_close_endpoint_after_job": true}
@@ -139,6 +141,10 @@ func (s *Server) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		job.Task = routeTask
 	}
 	applyTaskOutput(&job, s.cfg.Route(job.Route).Task)
+	if maxTokens > 0 && !s.processor.SupportsOutputTokenLimit(job) {
+		writeOpenAIError(w, http.StatusUnprocessableEntity, "the selected route cannot enforce max_tokens", "unsupported_parameter")
+		return
+	}
 	if err := validateJob(job); err != nil {
 		writeOpenAIError(w, http.StatusUnprocessableEntity, err.Error(), "invalid_request_error")
 		return
@@ -198,10 +204,7 @@ func (s *Server) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
-		finish := "stop"
-		if output.Truncated {
-			finish = "length"
-		}
+		finish := compatibilityFinishReason(output)
 		if err := writeChunk(map[string]string{}, finish); err != nil {
 			return
 		}
@@ -222,10 +225,7 @@ func (s *Server) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	if mode == "json" {
 		content = string(output.JSON)
 	}
-	finish := "stop"
-	if output.Truncated {
-		finish = "length"
-	}
+	finish := compatibilityFinishReason(output)
 	if input.Stream {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-store")
@@ -241,6 +241,16 @@ func (s *Server) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		"choices": []map[string]interface{}{{"index": 0, "message": map[string]string{"role": "assistant", "content": content}, "finish_reason": finish}},
 		"usage":   map[string]uint64{"prompt_tokens": output.InputTokens, "completion_tokens": output.OutputTokens, "total_tokens": output.TotalTokens},
 	})
+}
+
+func compatibilityFinishReason(output Output) string {
+	if output.Truncated {
+		return "length"
+	}
+	if reason := strings.TrimSpace(output.FinishReason); reason != "" {
+		return reason
+	}
+	return "stop"
 }
 
 func (s *Server) openAIRoute(model string) (string, error) {

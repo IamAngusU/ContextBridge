@@ -270,6 +270,7 @@ func (s *Server) Process(ctx context.Context, job Job) (Output, error) {
 	output := s.processJob(ctx, job)
 	if err := s.store.SaveOutput(job.ID, output); err != nil {
 		s.logger.Printf("output %s could not be stored: %v", job.ID, err)
+		return output, fmt.Errorf("persist output %s: %w", job.ID, err)
 	}
 	s.store.RecordCompleted(job, output)
 	return output, nil
@@ -303,6 +304,7 @@ func (s *Server) ProcessIncremental(ctx context.Context, job Job, emit func(stri
 	output := s.processor.ProcessIncremental(ctx, job, emit)
 	if err := s.store.SaveOutput(job.ID, output); err != nil {
 		s.logger.Printf("output %s could not be stored: %v", job.ID, err)
+		return output, fmt.Errorf("persist output %s: %w", job.ID, err)
 	}
 	s.store.RecordCompleted(job, output)
 	return output, nil
@@ -362,30 +364,52 @@ func (s *Server) processJob(ctx context.Context, job Job) Output {
 		for index, document := range job.Documents {
 			texts[index] = document.Text
 		}
-		embed := Job{ID: job.ID + "-embedding", Source: job.Source, Route: s.cfg.RAG.EmbeddingRoute, Task: "embedding", Texts: texts, TenantID: job.TenantID, Metadata: map[string]interface{}{"embedding_role": "passage"}, Output: OutputSpec{Mode: "embedding"}}
+		embed := derivedRAGEmbeddingJob(job, s.cfg.RAG.EmbeddingRoute, "passage")
+		embed.Texts = texts
 		vectors := s.processor.Process(ctx, embed)
 		if vectors.Error != "" || len(vectors.Embeddings) != len(job.Documents) {
-			return OutputError("rag", vectors.Provider, vectors.Model, "embedding_failed", time.Since(started))
+			return ragOutputWithEmbeddingUsage(OutputError("rag", vectors.Provider, vectors.Model, "embedding_failed", time.Since(started)), vectors)
 		}
 		if err := s.rag.Upsert(ctx, job.TenantID, job.Documents, vectors.Embeddings); err != nil {
-			return OutputError("rag", vectors.Provider, vectors.Model, err.Error(), time.Since(started))
+			return ragOutputWithEmbeddingUsage(OutputError("rag", vectors.Provider, vectors.Model, err.Error(), time.Since(started)), vectors)
 		}
-		return Output{Mode: "rag", Indexed: len(job.Documents), TenantID: job.TenantID, Provider: vectors.Provider, Model: vectors.Model, LatencyMS: time.Since(started).Milliseconds()}
+		return ragOutputWithEmbeddingUsage(Output{Mode: "rag", Indexed: len(job.Documents), TenantID: job.TenantID, Provider: vectors.Provider, Model: vectors.Model, LatencyMS: time.Since(started).Milliseconds()}, vectors)
 	}
 	query := strings.TrimSpace(job.Query)
 	if query == "" {
 		query = strings.TrimSpace(job.Text)
 	}
-	embed := Job{ID: job.ID + "-embedding", Source: job.Source, Route: s.cfg.RAG.EmbeddingRoute, Task: "embedding", Text: query, TenantID: job.TenantID, Metadata: map[string]interface{}{"embedding_role": "query"}, Output: OutputSpec{Mode: "embedding"}}
+	embed := derivedRAGEmbeddingJob(job, s.cfg.RAG.EmbeddingRoute, "query")
+	embed.Text = query
 	vectors := s.processor.Process(ctx, embed)
 	if vectors.Error != "" || len(vectors.Embeddings) != 1 {
-		return OutputError("rag", vectors.Provider, vectors.Model, "embedding_failed", time.Since(started))
+		return ragOutputWithEmbeddingUsage(OutputError("rag", vectors.Provider, vectors.Model, "embedding_failed", time.Since(started)), vectors)
 	}
 	matches, err := s.rag.Search(ctx, job.TenantID, vectors.Embeddings[0], job.TopK)
 	if err != nil {
-		return OutputError("rag", vectors.Provider, vectors.Model, err.Error(), time.Since(started))
+		return ragOutputWithEmbeddingUsage(OutputError("rag", vectors.Provider, vectors.Model, err.Error(), time.Since(started)), vectors)
 	}
-	return Output{Mode: "rag", Matches: matches, TenantID: job.TenantID, Provider: vectors.Provider, Model: vectors.Model, LatencyMS: time.Since(started).Milliseconds()}
+	return ragOutputWithEmbeddingUsage(Output{Mode: "rag", Matches: matches, TenantID: job.TenantID, Provider: vectors.Provider, Model: vectors.Model, LatencyMS: time.Since(started).Milliseconds()}, vectors)
+}
+
+func derivedRAGEmbeddingJob(parent Job, route, role string) Job {
+	return Job{
+		ID: parent.ID + "-embedding", Source: parent.Source, Route: route, Task: "embedding", TenantID: parent.TenantID,
+		Provider: parent.Provider, Model: parent.Model, MaxCostUSD: parent.MaxCostUSD,
+		ContextBridgeEgress: parent.ContextBridgeEgress, ContextBridgeProviderClassification: parent.ContextBridgeProviderClassification,
+		Metadata: map[string]interface{}{"embedding_role": role}, Output: OutputSpec{Mode: "embedding"},
+	}
+}
+
+func ragOutputWithEmbeddingUsage(output, embedding Output) Output {
+	output.InputTokens = embedding.InputTokens
+	output.OutputTokens = embedding.OutputTokens
+	output.TotalTokens = embedding.TotalTokens
+	output.CostStatus = embedding.CostStatus
+	output.CostSource = embedding.CostSource
+	output.ReservedCostUSD = embedding.ReservedCostUSD
+	output.EstimatedCostUSD = embedding.EstimatedCostUSD
+	return output
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -1460,6 +1484,9 @@ func validateJob(job Job) error {
 	}
 	if job.Output.MaxBytes != 0 && (job.Output.MaxBytes < 256 || job.Output.MaxBytes > 1<<20) {
 		return errors.New("output.max_bytes must be between 256 and 1048576")
+	}
+	if job.Output.MaxTokens < 0 || job.Output.MaxTokens > 250000 {
+		return errors.New("output.max_tokens must be between 1 and 250000 when set")
 	}
 	if job.Output.MaxArtifactBytes != 0 && (job.Output.MaxArtifactBytes < 1024 || job.Output.MaxArtifactBytes > 12<<20) {
 		return errors.New("output.max_artifact_bytes must be between 1024 and 12582912")

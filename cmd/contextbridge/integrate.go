@@ -54,7 +54,11 @@ type relayIntegrationInfo struct {
 	OutputPath string    `json:"output_path"`
 }
 
-const maximumIntegrationResponseBytes = 1 << 20
+const (
+	maximumIntegrationResponseBytes = 1 << 20
+	integrationPreflightTimeout     = 10 * time.Second
+	integrationLiveTimeout          = 90 * time.Second
+)
 
 func integrateCommand(args []string) error {
 	if len(args) == 0 {
@@ -81,7 +85,7 @@ func integrateCommand(args []string) error {
 	if flags.NArg() != 0 {
 		return errors.New("unexpected positional arguments")
 	}
-	if *jsonOutput && strings.TrimSpace(*writeEnv) != "" {
+	if target == "openai" && *jsonOutput && strings.TrimSpace(*writeEnv) != "" {
 		return errors.New("--json and --write-env are separate output modes")
 	}
 	if *showToken && strings.TrimSpace(*writeEnv) != "" {
@@ -223,6 +227,9 @@ func integrateCommand(args []string) error {
 		if err != nil {
 			return err
 		}
+		if *jsonOutput {
+			return writeIntegrationJSON(info)
+		}
 		fmt.Printf("Created private read-only UI integration file %s\n", info.OutputPath)
 		fmt.Printf("Relay observer %s · token %s", info.Subject, info.TokenID)
 		if !info.ExpiresAt.IsZero() {
@@ -314,7 +321,9 @@ func checkOpenAIIntegration(ctx context.Context, client *http.Client, info openA
 	if client == nil {
 		client = http.DefaultClient
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(info.BaseURL, "/")+"/models", nil)
+	preflightCtx, cancelPreflight := context.WithTimeout(ctx, integrationPreflightTimeout)
+	defer cancelPreflight()
+	request, err := http.NewRequestWithContext(preflightCtx, http.MethodGet, strings.TrimRight(info.BaseURL, "/")+"/models", nil)
 	if err != nil {
 		return report, fmt.Errorf("integration endpoint: %w", err)
 	}
@@ -332,6 +341,7 @@ func checkOpenAIIntegration(ctx context.Context, client *http.Client, info openA
 	if err := decodeIntegrationResponse(response, &models); err != nil {
 		return report, fmt.Errorf("local service authentication/model check: %w", err)
 	}
+	cancelPreflight()
 	report.Authenticated = true
 	for _, model := range models.Data {
 		if model.ID == info.Model {
@@ -351,7 +361,9 @@ func checkOpenAIIntegration(ctx context.Context, client *http.Client, info openA
 		if err != nil {
 			return report, err
 		}
-		request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(info.BaseURL, "/")+"/chat/completions", bytes.NewReader(body))
+		liveCtx, cancelLive := context.WithTimeout(ctx, integrationLiveTimeout)
+		defer cancelLive()
+		request, err := http.NewRequestWithContext(liveCtx, http.MethodPost, strings.TrimRight(info.BaseURL, "/")+"/chat/completions", bytes.NewReader(body))
 		if err != nil {
 			return report, err
 		}

@@ -5,9 +5,39 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
+
+func TestCaseDistinctUnixRootsRemainVisibleForIdentityQuarantine(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows paths are case-insensitive")
+	}
+	parent := t.TempDir()
+	upper, lower := filepath.Join(parent, "Pack"), filepath.Join(parent, "pack")
+	for _, root := range []string{upper, lower} {
+		if err := os.Mkdir(root, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, MarkerName), []byte(`{"schema_version":1,"id":"same-id","name":"Duplicate"}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	packs, err := Discover(Settings{Enabled: true, ScanRoots: []string{upper, lower}, MaxPacks: 8})
+	if err != nil || len(packs) != 2 {
+		t.Fatalf("case-distinct roots were collapsed: packs=%#v err=%v", packs, err)
+	}
+	for _, pack := range packs {
+		if !pack.Quarantined {
+			t.Fatalf("duplicate identity was not quarantined: %#v", packs)
+		}
+	}
+	aliases, err := Discover(Settings{Enabled: true, ScanRoots: []string{upper, filepath.Join(upper, ".")}, MaxPacks: 8})
+	if err != nil || len(aliases) != 1 || aliases[0].Quarantined {
+		t.Fatalf("one root alias became a false identity collision: %#v %v", aliases, err)
+	}
+}
 
 func TestDiscoverIsBoundedAndResolvesStableID(t *testing.T) {
 	root := t.TempDir()

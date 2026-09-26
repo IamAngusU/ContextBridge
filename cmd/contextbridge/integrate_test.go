@@ -3,16 +3,24 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/IamAngusU/ContextBridge/internal/cluster"
 	"github.com/IamAngusU/ContextBridge/internal/config"
 )
+
+type integrationRoundTripper func(*http.Request) (*http.Response, error)
+
+func (function integrationRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	return function(request)
+}
 
 func TestOpenAIIntegrationCheckSeparatesPreflightFromExplicitLiveInference(t *testing.T) {
 	const token = "private-local-token"
@@ -60,6 +68,110 @@ func TestOpenAIIntegrationCheckFailsClosedOnAuthenticationAndModelMismatch(t *te
 	}
 	if _, err := checkOpenAIIntegration(context.Background(), server.Client(), info, "expected", false); err == nil || !strings.Contains(err.Error(), "not advertised") {
 		t.Fatalf("missing model did not fail closed: %v", err)
+	}
+}
+
+func TestOpenAIIntegrationCheckAppliesDeadlinesToPreflightAndLive(t *testing.T) {
+	seen := 0
+	client := &http.Client{Transport: integrationRoundTripper(func(request *http.Request) (*http.Response, error) {
+		deadline, ok := request.Context().Deadline()
+		if !ok || time.Until(deadline) <= 0 {
+			t.Fatalf("request %s has no live deadline", request.URL.Path)
+		}
+		seen++
+		body := `{"data":[{"id":"contextbridge:default"}]}`
+		if strings.HasSuffix(request.URL.Path, "/chat/completions") {
+			body = `{"choices":[{"message":{"content":"CONTEXTBRIDGE-INTEGRATION-OK"}}]}`
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
+	})}
+	info := openAIIntegrationInfo{BaseURL: "http://127.0.0.1:32145/openai/v1", Model: "contextbridge:default"}
+	report, err := checkOpenAIIntegration(context.Background(), client, info, "token", true)
+	if err != nil || !report.LiveSucceeded || seen != 2 {
+		t.Fatalf("bounded integration check failed: report=%#v seen=%d err=%v", report, seen, err)
+	}
+}
+
+func TestOpenAIIntegrationCheckHonorsCallerDeadlineDuringHeaderAndBodyStalls(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		handler http.HandlerFunc
+	}{
+		{
+			name: "before headers",
+			handler: func(_ http.ResponseWriter, request *http.Request) {
+				<-request.Context().Done()
+			},
+		},
+		{
+			name: "after partial body",
+			handler: func(w http.ResponseWriter, request *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"data":[`)
+				if flusher, ok := w.(http.Flusher); ok {
+					flusher.Flush()
+				}
+				<-request.Context().Done()
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(test.handler)
+			t.Cleanup(server.Close)
+			ctx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
+			defer cancel()
+			started := time.Now()
+			_, err := checkOpenAIIntegration(ctx, server.Client(), openAIIntegrationInfo{
+				BaseURL: server.URL, Model: "contextbridge:default",
+			}, "token", false)
+			if err == nil || time.Since(started) > 2*time.Second {
+				t.Fatalf("stalled integration check was not cancelled promptly: elapsed=%s err=%v", time.Since(started), err)
+			}
+		})
+	}
+}
+
+func TestRelayIntegrationJSONWritesSecretOnlyToPrivateFile(t *testing.T) {
+	const secret = "cb_scoped_secret_never_stdout"
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"token": secret, "record": map[string]interface{}{"id": "tok_json", "role": "producer", "subject": "json-app", "created_at": "2026-09-26T00:00:00Z"}})
+	}))
+	defer relay.Close()
+	configPath := filepath.Join(t.TempDir(), "config.yml")
+	if err := config.Default(configPath); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Cluster.Relay.PublicURL = relay.URL
+	cfg.Cluster.Relay.AdminToken = "admin-token"
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	envPath := filepath.Join(t.TempDir(), "producer.env")
+	readEnd, writeEnd, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousStdout := os.Stdout
+	os.Stdout = writeEnd
+	commandErr := integrateCommand([]string{"relay", "--config", configPath, "--subject", "json-app", "--write-env", envPath, "--json"})
+	_ = writeEnd.Close()
+	os.Stdout = previousStdout
+	stdout, _ := io.ReadAll(readEnd)
+	_ = readEnd.Close()
+	if commandErr != nil {
+		t.Fatal(commandErr)
+	}
+	var report relayIntegrationInfo
+	if err := json.Unmarshal(stdout, &report); err != nil || report.TokenID != "tok_json" || strings.Contains(string(stdout), secret) {
+		t.Fatalf("relay JSON metadata is invalid or leaked secret: %q report=%#v err=%v", stdout, report, err)
+	}
+	private, err := os.ReadFile(envPath)
+	if err != nil || !strings.Contains(string(private), secret) {
+		t.Fatalf("private output did not contain issued credential: %q err=%v", private, err)
 	}
 }
 

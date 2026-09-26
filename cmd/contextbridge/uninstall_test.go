@@ -28,6 +28,44 @@ func TestUninstallPlanPreservesConfigurationWithoutPurge(t *testing.T) {
 	}
 }
 
+func TestUninstallPlanIncludesExactUpdaterOwnedArtifacts(t *testing.T) {
+	installDir, configPath := makeUninstallFixture(t)
+	binary := fixtureUninstallBinary(installDir)
+	wanted := []string{binary + ".previous", binary + ".next", binary + ".failed", binary + ".update-pending.json", binary + ".update-pending.json.tmp"}
+	foreignPlatformArtifact := binary + ".next.exe"
+	if runtime.GOOS == "windows" {
+		wanted = []string{binary + ".previous.exe", binary + ".next.exe", binary + ".failed.exe", binary + ".update.ps1"}
+		foreignPlatformArtifact = binary + ".update-pending.json"
+	}
+	for _, path := range wanted {
+		if err := os.WriteFile(path, []byte("owned update artifact"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unrelated := binary + ".previous.notes"
+	if err := os.WriteFile(unrelated, []byte("operator file"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(foreignPlatformArtifact, []byte("not owned on this platform"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := buildUninstallPlan(uninstallOptions{InstallDir: installDir, ConfigPath: configPath, Purge: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range wanted {
+		if !uninstallPathListContains(plan.ProgramPaths, path) {
+			t.Errorf("updater artifact missing from uninstall plan: %s", path)
+		}
+	}
+	if uninstallPathListContains(plan.ProgramPaths, unrelated) {
+		t.Fatal("similar unrelated sibling entered uninstall plan")
+	}
+	if uninstallPathListContains(plan.ProgramPaths, foreignPlatformArtifact) {
+		t.Fatal("another platform's updater suffix entered uninstall plan")
+	}
+}
+
 func TestUninstallPurgeIncludesOnlyManagedPaths(t *testing.T) {
 	installDir, configPath := makeUninstallFixture(t)
 	plan, err := buildUninstallPlan(uninstallOptions{InstallDir: installDir, ConfigPath: configPath, Purge: true})

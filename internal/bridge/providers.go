@@ -64,6 +64,35 @@ func (p *Processor) SupportsIncremental(job Job) bool {
 	return validateResolvedEngineEgress(job, engine) == nil
 }
 
+// SupportsOutputTokenLimit reports whether at least one selected execution
+// candidate understands a real generation-token ceiling. Process skips every
+// incapable candidate, so the compatibility API can reject unsupported
+// semantics before any job is submitted while still using a capable fallback.
+func (p *Processor) SupportsOutputTokenLimit(job Job) bool {
+	if job.Output.MaxTokens <= 0 {
+		return true
+	}
+	route := p.cfg.Route(job.Route)
+	providers := append([]string{route.Provider}, route.Fallback...)
+	if requested := strings.TrimSpace(job.Provider); requested != "" {
+		providers = []string{requested}
+	}
+	if len(providers) == 0 {
+		return false
+	}
+	for _, provider := range providers {
+		engine, ok := p.cfg.Engine(provider)
+		if !ok {
+			continue
+		}
+		switch engine.Type {
+		case "ollama", "llama_cpp", "openai_compatible":
+			return true
+		}
+	}
+	return false
+}
+
 // ProcessIncremental emits ordered, normalized text fragments with direct
 // downstream backpressure. The returned Output remains the final authority.
 // Callers must check SupportsIncremental before invoking this method.
@@ -138,6 +167,17 @@ func (p *Processor) Process(ctx context.Context, job Job) Output {
 				lastProviderError = strings.TrimSpace(err.Error())
 				continue
 			}
+			// max_tokens is an execution contract, not a best-effort hint. Skip
+			// engines that cannot enforce it so a capable fallback can be used;
+			// never let an adapter silently return an unbounded completion.
+			if job.Output.MaxTokens > 0 {
+				switch engine.Type {
+				case "ollama", "llama_cpp", "openai_compatible":
+				default:
+					lastProviderError = "output_token_limit_unsupported"
+					continue
+				}
+			}
 			switch engine.Type {
 			case "ollama":
 				output, err = p.ollama(ctx, job, route, engine, provider)
@@ -158,6 +198,10 @@ func (p *Processor) Process(ctx context.Context, job Job) Output {
 			return output
 		}
 		lastProviderError = strings.TrimSpace(err.Error())
+		var ambiguous *providerExecutionAmbiguousError
+		if errors.As(err, &ambiguous) {
+			return OutputError(outputMode(job.Output), provider, engine.Model, lastProviderError, 0)
+		}
 	}
 	failure := "providers_unavailable"
 	if strings.HasPrefix(lastProviderError, "cost_budget_exceeded:") || strings.HasPrefix(lastProviderError, "cost_budget_unverifiable:") {
@@ -170,6 +214,22 @@ func (p *Processor) Process(ctx context.Context, job Job) Output {
 		return Output{Mode: "decision", Decision: &decision, Provider: decision.Provider, Model: decision.Model}
 	}
 	return OutputError(outputMode(job.Output), "contextbridge", "fallback", failure, 0)
+}
+
+type providerExecutionAmbiguousError struct{ cause error }
+
+func (e *providerExecutionAmbiguousError) Error() string {
+	if e == nil || e.cause == nil {
+		return "execution_state_ambiguous"
+	}
+	return e.cause.Error()
+}
+
+func (e *providerExecutionAmbiguousError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
 }
 
 func validateResolvedEngineEgress(job Job, engine config.Engine) error {
@@ -240,12 +300,19 @@ func (p *Processor) ollama(parent context.Context, job Job, route config.Route, 
 		"prompt": prompt,
 		"stream": false,
 	}
+	options := map[string]int{}
 	// Vision encoders commonly consume almost all of Ollama's 4096-token
 	// default before ContextBridge's trust wrapper is counted. Give image jobs
 	// enough room for that fixed safety boundary without changing ordinary text
 	// memory use or silently truncating either the prompt or the image.
 	if needsImage {
-		payload["options"] = map[string]int{"num_ctx": 8192}
+		options["num_ctx"] = 8192
+	}
+	if limit := effectiveOutputTokenLimit(job.Output.MaxTokens, engine.MaxOutputTokens); limit > 0 {
+		options["num_predict"] = limit
+	}
+	if len(options) > 0 {
+		payload["options"] = options
 	}
 	if outputMode(job.Output) != "text" {
 		payload["format"] = "json"
@@ -276,6 +343,7 @@ func (p *Processor) ollama(parent context.Context, job Job, route config.Route, 
 		Response        string `json:"response"`
 		PromptEvalCount uint64 `json:"prompt_eval_count"`
 		EvalCount       uint64 `json:"eval_count"`
+		DoneReason      string `json:"done_reason"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(&answer); err != nil {
 		return Output{}, err
@@ -284,8 +352,13 @@ func (p *Processor) ollama(parent context.Context, job Job, route config.Route, 
 		return Output{}, errors.New("ollama returned an empty response")
 	}
 	output := NormalizeOutput([]byte(answer.Response), job.Output, provider, model, time.Since(started))
+	finishReason, finishErr := normalizeProviderFinishReason(answer.DoneReason)
+	if finishErr != nil {
+		return Output{}, finishErr
+	}
+	output.FinishReason = finishReason
 	output.InputTokens, output.OutputTokens = answer.PromptEvalCount, answer.EvalCount
-	output.TotalTokens = output.InputTokens + output.OutputTokens
+	output.TotalTokens = saturatingMetricAdd(output.InputTokens, output.OutputTokens)
 	if output.Error != "" {
 		return Output{}, errors.New(output.Error)
 	}
@@ -314,10 +387,28 @@ func (p *Processor) openAICompatible(parent context.Context, job Job, route conf
 		return Output{}, fmt.Errorf("openai-compatible job model %q does not match configured model %q", requested, model)
 	}
 	if outputMode(job.Output) == "embedding" {
-		if job.MaxCostUSD > 0 {
-			return Output{}, errors.New("cost_budget_unverifiable: embedding route has no reviewed cost upper-bound reservation")
+		reservation, reservationErr := embeddingCostReservation(engine, embeddingInputs(job))
+		if reservationErr != nil {
+			return Output{}, reservationErr
 		}
-		return p.openAICompatibleEmbedding(ctx, job, engine, provider, model, started)
+		if job.MaxCostUSD > 0 {
+			if engine.Costing.Mode != "upper_bound" {
+				return Output{}, errors.New("cost_budget_unverifiable: embedding route has no reviewed cost upper-bound reservation")
+			}
+			if reservation > job.MaxCostUSD {
+				return Output{}, fmt.Errorf("cost_budget_exceeded: reserved %.6f USD exceeds job maximum %.6f USD", reservation, job.MaxCostUSD)
+			}
+		}
+		if engine.MinimumBalanceUSD > 0 {
+			releaseBudget, reserveErr := p.reserveProviderBudget(ctx, engine, reservation)
+			if reserveErr != nil {
+				return Output{}, reserveErr
+			}
+			defer releaseBudget()
+		}
+		output, embeddingErr := p.openAICompatibleEmbedding(ctx, job, engine, provider, model, started)
+		output.ReservedCostUSD = reservation
+		return output, embeddingErr
 	}
 	trusted := trustedPrompt(job)
 	content := []map[string]interface{}{{"type": "text", "text": trusted}}
@@ -333,7 +424,8 @@ func (p *Processor) openAICompatible(parent context.Context, job Job, route conf
 			content = append(content, map[string]interface{}{"type": "image_url", "image_url": map[string]string{"url": "data:" + image.MediaType + ";base64," + image.DataBase64}})
 		}
 	}
-	reservedCost, reservationErr := providerCostReservation(engine, trusted, len(images) > 0)
+	outputTokenLimit := effectiveOutputTokenLimit(job.Output.MaxTokens, engine.MaxOutputTokens)
+	reservedCost, reservationErr := providerCostReservation(engine, trusted, len(images) > 0, outputTokenLimit)
 	if reservationErr != nil {
 		return Output{}, reservationErr
 	}
@@ -357,8 +449,8 @@ func (p *Processor) openAICompatible(parent context.Context, job Job, route conf
 	payload := map[string]interface{}{
 		"model": model, "messages": []map[string]interface{}{{"role": "user", "content": content}}, "stream": false,
 	}
-	if engine.MaxOutputTokens > 0 {
-		payload["max_tokens"] = engine.MaxOutputTokens
+	if outputTokenLimit > 0 {
+		payload["max_tokens"] = outputTokenLimit
 	}
 	if effort := strings.ToLower(strings.TrimSpace(engine.ReasoningEffort)); effort != "" {
 		payload["reasoning_effort"] = effort
@@ -385,16 +477,14 @@ func (p *Processor) openAICompatible(parent context.Context, job Job, route conf
 	var answer struct {
 		Choices []struct {
 			Message struct {
-				Content json.RawMessage `json:"content"`
+				Content      json.RawMessage `json:"content"`
+				Refusal      json.RawMessage `json:"refusal"`
+				ToolCalls    json.RawMessage `json:"tool_calls"`
+				FunctionCall json.RawMessage `json:"function_call"`
 			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
-		Usage struct {
-			PromptTokens          uint64 `json:"prompt_tokens"`
-			CompletionTokens      uint64 `json:"completion_tokens"`
-			TotalTokens           uint64 `json:"total_tokens"`
-			PromptCacheHitTokens  uint64 `json:"prompt_cache_hit_tokens"`
-			PromptCacheMissTokens uint64 `json:"prompt_cache_miss_tokens"`
-		} `json:"usage"`
+		Usage *providerUsage `json:"usage"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 8<<20)).Decode(&answer); err != nil {
 		return Output{}, err
@@ -402,14 +492,32 @@ func (p *Processor) openAICompatible(parent context.Context, job Job, route conf
 	if len(answer.Choices) == 0 {
 		return Output{}, errors.New("openai-compatible provider returned no choices")
 	}
+	if len(answer.Choices) != 1 {
+		return Output{}, errors.New("openai-compatible provider returned an unexpected number of choices")
+	}
+	finishReason, err := normalizeProviderFinishReason(answer.Choices[0].FinishReason)
+	if err != nil {
+		return Output{}, err
+	}
+	if rawJSONValuePresent(answer.Choices[0].Message.ToolCalls) || rawJSONValuePresent(answer.Choices[0].Message.FunctionCall) {
+		return Output{}, errors.New("provider requested an unsupported tool completion")
+	}
+	if rawJSONValuePresent(answer.Choices[0].Message.Refusal) {
+		finishReason = "content_filter"
+	}
 	text := openAIMessageText(answer.Choices[0].Message.Content)
 	if strings.TrimSpace(text) == "" {
-		return Output{}, errors.New("openai-compatible provider returned empty content")
+		if finishReason != "content_filter" {
+			return Output{}, errors.New("openai-compatible provider returned empty content")
+		}
+		output := Output{Mode: outputMode(job.Output), Provider: provider, Model: model, LatencyMS: time.Since(started).Milliseconds(), FinishReason: finishReason, ReservedCostUSD: reservedCost}
+		applyProviderUsage(&output, engine, answer.Usage)
+		return output, nil
 	}
 	output := NormalizeOutput([]byte(text), job.Output, provider, model, time.Since(started))
-	output.InputTokens, output.OutputTokens, output.TotalTokens = answer.Usage.PromptTokens, answer.Usage.CompletionTokens, answer.Usage.TotalTokens
+	output.FinishReason = finishReason
 	output.ReservedCostUSD = reservedCost
-	applyProviderCost(&output, engine, answer.Usage.PromptTokens, answer.Usage.PromptCacheHitTokens, answer.Usage.PromptCacheMissTokens, answer.Usage.CompletionTokens)
+	applyProviderUsage(&output, engine, answer.Usage)
 	if output.Error != "" {
 		return Output{}, errors.New(output.Error)
 	}
@@ -438,7 +546,8 @@ func (p *Processor) openAICompatibleIncremental(parent context.Context, job Job,
 		return Output{}, errors.New("incremental image input is not enabled")
 	}
 	trusted := trustedPrompt(job)
-	reservedCost, reservationErr := providerCostReservation(engine, trusted, false)
+	outputTokenLimit := effectiveOutputTokenLimit(job.Output.MaxTokens, engine.MaxOutputTokens)
+	reservedCost, reservationErr := providerCostReservation(engine, trusted, false, outputTokenLimit)
 	if reservationErr != nil {
 		return Output{}, reservationErr
 	}
@@ -465,8 +574,8 @@ func (p *Processor) openAICompatibleIncremental(parent context.Context, job Job,
 		"stream":         true,
 		"stream_options": map[string]bool{"include_usage": true},
 	}
-	if engine.MaxOutputTokens > 0 {
-		payload["max_tokens"] = engine.MaxOutputTokens
+	if outputTokenLimit > 0 {
+		payload["max_tokens"] = outputTokenLimit
 	}
 	if effort := strings.ToLower(strings.TrimSpace(engine.ReasoningEffort)); effort != "" {
 		payload["reasoning_effort"] = effort
@@ -496,17 +605,17 @@ func (p *Processor) openAICompatibleIncremental(parent context.Context, job Job,
 	pendingWhitespace := ""
 	events := 0
 	done := false
-	var usage struct {
-		PromptTokens          uint64 `json:"prompt_tokens"`
-		CompletionTokens      uint64 `json:"completion_tokens"`
-		TotalTokens           uint64 `json:"total_tokens"`
-		PromptCacheHitTokens  uint64 `json:"prompt_cache_hit_tokens"`
-		PromptCacheMissTokens uint64 `json:"prompt_cache_miss_tokens"`
-	}
+	terminalChoice := false
+	refusalSeen := false
+	var usage *providerUsage
+	finishReason := ""
 	err = scanOpenAISSE(response.Body, func(data []byte) error {
 		if bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
 			if done {
 				return errors.New("incremental provider emitted duplicate [DONE]")
+			}
+			if !terminalChoice {
+				return errors.New("incremental provider emitted [DONE] without a terminal choice")
 			}
 			done = true
 			return nil
@@ -521,26 +630,47 @@ func (p *Processor) openAICompatibleIncremental(parent context.Context, job Job,
 		var chunk struct {
 			Choices []struct {
 				Delta struct {
-					Content json.RawMessage `json:"content"`
+					Content      json.RawMessage `json:"content"`
+					Refusal      json.RawMessage `json:"refusal"`
+					ToolCalls    json.RawMessage `json:"tool_calls"`
+					FunctionCall json.RawMessage `json:"function_call"`
 				} `json:"delta"`
+				FinishReason string `json:"finish_reason"`
 			} `json:"choices"`
-			Usage *struct {
-				PromptTokens          uint64 `json:"prompt_tokens"`
-				CompletionTokens      uint64 `json:"completion_tokens"`
-				TotalTokens           uint64 `json:"total_tokens"`
-				PromptCacheHitTokens  uint64 `json:"prompt_cache_hit_tokens"`
-				PromptCacheMissTokens uint64 `json:"prompt_cache_miss_tokens"`
-			} `json:"usage"`
+			Usage *providerUsage `json:"usage"`
 		}
 		if err := json.Unmarshal(data, &chunk); err != nil {
 			return errors.New("incremental provider returned invalid JSON event")
 		}
 		if chunk.Usage != nil {
-			usage.PromptTokens = chunk.Usage.PromptTokens
-			usage.CompletionTokens = chunk.Usage.CompletionTokens
-			usage.TotalTokens = chunk.Usage.TotalTokens
-			usage.PromptCacheHitTokens = chunk.Usage.PromptCacheHitTokens
-			usage.PromptCacheMissTokens = chunk.Usage.PromptCacheMissTokens
+			usage = chunk.Usage
+		}
+		if len(chunk.Choices) > 1 {
+			return errors.New("incremental provider returned an unexpected number of choices")
+		}
+		if terminalChoice && len(chunk.Choices) > 0 {
+			return errors.New("incremental provider emitted a choice after its terminal choice")
+		}
+		if len(chunk.Choices) > 0 && (rawJSONValuePresent(chunk.Choices[0].Delta.ToolCalls) || rawJSONValuePresent(chunk.Choices[0].Delta.FunctionCall)) {
+			return errors.New("provider requested an unsupported tool completion")
+		}
+		if len(chunk.Choices) > 0 && strings.TrimSpace(chunk.Choices[0].FinishReason) != "" {
+			normalized, normalizeErr := normalizeProviderFinishReason(chunk.Choices[0].FinishReason)
+			if normalizeErr != nil {
+				return normalizeErr
+			}
+			if refusalSeen && normalized == "stop" {
+				normalized = "content_filter"
+			}
+			if finishReason != "" && finishReason != normalized {
+				return errors.New("incremental provider changed its finish reason")
+			}
+			finishReason = normalized
+			terminalChoice = true
+		}
+		if len(chunk.Choices) > 0 && rawJSONValuePresent(chunk.Choices[0].Delta.Refusal) {
+			refusalSeen = true
+			finishReason = "content_filter"
 		}
 		if len(chunk.Choices) == 0 || len(chunk.Choices[0].Delta.Content) == 0 || string(chunk.Choices[0].Delta.Content) == "null" {
 			return nil
@@ -576,16 +706,21 @@ func (p *Processor) openAICompatibleIncremental(parent context.Context, job Job,
 	if !done {
 		return Output{}, errors.New("incremental provider ended without [DONE]")
 	}
-	output := NormalizeOutput([]byte(accepted.String()), job.Output, provider, model, time.Since(started))
-	if output.Error != "" {
-		return Output{}, errors.New(output.Error)
+	var output Output
+	if accepted.Len() == 0 && finishReason == "content_filter" {
+		output = Output{Mode: outputMode(job.Output), Provider: provider, Model: model, LatencyMS: time.Since(started).Milliseconds()}
+	} else {
+		output = NormalizeOutput([]byte(accepted.String()), job.Output, provider, model, time.Since(started))
+		if output.Error != "" {
+			return Output{}, errors.New(output.Error)
+		}
+		if output.Text != accepted.String() {
+			return Output{}, errors.New("incremental output did not reconstruct the validated final text")
+		}
 	}
-	if output.Text != accepted.String() {
-		return Output{}, errors.New("incremental output did not reconstruct the validated final text")
-	}
-	output.InputTokens, output.OutputTokens, output.TotalTokens = usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens
+	output.FinishReason = finishReason
 	output.ReservedCostUSD = reservedCost
-	applyProviderCost(&output, engine, usage.PromptTokens, usage.PromptCacheHitTokens, usage.PromptCacheMissTokens, usage.CompletionTokens)
+	applyProviderUsage(&output, engine, usage)
 	return output, nil
 }
 
@@ -654,6 +789,11 @@ func (p *Processor) openAICompatibleEmbedding(ctx context.Context, job Job, engi
 	}
 	output, err := embeddingOutput(embeddings, job.TenantID, provider, model, time.Since(started))
 	output.InputTokens, output.TotalTokens = usage.PromptTokens, usage.TotalTokens
+	if usage.Complete() {
+		applyProviderCost(&output, engine, usage.PromptTokens, 0, usage.PromptTokens, 0)
+	} else {
+		output.CostStatus = "unknown"
+	}
 	return output, err
 }
 
@@ -663,8 +803,8 @@ func applyOpenAIEngineAuth(request *http.Request, engine config.Engine) {
 	}
 }
 
-func providerCostReservation(engine config.Engine, prompt string, hasImage bool) (float64, error) {
-	if engine.Costing.Mode != "upper_bound" || engine.MaxOutputTokens <= 0 {
+func providerCostReservation(engine config.Engine, prompt string, hasImage bool, outputTokens int) (float64, error) {
+	if engine.Costing.Mode != "upper_bound" || outputTokens <= 0 {
 		return 0, nil
 	}
 	if hasImage && engine.MinimumBalanceUSD > 0 {
@@ -674,8 +814,112 @@ func providerCostReservation(engine config.Engine, prompt string, hasImage bool)
 	// each token consumes at least one byte. Cache discounts are deliberately
 	// ignored when reserving so concurrent work cannot spend below the floor.
 	inputCeiling := float64(len([]byte(prompt))) / 1_000_000 * engine.Costing.InputPerMillionUSD
-	outputCeiling := float64(engine.MaxOutputTokens) / 1_000_000 * engine.Costing.OutputPerMillionUSD
+	outputCeiling := float64(outputTokens) / 1_000_000 * engine.Costing.OutputPerMillionUSD
 	return inputCeiling + outputCeiling, nil
+}
+
+func embeddingCostReservation(engine config.Engine, inputs []string) (float64, error) {
+	if engine.Costing.Mode != "upper_bound" {
+		return 0, nil
+	}
+	var inputBytes uint64
+	for _, input := range inputs {
+		length := uint64(len([]byte(input)))
+		if inputBytes > ^uint64(0)-length {
+			return 0, errors.New("cost_budget_unverifiable: embedding input size overflow")
+		}
+		inputBytes += length
+	}
+	return float64(inputBytes) / 1_000_000 * engine.Costing.InputPerMillionUSD, nil
+}
+
+func effectiveOutputTokenLimit(requested, configured int) int {
+	if requested <= 0 {
+		return configured
+	}
+	if configured <= 0 || requested < configured {
+		return requested
+	}
+	return configured
+}
+
+type providerUsage struct {
+	PromptTokens          *uint64 `json:"prompt_tokens"`
+	CompletionTokens      *uint64 `json:"completion_tokens"`
+	TotalTokens           *uint64 `json:"total_tokens"`
+	PromptCacheHitTokens  *uint64 `json:"prompt_cache_hit_tokens"`
+	PromptCacheMissTokens *uint64 `json:"prompt_cache_miss_tokens"`
+}
+
+func (u *providerUsage) complete() bool {
+	if u == nil || u.PromptTokens == nil || u.CompletionTokens == nil || u.TotalTokens == nil {
+		return false
+	}
+	// A provider-reported total is authoritative only when the complete tuple
+	// is internally consistent. Guard the addition so crafted usage metadata
+	// cannot wrap and turn an unknown bill into an apparently exact zero-cost
+	// result.
+	if *u.PromptTokens > ^uint64(0)-*u.CompletionTokens {
+		return false
+	}
+	return *u.TotalTokens == *u.PromptTokens+*u.CompletionTokens
+}
+
+func applyProviderUsage(output *Output, engine config.Engine, usage *providerUsage) {
+	if !usage.complete() {
+		output.CostStatus = "unknown"
+		return
+	}
+	output.InputTokens, output.OutputTokens, output.TotalTokens = *usage.PromptTokens, *usage.CompletionTokens, *usage.TotalTokens
+	var cacheHit, cacheMiss uint64
+	if usage.PromptCacheHitTokens != nil {
+		cacheHit = *usage.PromptCacheHitTokens
+	}
+	if usage.PromptCacheMissTokens != nil {
+		cacheMiss = *usage.PromptCacheMissTokens
+	}
+	// Optional cache counters may be absent, but values that exceed the prompt
+	// total are contradictory evidence. Do not clamp attacker/provider mistakes
+	// into a falsely discounted known cost.
+	if cacheHit > *usage.PromptTokens || cacheMiss > *usage.PromptTokens-cacheHit {
+		output.CostStatus = "unknown"
+		return
+	}
+	applyProviderCost(output, engine, *usage.PromptTokens, cacheHit, cacheMiss, *usage.CompletionTokens)
+}
+
+func normalizeProviderFinishReason(value string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "stop":
+		return "stop", nil
+	case "length":
+		return "length", nil
+	case "content_filter", "refusal":
+		return "content_filter", nil
+	case "tool_calls", "function_call":
+		return "", errors.New("provider requested an unsupported tool completion")
+	default:
+		return "", fmt.Errorf("provider returned unsupported finish reason %q", cleanProviderLabel(value, 64))
+	}
+}
+
+func cleanProviderLabel(value string, maximum int) string {
+	value = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, strings.TrimSpace(value))
+	runes := []rune(value)
+	if len(runes) > maximum {
+		value = string(runes[:maximum])
+	}
+	return value
+}
+
+func rawJSONValuePresent(value json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(value)
+	return len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null")) && !bytes.Equal(trimmed, []byte(`""`)) && !bytes.Equal(trimmed, []byte("[]"))
 }
 
 func (p *Processor) reserveProviderBudget(ctx context.Context, engine config.Engine, reservation float64) (func(), error) {
@@ -1014,6 +1258,9 @@ func (p *Processor) llamaCPP(parent context.Context, job Job, route config.Route
 		content = append(content, map[string]interface{}{"type": "image_url", "image_url": map[string]string{"url": "data:" + image.MediaType + ";base64," + image.DataBase64}})
 	}
 	payload := map[string]interface{}{"model": model, "messages": []map[string]interface{}{{"role": "user", "content": content}}, "stream": false}
+	if limit := effectiveOutputTokenLimit(job.Output.MaxTokens, engine.MaxOutputTokens); limit > 0 {
+		payload["max_tokens"] = limit
+	}
 	if outputMode(job.Output) != "text" {
 		payload["response_format"] = map[string]string{"type": "json_object"}
 	}
@@ -1034,6 +1281,7 @@ func (p *Processor) llamaCPP(parent context.Context, job Job, route config.Route
 			Message struct {
 				Content string `json:"content"`
 			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
 		Usage struct {
 			PromptTokens     uint64 `json:"prompt_tokens"`
@@ -1048,7 +1296,16 @@ func (p *Processor) llamaCPP(parent context.Context, job Job, route config.Route
 		return Output{}, errors.New("llama.cpp returned no choices")
 	}
 	output := NormalizeOutput([]byte(answer.Choices[0].Message.Content), job.Output, "llama_cpp", model, time.Since(started))
-	output.InputTokens, output.OutputTokens, output.TotalTokens = answer.Usage.PromptTokens, answer.Usage.CompletionTokens, answer.Usage.TotalTokens
+	finishReason, finishErr := normalizeProviderFinishReason(answer.Choices[0].FinishReason)
+	if finishErr != nil {
+		return Output{}, finishErr
+	}
+	output.FinishReason = finishReason
+	output.InputTokens, output.OutputTokens = answer.Usage.PromptTokens, answer.Usage.CompletionTokens
+	// llama.cpp-compatible servers occasionally return a stale or otherwise
+	// contradictory total. The two measured components are the stronger
+	// evidence and also let us avoid trusting an overflowed aggregate.
+	output.TotalTokens = saturatingMetricAdd(answer.Usage.PromptTokens, answer.Usage.CompletionTokens)
 	if output.Error != "" {
 		return Output{}, errors.New(output.Error)
 	}
@@ -1105,8 +1362,7 @@ func (p *Processor) adapter(parent context.Context, job Job, route config.Route)
 	}, timeout)
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
-	select {
-	case output := <-done:
+	accept := func(output Output) (Output, error) {
 		if output.Error != "" {
 			return Output{}, errors.New(output.Error)
 		}
@@ -1117,11 +1373,38 @@ func (p *Processor) adapter(parent context.Context, job Job, route config.Route)
 			output.Decision.LatencyMS = output.LatencyMS
 		}
 		return output, nil
+	}
+	select {
+	case output := <-done:
+		return accept(output)
 	case <-timer.C:
-		p.store.Cancel(job.ID)
+		actionUnknown := p.store.Cancel(job.ID)
+		if !actionUnknown {
+			// Complete removes the queue entry before publishing to the buffered
+			// result channel. If timer and completion became ready together,
+			// prefer the already authoritative result over a false timeout.
+			select {
+			case output := <-done:
+				return accept(output)
+			default:
+			}
+		}
+		if actionUnknown {
+			return Output{}, &providerExecutionAmbiguousError{cause: errors.New("adapter_timeout_ambiguous")}
+		}
 		return Output{}, errors.New("adapter_timeout")
 	case <-parent.Done():
-		p.store.Cancel(job.ID)
+		actionUnknown := p.store.Cancel(job.ID)
+		if !actionUnknown {
+			select {
+			case output := <-done:
+				return accept(output)
+			default:
+			}
+		}
+		if actionUnknown {
+			return Output{}, &providerExecutionAmbiguousError{cause: fmt.Errorf("adapter_execution_ambiguous: %w", parent.Err())}
+		}
 		return Output{}, parent.Err()
 	}
 }

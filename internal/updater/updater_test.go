@@ -87,6 +87,12 @@ func TestNewerVersion(t *testing.T) {
 		{"v0.1.1", "v0.2.0", true},
 		{"v1.2.3", "v1.2.3", false},
 		{"v2.0.0", "v1.9.9", false},
+		{"v1.2.3-rc.1", "v1.2.3-rc.2", true},
+		{"v1.2.3-rc.9", "v1.2.3-rc.10", true},
+		{"v1.2.3-rc.2", "v1.2.3", true},
+		{"v1.2.3", "v1.2.3-rc.99", false},
+		{"v1.2.3+build.1", "v1.2.3+build.2", false},
+		{"v1.2.3-rc.2+build.1", "v1.2.3-rc.2+build.2", false},
 		{"dev", "v1.0.0", false},
 	}
 	for _, test := range tests {

@@ -427,7 +427,7 @@ func startUpdater(ctx context.Context, manager *updater.Manager, logger *log.Log
 			return
 		}
 		logger.Printf("staged %s; restarting the managed service", result.TargetVersion)
-		if err := updater.RestartCurrentProcess(); err != nil {
+		if err := manager.RestartCurrentProcess(); err != nil {
 			logger.Printf("restart handoff: %v", err)
 		}
 		os.Exit(75)
@@ -587,7 +587,7 @@ func finishManagedUpdate(ctx context.Context, manager *updater.Manager, service,
 		return nil
 	}
 	if err := restart(); err != nil {
-		rollbackErr := updater.RollbackFailedStart(expected)
+		rollbackErr := manager.RollbackFailedStart(expected)
 		restartErr := restart()
 		return fmt.Errorf("updated service could not restart (%v); rollback: %v; previous restart: %v", err, rollbackErr, restartErr)
 	}
@@ -2436,9 +2436,25 @@ func clusterSubmitCommand(args []string) error {
 }
 
 func clusterTokenCommand(args []string) error {
-	flags := flag.NewFlagSet("cluster token", flag.ContinueOnError)
+	if len(args) > 0 {
+		switch args[0] {
+		case "create":
+			return clusterTokenCreateCommand(args[1:])
+		case "list":
+			return clusterTokenListCommand(args[1:])
+		case "revoke":
+			return clusterTokenRevokeCommand(args[1:])
+		}
+	}
+	// Preserve the original `cluster token --role ...` creation form while
+	// providing explicit lifecycle subcommands for incident response.
+	return clusterTokenCreateCommand(args)
+}
+
+func clusterTokenCreateCommand(args []string) error {
+	flags := flag.NewFlagSet("cluster token create", flag.ContinueOnError)
 	path := flags.String("config", defaultConfigPath(), "config path")
-	role := flags.String("role", "producer", "producer or observer")
+	role := flags.String("role", "producer", "admin, producer, node, or observer")
 	subject := flags.String("subject", "client", "token label")
 	groups := flags.String("groups", "", "comma-separated scheduling groups")
 	lifetimeHours := flags.Int("lifetime-hours", 0, "credential lifetime in hours; 0 never expires")
@@ -2446,8 +2462,11 @@ func clusterTokenCommand(args []string) error {
 	maxJobsPerHour := flags.Int("max-jobs-per-hour", 0, "durable producer admission limit; 0 disables it")
 	providers := flags.String("providers", "", "comma-separated provider allowlist")
 	egress := flags.String("egress", "", "producer egress ceiling: local_only or empty")
-	if err := flags.Parse(args); err != nil {
+	if err := parseInterspersedFlags(flags, args); err != nil {
 		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("unexpected positional arguments")
 	}
 	cfg, err := config.Load(*path)
 	if err != nil {
@@ -2462,6 +2481,101 @@ func clusterTokenCommand(args []string) error {
 		return err
 	}
 	return json.NewEncoder(os.Stdout).Encode(output)
+}
+
+func clusterTokenListCommand(args []string) error {
+	flags := flag.NewFlagSet("cluster token list", flag.ContinueOnError)
+	path := flags.String("config", defaultConfigPath(), "config path")
+	token := flags.String("token", "", "admin token; defaults to the configured relay admin token")
+	limit := flags.Int("limit", 100, "credential records to return (1-200)")
+	offset := flags.Int("offset", 0, "credential record offset (0-1000000)")
+	asJSON := flags.Bool("json", false, "print machine-readable credential metadata")
+	if err := parseInterspersedFlags(flags, args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("unexpected positional arguments")
+	}
+	if *limit < 1 || *limit > 200 || *offset < 0 || *offset > 1_000_000 {
+		return errors.New("--limit must be 1 to 200 and --offset must be 0 to 1000000")
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(*token) == "" {
+		*token = strings.TrimSpace(cfg.Cluster.Relay.AdminToken)
+	}
+	if strings.TrimSpace(*token) == "" {
+		return errors.New("relay admin token is required; set it in the config or pass --token")
+	}
+	var inventory cluster.TokenInventory
+	target := fmt.Sprintf("%s/v1/cluster/tokens?limit=%d&offset=%d", clusterBaseURL(cfg), *limit, *offset)
+	if err := clusterGET(context.Background(), target, *token, &inventory); err != nil {
+		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(inventory)
+	}
+	if len(inventory.Tokens) == 0 {
+		fmt.Printf("No credentials in page %d..%d (total %d).\n", inventory.Offset, inventory.Offset+inventory.Limit, inventory.Total)
+		return nil
+	}
+	now := time.Now().UTC()
+	for _, record := range inventory.Tokens {
+		state := "active"
+		if record.Revoked {
+			state = "revoked"
+		} else if !record.ExpiresAt.IsZero() && !now.Before(record.ExpiresAt) {
+			state = "expired"
+		}
+		expires := "never"
+		if !record.ExpiresAt.IsZero() {
+			expires = record.ExpiresAt.Format(time.RFC3339)
+		}
+		fmt.Printf("%s  [%s]  [%s]  %s  expires %s\n", record.ID, record.Role, state, emptyLabel(record.Subject, "no subject"), expires)
+	}
+	if inventory.Offset+len(inventory.Tokens) < inventory.Total {
+		fmt.Printf("More credentials available: --offset %d\n", inventory.Offset+len(inventory.Tokens))
+	}
+	return nil
+}
+
+func clusterTokenRevokeCommand(args []string) error {
+	flags := flag.NewFlagSet("cluster token revoke", flag.ContinueOnError)
+	path := flags.String("config", defaultConfigPath(), "config path")
+	token := flags.String("token", "", "admin token; defaults to the configured relay admin token")
+	asJSON := flags.Bool("json", false, "print machine-readable revoked credential metadata")
+	if err := parseInterspersedFlags(flags, args); err != nil {
+		return err
+	}
+	if flags.NArg() != 1 {
+		return errors.New("usage: contextbridge cluster token revoke TOKEN_ID [--config path] [--token token] [--json]")
+	}
+	id := strings.TrimSpace(flags.Arg(0))
+	if !strings.HasPrefix(id, "tok_") || len(id) > 128 || strings.Contains(id, "..") {
+		return errors.New("valid token ID is required")
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(*token) == "" {
+		*token = strings.TrimSpace(cfg.Cluster.Relay.AdminToken)
+	}
+	if strings.TrimSpace(*token) == "" {
+		return errors.New("relay admin token is required; set it in the config or pass --token")
+	}
+	var record cluster.TokenRecord
+	target := clusterBaseURL(cfg) + "/v1/cluster/tokens/" + url.PathEscape(id)
+	if err := clusterDELETE(context.Background(), target, *token, &record); err != nil {
+		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(record)
+	}
+	fmt.Printf("Revoked credential %s  [%s]  %s\n", record.ID, record.Role, emptyLabel(record.Subject, "no subject"))
+	return nil
 }
 
 func clusterLoginCommand(args []string) error {
@@ -2564,6 +2678,29 @@ func clusterGET(ctx context.Context, target, token string, output interface{}) e
 func clusterPOST(ctx context.Context, target, token string, input, output interface{}) error {
 	_, err := clusterPOSTHeaders(ctx, target, token, input, output, nil)
 	return err
+}
+
+func clusterDELETE(ctx context.Context, target, token string, output interface{}) error {
+	// #nosec G704 -- target is the operator-configured relay URL plus a fixed,
+	// escaped cluster API path selected by an explicit CLI command.
+	req, _ := http.NewRequestWithContext(ctx, http.MethodDelete, target, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := clusterHTTPClient(target).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, err := readClusterAPIResponse(resp.Body)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("relay returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	if output != nil {
+		return json.Unmarshal(body, output)
+	}
+	return nil
 }
 
 func clusterPOSTHeaders(ctx context.Context, target, token string, input, output interface{}, headers http.Header) (http.Header, error) {

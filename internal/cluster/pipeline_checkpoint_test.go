@@ -88,6 +88,47 @@ func TestPipelineCompletedCheckpointFailurePersistsFailedTerminalState(t *testin
 	}
 }
 
+func TestFailedPipelineStepUsageIsIncludedInParent(t *testing.T) {
+	relay := newPipelineCheckpointRelay(t)
+	defer relay.Close()
+	run := PipelineRun{ID: "failed-step-usage", Pipeline: "checkpoint-test", OwnerSubject: "owner-a", Status: "running", Input: json.RawMessage(`{"input":true}`), CreatedAt: time.Now().UTC()}
+	if err := relay.store.SavePipelineRun(run); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		relay.executePipeline(context.Background(), run, Pipeline{Steps: []PipelineStep{{Name: "paid-failure", Requirements: Requirements{Task: "generation"}, Input: `${previous}`}}})
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		jobs, err := relay.store.ListJobsForOwner(20, JobQueued, run.OwnerSubject)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(jobs) > 0 {
+			assigned, err := relay.store.AssignJob(jobs[0].ID, "checkpoint-node")
+			if err != nil {
+				t.Fatal(err)
+			}
+			usage := Usage{InputTokens: 100, OutputTokens: 25, TotalTokens: 125, EstimatedCostUSD: 0.25, CostKnownJobs: 1, CostStatus: "actual", CostSource: "provider"}
+			if _, err := relay.store.CompleteJob(assigned.ID, "checkpoint-node", assigned.Attempt, nil, nil, usage, "provider failed after compute"); err != nil {
+				t.Fatal(err)
+			}
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	waitPipelineDone(t, done)
+	stored, err := relay.store.GetPipelineRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != "failed" || stored.Usage.TotalTokens != 125 || stored.Usage.EstimatedCostUSD != 0.25 || stored.Usage.CostKnownJobs != 1 {
+		t.Fatalf("failed child usage was not preserved exactly once: %#v", stored)
+	}
+}
+
 func newPipelineCheckpointRelay(t *testing.T) *Relay {
 	t.Helper()
 	relay, err := NewRelay(RelayConfig{

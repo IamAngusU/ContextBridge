@@ -90,5 +90,7 @@ func RollbackFailedStart(version string) error {
 	if err != nil {
 		return err
 	}
-	return rollbackPendingAt(current, version)
+	return rollbackFailedStartAt(current, version)
 }
+
+func rollbackFailedStartAt(current, version string) error { return rollbackPendingAt(current, version) }

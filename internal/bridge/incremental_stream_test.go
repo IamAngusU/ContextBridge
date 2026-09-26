@@ -80,6 +80,7 @@ func TestIncrementalProviderFinalTextExactlyMatchesPublishedDeltas(t *testing.T)
 			raw, _ := json.Marshal(map[string]interface{}{"choices": []map[string]interface{}{{"delta": map[string]string{"content": text}}}})
 			_, _ = fmt.Fprintf(w, "data: %s\n\n", raw)
 		}
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
 		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 	}))
 	defer provider.Close()
@@ -91,6 +92,51 @@ func TestIncrementalProviderFinalTextExactlyMatchesPublishedDeltas(t *testing.T)
 	})
 	if output.Error != "" || output.Text != "hello world" || published.String() != output.Text {
 		t.Fatalf("published=%q final=%#v", published.String(), output)
+	}
+}
+
+func TestIncrementalProviderRequiresTerminalChoiceBeforeDone(t *testing.T) {
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"not final\"}}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer provider.Close()
+	output := incrementalTestProcessor(provider.URL, nil).ProcessIncremental(context.Background(), Job{Route: "default", Prompt: "test", Output: OutputSpec{Mode: "text"}}, func(string) error { return nil })
+	if output.Error != "providers_unavailable" || output.Text != "" {
+		t.Fatalf("stream without terminal choice became authoritative: %#v", output)
+	}
+}
+
+func TestIncrementalProviderPreservesFilteringAndRejectsTools(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		terminal     string
+		wantReason   string
+		wantProvider bool
+	}{
+		{name: "content filter", terminal: `{"choices":[{"delta":{},"finish_reason":"content_filter"}]}`, wantReason: "content_filter"},
+		{name: "refusal", terminal: `{"choices":[{"delta":{"refusal":"policy"},"finish_reason":"stop"}]}`, wantReason: "content_filter"},
+		{name: "tool call", terminal: `{"choices":[{"delta":{"tool_calls":[{"id":"call"}]},"finish_reason":"tool_calls"}]}`, wantProvider: true},
+		{name: "legacy function call", terminal: `{"choices":[{"delta":{"function_call":{"name":"act"}},"finish_reason":"stop"}]}`, wantProvider: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", test.terminal)
+			}))
+			defer provider.Close()
+			output := incrementalTestProcessor(provider.URL, nil).ProcessIncremental(context.Background(), Job{Route: "default", Prompt: "test", Output: OutputSpec{Mode: "text"}}, func(string) error { return nil })
+			if test.wantProvider {
+				if output.Error != "providers_unavailable" {
+					t.Fatalf("unsupported tool completion was accepted: %#v", output)
+				}
+				return
+			}
+			if output.Error != "" || output.FinishReason != test.wantReason || output.Text != "" || output.CostStatus != "unknown" {
+				t.Fatalf("filtered terminal state was not preserved: %#v", output)
+			}
+		})
 	}
 }
 

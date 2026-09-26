@@ -167,6 +167,17 @@ func (s *Store) PruneRetention(now time.Time, policy RetentionPolicy) (Retention
 			if adapterSessionJobLockExistsTx(tx, job) {
 				continue
 			}
+			// A terminal child is still live orchestration state until its
+			// parent reaches a terminal state. The pipeline executor polls the
+			// child record to consume its result, so pruning it here could turn
+			// successful work into a failed pipeline.
+			protected, err := activePipelineChildTx(tx, job)
+			if err != nil {
+				return err
+			}
+			if protected {
+				continue
+			}
 			finished := jobRetentionTime(job)
 			if !finished.Before(cutoff) {
 				if _, keep := jobKeep[job.ID]; keep {
@@ -203,6 +214,24 @@ func (s *Store) PruneRetention(now time.Time, policy RetentionPolicy) (Retention
 		return nil
 	})
 	return result, err
+}
+
+func activePipelineChildTx(tx *bolt.Tx, job Job) (bool, error) {
+	if job.ParentID == "" {
+		return false, nil
+	}
+	raw := tx.Bucket(bucketPipelineRuns).Get([]byte(job.ParentID))
+	if raw == nil {
+		return false, nil
+	}
+	var parent PipelineRun
+	if err := json.Unmarshal(raw, &parent); err != nil {
+		return false, err
+	}
+	if parent.ID != job.ParentID {
+		return false, errors.New("pipeline run record key does not match its id")
+	}
+	return parent.Status == "running", nil
 }
 
 func pruneSessionPlacements(bucket *bolt.Bucket, cutoff time.Time, limit int) (int, error) {

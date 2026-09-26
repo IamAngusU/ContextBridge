@@ -88,6 +88,22 @@ reports that the retained identity is missing or belongs to another relay.
 Changing the role does not revoke a producer credential. Revoke that scoped
 token at the relay when the device must no longer be allowed to submit work.
 
+Relay administrators can inventory and revoke credentials by public token ID;
+the bearer value and its hash are never returned:
+
+```sh
+contextbridge cluster token list --config ./config.yml
+contextbridge cluster token revoke tok_0123456789abcdef0123456789abcdef --config ./config.yml
+```
+
+Changing `cluster.relay.admin_token` and restarting the relay is an atomic
+bootstrap rotation: the preceding configured `relay-admin` credential is
+retired, while separately issued administrator credentials retain their own
+lifecycle. Use `cluster token list` and `cluster token revoke` for those
+explicit credentials and for incident response. A revoked live node credential
+is disconnected immediately; already dispatched work keeps its existing
+fenced/ambiguous finality instead of being blindly replayed.
+
 Inspect before submitting work:
 
 ```sh

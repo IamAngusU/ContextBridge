@@ -195,7 +195,9 @@ func (s *Server) runScheduleSteps(ctx context.Context, scheduleID string, first 
 			}
 		}
 		entry := ScheduleStepRun{ID: job.ID, Name: name, StartedAt: time.Now().UTC(), Outcome: "running"}
-		s.schedules.recordStep(scheduleID, first.ID, entry)
+		if err := s.schedules.recordStep(scheduleID, first.ID, entry); err != nil {
+			return "failed", "schedule step checkpoint could not be stored before execution: " + err.Error()
+		}
 		output, err := s.Process(ctx, job)
 		entry.EndedAt = time.Now().UTC()
 		if err != nil || output.Error != "" {
@@ -205,17 +207,23 @@ func (s *Server) runScheduleSteps(ctx context.Context, scheduleID string, first 
 			} else {
 				entry.Error = output.Error
 			}
-			s.schedules.recordStep(scheduleID, first.ID, entry)
+			if checkpointErr := s.schedules.recordStep(scheduleID, first.ID, entry); checkpointErr != nil {
+				return "failed", "schedule step failure checkpoint could not be stored: " + checkpointErr.Error()
+			}
 			return "failed", entry.Error
 		}
 		if output.Decision != nil && output.Decision.Verdict == "review" {
 			entry.Outcome = "review"
 			entry.Error = strings.Join(output.Decision.Flags, ",")
-			s.schedules.recordStep(scheduleID, first.ID, entry)
+			if checkpointErr := s.schedules.recordStep(scheduleID, first.ID, entry); checkpointErr != nil {
+				return "failed", "schedule review checkpoint could not be stored: " + checkpointErr.Error()
+			}
 			return "review", entry.Error
 		}
 		entry.Outcome = "completed"
-		s.schedules.recordStep(scheduleID, first.ID, entry)
+		if err := s.schedules.recordStep(scheduleID, first.ID, entry); err != nil {
+			return "failed", "schedule completed step checkpoint could not be stored; execution will not continue: " + err.Error()
+		}
 		previous = output
 	}
 	return "completed", ""

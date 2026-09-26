@@ -59,6 +59,13 @@ jobs:
       - run: bash scripts/test-install-headless.sh
       - run: pwsh -NoProfile -File scripts/test-install-powershell.ps1
 
+  reference-clients:
+    name: Reference client contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: bash scripts/test-reference-clients.sh
+
   release-reproducibility:
     name: Reproducible release and SBOM
     runs-on: ubuntu-latest

@@ -186,6 +186,46 @@ func TestRetentionKeepsCancelledRoutingRecoveryProbeUntilExecutionEnds(t *testin
 	}
 }
 
+func TestRetentionKeepsTerminalChildUntilPipelineIsTerminal(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	run := PipelineRun{ID: "active-parent", Pipeline: "linear", Status: "running", CreatedAt: now.Add(-48 * time.Hour)}
+	if err := store.SavePipelineRun(run); err != nil {
+		t.Fatal(err)
+	}
+	child := retentionJob("completed-child", JobCompleted, now.Add(-40*24*time.Hour), 1)
+	child.ParentID, child.Pipeline, child.Step = run.ID, run.Pipeline, "first"
+	newer := retentionJob("newer-independent", JobCompleted, now.Add(-time.Hour), 1)
+	putRetentionJob(t, store, child)
+	putRetentionJob(t, store, newer)
+	policy := RetentionPolicy{MaxAge: 30 * 24 * time.Hour, MaxTerminalJobs: 1, MaxEvents: 1, MaxTerminalPipelineRuns: 1, MaxSessionPlacements: 1}
+	removed, err := store.PruneRetention(now, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed.Jobs != 0 {
+		t.Fatalf("retention removed an unconsumed child: %#v", removed)
+	}
+	if _, err := store.GetJob(child.ID); err != nil {
+		t.Fatalf("active pipeline child disappeared: %v", err)
+	}
+	run.Status, run.FinishedAt = "failed", now
+	if err := store.SavePipelineRun(run); err != nil {
+		t.Fatal(err)
+	}
+	removed, err = store.PruneRetention(now, policy)
+	if err != nil || removed.Jobs != 1 {
+		t.Fatalf("terminal parent did not release child for retention: %#v %v", removed, err)
+	}
+	if _, err := store.GetJob(child.ID); !os.IsNotExist(err) {
+		t.Fatalf("released child survived retention: %v", err)
+	}
+}
+
 func TestRetentionBoundsSessionPlacementsByAgeAndCount(t *testing.T) {
 	store, err := OpenStore(filepath.Join(t.TempDir(), "relay.db"))
 	if err != nil {

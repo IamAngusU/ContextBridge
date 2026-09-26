@@ -58,6 +58,18 @@ $transport = static function (string $method, string $url, array $headers, ?stri
     return array_shift($responses) ?? ['status' => 500, 'headers' => [], 'body' => '{"error":"fixture exhausted"}'];
 };
 $client = new ContextBridgeClient('https://relay.example.test', 'cb_producer_test-token', 5, $transport);
+$validateJobId = new ReflectionMethod(ContextBridgeClient::class, 'validateJobId');
+$validateJobId->setAccessible(true);
+$validateJobId->invoke($client, 'job.');
+foreach (['_job', '-job', 'job..child', str_repeat('a', 129)] as $invalidJobId) {
+    $rejected = false;
+    try {
+        $validateJobId->invoke($client, $invalidJobId);
+    } catch (RuntimeException) {
+        $rejected = true;
+    }
+    check($rejected, 'invalid job ID was accepted: ' . $invalidJobId);
+}
 $job = $client->job('job-1');
 check(($job['status'] ?? '') === 'queued', 'safe GET did not retry once');
 check(count($calls) === 2, 'safe GET retry count changed');
@@ -120,10 +132,12 @@ fclose($partial);
 stream_wrapper_unregister('contextbridgepartial');
 check(ContextBridgePartialWriteStream::$bytes === 'partial-write-proof', 'partial artifact writes were not completed');
 
+$remoteHttpRejected = false;
 try {
     new ContextBridgeClient('http://relay.example.test', 'cb_producer_test-token');
-    throw new RuntimeException('plain remote HTTP unexpectedly accepted');
 } catch (RuntimeException) {
+    $remoteHttpRejected = true;
 }
+check($remoteHttpRejected, 'plain remote HTTP unexpectedly accepted');
 
 echo "ContextBridge PHP client tests passed.\n";

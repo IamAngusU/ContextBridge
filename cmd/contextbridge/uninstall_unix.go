@@ -5,7 +5,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/xml"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -83,11 +85,72 @@ func removeUnixAutostart(plan uninstallPlan) {
 		} {
 			path := filepath.Join(agentDir, spec.file)
 			raw, err := readSmallRegularFile(path, 256<<10)
-			if err != nil || !bytes.Contains(raw, []byte(plan.InstallBinary)) || !bytes.Contains(raw, []byte(spec.label)) {
+			if err != nil || !ownedLaunchAgent(raw, plan.InstallBinary, spec.label) {
 				continue
 			}
 			_ = exec.CommandContext(ctx, "launchctl", "bootout", fmt.Sprintf("gui/%d", os.Getuid()), path).Run()
 			_ = os.Remove(path)
+		}
+	}
+}
+
+// ownedLaunchAgent parses the two authoritative plist values instead of
+// searching raw XML bytes. Dynamic installer paths are XML-escaped, and a raw
+// substring check both misses legitimate paths containing '&' and can accept a
+// matching string in an unrelated key or comment.
+func ownedLaunchAgent(raw []byte, installBinary, label string) bool {
+	decoder := xml.NewDecoder(bytes.NewReader(raw))
+	pendingKey := ""
+	programArgumentsDepth := 0
+	programBinary := ""
+	parsedLabel := ""
+	programArgumentsSeen := false
+	labelSeen := false
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return err == io.EOF && parsedLabel == label && programBinary == installBinary
+		}
+		switch value := token.(type) {
+		case xml.StartElement:
+			switch value.Name.Local {
+			case "key":
+				var key string
+				if err := decoder.DecodeElement(&key, &value); err != nil {
+					return false
+				}
+				pendingKey = strings.TrimSpace(key)
+			case "array":
+				if pendingKey == "ProgramArguments" {
+					if programArgumentsSeen {
+						return false
+					}
+					programArgumentsSeen = true
+					programArgumentsDepth = 1
+				} else if programArgumentsDepth > 0 {
+					programArgumentsDepth++
+				}
+				pendingKey = ""
+			case "string":
+				var stringValue string
+				if err := decoder.DecodeElement(&stringValue, &value); err != nil {
+					return false
+				}
+				if programArgumentsDepth > 0 && programBinary == "" {
+					programBinary = stringValue
+				} else if pendingKey == "Label" {
+					if labelSeen {
+						return false
+					}
+					labelSeen = true
+					parsedLabel = stringValue
+				}
+				pendingKey = ""
+			}
+		case xml.EndElement:
+			if value.Name.Local == "array" && programArgumentsDepth > 0 {
+				programArgumentsDepth--
+			}
 		}
 	}
 }

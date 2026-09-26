@@ -46,7 +46,7 @@ canonical_name_available=1
 if [ -n "$existing_contextbridge" ] && [ "$existing_contextbridge" != "$canonical_path" ]; then
   canonical_name_available=0
 elif [ -e "$canonical_path" ] || [ -L "$canonical_path" ]; then
-  if ! { [ -f "$INSTALL_DIR/contextbridge" ] && cmp -s "$canonical_path" "$INSTALL_DIR/contextbridge"; }; then
+	if ! managed_alias_path "$canonical_path" && ! { [ -f "$INSTALL_DIR/contextbridge" ] && cmp -s "$canonical_path" "$INSTALL_DIR/contextbridge"; }; then
     canonical_name_available=0
   fi
 fi
@@ -197,7 +197,8 @@ chmod 0600 "$manifest_stage"
 mv -f "$manifest_stage" "$INSTALL_DIR/.contextbridge-install.json"
 canonical_command_installed=0
 if [ "$canonical_name_available" = "1" ]; then
-  install -m 0755 "$INSTALL_DIR/contextbridge" "$BIN_DIR/contextbridge"
+	if [ -e "$canonical_path" ] || [ -L "$canonical_path" ]; then rm -f "$canonical_path"; fi
+	ln -s "$INSTALL_DIR/contextbridge" "$canonical_path"
   canonical_command_installed=1
 else
   echo "Preserved the existing 'contextbridge' command; ContextBridge's binary remains at $INSTALL_DIR/contextbridge."
@@ -476,16 +477,28 @@ elif [ "$os" = "darwin" ]; then
   agent="$agent_dir/de.angusu.contextbridge.plist"
   update_agent="$agent_dir/de.angusu.contextbridge.update.plist"
   mkdir -p "$agent_dir"
+	# plist string values are XML text, not shell syntax. Escape every dynamic
+	# path so valid names containing &, <, >, quotes, spaces, or Unicode remain
+	# valid launchd property lists.
+	xml_escape() {
+	  printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g' -e "s/'/\&apos;/g"
+	}
+	plist_binary="$(xml_escape "$INSTALL_DIR/contextbridge")"
+	plist_config="$(xml_escape "$config")"
+	plist_log="$(xml_escape "$INSTALL_DIR/contextbridge.log")"
+	plist_error_log="$(xml_escape "$INSTALL_DIR/contextbridge-error.log")"
+	plist_update_log="$(xml_escape "$INSTALL_DIR/contextbridge-update.log")"
+	plist_update_error_log="$(xml_escape "$INSTALL_DIR/contextbridge-update-error.log")"
   cat > "$agent" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>de.angusu.contextbridge</string>
-  <key>ProgramArguments</key><array><string>$INSTALL_DIR/contextbridge</string><string>run</string><string>--config</string><string>$config</string></array>
+  <key>ProgramArguments</key><array><string>$plist_binary</string><string>run</string><string>--config</string><string>$plist_config</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
-  <key>StandardOutPath</key><string>$INSTALL_DIR/contextbridge.log</string>
-  <key>StandardErrorPath</key><string>$INSTALL_DIR/contextbridge-error.log</string>
+  <key>StandardOutPath</key><string>$plist_log</string>
+  <key>StandardErrorPath</key><string>$plist_error_log</string>
 </dict></plist>
 EOF
   cat > "$update_agent" <<EOF
@@ -493,11 +506,11 @@ EOF
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>de.angusu.contextbridge.update</string>
-  <key>ProgramArguments</key><array><string>$INSTALL_DIR/contextbridge</string><string>update</string><string>auto</string><string>--config</string><string>$config</string></array>
+  <key>ProgramArguments</key><array><string>$plist_binary</string><string>update</string><string>auto</string><string>--config</string><string>$plist_config</string></array>
   <key>StartInterval</key><integer>86400</integer>
   <key>ProcessType</key><string>Background</string>
-  <key>StandardOutPath</key><string>$INSTALL_DIR/contextbridge-update.log</string>
-  <key>StandardErrorPath</key><string>$INSTALL_DIR/contextbridge-update-error.log</string>
+  <key>StandardOutPath</key><string>$plist_update_log</string>
+  <key>StandardErrorPath</key><string>$plist_update_error_log</string>
 </dict></plist>
 EOF
   launchctl bootout "gui/$(id -u)" "$agent" >/dev/null 2>&1 || true

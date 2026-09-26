@@ -3,6 +3,8 @@
 // desktop runtimes, or a private web backend. Never bundle an observer token
 // into public browser JavaScript.
 
+import { readBoundedText } from "./bounded-response.mjs";
+
 const DEFAULT_MAX_RESPONSE_BYTES = 12 << 20;
 const DEFAULT_TIMEOUT_MS = 10_000;
 
@@ -33,7 +35,7 @@ export class ContextBridgeUIClient {
   }
 
   jobs({ limit = 50, status = "" } = {}) {
-    const query = new URLSearchParams({ limit: String(boundedInteger(limit, 1, 500, "limit")) });
+    const query = new URLSearchParams({ limit: String(boundedInteger(limit, 1, 200, "limit")) });
     if (status) query.set("status", requiredText(status, "status"));
     return this.requestJSON(`/v1/cluster/jobs?${query}`);
   }
@@ -103,10 +105,6 @@ export class ContextBridgeUIClient {
       signal: AbortSignal.timeout(this.timeoutMS),
       redirect: "error",
     });
-    const declared = Number(response.headers.get("content-length") || 0);
-    if (Number.isFinite(declared) && declared > this.maxResponseBytes) {
-      throw new Error(`ContextBridge response exceeds ${this.maxResponseBytes} bytes`);
-    }
     const raw = await readBoundedText(response, this.maxResponseBytes);
     if (!response.ok) {
       throw new Error(`ContextBridge returned HTTP ${response.status}: ${raw.slice(0, 4096)}`);
@@ -134,40 +132,6 @@ function validateRelayURL(value) {
   return parsed.toString().replace(/\/$/, "");
 }
 
-async function readBoundedText(response, maximumBytes) {
-  if (!response.body || typeof response.body.getReader !== "function") {
-    const raw = await response.text();
-    if (new TextEncoder().encode(raw).byteLength > maximumBytes) {
-      throw new Error(`ContextBridge response exceeds ${maximumBytes} bytes`);
-    }
-    return raw;
-  }
-  const reader = response.body.getReader();
-  const chunks = [];
-  let total = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > maximumBytes) {
-        await reader.cancel("ContextBridge response size limit exceeded");
-        throw new Error(`ContextBridge response exceeds ${maximumBytes} bytes`);
-      }
-      chunks.push(value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  const payload = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    payload.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return new TextDecoder().decode(payload);
-}
-
 function requiredText(value, label) {
   const normalized = String(value ?? "").trim();
   if (!normalized || /[\r\n\0]/u.test(normalized)) throw new TypeError(`${label} is required and must be one line`);
@@ -182,5 +146,9 @@ function boundedInteger(value, minimum, maximum, label) {
 }
 
 function pathID(value) {
-  return encodeURIComponent(requiredText(value, "ID"));
+  const id = requiredText(value, "ID");
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(id) || id.includes("..")) {
+    throw new TypeError("ID does not match the ContextBridge identifier contract");
+  }
+  return encodeURIComponent(id);
 }

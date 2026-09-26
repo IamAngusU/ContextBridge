@@ -134,6 +134,7 @@ func buildUninstallPlan(options uninstallOptions) (uninstallPlan, error) {
 		plan.ProgramPaths = appendExistingOwnedPath(plan.ProgramPaths, filepath.Join(installDir, name), installDir, false)
 	}
 	plan.ProgramPaths = appendExistingOwnedPath(plan.ProgramPaths, plan.InstallBinary, installDir, true)
+	plan.ProgramPaths = appendUpdaterOwnedArtifacts(plan.ProgramPaths, plan.InstallBinary, installDir)
 	plan.ProgramPaths = append(plan.ProgramPaths, managedCommandFiles(installDir)...)
 	plan, err = addInstallOwnershipManifestPaths(plan)
 	if err != nil {
@@ -159,6 +160,19 @@ func buildUninstallPlan(options uninstallOptions) (uninstallPlan, error) {
 		return uninstallPlan{}, err
 	}
 	return plan, nil
+}
+
+func appendUpdaterOwnedArtifacts(paths []string, installBinary, installDir string) []string {
+	// These are exact updater-owned siblings. Never glob: an unrelated file
+	// with a similar prefix is not installation ownership evidence.
+	suffixes := []string{".previous", ".next", ".failed", ".update-pending.json", ".update-pending.json.tmp"}
+	if runtime.GOOS == "windows" {
+		suffixes = []string{".previous.exe", ".next.exe", ".failed.exe", ".update.ps1"}
+	}
+	for _, suffix := range suffixes {
+		paths = appendExistingOwnedPath(paths, installBinary+suffix, installDir, true)
+	}
+	return paths
 }
 
 func addInstallOwnershipManifestPaths(plan uninstallPlan) (uninstallPlan, error) {

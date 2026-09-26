@@ -2,6 +2,7 @@
 // Minimal server-side ContextBridge producer for Node.js 18+.
 
 import crypto from "node:crypto";
+import { readBoundedText } from "./bounded-response.mjs";
 
 const relay = requiredEnv("CONTEXTBRIDGE_RELAY_URL").replace(/\/$/, "");
 const token = requiredEnv("CONTEXTBRIDGE_PRODUCER_TOKEN");
@@ -67,9 +68,9 @@ async function requestJSON(method, url, body, extraHeaders = {}) {
     },
     body: body === undefined ? undefined : JSON.stringify(body),
     signal: AbortSignal.timeout(10_000),
+    redirect: "error",
   });
-  const raw = await response.text();
-  if (raw.length > 1 << 20) throw new Error("relay response exceeded 1 MiB");
+  const raw = await readBoundedText(response, 1 << 20, "relay response");
   if (!response.ok) throw new Error(`relay returned HTTP ${response.status}: ${raw.slice(0, 4096)}`);
   return JSON.parse(raw);
 }

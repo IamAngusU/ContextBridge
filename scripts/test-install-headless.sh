@@ -108,12 +108,15 @@ export CONTEXTBRIDGE_NONINTERACTIVE="1"
 HOME="$home" PATH="$fake_bin:$test_system_path" sh "$root/install.sh" > "$test_root/install.out"
 
 test -x "$CONTEXTBRIDGE_BIN_DIR/contextbridge"
+test -L "$CONTEXTBRIDGE_BIN_DIR/contextbridge"
+test "$(readlink "$CONTEXTBRIDGE_BIN_DIR/contextbridge")" = "$CONTEXTBRIDGE_HOME/contextbridge"
 test -f "$CONTEXTBRIDGE_HOME/.contextbridge-install.json"
 grep -F -- '"schema_version":1' "$CONTEXTBRIDGE_HOME/.contextbridge-install.json" >/dev/null
 grep -F -- '"contextbridge"' "$CONTEXTBRIDGE_HOME/.contextbridge-install.json" >/dev/null
 grep -F -- '"config.example.yml"' "$CONTEXTBRIDGE_HOME/.contextbridge-install.json" >/dev/null
 test -x "$CONTEXTBRIDGE_BIN_DIR/cb"
 test "$(readlink "$CONTEXTBRIDGE_BIN_DIR/cb")" = "$CONTEXTBRIDGE_HOME/contextbridge"
+test "$(readlink "$CONTEXTBRIDGE_BIN_DIR/contextbridge")" = "$(readlink "$CONTEXTBRIDGE_BIN_DIR/cb")"
 "$CONTEXTBRIDGE_BIN_DIR/cb" version
 grep -F -- 'version' "$calls" >/dev/null
 grep -F -- '# fixture completion for bash' "$home/.local/share/bash-completion/completions/contextbridge" >/dev/null
@@ -125,6 +128,25 @@ grep -F -- "cluster configure --config $CONTEXTBRIDGE_CONFIG --mode worker --rel
 grep -F -- "pair --config $CONTEXTBRIDGE_CONFIG --name headless-worker" "$calls" >/dev/null
 grep -F -- '--user enable --now contextbridge.service contextbridge-update.timer' "$systemctl_calls" >/dev/null
 grep -F -- "ExecStart=\"$CONTEXTBRIDGE_HOME/contextbridge\" run --config \"$CONTEXTBRIDGE_CONFIG\"" "$home/.config/systemd/user/contextbridge.service" >/dev/null
+
+# Migrate the pre-fix layout where the long command was a second copied
+# executable. It is owned only when byte-identical to the previously installed
+# canonical binary; the installer must replace it with the same path-stable
+# symlink used by cb.
+rm -f "$CONTEXTBRIDGE_BIN_DIR/contextbridge"
+cp "$CONTEXTBRIDGE_HOME/contextbridge" "$CONTEXTBRIDGE_BIN_DIR/contextbridge"
+test ! -L "$CONTEXTBRIDGE_BIN_DIR/contextbridge"
+HOME="$home" PATH="$fake_bin:$test_system_path" sh "$root/install.sh" > "$test_root/migration.out"
+test -L "$CONTEXTBRIDGE_BIN_DIR/contextbridge"
+test "$(readlink "$CONTEXTBRIDGE_BIN_DIR/contextbridge")" = "$CONTEXTBRIDGE_HOME/contextbridge"
+test "$(readlink "$CONTEXTBRIDGE_BIN_DIR/cb")" = "$CONTEXTBRIDGE_HOME/contextbridge"
+cat > "$CONTEXTBRIDGE_HOME/contextbridge" <<'EOF'
+#!/bin/sh
+printf 'fixture-updated-version\n'
+EOF
+chmod +x "$CONTEXTBRIDGE_HOME/contextbridge"
+test "$("$CONTEXTBRIDGE_BIN_DIR/contextbridge" version)" = "fixture-updated-version"
+test "$("$CONTEXTBRIDGE_BIN_DIR/cb" version)" = "fixture-updated-version"
 
 collision="$test_root/collision"
 mkdir -p "$collision/home/.local/share/bash-completion/completions" "$collision/home/.zfunc" "$collision/bin"

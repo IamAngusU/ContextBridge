@@ -717,6 +717,112 @@ func TestEmbeddingAndRAGRoundTrip(t *testing.T) {
 	}
 }
 
+func TestRAGEmbeddingChildPreservesAuthenticatedExecutionBoundary(t *testing.T) {
+	cfg := config.Config{
+		Version: 1,
+		Server:  config.Server{Listen: "127.0.0.1:32145", Token: "test-token-that-is-long-enough"},
+		Storage: config.Storage{Directory: t.TempDir(), Inbox: t.TempDir(), Models: t.TempDir()},
+		Routes: map[string]config.Route{
+			"rag_query": {Provider: "local", Task: "rag_query"},
+			"embedding": {Provider: "remote-embed", Task: "embedding"},
+		},
+		Engines: map[string]config.Engine{
+			"local":        {Type: "ollama", URL: "http://127.0.0.1:11434", Model: "local"},
+			"remote-embed": {Type: "openai_compatible", URL: "https://203.0.113.9/v1", Model: "embed", TimeoutSeconds: 1},
+		},
+		RAG: config.RAG{Enabled: true, Backend: "local", Directory: t.TempDir(), EmbeddingRoute: "embedding", MaxDocuments: 10},
+	}
+	server, err := NewServer(cfg, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := Job{
+		ID: "rag-boundary", Route: "rag_query", TenantID: "private", Query: "secret", Output: OutputSpec{Mode: "rag"},
+		ContextBridgeEgress: "local_only", ContextBridgeProviderClassification: "local", MaxCostUSD: 0.01,
+	}
+	child := derivedRAGEmbeddingJob(parent, "embedding", "query")
+	if child.ContextBridgeEgress != parent.ContextBridgeEgress || child.ContextBridgeProviderClassification != parent.ContextBridgeProviderClassification || child.MaxCostUSD != parent.MaxCostUSD {
+		t.Fatalf("derived embedding lost authenticated authority: %#v", child)
+	}
+	output, err := server.Process(context.Background(), parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.Error != "embedding_failed" {
+		t.Fatalf("remote embedding route escaped local-only parent boundary: %#v", output)
+	}
+}
+
+func TestRAGEmbeddingChildPreservesExplicitProviderAndModelConstraint(t *testing.T) {
+	parent := Job{ID: "rag-explicit", Provider: "local", Model: "fixed-model", MaxCostUSD: 1, ContextBridgeEgress: "local_only", ContextBridgeProviderClassification: "local"}
+	child := derivedRAGEmbeddingJob(parent, "embedding", "passage")
+	if child.Provider != parent.Provider || child.Model != parent.Model || child.MaxCostUSD != parent.MaxCostUSD || child.ContextBridgeEgress != parent.ContextBridgeEgress || child.ContextBridgeProviderClassification != parent.ContextBridgeProviderClassification {
+		t.Fatalf("derived embedding changed parent execution constraints: %#v", child)
+	}
+}
+
+func TestRAGEmbeddingHonorsBalanceFloorAndInheritedCostBoundary(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		balance       string
+		wantError     string
+		wantEmbedding int
+	}{
+		{name: "below reserved floor", balance: "5.05", wantError: "embedding_failed"},
+		{name: "above reserved floor", balance: "5.20", wantEmbedding: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			embeddingCalls := 0
+			provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				switch request.URL.Path {
+				case "/balance":
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{"is_available": true, "balance_infos": []map[string]string{{"currency": "USD", "total_balance": test.balance}}})
+				case "/v1/embeddings":
+					embeddingCalls++
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{
+						"data":  []map[string]interface{}{{"embedding": []float64{1, 0}, "index": 0}},
+						"usage": map[string]int{"prompt_tokens": 100, "total_tokens": 100},
+					})
+				default:
+					http.NotFound(w, request)
+				}
+			}))
+			defer provider.Close()
+			directory := t.TempDir()
+			cfg := config.Config{
+				Version: 1, Server: config.Server{Listen: "127.0.0.1:32145", Token: "test-token-that-is-long-enough"},
+				Storage: config.Storage{Directory: directory, Inbox: directory, Models: directory},
+				Routes: map[string]config.Route{
+					"rag_query": {Provider: "remote", Task: "rag_query"},
+					"embedding": {Provider: "remote", Task: "embedding"},
+				},
+				Engines: map[string]config.Engine{"remote": {
+					Type: "openai_compatible", URL: provider.URL + "/v1", Model: "embed", Capabilities: []string{"embedding"},
+					BalancePath: "/balance", MinimumBalanceUSD: 5, MaxOutputTokens: 1,
+					Costing: config.EngineCosting{Mode: "upper_bound", Source: "test", InputPerMillionUSD: 1000},
+				}},
+				RAG: config.RAG{Enabled: true, Backend: "local", Directory: filepath.Join(directory, "rag"), EmbeddingRoute: "embedding", MaxDocuments: 10},
+			}
+			server, err := NewServer(cfg, log.New(io.Discard, "", 0))
+			if err != nil {
+				t.Fatal(err)
+			}
+			output, err := server.Process(context.Background(), Job{
+				ID: "rag-balance", Route: "rag_query", TenantID: "tenant", Query: strings.Repeat("x", 100), MaxCostUSD: 1, Output: OutputSpec{Mode: "rag"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if output.Error != test.wantError || embeddingCalls != test.wantEmbedding {
+				t.Fatalf("RAG balance/cost boundary failed: output=%#v embedding_calls=%d", output, embeddingCalls)
+			}
+			if test.wantError == "" && (output.ReservedCostUSD < 0.099 || output.CostStatus != "upper_bound") {
+				t.Fatalf("RAG output lost embedding cost evidence: %#v", output)
+			}
+		})
+	}
+}
+
 func TestTunnelHeartbeatAppearsInStatus(t *testing.T) {
 	cfg := config.Config{Version: 1, Server: config.Server{Listen: "127.0.0.1:32145", Token: "test-token-that-is-long-enough"}, Storage: config.Storage{Directory: t.TempDir(), Inbox: t.TempDir()}, Routes: map[string]config.Route{"default": {Provider: "adapter"}}, Providers: config.Providers{Adapter: config.AdapterProvider{LeaseSeconds: 5, AuthMode: "dual"}}}
 	server, err := NewServer(cfg, log.New(io.Discard, "", 0))

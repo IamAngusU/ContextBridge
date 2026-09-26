@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -59,6 +60,22 @@ func TestScheduleTiming(t *testing.T) {
 	}
 	if _, err := (ScheduleTiming{Type: "interval", IntervalSeconds: 60}).next(time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2, 1, 1, 0, 0, 0, 0, time.UTC)); err == nil {
 		t.Fatal("overflowing interval schedule was accepted")
+	}
+}
+
+func TestCronWildcardStepOnePreservesWeekdayRestriction(t *testing.T) {
+	after := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC) // Friday
+	plain, err := (ScheduleTiming{Type: "cron", Cron: "0 9 * * 1", Timezone: "UTC"}).next(after, after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stepped, err := (ScheduleTiming{Type: "cron", Cron: "0 9 */1 * 1", Timezone: "UTC"}).next(after, after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := time.Date(2026, 9, 28, 9, 0, 0, 0, time.UTC)
+	if !plain.Equal(want) || !stepped.Equal(want) {
+		t.Fatalf("wildcard-equivalent day field changed DOM/DOW semantics: plain=%s stepped=%s want=%s", plain, stepped, want)
 	}
 }
 
@@ -739,4 +756,32 @@ func TestScheduleWorkflowUsesSavedPreviousResultAndHistory(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("workflow did not finish")
+}
+
+func TestScheduleStopsAfterExecutedResultCannotBePersisted(t *testing.T) {
+	var providerCalls int
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerCalls++
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"response": "executed"})
+	}))
+	defer provider.Close()
+	dir := t.TempDir()
+	cfg := config.Config{Storage: config.Storage{Directory: dir, Inbox: t.TempDir()}, Routes: map[string]config.Route{"default": {Provider: "ollama", TimeoutSeconds: 5, Model: "test-model"}}, Providers: config.Providers{Ollama: config.OllamaProvider{URL: provider.URL, Timeout: 5}}}
+	server, err := NewServer(cfg, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := Job{ID: "schedule-persist-failure", Source: "schedule", Route: "default", Prompt: "first", Output: OutputSpec{Mode: "text"}}
+	server.schedules.items["persist-failure"] = Schedule{
+		ID: "persist-failure", CurrentRunID: first.ID,
+		History: []ScheduleRun{{ID: first.ID, StartedAt: time.Now().UTC(), Outcome: "running"}},
+	}
+	resultPath := filepath.Join(server.store.dir, "jobs", jobStorageStem(first.ID)+".result.json")
+	if err := os.Mkdir(resultPath, 0700); err != nil {
+		t.Fatal(err)
+	}
+	outcome, detail := server.runScheduleSteps(withScheduledExecution(context.Background()), "persist-failure", first, []ScheduleStep{{Name: "second", Job: Job{Route: "default", Prompt: "must not run", Output: OutputSpec{Mode: "text"}}}})
+	if outcome != "failed" || !strings.Contains(detail, "persist output") || providerCalls != 1 {
+		t.Fatalf("schedule advanced without durable result: outcome=%s detail=%q provider_calls=%d", outcome, detail, providerCalls)
+	}
 }

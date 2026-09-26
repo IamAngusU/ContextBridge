@@ -219,6 +219,139 @@ func TestOpenAICompatibleProviderRejectsUnknownCostWhenBudgetRequested(t *testin
 	}
 }
 
+func TestOpenAICompatibleMissingUsageRemainsUnknownCost(t *testing.T) {
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{{"message": map[string]string{"content": "paid output"}, "finish_reason": "stop"}},
+		})
+	}))
+	defer provider.Close()
+	cfg := config.Config{
+		Routes: map[string]config.Route{"default": {Provider: "remote"}},
+		Engines: map[string]config.Engine{"remote": {
+			Type: "openai_compatible", URL: provider.URL, Model: "priced", Capabilities: []string{"text"}, MaxOutputTokens: 64,
+			Costing: config.EngineCosting{Mode: "upper_bound", Source: "reviewed", InputPerMillionUSD: 1, OutputPerMillionUSD: 2},
+		}},
+	}
+	output := NewProcessor(cfg, nil).Process(context.Background(), Job{Prompt: "paid", Output: OutputSpec{Mode: "text"}})
+	if output.Error != "" || output.CostStatus != "unknown" || output.EstimatedCostUSD != 0 || output.ReservedCostUSD <= 0 {
+		t.Fatalf("missing usage became known zero cost: %#v", output)
+	}
+}
+
+func TestOpenAICompatibleProviderPreservesFilteringAndRejectsTools(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		choice     map[string]interface{}
+		wantReason string
+		wantError  bool
+	}{
+		{name: "content filter", choice: map[string]interface{}{"message": map[string]interface{}{"content": ""}, "finish_reason": "content_filter"}, wantReason: "content_filter"},
+		{name: "refusal", choice: map[string]interface{}{"message": map[string]interface{}{"content": nil, "refusal": "policy"}, "finish_reason": "stop"}, wantReason: "content_filter"},
+		{name: "tool call reason", choice: map[string]interface{}{"message": map[string]interface{}{"content": nil}, "finish_reason": "tool_calls"}, wantError: true},
+		{name: "tool call payload", choice: map[string]interface{}{"message": map[string]interface{}{"content": "ignored", "tool_calls": []map[string]string{{"id": "call"}}}, "finish_reason": "stop"}, wantError: true},
+		{name: "legacy function payload", choice: map[string]interface{}{"message": map[string]interface{}{"content": "ignored", "function_call": map[string]string{"name": "act"}}, "finish_reason": "stop"}, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"choices": []map[string]interface{}{test.choice},
+					"usage":   map[string]int{"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1},
+				})
+			}))
+			defer provider.Close()
+			cfg := config.Config{
+				Routes:  map[string]config.Route{"default": {Provider: "remote"}},
+				Engines: map[string]config.Engine{"remote": {Type: "openai_compatible", URL: provider.URL, Model: "model", Capabilities: []string{"text"}}},
+			}
+			output := NewProcessor(cfg, nil).Process(context.Background(), Job{Prompt: "test", Output: OutputSpec{Mode: "text"}})
+			if test.wantError {
+				if output.Error != "providers_unavailable" {
+					t.Fatalf("unsupported tool completion was accepted: %#v", output)
+				}
+				return
+			}
+			if output.Error != "" || output.FinishReason != test.wantReason || output.Text != "" {
+				t.Fatalf("filtered completion was not preserved: %#v", output)
+			}
+		})
+	}
+}
+
+func TestOpenAICompatibleEmbeddingHonorsBalanceFloor(t *testing.T) {
+	balanceCalls, embeddingCalls := 0, 0
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/balance":
+			balanceCalls++
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"is_available": true, "balance_infos": []map[string]string{{"currency": "USD", "total_balance": "1"}}})
+		case "/v1/embeddings":
+			embeddingCalls++
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": []map[string]interface{}{{"embedding": []float64{1}, "index": 0}}})
+		default:
+			http.NotFound(w, request)
+		}
+	}))
+	defer provider.Close()
+	cfg := config.Config{
+		Routes:  map[string]config.Route{"default": {Provider: "remote", Task: "embedding"}},
+		Engines: map[string]config.Engine{"remote": {Type: "openai_compatible", URL: provider.URL + "/v1", Model: "embed", Capabilities: []string{"embedding"}, BalancePath: "/balance", MinimumBalanceUSD: 5}},
+	}
+	output := NewProcessor(cfg, nil).Process(context.Background(), Job{Task: "embedding", Text: "query", Output: OutputSpec{Mode: "embedding"}})
+	if output.Error != "providers_unavailable" || balanceCalls != 1 || embeddingCalls != 0 {
+		t.Fatalf("embedding bypassed balance floor: output=%#v balance=%d embeddings=%d", output, balanceCalls, embeddingCalls)
+	}
+}
+
+func TestOpenAICompatibleEmbeddingReservesConservativeInputCost(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		balance        string
+		wantEmbeddings int
+		wantError      bool
+	}{
+		{name: "reservation crosses floor", balance: "5.05", wantError: true},
+		{name: "reservation preserves floor", balance: "5.20", wantEmbeddings: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			embeddingCalls := 0
+			provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				switch request.URL.Path {
+				case "/balance":
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{"is_available": true, "balance_infos": []map[string]string{{"currency": "USD", "total_balance": test.balance}}})
+				case "/v1/embeddings":
+					embeddingCalls++
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{
+						"data":  []map[string]interface{}{{"embedding": []float64{1}, "index": 0}},
+						"usage": map[string]int{"prompt_tokens": 100, "total_tokens": 100},
+					})
+				default:
+					http.NotFound(w, request)
+				}
+			}))
+			defer provider.Close()
+			cfg := config.Config{
+				Routes: map[string]config.Route{"default": {Provider: "remote", Task: "embedding"}},
+				Engines: map[string]config.Engine{"remote": {
+					Type: "openai_compatible", URL: provider.URL + "/v1", Model: "embed", Capabilities: []string{"embedding"},
+					BalancePath: "/balance", MinimumBalanceUSD: 5, MaxOutputTokens: 1,
+					Costing: config.EngineCosting{Mode: "upper_bound", Source: "test", InputPerMillionUSD: 1000},
+				}},
+			}
+			output := NewProcessor(cfg, nil).Process(context.Background(), Job{Task: "embedding", Text: strings.Repeat("x", 100), Output: OutputSpec{Mode: "embedding"}})
+			if test.wantError {
+				if output.Error != "providers_unavailable" || embeddingCalls != 0 {
+					t.Fatalf("embedding reservation did not protect floor: output=%#v calls=%d", output, embeddingCalls)
+				}
+				return
+			}
+			if output.Error != "" || embeddingCalls != test.wantEmbeddings || output.ReservedCostUSD < 0.099 || output.CostStatus != "upper_bound" {
+				t.Fatalf("embedding reservation/output evidence is wrong: output=%#v calls=%d", output, embeddingCalls)
+			}
+		})
+	}
+}
+
 func TestOpenAICompatibleVisionRequiresExplicitCapability(t *testing.T) {
 	cfg := config.Config{
 		Routes:  map[string]config.Route{"default": {Provider: "remote"}},

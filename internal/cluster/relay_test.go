@@ -145,6 +145,64 @@ func TestCreateTokenRejectsLifetimeBeforeDurationConversion(t *testing.T) {
 			t.Fatalf("lifetime %s returned %d: %s", lifetime, response.Code, response.Body.String())
 		}
 	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/cluster/tokens", strings.NewReader(`{"role":"admin","subject":"relay-admin"}`))
+	request.Header.Set("Authorization", "Bearer "+adminToken)
+	response := httptest.NewRecorder()
+	relay.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("reserved bootstrap identity was issued explicitly: %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestAdminTokenInventoryAndRevocationNeverExposeSecrets(t *testing.T) {
+	admin := "admin_012345678901234567890123456789012345"
+	relay, err := NewRelay(RelayConfig{Database: filepath.Join(t.TempDir(), "relay.db"), AdminToken: admin}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+	secret, record, err := relay.store.CreateToken("producer", "inventory-client", []string{"private"}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/cluster/tokens?limit=200&offset=0", nil)
+	request.Header.Set("Authorization", "Bearer "+secret)
+	response := httptest.NewRecorder()
+	relay.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("producer listed credential inventory with status %d", response.Code)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/v1/cluster/tokens?limit=200&offset=0", nil)
+	request.Header.Set("Authorization", "Bearer "+admin)
+	response = httptest.NewRecorder()
+	relay.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("admin inventory returned %d: %s", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), secret) || strings.Contains(response.Body.String(), tokenHash(secret)) {
+		t.Fatal("credential inventory exposed a bearer secret or credential hash")
+	}
+	var inventory TokenInventory
+	if err := json.Unmarshal(response.Body.Bytes(), &inventory); err != nil || inventory.Total < 2 {
+		t.Fatalf("invalid token inventory: %#v err=%v", inventory, err)
+	}
+
+	request = httptest.NewRequest(http.MethodDelete, "/v1/cluster/tokens/"+record.ID, nil)
+	request.Header.Set("Authorization", "Bearer "+admin)
+	response = httptest.NewRecorder()
+	relay.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), secret) || strings.Contains(response.Body.String(), tokenHash(secret)) {
+		t.Fatalf("revocation response was invalid or leaked a secret: %d %s", response.Code, response.Body.String())
+	}
+	if _, ok := relay.store.Authenticate(secret); ok {
+		t.Fatal("revoked credential remained authorized")
+	}
+	var revoked TokenRecord
+	if err := json.Unmarshal(response.Body.Bytes(), &revoked); err != nil || revoked.ID != record.ID || !revoked.Revoked {
+		t.Fatalf("revocation did not return durable metadata: %#v err=%v", revoked, err)
+	}
 }
 
 func TestNodeDrainEndpointRequiresAdminAndPreservesConnection(t *testing.T) {

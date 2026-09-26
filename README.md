@@ -289,10 +289,17 @@ contextbridge cluster chat --provider ollama --model auto --artifacts off --prom
 On the running relay host, using its private configuration:
 
 ```sh
-contextbridge cluster token --role producer --subject my-app --max-jobs-per-hour 120 --max-queued-jobs 8
+contextbridge cluster token create --role producer --subject my-app --max-jobs-per-hour 120 --max-queued-jobs 8
 ```
 
 This prints token JSON. Store it securely; **never give an application the relay admin token**. The optional limits are stored with the credential and enforced durably by the relay. `--providers ollama --egress local_only` can additionally prevent that credential from selecting a remote route. For a separate CLI client, save the returned JSON as a private **UTF-8** file named `producer-token.json` and transfer it through a secure channel. Do not commit it.
+
+List credential metadata or revoke a known token ID without exposing secrets:
+
+```sh
+contextbridge cluster token list
+contextbridge cluster token revoke tok_0123456789abcdef0123456789abcdef
+```
 
 On that client, install CB in **client/sender** mode, then point it at the relay and load the credential:
 

@@ -95,14 +95,18 @@ func (job Job) InputImages() []ImageInput {
 }
 
 type OutputSpec struct {
-	Mode             string   `json:"mode,omitempty"`
-	RequiredKeys     []string `json:"required_keys,omitempty"`
-	MaxBytes         int      `json:"max_bytes,omitempty"`
-	Artifacts        bool     `json:"artifacts,omitempty"`
-	MaxArtifactBytes int      `json:"max_artifact_bytes,omitempty"`
-	MinArtifacts     int      `json:"min_artifacts,omitempty"`
-	MinImages        int      `json:"min_images,omitempty"`
-	MinMedia         int      `json:"min_media,omitempty"`
+	Mode         string   `json:"mode,omitempty"`
+	RequiredKeys []string `json:"required_keys,omitempty"`
+	MaxBytes     int      `json:"max_bytes,omitempty"`
+	// MaxTokens is an execution constraint, not a byte-size approximation.
+	// Providers that support token ceilings receive the lower of this value
+	// and the operator-configured engine ceiling.
+	MaxTokens        int  `json:"max_tokens,omitempty"`
+	Artifacts        bool `json:"artifacts,omitempty"`
+	MaxArtifactBytes int  `json:"max_artifact_bytes,omitempty"`
+	MinArtifacts     int  `json:"min_artifacts,omitempty"`
+	MinImages        int  `json:"min_images,omitempty"`
+	MinMedia         int  `json:"min_media,omitempty"`
 }
 
 // Artifact is a file or image found in the final adapter response. DataBase64
@@ -167,8 +171,12 @@ type Output struct {
 	// Truncated is set when a text result exceeded output.max_bytes. It keeps
 	// bounded responses explicit so callers never mistake a prefix for the
 	// complete model answer.
-	Truncated bool   `json:"truncated,omitempty"`
-	Error     string `json:"error,omitempty"`
+	Truncated bool `json:"truncated,omitempty"`
+	// FinishReason preserves a provider-verified termination reason. It is
+	// deliberately separate from Truncated, which records ContextBridge's own
+	// byte boundary.
+	FinishReason string `json:"finish_reason,omitempty"`
+	Error        string `json:"error,omitempty"`
 }
 
 type adapterJob struct {

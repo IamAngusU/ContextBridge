@@ -50,6 +50,7 @@ var (
 	queueIndexVersion         = []byte("3")
 	keyClusterID              = []byte("cluster_id_v1")
 	keyRelayEpoch             = []byte("relay_epoch_v1")
+	keyBootstrapAdminHash     = []byte("bootstrap_admin_hash_v1")
 )
 
 func requiredStoreBuckets() [][]byte {
@@ -87,6 +88,8 @@ var (
 	ErrAssignmentFenceMismatch     = errors.New("assignment fence does not match the current durable assignment")
 	ErrAdapterSessionBusy          = errors.New("adapter session already has an active job or reservation")
 	ErrIdempotencyConflict         = errors.New("idempotency key was already used for a different request")
+	ErrWorkerCredentialInvalid     = errors.New("worker credential is revoked, expired, or does not authorize this node")
+	ErrPipelineParentTerminal      = errors.New("pipeline parent no longer authorizes child execution")
 )
 
 type reservation struct {
@@ -403,7 +406,71 @@ func (s *Store) EnsureToken(token, role, subject string, groups []string) error 
 	})
 }
 
+// EnsureBootstrapAdminToken installs exactly one configured relay bootstrap
+// credential. The reserved relay-admin identity is owned by configuration;
+// changing the configured secret atomically retires every earlier bootstrap
+// credential while leaving explicitly issued administrators with other
+// subjects untouched.
+func (s *Store) EnsureBootstrapAdminToken(token string) error {
+	if len(token) < 32 {
+		return errors.New("token must contain at least 32 characters")
+	}
+	currentHash := tokenHash(token)
+	now := time.Now().UTC()
+	return s.db.Update(func(tx *bolt.Tx) error {
+		tokens := tx.Bucket(bucketTokens)
+		meta := tx.Bucket(bucketStoreMeta)
+		if previous := string(meta.Get(keyBootstrapAdminHash)); previous == currentHash {
+			var current TokenRecord
+			if err := getJSON(tokens, currentHash, &current); err != nil {
+				return errors.New("configured bootstrap admin credential metadata is inconsistent")
+			}
+			if current.Revoked || !current.ExpiresAt.IsZero() || current.Role != "admin" || current.Subject != "relay-admin" {
+				return errors.New("configured bootstrap admin credential was retired; choose a new secret")
+			}
+			return nil
+		}
+		cursor := tokens.Cursor()
+		for key, value := cursor.First(); key != nil; key, value = cursor.Next() {
+			var record TokenRecord
+			if json.Unmarshal(value, &record) != nil || record.Role != "admin" || record.Subject != "relay-admin" {
+				continue
+			}
+			if string(key) == currentHash {
+				if record.Revoked {
+					return errors.New("configured bootstrap admin credential was previously retired; choose a new secret")
+				}
+				continue
+			}
+			if !record.Revoked {
+				record.Revoked = true
+				if err := putJSON(tokens, string(key), record); err != nil {
+					return err
+				}
+			}
+		}
+		if existing := tokens.Get([]byte(currentHash)); existing != nil {
+			var record TokenRecord
+			if err := json.Unmarshal(existing, &record); err != nil {
+				return errors.New("configured bootstrap admin credential metadata is invalid")
+			}
+			if record.Revoked || !record.ExpiresAt.IsZero() || record.Role != "admin" || record.Subject != "relay-admin" {
+				return errors.New("configured bootstrap admin secret collides with another or retired credential; choose a new secret")
+			}
+		} else {
+			record := TokenRecord{ID: randomID("tok"), Role: "admin", Subject: "relay-admin", CreatedAt: now}
+			if err := putJSON(tokens, currentHash, record); err != nil {
+				return err
+			}
+		}
+		return meta.Put(keyBootstrapAdminHash, []byte(currentHash))
+	})
+}
+
 func validateTokenIdentity(role, subject string, groups []string) error {
+	if role == "admin" && strings.EqualFold(strings.TrimSpace(subject), "relay-admin") {
+		return errors.New("relay-admin is reserved for the configured bootstrap credential")
+	}
 	if (role == "producer" || role == "node") && !validRoutingLabel(subject, 120) {
 		return fmt.Errorf("%s token subject must be 1 to 120 safe UTF-8 bytes", role)
 	}
@@ -426,28 +493,106 @@ func (s *Store) Authenticate(token string) (TokenRecord, bool) {
 		return TokenRecord{}, false
 	}
 	var record TokenRecord
+	hash := tokenHash(token)
 	err := s.db.View(func(tx *bolt.Tx) error {
-		return getJSON(tx.Bucket(bucketTokens), tokenHash(token), &record)
+		return getJSON(tx.Bucket(bucketTokens), hash, &record)
 	})
 	if err != nil || record.Revoked || (!record.ExpiresAt.IsZero() && time.Now().After(record.ExpiresAt)) {
 		return TokenRecord{}, false
 	}
+	record.AuthHash = hash
 	return record, true
 }
 
+func validNodeCredentialTx(tx *bolt.Tx, hash, nodeID string, now time.Time) bool {
+	if hash == "" || nodeID == "" {
+		return false
+	}
+	var record TokenRecord
+	if err := getJSON(tx.Bucket(bucketTokens), hash, &record); err != nil {
+		return false
+	}
+	return record.Role == "node" && record.Subject == nodeID && !record.Revoked && (record.ExpiresAt.IsZero() || now.Before(record.ExpiresAt))
+}
+
+func (s *Store) NodeCredentialValid(hash, nodeID string, now time.Time) bool {
+	valid := false
+	_ = s.db.View(func(tx *bolt.Tx) error {
+		valid = validNodeCredentialTx(tx, hash, nodeID, now)
+		return nil
+	})
+	return valid
+}
+
 func (s *Store) RevokeToken(id string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	_, _, err := s.RevokeTokenWithHash(id)
+	return err
+}
+
+// RevokeTokenWithHash returns the internal lookup hash only to trusted relay
+// code so an active connection authenticated by this exact credential can be
+// closed immediately. API responses must never expose the hash.
+func (s *Store) RevokeTokenWithHash(id string) (TokenRecord, string, error) {
+	var revoked TokenRecord
+	var authHash string
+	err := s.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(bucketTokens)
 		cursor := bucket.Cursor()
 		for key, value := cursor.First(); key != nil; key, value = cursor.Next() {
 			var record TokenRecord
 			if json.Unmarshal(value, &record) == nil && record.ID == id {
 				record.Revoked = true
-				return putJSON(bucket, string(key), record)
+				if err := putJSON(bucket, string(key), record); err != nil {
+					return err
+				}
+				revoked = record
+				authHash = string(key)
+				return nil
 			}
 		}
 		return os.ErrNotExist
 	})
+	return revoked, authHash, err
+}
+
+func (s *Store) ListTokens(offset, limit int) (TokenInventory, error) {
+	if offset < 0 || offset > 1_000_000 {
+		return TokenInventory{}, errors.New("token inventory offset must be 0 to 1000000")
+	}
+	if limit < 1 || limit > 200 {
+		return TokenInventory{}, errors.New("token inventory limit must be 1 to 200")
+	}
+	records := make([]TokenRecord, 0)
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketTokens).ForEach(func(_, value []byte) error {
+			var record TokenRecord
+			if err := json.Unmarshal(value, &record); err != nil || record.ID == "" {
+				return errors.New("token inventory contains invalid credential metadata")
+			}
+			record.AuthHash = ""
+			records = append(records, record)
+			return nil
+		})
+	})
+	if err != nil {
+		return TokenInventory{}, err
+	}
+	sort.Slice(records, func(i, j int) bool {
+		if !records[i].CreatedAt.Equal(records[j].CreatedAt) {
+			return records[i].CreatedAt.After(records[j].CreatedAt)
+		}
+		return records[i].ID < records[j].ID
+	})
+	total := len(records)
+	if offset >= total {
+		records = []TokenRecord{}
+	} else {
+		records = records[offset:]
+		if len(records) > limit {
+			records = records[:limit]
+		}
+	}
+	return TokenInventory{Tokens: records, Total: total, Offset: offset, Limit: limit}, nil
 }
 
 func (s *Store) CreatePairing(request PairRequest, verificationURI string, lifetime time.Duration) (PairResponse, error) {
@@ -663,10 +808,27 @@ func (s *Store) UpsertNode(node Node) error {
 // created manually by an administrator may pin its key on first use; every
 // later connection must present that exact key.
 func (s *Store) UpsertNodePinned(node Node) error {
+	return s.upsertNodePinnedAuthorized(node, "")
+}
+
+// UpsertNodePinnedAuthorized makes credential validation and the first live
+// node mutation one Bolt transaction. A revocation committed before this
+// boundary therefore cannot race a stale WebSocket hello into durable state.
+func (s *Store) UpsertNodePinnedAuthorized(node Node, credentialHash string) error {
+	if credentialHash == "" {
+		return ErrWorkerCredentialInvalid
+	}
+	return s.upsertNodePinnedAuthorized(node, credentialHash)
+}
+
+func (s *Store) upsertNodePinnedAuthorized(node Node, credentialHash string) error {
 	if _, err := parsePublicKey(node.PublicKey); err != nil {
 		return fmt.Errorf("invalid node public key: %w", err)
 	}
 	return s.db.Update(func(tx *bolt.Tx) error {
+		if credentialHash != "" && !validNodeCredentialTx(tx, credentialHash, node.ID, time.Now().UTC()) {
+			return ErrWorkerCredentialInvalid
+		}
 		var existing Node
 		err := getJSON(tx.Bucket(bucketNodes), node.ID, &existing)
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -1917,6 +2079,13 @@ func (s *Store) AssignJobFencedWithDecision(id, nodeID string, decision RoutingD
 	return s.assignJob(id, nodeID, nil, &decision, &authority)
 }
 
+func (s *Store) AssignJobAuthorizedFencedWithDecision(id, nodeID, credentialHash string, decision RoutingDecision, authority RelayAuthority) (Job, error) {
+	if !authority.Valid() {
+		return Job{}, errors.New("valid relay authority is required for fenced assignment")
+	}
+	return s.assignJobAuthorized(id, nodeID, credentialHash, nil, &decision, &authority)
+}
+
 type adapterAssignment struct {
 	EndpointID      int
 	Principal       string
@@ -1938,7 +2107,18 @@ func (s *Store) AssignAdapterJobFencedWithDecision(id, nodeID string, endpointID
 	return s.assignJob(id, nodeID, &adapterAssignment{EndpointID: endpointID, Principal: principal, SessionRecovery: sessionRecovery}, &decision, &authority)
 }
 
+func (s *Store) AssignAdapterJobAuthorizedFencedWithDecision(id, nodeID, credentialHash string, endpointID int, principal string, sessionRecovery bool, decision RoutingDecision, authority RelayAuthority) (Job, error) {
+	if !authority.Valid() {
+		return Job{}, errors.New("valid relay authority is required for fenced assignment")
+	}
+	return s.assignJobAuthorized(id, nodeID, credentialHash, &adapterAssignment{EndpointID: endpointID, Principal: principal, SessionRecovery: sessionRecovery}, &decision, &authority)
+}
+
 func (s *Store) assignJob(id, nodeID string, adapter *adapterAssignment, decision *RoutingDecision, authority *RelayAuthority) (Job, error) {
+	return s.assignJobAuthorized(id, nodeID, "", adapter, decision, authority)
+}
+
+func (s *Store) assignJobAuthorized(id, nodeID, credentialHash string, adapter *adapterAssignment, decision *RoutingDecision, authority *RelayAuthority) (Job, error) {
 	var job Job
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		if err := getJSON(tx.Bucket(bucketJobs), id, &job); err != nil {
@@ -1946,6 +2126,12 @@ func (s *Store) assignJob(id, nodeID string, adapter *adapterAssignment, decisio
 		}
 		if job.Status != JobQueued {
 			return errors.New("job is no longer queued")
+		}
+		if job.ParentID != "" {
+			var parent PipelineRun
+			if err := getJSON(tx.Bucket(bucketPipelineRuns), job.ParentID, &parent); err != nil || parent.Status != "running" {
+				return ErrPipelineParentTerminal
+			}
 		}
 		if job.SealedPayload != nil && job.AssignedNode != "" && job.AssignedNode != nodeID {
 			return errors.New("sealed job is bound to another node")
@@ -1961,6 +2147,9 @@ func (s *Store) assignJob(id, nodeID string, adapter *adapterAssignment, decisio
 			return ErrNodeDraining
 		}
 		now := time.Now().UTC()
+		if credentialHash != "" && !validNodeCredentialTx(tx, credentialHash, nodeID, now) {
+			return ErrWorkerCredentialInvalid
+		}
 		if decision != nil && decision.RouteKey != "" {
 			expectedRouteKey, _, _ := routingHealthKey(decision.Requirements)
 			if !validRoutingHealthRouteKey(decision.RouteKey) || decision.RouteKey != expectedRouteKey {
@@ -2470,7 +2659,7 @@ func (s *Store) RequeueNode(nodeID, reason string) ([]Job, error) {
 			if json.Unmarshal(value, &job) != nil || job.AssignedNode != nodeID {
 				return nil
 			}
-			if job.Status == JobCancelled {
+			if job.Status == JobCancelled || job.Status == JobFailed && job.FailureCode == FailureExecutionTimeoutAmbiguous {
 				now := time.Now().UTC()
 				activeProbe, err := routingRecoveryProbeExistsTx(tx, job.AssignedNode, job.ID)
 				if err != nil {
@@ -3551,6 +3740,7 @@ func (s *Store) FailActivePipelineRuns(reason string) (int, error) {
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(bucketPipelineRuns)
 		updates := map[string]PipelineRun{}
+		activeRunIDs := map[string]struct{}{}
 		if err := bucket.ForEach(func(key, value []byte) error {
 			var run PipelineRun
 			if err := json.Unmarshal(value, &run); err != nil {
@@ -3563,6 +3753,7 @@ func (s *Store) FailActivePipelineRuns(reason string) (int, error) {
 			run.Error = reason
 			run.FinishedAt = time.Now().UTC()
 			updates[string(key)] = run
+			activeRunIDs[run.ID] = struct{}{}
 			failed++
 			return nil
 		}); err != nil {
@@ -3573,6 +3764,50 @@ func (s *Store) FailActivePipelineRuns(reason string) (int, error) {
 				return err
 			}
 			if err := appendPipelineEventTx(tx, s, run, "pipeline.failed"); err != nil {
+				return err
+			}
+		}
+		if len(activeRunIDs) == 0 {
+			return nil
+		}
+		jobs := tx.Bucket(bucketJobs)
+		type childUpdate struct {
+			key []byte
+			job Job
+		}
+		children := []childUpdate{}
+		if err := jobs.ForEach(func(key, value []byte) error {
+			var job Job
+			if json.Unmarshal(value, &job) != nil || job.Status != JobQueued {
+				return nil
+			}
+			if _, orphaned := activeRunIDs[job.ParentID]; !orphaned {
+				return nil
+			}
+			job.Status = JobFailed
+			job.Error = reason
+			job.FailureCode = FailurePipelineParentTerminal
+			job.UpdatedAt = time.Now().UTC()
+			job.FinishedAt = job.UpdatedAt
+			children = append(children, childUpdate{key: append([]byte(nil), key...), job: job})
+			return nil
+		}); err != nil {
+			return err
+		}
+		for _, child := range children {
+			if err := deleteQueueEntry(tx, child.job.ID); err != nil {
+				return err
+			}
+			if err := releaseAdapterSessionLockTx(tx, child.job.OwnerSubject, child.job.Requirements, adapterSessionLockJob, child.job.ID); err != nil {
+				return err
+			}
+			if err := putJSON(jobs, string(child.key), child.job); err != nil {
+				return err
+			}
+			if err := appendAuthoritativeJobEventTx(tx, s, child.job, "job.failed"); err != nil {
+				return err
+			}
+			if err := appendPipelineStepEventTx(tx, s, child.job, "pipeline.step.failed"); err != nil {
 				return err
 			}
 		}

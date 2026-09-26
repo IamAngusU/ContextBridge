@@ -98,6 +98,15 @@ type scheduleStore struct {
 	admissionLimit int
 }
 
+func cloneScheduleState(item Schedule) Schedule {
+	cloned := item
+	cloned.History = append([]ScheduleRun(nil), item.History...)
+	for index := range cloned.History {
+		cloned.History[index].Steps = append([]ScheduleStepRun(nil), item.History[index].Steps...)
+	}
+	return cloned
+}
+
 func newScheduleStore(dir string, admissionLimit int) (*scheduleStore, error) {
 	if admissionLimit <= 0 {
 		admissionLimit = defaultJobAdmissionLimit
@@ -220,7 +229,7 @@ func (ss *scheduleStore) setEnabled(id string, enabled bool) (Schedule, error) {
 	if !ok {
 		return Schedule{}, os.ErrNotExist
 	}
-	previous := item
+	previous := cloneScheduleState(item)
 	item.Enabled, item.UpdatedAt = enabled, time.Now().UTC()
 	if enabled && item.NextRun.IsZero() {
 		return Schedule{}, errors.New("one-shot schedule has already run")
@@ -368,13 +377,14 @@ func (ss *scheduleStore) status() []map[string]interface{} {
 	return result
 }
 
-func (ss *scheduleStore) finish(id, runID, outcome, detail string) {
+func (ss *scheduleStore) finish(id, runID, outcome, detail string) error {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 	item, ok := ss.items[id]
 	if !ok || item.CurrentRunID != runID {
-		return
+		return os.ErrNotExist
 	}
+	previous := cloneScheduleState(item)
 	item.CurrentRunID, item.LastRunID, item.LastRun = "", runID, time.Now().UTC()
 	item.LastOutcome, item.LastError, item.UpdatedAt = outcome, detail, item.LastRun
 	item.Runs = saturatingMetricAdd(item.Runs, 1)
@@ -386,16 +396,21 @@ func (ss *scheduleStore) finish(id, runID, outcome, detail string) {
 		}
 	}
 	ss.items[id] = item
-	_ = ss.persistLocked()
+	if err := ss.persistLocked(); err != nil {
+		ss.items[id] = previous
+		return err
+	}
+	return nil
 }
 
-func (ss *scheduleStore) recordStep(id, runID string, step ScheduleStepRun) {
+func (ss *scheduleStore) recordStep(id, runID string, step ScheduleStepRun) error {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 	item, ok := ss.items[id]
 	if !ok || item.CurrentRunID != runID {
-		return
+		return os.ErrNotExist
 	}
+	previous := cloneScheduleState(item)
 	for i := range item.History {
 		if item.History[i].ID != runID {
 			continue
@@ -412,7 +427,11 @@ func (ss *scheduleStore) recordStep(id, runID string, step ScheduleStepRun) {
 		}
 	}
 	ss.items[id] = item
-	_ = ss.persistLocked()
+	if err := ss.persistLocked(); err != nil {
+		ss.items[id] = previous
+		return err
+	}
+	return nil
 }
 
 func (ss *scheduleStore) waiting(id, reason string) {
@@ -558,6 +577,7 @@ func (t ScheduleTiming) next(after, anchor time.Time) (time.Time, error) {
 
 func parseCronField(field string, minValue, maxValue int) (map[int]bool, bool, error) {
 	values := map[int]bool{}
+	wildcardSyntax := false
 	for _, part := range strings.Split(field, ",") {
 		base, step := part, 1
 		if strings.Contains(part, "/") {
@@ -600,8 +620,14 @@ func parseCronField(field string, minValue, maxValue int) (map[int]bool, bool, e
 		for value := start; value <= end; value += step {
 			values[value] = true
 		}
+		// In the documented standard five-field dialect, */1 has the same
+		// day-field semantics as *. Larger wildcard steps are restricted
+		// fields and therefore intentionally do not set this bit.
+		if base == "*" && step == 1 {
+			wildcardSyntax = true
+		}
 	}
-	return values, field == "*", nil
+	return values, wildcardSyntax, nil
 }
 
 func (s *Server) dispatchSchedules(ctx context.Context) {
@@ -694,7 +720,11 @@ func (s *Server) executeSchedule(ctx context.Context, id string, job Job) {
 		return
 	}
 	outcome, detail := s.runScheduleSteps(withScheduledExecution(ctx), id, job, item.Steps)
-	s.schedules.finish(id, job.ID, outcome, detail)
+	if err := s.schedules.finish(id, job.ID, outcome, detail); err != nil {
+		s.logger.Printf("schedule %s terminal checkpoint could not be stored: %v", id, err)
+		s.store.AddActivity("scheduled", "Scheduled job terminal checkpoint failed", job.ID)
+		return
+	}
 	s.store.AddActivity("scheduled", "Scheduled job "+outcome, job.ID)
 }
 

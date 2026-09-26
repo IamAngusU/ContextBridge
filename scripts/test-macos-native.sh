@@ -37,9 +37,9 @@ require_contains() {
 fixture="$test_root/fixture"
 fake_bin="$test_root/fake-bin"
 home="$test_root/home"
-install_dir="$home/.local/share/contextbridge"
+install_dir="$home/Tools & AI/ContextBridge"
 bin_dir="$home/.local/bin"
-config="$home/.config/contextbridge/config.yml"
+config="$home/.config/Context & Bridge/config.yml"
 launchctl_calls="$test_root/launchctl-calls"
 mkdir -p "$fixture" "$fake_bin" "$home"
 
@@ -92,6 +92,8 @@ HOME="$home" PATH="$fake_bin:$PATH" sh "$root/install.sh" > "$test_root/install.
 installed="$install_dir/contextbridge"
 [[ -x "$installed" ]]
 [[ -x "$bin_dir/contextbridge" ]]
+[[ -L "$bin_dir/contextbridge" ]]
+[[ "$(readlink "$bin_dir/contextbridge")" == "$installed" ]]
 [[ -L "$bin_dir/cb" ]]
 [[ "$(readlink "$bin_dir/cb")" == "$installed" ]]
 [[ -f "$config" ]]
@@ -103,8 +105,8 @@ update_agent="$home/Library/LaunchAgents/de.angusu.contextbridge.update.plist"
 plutil -lint "$agent" "$update_agent"
 require_contains "bootstrap gui/$(id -u) $agent" "$launchctl_calls" "main LaunchAgent was not bootstrapped"
 require_contains "bootstrap gui/$(id -u) $update_agent" "$launchctl_calls" "update LaunchAgent was not bootstrapped"
-require_contains "$installed" "$agent" "main LaunchAgent does not reference the installed binary"
-require_contains "$config" "$agent" "main LaunchAgent does not reference the installed config"
+[[ "$(plutil -extract ProgramArguments.0 raw -o - "$agent")" == "$installed" ]] || fail "main LaunchAgent does not decode the installed binary path"
+[[ "$(plutil -extract ProgramArguments.2 raw -o - "$agent")" == "$config" ]] || fail "main LaunchAgent does not decode the installed config path"
 
 "$installed" serve --config "$config" > "$test_root/service.out" 2> "$test_root/service.err" &
 service_pid="$!"
