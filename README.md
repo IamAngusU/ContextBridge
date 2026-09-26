@@ -92,6 +92,9 @@ curl -fsSL https://raw.githubusercontent.com/IamAngusU/ContextBridge/main/instal
 
 Choose **Existing Ollama**, then **4) Relay and worker on this device**. Leave the public HTTPS URL empty for this local demo. The installer downloads the latest release, checks its published checksum, creates a private configuration and pairs the local worker.
 
+> [!NOTE]
+> This README tracks current `main`, while the install commands above deliberately download the latest published release. Until the next release catches up, newer main-only commands such as `cluster estimate`, `cluster lan relocate`, and `pair --interactive` require a build from current source. Release/onboarding parity is tracked in #36.
+
 Open a **new terminal**. If the installer did not start the service, run `contextbridge run` and leave that terminal open. In another terminal:
 
 ```sh
