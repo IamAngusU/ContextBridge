@@ -39,6 +39,7 @@ without sending an inference request.
 | Producer-required E2EE | `producer_required_e2ee_v1`, `privacy.e2ee_required` | Token-bound fail-closed rejection of cleartext job and unsupported cleartext pipeline admission; payload confidentiality only, not coordination anonymity |
 | Out-of-tree adapter | `contextbridge.adapter.v2` | Scoped principal, endpoint capability, and per-generation lease capability; no standalone adapter certification suite is claimed yet |
 | Portable resource pack | `.contextbridge-pack.json`, `schema_version: 1` | Bounded discovery and identity validation; discovery is not execution approval |
+| Runtime lifecycle ownership | `runtime.engines.*.lifecycle_owner` | External APIs and externally started runtimes are observed but never stopped by CB; only a llama.cpp process actually started by CB reports `contextbridge` ownership |
 
 The runtime protocol manifest publishes exact contract versions, feature IDs,
 stable admission/runtime failure-code catalogs, and hard limits. Consumers

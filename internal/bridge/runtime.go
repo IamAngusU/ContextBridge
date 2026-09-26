@@ -30,18 +30,19 @@ type RuntimeStatus struct {
 }
 
 type EngineStatus struct {
-	Name      string         `json:"name"`
-	Type      string         `json:"type"`
-	Remote    bool           `json:"remote,omitempty"`
-	State     string         `json:"state"`
-	URL       string         `json:"url,omitempty"`
-	Model     string         `json:"model,omitempty"`
-	Affinity  string         `json:"affinity,omitempty"`
-	Warning   string         `json:"warning,omitempty"`
-	Version   string         `json:"version,omitempty"`
-	Models    []RuntimeModel `json:"models,omitempty"`
-	UpdatedAt time.Time      `json:"updated_at"`
-	Restarts  int            `json:"restarts"`
+	Name           string         `json:"name"`
+	Type           string         `json:"type"`
+	Remote         bool           `json:"remote,omitempty"`
+	State          string         `json:"state"`
+	URL            string         `json:"url,omitempty"`
+	Model          string         `json:"model,omitempty"`
+	Affinity       string         `json:"affinity,omitempty"`
+	LifecycleOwner string         `json:"lifecycle_owner,omitempty"`
+	Warning        string         `json:"warning,omitempty"`
+	Version        string         `json:"version,omitempty"`
+	Models         []RuntimeModel `json:"models,omitempty"`
+	UpdatedAt      time.Time      `json:"updated_at"`
+	Restarts       int            `json:"restarts"`
 }
 
 type RuntimeModel struct {
@@ -77,11 +78,11 @@ type RuntimeManager struct {
 func NewRuntimeManager(cfg config.Config, logger *log.Logger) *RuntimeManager {
 	manager := &RuntimeManager{cfg: cfg, logger: logger, engines: map[string]EngineStatus{}}
 	for name, engine := range cfg.Engines {
-		manager.engines[name] = EngineStatus{Name: name, Type: engine.Type, State: "checking", URL: engineURL(engine), Model: engine.Model, UpdatedAt: time.Now().UTC()}
+		manager.engines[name] = EngineStatus{Name: name, Type: engine.Type, State: "checking", URL: engineURL(engine), Model: engine.Model, LifecycleOwner: configuredLifecycleOwner(engine), UpdatedAt: time.Now().UTC()}
 	}
-	if _, ok := manager.engines["ollama"]; !ok {
+	if _, ok := manager.engines["ollama"]; !ok && needsImplicitOllama(cfg) {
 		engine, _ := cfg.Engine("ollama")
-		manager.engines["ollama"] = EngineStatus{Name: "ollama", Type: "ollama", State: "checking", URL: engine.URL, Model: engine.Model, UpdatedAt: time.Now().UTC()}
+		manager.engines["ollama"] = EngineStatus{Name: "ollama", Type: "ollama", State: "checking", URL: engine.URL, Model: engine.Model, LifecycleOwner: "external", UpdatedAt: time.Now().UTC()}
 	}
 	return manager
 }
@@ -141,7 +142,7 @@ func (m *RuntimeManager) refreshExternalEngines(parent context.Context) {
 	m.packs = append([]resourcepacks.Pack(nil), packs...)
 	m.mu.Unlock()
 	engines := m.cfg.Engines
-	if _, ok := engines["ollama"]; !ok {
+	if _, ok := engines["ollama"]; !ok && needsImplicitOllama(m.cfg) {
 		engine, _ := m.cfg.Engine("ollama")
 		engines = make(map[string]config.Engine, len(m.cfg.Engines)+1)
 		for name, configured := range m.cfg.Engines {
@@ -152,7 +153,7 @@ func (m *RuntimeManager) refreshExternalEngines(parent context.Context) {
 	for name, engine := range engines {
 		resolved, resolveErr := resolveResourceEngine(engine, packs)
 		if resolveErr != nil {
-			m.setEngine(EngineStatus{Name: name, Type: engine.Type, State: "unavailable", Model: engine.Model, Warning: resolveErr.Error(), UpdatedAt: time.Now().UTC()})
+			m.setEngine(EngineStatus{Name: name, Type: engine.Type, State: "unavailable", Model: engine.Model, LifecycleOwner: configuredLifecycleOwner(engine), Warning: resolveErr.Error(), UpdatedAt: time.Now().UTC()})
 			continue
 		}
 		engine = resolved
@@ -166,7 +167,7 @@ func (m *RuntimeManager) refreshExternalEngines(parent context.Context) {
 			continue
 		}
 		if engine.Type == "llama_cpp" && !engine.AutoStart {
-			status := EngineStatus{Name: name, Type: engine.Type, State: "stopped", URL: engineURL(engine), Model: engine.Model, UpdatedAt: time.Now().UTC()}
+			status := EngineStatus{Name: name, Type: engine.Type, State: "stopped", URL: engineURL(engine), Model: engine.Model, LifecycleOwner: "external", UpdatedAt: time.Now().UTC()}
 			ctx, cancel := context.WithTimeout(parent, time.Second)
 			if healthy(ctx, status.URL) {
 				status.State = "online"
@@ -195,7 +196,7 @@ func (m *RuntimeManager) supervise(ctx context.Context, name string, engine conf
 			return
 		}
 		if healthy(ctx, engineURL(engine)) {
-			m.setEngine(EngineStatus{Name: name, Type: engine.Type, State: "online", URL: engineURL(engine), Model: engine.Model, Affinity: "external", Models: []RuntimeModel{configuredRuntimeModel(engine, true)}, UpdatedAt: time.Now().UTC()})
+			m.setEngine(EngineStatus{Name: name, Type: engine.Type, State: "online", URL: engineURL(engine), Model: engine.Model, Affinity: "external", LifecycleOwner: "external", Models: []RuntimeModel{configuredRuntimeModel(engine, true)}, UpdatedAt: time.Now().UTC()})
 			select {
 			case <-ctx.Done():
 				return
@@ -281,7 +282,7 @@ func (m *RuntimeManager) runLlama(ctx context.Context, name string, engine confi
 		affinity = "CPU fallback"
 		warning = "GPU startup failed. ContextBridge used the configured CPU fallback."
 	}
-	m.setEngine(EngineStatus{Name: name, Type: engine.Type, State: "starting", URL: engineURL(engine), Model: engine.Model, Affinity: affinity, Warning: warning, UpdatedAt: time.Now().UTC()})
+	m.setEngine(EngineStatus{Name: name, Type: engine.Type, State: "starting", URL: engineURL(engine), Model: engine.Model, Affinity: affinity, LifecycleOwner: "contextbridge", Warning: warning, UpdatedAt: time.Now().UTC()})
 	ready := make(chan bool, 1)
 	go func() {
 		deadline := time.Now().Add(90 * time.Second)
@@ -303,7 +304,7 @@ func (m *RuntimeManager) runLlama(ctx context.Context, name string, engine confi
 			<-wait
 			return fmt.Errorf("engine did not become healthy; see %s", logFile.Name())
 		}
-		status := EngineStatus{Name: name, Type: engine.Type, State: "online", URL: engineURL(engine), Model: engine.Model, Affinity: affinity, Warning: warning, Models: []RuntimeModel{configuredRuntimeModel(engine, true)}, UpdatedAt: time.Now().UTC()}
+		status := EngineStatus{Name: name, Type: engine.Type, State: "online", URL: engineURL(engine), Model: engine.Model, Affinity: affinity, LifecycleOwner: "contextbridge", Warning: warning, Models: []RuntimeModel{configuredRuntimeModel(engine, true)}, UpdatedAt: time.Now().UTC()}
 		m.mu.RLock()
 		status.Restarts = m.engines[name].Restarts
 		m.mu.RUnlock()
@@ -326,6 +327,7 @@ func (m *RuntimeManager) markEngineError(name string, engine config.Engine, warn
 	status.State = "error"
 	status.URL = engineURL(engine)
 	status.Model = engine.Model
+	status.LifecycleOwner = ""
 	status.Warning = warning
 	status.UpdatedAt = time.Now().UTC()
 	status.Restarts++
@@ -370,6 +372,24 @@ func engineURL(engine config.Engine) string {
 	return ""
 }
 
+func needsImplicitOllama(cfg config.Config) bool {
+	for _, route := range cfg.Routes {
+		for _, provider := range append([]string{route.Provider}, route.Fallback...) {
+			if strings.EqualFold(strings.TrimSpace(provider), "ollama") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func configuredLifecycleOwner(engine config.Engine) string {
+	if engine.Type == "llama_cpp" && engine.AutoStart {
+		return ""
+	}
+	return "external"
+}
+
 func healthy(parent context.Context, base string) bool {
 	if base == "" {
 		return false
@@ -390,7 +410,7 @@ func openAICompatibleStatus(parent context.Context, name string, engine config.E
 	if engine.Remote {
 		affinity = "remote API"
 	}
-	status := EngineStatus{Name: name, Type: engine.Type, Remote: engine.Remote, State: "offline", URL: engine.URL, Model: engine.Model, Affinity: affinity, UpdatedAt: time.Now().UTC()}
+	status := EngineStatus{Name: name, Type: engine.Type, Remote: engine.Remote, State: "offline", URL: engine.URL, Model: engine.Model, Affinity: affinity, LifecycleOwner: "external", UpdatedAt: time.Now().UTC()}
 	ctx, cancel := context.WithTimeout(parent, 1500*time.Millisecond)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(engine.URL, "/")+"/models", nil)
@@ -474,7 +494,7 @@ func configuredRuntimeModel(engine config.Engine, loaded bool) RuntimeModel {
 }
 
 func ollamaStatus(parent context.Context, name string, engine config.Engine) EngineStatus {
-	status := EngineStatus{Name: name, Type: "ollama", State: "offline", URL: engine.URL, Model: engine.Model, UpdatedAt: time.Now().UTC()}
+	status := EngineStatus{Name: name, Type: "ollama", State: "offline", URL: engine.URL, Model: engine.Model, LifecycleOwner: "external", UpdatedAt: time.Now().UTC()}
 	base := strings.TrimRight(engine.URL, "/")
 	var version struct {
 		Version string `json:"version"`

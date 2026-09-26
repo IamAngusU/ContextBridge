@@ -52,6 +52,16 @@ func TestOpenAICompatibleRemoteRequiresExplicitEgressAndSecret(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatibleRejectsMisleadingManagedLifecycleFlag(t *testing.T) {
+	cfg := validOpenAICompatibleConfig(t)
+	engine := cfg.Engines["deepseek"]
+	engine.AutoStart = true
+	cfg.Engines["deepseek"] = engine
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "only for ContextBridge-managed llama_cpp") {
+		t.Fatalf("external API accepted a misleading auto_start flag: %v", err)
+	}
+}
+
 func TestIncrementalOutputCapabilityIsExplicitAndEngineScoped(t *testing.T) {
 	cfg := validOpenAICompatibleConfig(t)
 	engine := cfg.Engines["deepseek"]

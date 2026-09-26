@@ -576,6 +576,9 @@ func (c Config) Validate() error {
 		if engine.Type != "ollama" && engine.Type != "llama_cpp" && engine.Type != "adapter" && engine.Type != "openai_compatible" {
 			return fmt.Errorf("engine %s has unsupported type %s", name, engine.Type)
 		}
+		if engine.AutoStart && engine.Type != "llama_cpp" {
+			return fmt.Errorf("engine %s auto_start is supported only for ContextBridge-managed llama_cpp engines", name)
+		}
 		if engine.TimeoutSeconds < 0 || engine.TimeoutSeconds > 86400 {
 			return fmt.Errorf("engine %s timeout_seconds must be between 1 and 86400 when set", name)
 		}

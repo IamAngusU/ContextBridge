@@ -211,6 +211,23 @@ the engine config with `context_window_tokens`, `max_output_tokens`,
 Known hard limits are enforced before provider execution; missing limits do
 not silently become zero or an unsupported claim.
 
+## Externally managed runtimes
+
+An `openai_compatible` engine is always lifecycle-owned by the operator or its
+existing runtime manager. ContextBridge discovers its bounded model inventory
+and submits configured work; it does not install, start, stop or download
+anything for that service. A `llama_cpp` engine with `auto_start: false` has the
+same external lifecycle boundary. Only an `auto_start: true` `llama_cpp`
+process that CB actually starts is reported with lifecycle owner
+`contextbridge` in its runtime status.
+
+Runtime status reports `lifecycle_owner: external` or `contextbridge` where
+ownership is known. An external-only configuration no longer inserts or probes
+Ollama unless a configured route or fallback actually references `ollama`.
+Stopping ContextBridge leaves externally managed services running. Setting
+`auto_start: true` on an external API is rejected instead of being silently
+ignored.
+
 ## MCP stdio
 
 Generate a ready-to-paste generic MCP client entry with the exact executable
