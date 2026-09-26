@@ -190,7 +190,7 @@ func (p *Processor) Process(ctx context.Context, job Job) Output {
 			case "ollama":
 				output, err = p.ollama(ctx, job, route, engine, provider)
 			case "llama_cpp":
-				output, err = p.llamaCPP(ctx, job, route, engine)
+				output, err = p.llamaCPP(ctx, job, route, engine, provider)
 			case "openai_compatible":
 				output, err = p.openAICompatible(ctx, job, route, engine, provider)
 			case "adapter":
@@ -328,7 +328,7 @@ func (p *Processor) ollama(parent context.Context, job Job, route config.Route, 
 		}
 	}
 	if outputMode(job.Output) == "embedding" {
-		return p.ollamaEmbedding(ctx, job, engine, model, started)
+		return p.ollamaEmbedding(ctx, job, engine, provider, model, started)
 	}
 	prompt := trustedPrompt(job)
 	payload := map[string]interface{}{
@@ -1230,7 +1230,7 @@ func containsFolded(values []string, wanted string) bool {
 	return containsAllFolded(values, []string{wanted})
 }
 
-func (p *Processor) ollamaEmbedding(ctx context.Context, job Job, engine config.Engine, model string, started time.Time) (result Output, err error) {
+func (p *Processor) ollamaEmbedding(ctx context.Context, job Job, engine config.Engine, provider, model string, started time.Time) (result Output, err error) {
 	executionAttempted := false
 	defer func() {
 		if executionAttempted {
@@ -1258,12 +1258,12 @@ func (p *Processor) ollamaEmbedding(ctx context.Context, job Job, engine config.
 	if err != nil {
 		return Output{}, err
 	}
-	output, err := embeddingOutput(embeddings, job.TenantID, "ollama", model, time.Since(started))
+	output, err := embeddingOutput(embeddings, job.TenantID, provider, model, time.Since(started))
 	output.InputTokens, output.TotalTokens = promptTokens, promptTokens
 	return output, err
 }
 
-func (p *Processor) llamaCPP(parent context.Context, job Job, route config.Route, engine config.Engine) (result Output, err error) {
+func (p *Processor) llamaCPP(parent context.Context, job Job, route config.Route, engine config.Engine, provider string) (result Output, err error) {
 	executionAttempted := false
 	defer func() {
 		if executionAttempted {
@@ -1316,7 +1316,7 @@ func (p *Processor) llamaCPP(parent context.Context, job Job, route config.Route
 		if err != nil {
 			return Output{}, err
 		}
-		output, err := embeddingOutput(embeddings, job.TenantID, "llama_cpp", model, time.Since(started))
+		output, err := embeddingOutput(embeddings, job.TenantID, provider, model, time.Since(started))
 		output.InputTokens, output.TotalTokens = usage.PromptTokens, usage.TotalTokens
 		return output, err
 	}
@@ -1368,7 +1368,7 @@ func (p *Processor) llamaCPP(parent context.Context, job Job, route config.Route
 	if len(answer.Choices) == 0 {
 		return Output{}, errors.New("llama.cpp returned no choices")
 	}
-	output := NormalizeOutput([]byte(answer.Choices[0].Message.Content), job.Output, "llama_cpp", model, time.Since(started))
+	output := NormalizeOutput([]byte(answer.Choices[0].Message.Content), job.Output, provider, model, time.Since(started))
 	finishReason, finishErr := normalizeProviderFinishReason(answer.Choices[0].FinishReason)
 	if finishErr != nil {
 		return Output{}, finishErr

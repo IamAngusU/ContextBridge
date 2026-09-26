@@ -151,11 +151,12 @@ type Tunnel struct {
 }
 
 type RAG struct {
-	Enabled        bool   `yaml:"enabled" json:"enabled"`
-	Backend        string `yaml:"backend" json:"backend"`
-	Directory      string `yaml:"directory" json:"directory"`
-	EmbeddingRoute string `yaml:"embedding_route" json:"embedding_route"`
-	MaxDocuments   int    `yaml:"max_documents" json:"max_documents"`
+	Enabled           bool   `yaml:"enabled" json:"enabled"`
+	Backend           string `yaml:"backend" json:"backend"`
+	Directory         string `yaml:"directory" json:"directory"`
+	EmbeddingRoute    string `yaml:"embedding_route" json:"embedding_route"`
+	EmbeddingRevision string `yaml:"embedding_revision,omitempty" json:"embedding_revision,omitempty"`
+	MaxDocuments      int    `yaml:"max_documents" json:"max_documents"`
 }
 
 type Providers struct {
@@ -732,6 +733,11 @@ func (c Config) Validate() error {
 		if _, ok := c.Routes[c.RAG.EmbeddingRoute]; !ok {
 			return fmt.Errorf("RAG embedding route %s does not exist", c.RAG.EmbeddingRoute)
 		}
+	}
+	if revision := c.RAG.EmbeddingRevision; len(revision) > 200 || strings.TrimSpace(revision) != revision || !utf8.ValidString(revision) || strings.IndexFunc(revision, func(r rune) bool {
+		return unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp)
+	}) >= 0 {
+		return errors.New("rag.embedding_revision must be at most 200 UTF-8 bytes without surrounding whitespace or control characters")
 	}
 	if c.RAG.MaxDocuments < 0 || c.RAG.MaxDocuments > 1_000_000 {
 		return errors.New("rag.max_documents must be between 1 and 1000000 when set")
@@ -1594,6 +1600,7 @@ rag:
   backend: local
   directory: ./data/rag
   embedding_route: embedding
+  embedding_revision: ""
   max_documents: 10000
 
 cluster:

@@ -228,6 +228,42 @@ Stopping ContextBridge leaves externally managed services running. Setting
 `auto_start: true` on an external API is rejected instead of being silently
 ignored.
 
+## Bring your own context and vector systems
+
+ContextBridge's built-in local RAG store is optional. An application may own
+document parsing, chunking, retrieval, reranking and a remote vector database,
+then submit only the selected bounded context through the normal job contract.
+CB does not need to copy or replace that system to route the resulting model
+work. The application remains authoritative for document ACLs, deletion,
+retention, citations and index lifecycle; CB remains authoritative for the
+admitted execution, placement, policy, lease, finality and receipt evidence.
+
+For the built-in store, vectors are never treated as compatible merely because
+their dimensions match. Each vector carries a
+`contextbridge.embedding-space.v1` descriptor derived from the actual provider,
+runtime, model, known immutable model revision/digest, dimensions, similarity,
+normalization evidence and a digest of query/passage preprocessing and pooling.
+Ingest and query results expose the space fingerprint and whether its strongest
+evidence is `immutable_revision`, `operator_revision` or `mutable_alias`.
+
+When an external provider exposes only a mutable model alias, set
+`rag.embedding_revision` to an operator-reviewed immutable provider revision
+and change it whenever the deployed embedding content or preprocessing changes.
+That field is evidence supplied by the operator, not provider attestation.
+
+Changing model, revision, pooling, prefixes or dimensions creates a different
+space. Partial mixing and cross-space queries fail closed with
+`embedding_space_mismatch`. A legacy local store has no space identity and
+returns `embedding_space_reindex_required`; reingesting the complete tenant in
+one batch safely replaces every legacy vector. For a corpus larger than one
+embedding batch, ingest it under a new tenant namespace and switch the
+application after that namespace is complete. CB never silently blesses legacy
+vectors as belonging to the currently configured model.
+
+No remote vector backend is implied by this contract. A future backend must
+preserve the same tenant and embedding-space boundaries rather than treating a
+matching vendor collection name as sufficient trust.
+
 ## MCP stdio
 
 Generate a ready-to-paste generic MCP client entry with the exact executable

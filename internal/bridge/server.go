@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
@@ -370,10 +371,14 @@ func (s *Server) processJob(ctx context.Context, job Job) Output {
 		if vectors.Error != "" || len(vectors.Embeddings) != len(job.Documents) {
 			return ragOutputWithEmbeddingUsage(OutputError("rag", vectors.Provider, vectors.Model, "embedding_failed", time.Since(started)), vectors)
 		}
-		if err := s.rag.Upsert(ctx, job.TenantID, job.Documents, vectors.Embeddings); err != nil {
+		space, err := s.ragEmbeddingSpace(vectors)
+		if err != nil {
 			return ragOutputWithEmbeddingUsage(OutputError("rag", vectors.Provider, vectors.Model, err.Error(), time.Since(started)), vectors)
 		}
-		return ragOutputWithEmbeddingUsage(Output{Mode: "rag", Indexed: len(job.Documents), TenantID: job.TenantID, Provider: vectors.Provider, Model: vectors.Model, LatencyMS: time.Since(started).Milliseconds()}, vectors)
+		if err := s.rag.Upsert(ctx, job.TenantID, space, job.Documents, vectors.Embeddings); err != nil {
+			return ragOutputWithEmbeddingUsage(OutputError("rag", vectors.Provider, vectors.Model, err.Error(), time.Since(started)), vectors)
+		}
+		return ragOutputWithEmbeddingUsage(Output{Mode: "rag", Indexed: len(job.Documents), TenantID: job.TenantID, Provider: vectors.Provider, Model: vectors.Model, EmbeddingSpace: space.Fingerprint, EmbeddingEvidence: space.Evidence, LatencyMS: time.Since(started).Milliseconds()}, vectors)
 	}
 	query := strings.TrimSpace(job.Query)
 	if query == "" {
@@ -385,11 +390,71 @@ func (s *Server) processJob(ctx context.Context, job Job) Output {
 	if vectors.Error != "" || len(vectors.Embeddings) != 1 {
 		return ragOutputWithEmbeddingUsage(OutputError("rag", vectors.Provider, vectors.Model, "embedding_failed", time.Since(started)), vectors)
 	}
-	matches, err := s.rag.Search(ctx, job.TenantID, vectors.Embeddings[0], job.TopK)
+	space, err := s.ragEmbeddingSpace(vectors)
 	if err != nil {
 		return ragOutputWithEmbeddingUsage(OutputError("rag", vectors.Provider, vectors.Model, err.Error(), time.Since(started)), vectors)
 	}
-	return ragOutputWithEmbeddingUsage(Output{Mode: "rag", Matches: matches, TenantID: job.TenantID, Provider: vectors.Provider, Model: vectors.Model, LatencyMS: time.Since(started).Milliseconds()}, vectors)
+	matches, err := s.rag.Search(ctx, job.TenantID, space, vectors.Embeddings[0], job.TopK)
+	if err != nil {
+		return ragOutputWithEmbeddingUsage(OutputError("rag", vectors.Provider, vectors.Model, err.Error(), time.Since(started)), vectors)
+	}
+	return ragOutputWithEmbeddingUsage(Output{Mode: "rag", Matches: matches, TenantID: job.TenantID, Provider: vectors.Provider, Model: vectors.Model, EmbeddingSpace: space.Fingerprint, EmbeddingEvidence: space.Evidence, LatencyMS: time.Since(started).Milliseconds()}, vectors)
+}
+
+func (s *Server) ragEmbeddingSpace(output Output) (vectorstore.EmbeddingSpace, error) {
+	route := s.cfg.Route(s.cfg.RAG.EmbeddingRoute)
+	providerKey, runtimeType := strings.TrimSpace(output.Provider), strings.TrimSpace(output.Provider)
+	selectedEngine := config.Engine{}
+	candidates := append([]string{route.Provider}, route.Fallback...)
+	for _, candidate := range candidates {
+		engine, ok := s.cfg.Engine(candidate)
+		if !ok {
+			continue
+		}
+		providerMatches := strings.EqualFold(candidate, output.Provider) || strings.EqualFold(engine.Type, output.Provider)
+		modelMatches := output.Model == "" || strings.EqualFold(route.Model, output.Model) || strings.EqualFold(engine.Model, output.Model)
+		if providerMatches && modelMatches {
+			providerKey, runtimeType, selectedEngine = candidate, engine.Type, engine
+			break
+		}
+	}
+	modelName := strings.TrimSpace(output.Model)
+	if modelName == "" {
+		modelName = strings.TrimSpace(selectedEngine.Model)
+	}
+	configuredModel, hasConfiguredModel := s.cfg.Models[modelName]
+	if !hasConfiguredModel && selectedEngine.Model != "" {
+		configuredModel, hasConfiguredModel = s.cfg.Models[selectedEngine.Model]
+	}
+	revision := ""
+	operatorRevision := strings.TrimSpace(s.cfg.RAG.EmbeddingRevision)
+	evidence := "mutable_alias"
+	modelDigest := ""
+	if hasConfiguredModel {
+		modelDigest = configuredModel.SHA256
+		revision = configuredModel.Revision
+		if configuredModel.Revision != "" || configuredModel.SHA256 != "" {
+			evidence = "immutable_revision"
+		}
+	}
+	if evidence == "mutable_alias" && operatorRevision != "" {
+		evidence = "operator_revision"
+	}
+	strategy, err := json.Marshal(struct {
+		Runtime       string `json:"runtime"`
+		Pooling       string `json:"pooling,omitempty"`
+		QueryPrefix   string `json:"query_prefix,omitempty"`
+		PassagePrefix string `json:"passage_prefix,omitempty"`
+	}{Runtime: runtimeType, Pooling: selectedEngine.Pooling, QueryPrefix: configuredModel.QueryPrefix, PassagePrefix: configuredModel.PassagePrefix})
+	if err != nil {
+		return vectorstore.EmbeddingSpace{}, err
+	}
+	strategyDigest := sha256.Sum256(strategy)
+	return vectorstore.NormalizeEmbeddingSpace(vectorstore.EmbeddingSpace{
+		Provider: providerKey, Runtime: runtimeType, Model: modelName, Revision: revision, OperatorRevision: operatorRevision, ModelSHA256: modelDigest,
+		Dimensions: output.Dimensions, Normalization: "provider_unspecified", Similarity: "cosine",
+		QueryPassageStrategySHA256: hex.EncodeToString(strategyDigest[:]), Evidence: evidence,
+	})
 }
 
 func derivedRAGEmbeddingJob(parent Job, route, role string) Job {

@@ -708,12 +708,46 @@ func TestEmbeddingAndRAGRoundTrip(t *testing.T) {
 		return submission
 	}
 	ingest := post(Job{Route: "rag_ingest", TenantID: "docs", Documents: []vectorstore.Document{{ID: "apple", Text: "apple document"}, {ID: "banana", Text: "banana document"}}})
-	if ingest.Output == nil || ingest.Output.Indexed != 2 {
+	if ingest.Output == nil || ingest.Output.Indexed != 2 || ingest.Output.EmbeddingSpace == "" || ingest.Output.EmbeddingEvidence != "mutable_alias" {
 		t.Fatalf("unexpected ingest output: %#v", ingest)
 	}
 	query := post(Job{Route: "rag_query", TenantID: "docs", Query: "apple question", TopK: 1})
-	if query.Output == nil || len(query.Output.Matches) != 1 || query.Output.Matches[0].ID != "apple" {
+	if query.Output == nil || len(query.Output.Matches) != 1 || query.Output.Matches[0].ID != "apple" || query.Output.EmbeddingSpace != ingest.Output.EmbeddingSpace {
 		t.Fatalf("unexpected query output: %#v", query)
+	}
+}
+
+func TestRAGEmbeddingSpaceBindsImmutableModelAndPreprocessing(t *testing.T) {
+	modelDigest := strings.Repeat("a", 64)
+	cfg := config.Config{
+		Routes:  map[string]config.Route{"embedding": {Provider: "jina", Task: "embedding"}},
+		Engines: map[string]config.Engine{"jina": {Type: "llama_cpp", Model: "jina-v4", Pooling: "mean"}},
+		Models: map[string]config.Model{"jina-v4": {
+			Repository: "jinaai/jina", File: "jina.gguf", Revision: strings.Repeat("b", 40), SHA256: modelDigest,
+			QueryPrefix: "Query: ", PassagePrefix: "Passage: ", Dimensions: 2048,
+		}},
+		RAG: config.RAG{EmbeddingRoute: "embedding"},
+	}
+	server := &Server{cfg: cfg}
+	space, err := server.ragEmbeddingSpace(Output{Provider: "jina", Model: "jina-v4", Dimensions: 2048})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if space.Provider != "jina" || space.Runtime != "llama_cpp" || space.ModelSHA256 != modelDigest || space.Evidence != "immutable_revision" || !space.Valid() {
+		t.Fatalf("unexpected immutable embedding space: %#v", space)
+	}
+	cfg.Models["jina-v4"] = config.Model{Repository: "jinaai/jina", File: "jina.gguf", QueryPrefix: "search: ", Dimensions: 2048}
+	changed, err := (&Server{cfg: cfg}).ragEmbeddingSpace(Output{Provider: "jina", Model: "jina-v4", Dimensions: 2048})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed.Fingerprint == space.Fingerprint || changed.Evidence != "mutable_alias" {
+		t.Fatalf("preprocessing/model evidence change did not create a distinct mutable space: %#v", changed)
+	}
+	cfg.RAG.EmbeddingRevision = "operator-pinned-r7"
+	pinned, err := (&Server{cfg: cfg}).ragEmbeddingSpace(Output{Provider: "jina", Model: "jina-v4", Dimensions: 2048})
+	if err != nil || pinned.Evidence != "operator_revision" || pinned.OperatorRevision != "operator-pinned-r7" || pinned.Revision != "" {
+		t.Fatalf("operator revision not represented: %#v, %v", pinned, err)
 	}
 }
 
