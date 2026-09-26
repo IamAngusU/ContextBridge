@@ -952,6 +952,10 @@ func (r *Relay) handleRouteExplain(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, err)
 		return
 	}
+	if err := scopeTenantID(&input.TenantID, record); err != nil {
+		writeErrorCode(w, http.StatusForbidden, AdmissionCodeTenantScopeForbidden, err)
+		return
+	}
 	policyDecision, err := EvaluateExecutionPolicy(r.cfg.ExecutionPolicy, input.TenantID, input.Requirements, time.Now().UTC())
 	if err != nil {
 		var violation *PolicyViolation
@@ -1098,7 +1102,7 @@ func (r *Relay) handleSubmit(w http.ResponseWriter, req *http.Request) {
 			status = http.StatusForbidden
 		} else if errors.Is(err, ErrIdempotencyConflict) {
 			status = http.StatusConflict
-		} else if errors.Is(err, ErrE2EERequired) {
+		} else if errors.Is(err, ErrE2EERequired) || errors.Is(err, ErrTenantScopeForbidden) {
 			status = http.StatusForbidden
 		} else if errors.Is(err, os.ErrExist) {
 			status = http.StatusConflict
@@ -1245,6 +1249,10 @@ func (r *Relay) handleReserve(w http.ResponseWriter, req *http.Request) {
 	}
 	if err := validateTenantID(input.TenantID); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err)
+		return
+	}
+	if err := scopeTenantID(&input.TenantID, record); err != nil {
+		writeErrorCode(w, http.StatusForbidden, AdmissionCodeTenantScopeForbidden, err)
 		return
 	}
 	policyDecision, err := EvaluateExecutionPolicy(r.cfg.ExecutionPolicy, input.TenantID, input.Requirements, time.Now().UTC())
@@ -2495,6 +2503,27 @@ func scopeRequirements(requirements *Requirements, record TokenRecord) error {
 		} else if requirements.Egress != "local_only" {
 			return errors.New("producer token permits only local execution")
 		}
+	}
+	return nil
+}
+
+// scopeTenantID turns tenant_id from a caller-selected policy label into an
+// authenticated boundary only when the administrator placed an allowlist on
+// this producer credential. Unscoped credentials retain the original
+// caller-selected behavior for backwards compatibility.
+func scopeTenantID(tenantID *string, record TokenRecord) error {
+	if record.Role != "producer" || len(record.ProducerLimits.AllowedTenants) == 0 {
+		return nil
+	}
+	if *tenantID == "" {
+		if len(record.ProducerLimits.AllowedTenants) == 1 {
+			*tenantID = record.ProducerLimits.AllowedTenants[0]
+			return nil
+		}
+		return errors.New("tenant_id is required for this producer credential")
+	}
+	if !contains(record.ProducerLimits.AllowedTenants, *tenantID) {
+		return ErrTenantScopeForbidden
 	}
 	return nil
 }

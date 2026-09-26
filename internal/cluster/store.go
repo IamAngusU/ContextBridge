@@ -93,6 +93,7 @@ var (
 	ErrWorkerCredentialInvalid     = errors.New("worker credential is revoked, expired, or does not authorize this node")
 	ErrPipelineParentTerminal      = errors.New("pipeline parent no longer authorizes child execution")
 	ErrE2EERequired                = errors.New("producer credential requires an end-to-end encrypted payload")
+	ErrTenantScopeForbidden        = errors.New("producer credential does not authorize this tenant_id")
 )
 
 type reservation struct {
@@ -353,7 +354,7 @@ func (s *Store) CreateTokenWithLimits(role, subject string, groups []string, lif
 }
 
 func validateProducerLimits(role string, limits ProducerLimits) error {
-	if role != "producer" && (limits.MaxQueuedJobs != 0 || limits.MaxJobsPerHour != 0 || len(limits.Providers) != 0 || limits.Egress != "" || limits.RequireE2EE) {
+	if role != "producer" && (limits.MaxQueuedJobs != 0 || limits.MaxJobsPerHour != 0 || len(limits.Providers) != 0 || len(limits.AllowedTenants) != 0 || limits.Egress != "" || limits.RequireE2EE) {
 		return errors.New("producer limits may only be assigned to producer tokens")
 	}
 	if limits.MaxQueuedJobs < 0 || limits.MaxQueuedJobs > maxQueuedJobsPerOwner {
@@ -376,6 +377,20 @@ func validateProducerLimits(role string, limits ProducerLimits) error {
 		}
 		seen[key] = struct{}{}
 	}
+	if len(limits.AllowedTenants) > 32 {
+		return errors.New("producer_limits.allowed_tenants accepts at most 32 tenant IDs")
+	}
+	seen = map[string]struct{}{}
+	for _, tenant := range limits.AllowedTenants {
+		if tenant == "" || validateTenantID(tenant) != nil {
+			return errors.New("producer_limits.allowed_tenants contains an invalid tenant ID")
+		}
+		key := strings.ToLower(tenant)
+		if _, exists := seen[key]; exists {
+			return errors.New("producer_limits.allowed_tenants contains a case-insensitive duplicate tenant ID")
+		}
+		seen[key] = struct{}{}
+	}
 	if limits.Egress != "" && limits.Egress != "local_only" {
 		return errors.New("producer_limits.egress must be empty or local_only")
 	}
@@ -384,6 +399,7 @@ func validateProducerLimits(role string, limits ProducerLimits) error {
 
 func normalizeProducerLimits(limits ProducerLimits) ProducerLimits {
 	limits.Providers = cleanList(limits.Providers, 32, 80)
+	limits.AllowedTenants = cleanList(limits.AllowedTenants, 32, 200)
 	limits.Egress = strings.ToLower(strings.TrimSpace(limits.Egress))
 	return limits
 }
@@ -1166,6 +1182,9 @@ func (s *Store) admitPreparedJobTx(tx *bolt.Tx, job *Job, maxQueued int, limits 
 	if limits.RequireE2EE && job.SealedPayload == nil {
 		return false, ErrE2EERequired
 	}
+	if len(limits.AllowedTenants) > 0 && !contains(limits.AllowedTenants, job.TenantID) {
+		return false, ErrTenantScopeForbidden
+	}
 	if idempotencyKey != "" {
 		existing, found, lookupErr := lookupIdempotentJobTx(tx, job.OwnerSubject, idempotencyKey, requestHash)
 		if lookupErr != nil {
@@ -1515,6 +1534,9 @@ func (s *Store) consumeReservationAdmitted(id, secret string, sealed *SealedEnve
 	}
 	if sealed == nil {
 		return Job{}, false, errors.New("reserved assignments require a sealed payload")
+	}
+	if len(limits.AllowedTenants) > 0 && !contains(limits.AllowedTenants, tenant) {
+		return Job{}, false, ErrTenantScopeForbidden
 	}
 	if idempotencyKey != "" {
 		if err := ValidateIdempotencyKey(idempotencyKey); err != nil {

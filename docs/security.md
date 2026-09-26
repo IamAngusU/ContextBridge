@@ -31,6 +31,15 @@ but it does not hide coordination metadata, the ciphertext length, or content
 from the selected worker and any downstream provider the worker invokes.
 See [Privacy boundaries](privacy.md).
 
+The authenticated producer subject owns jobs. `tenant_id` is otherwise a
+caller-selected logical namespace and execution-policy selector, not proof of
+customer identity. Administrators can issue a producer credential with
+`allowed_tenants`; the relay then binds a single omitted tenant automatically
+or rejects values outside the credential scope with
+`scope.tenant_forbidden`, before policy selection. Applications still
+authenticate and authorize their own users. See
+[Producer identity and tenant labels](tenancy.md).
+
 For an E2EE failure, the relay receives only a bounded stable failure code and
 a generic failure label. Provider and local-runtime diagnostic text stays at
 the worker/operator boundary because it can reflect decrypted payload content.

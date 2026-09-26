@@ -11,6 +11,7 @@ contextbridge integrate relay \
   --lifetime-hours 720 \
   --max-queued-jobs 4 \
   --max-jobs-per-hour 60 \
+  --allowed-tenants demo-server-app \
   --write-env ./contextbridge-producer.env
 ```
 

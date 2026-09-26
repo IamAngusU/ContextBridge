@@ -322,6 +322,13 @@ contextbridge cluster token create --role producer --subject my-app --max-jobs-p
 
 This prints token JSON. Store it securely; **never give an application the relay admin token**. The optional limits are stored with the credential and enforced durably by the relay. `--providers ollama --egress local_only` can additionally prevent that credential from selecting a remote route. For a separate CLI client, save the returned JSON as a private **UTF-8** file named `producer-token.json` and transfer it through a secure channel. Do not commit it.
 
+`tenant_id` is a caller-selected namespace and policy selector, not customer
+authentication. For a customer- or project-specific token, add
+`--allowed-tenants customer-42`; a single value is applied when omitted and a
+different value fails before policy selection. Multiple comma-separated
+values require the client to choose one exact allowed value. See
+[Producer identity and tenant labels](docs/tenancy.md).
+
 For an application that must never submit cleartext payloads, issue a separate
 credential with `--require-e2ee`. The relay then rejects cleartext admission
 with `privacy.e2ee_required`; a forgotten client flag cannot silently weaken
