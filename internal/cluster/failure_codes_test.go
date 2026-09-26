@@ -16,6 +16,7 @@ func TestWorkerFailureCodesAreBoundedAndBackwardCompatible(t *testing.T) {
 		{message: "adapter_automation_error: provider dialog", want: FailureAdapterAutomation},
 		{message: "cost_budget_exceeded: reservation", want: FailureCostBudgetExceeded},
 		{message: "cost_budget_unverifiable: unknown price", want: FailureCostBudgetUnverifiable},
+		{message: "execution_state_ambiguous: provider timed out", want: FailureExecutionStateAmbiguous},
 		{message: "images_missing: expected 1", want: FailureArtifactRequirement},
 		{message: "provider_not_bound_to_local_route: missing", want: FailureProviderRouteUnavailable},
 		{message: "unreviewed provider prose", want: FailureWorkerExecution},
@@ -34,6 +35,10 @@ func TestWorkerFailureCodesAreBoundedAndBackwardCompatible(t *testing.T) {
 }
 
 func TestWorkerFailureCodesPreserveContextCancellation(t *testing.T) {
+	ambiguous := errors.Join(errors.New("execution_state_ambiguous"), context.DeadlineExceeded)
+	if got := workerFailureCode(ambiguous); got != FailureExecutionStateAmbiguous {
+		t.Fatalf("ambiguous timeout code = %q", got)
+	}
 	if got := workerFailureCode(context.Canceled); got != FailureWorkerExecutionCancelled {
 		t.Fatalf("cancelled code = %q", got)
 	}

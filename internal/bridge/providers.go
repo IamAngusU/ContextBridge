@@ -113,10 +113,18 @@ func (p *Processor) ProcessIncremental(ctx context.Context, job Job, emit func(s
 	if err != nil {
 		failure := "providers_unavailable"
 		diagnostic := strings.TrimSpace(err.Error())
+		var ambiguous *providerExecutionAmbiguousError
+		if errors.As(err, &ambiguous) {
+			failure = diagnostic
+		}
 		if strings.HasPrefix(diagnostic, "cost_budget_exceeded:") || strings.HasPrefix(diagnostic, "cost_budget_unverifiable:") {
 			failure = diagnostic
 		}
-		return OutputError("text", route.Provider, engine.Model, failure, 0)
+		failed := OutputError("text", route.Provider, engine.Model, failure, 0)
+		if ambiguous != nil {
+			failed.CostStatus = "unknown"
+		}
+		return failed
 	}
 	if output.CostStatus == "" {
 		output.CostStatus = "unknown"
@@ -200,7 +208,9 @@ func (p *Processor) Process(ctx context.Context, job Job) Output {
 		lastProviderError = strings.TrimSpace(err.Error())
 		var ambiguous *providerExecutionAmbiguousError
 		if errors.As(err, &ambiguous) {
-			return OutputError(outputMode(job.Output), provider, engine.Model, lastProviderError, 0)
+			failed := OutputError(outputMode(job.Output), provider, engine.Model, lastProviderError, 0)
+			failed.CostStatus = "unknown"
+			return failed
 		}
 	}
 	failure := "providers_unavailable"
@@ -216,11 +226,17 @@ func (p *Processor) Process(ctx context.Context, job Job) Output {
 	return OutputError(outputMode(job.Output), "contextbridge", "fallback", failure, 0)
 }
 
-type providerExecutionAmbiguousError struct{ cause error }
+type providerExecutionAmbiguousError struct {
+	cause   error
+	message string
+}
 
 func (e *providerExecutionAmbiguousError) Error() string {
 	if e == nil || e.cause == nil {
 		return "execution_state_ambiguous"
+	}
+	if e.message != "" {
+		return e.message
 	}
 	return e.cause.Error()
 }
@@ -230,6 +246,20 @@ func (e *providerExecutionAmbiguousError) Unwrap() error {
 		return nil
 	}
 	return e.cause
+}
+
+// Once Do begins, a transport error or invalid response cannot prove that the
+// provider did not execute the request. Keep the cause for internal callers,
+// but expose only a stable code to avoid returning provider diagnostics.
+func ambiguousHTTPExecution(err error) error {
+	if err == nil {
+		return nil
+	}
+	var ambiguous *providerExecutionAmbiguousError
+	if errors.As(err, &ambiguous) {
+		return err
+	}
+	return &providerExecutionAmbiguousError{cause: err, message: "execution_state_ambiguous"}
 }
 
 func validateResolvedEngineEgress(job Job, engine config.Engine) error {
@@ -264,7 +294,13 @@ func validateResolvedEngineEgress(job Job, engine config.Engine) error {
 	return nil
 }
 
-func (p *Processor) ollama(parent context.Context, job Job, route config.Route, engine config.Engine, provider string) (Output, error) {
+func (p *Processor) ollama(parent context.Context, job Job, route config.Route, engine config.Engine, provider string) (result Output, err error) {
+	executionAttempted := false
+	defer func() {
+		if executionAttempted {
+			err = ambiguousHTTPExecution(err)
+		}
+	}()
 	started := time.Now()
 	timeout := time.Duration(engine.TimeoutSeconds) * time.Second
 	ctx, cancel := context.WithTimeout(parent, timeout)
@@ -330,6 +366,7 @@ func (p *Processor) ollama(parent context.Context, job Job, route config.Route, 
 		return Output{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	executionAttempted = true
 	resp, err := providerHTTPClient.Do(req)
 	if err != nil {
 		return Output{}, err
@@ -365,7 +402,13 @@ func (p *Processor) ollama(parent context.Context, job Job, route config.Route, 
 	return output, nil
 }
 
-func (p *Processor) openAICompatible(parent context.Context, job Job, route config.Route, engine config.Engine, provider string) (Output, error) {
+func (p *Processor) openAICompatible(parent context.Context, job Job, route config.Route, engine config.Engine, provider string) (result Output, err error) {
+	executionAttempted := false
+	defer func() {
+		if executionAttempted {
+			err = ambiguousHTTPExecution(err)
+		}
+	}()
 	started := time.Now()
 	timeout := time.Duration(engine.TimeoutSeconds) * time.Second
 	if timeout <= 0 {
@@ -465,6 +508,7 @@ func (p *Processor) openAICompatible(parent context.Context, job Job, route conf
 	}
 	request.Header.Set("Content-Type", "application/json")
 	applyOpenAIEngineAuth(request, engine)
+	executionAttempted = true
 	response, err := providerHTTPClient.Do(request)
 	if err != nil {
 		return Output{}, err
@@ -524,7 +568,13 @@ func (p *Processor) openAICompatible(parent context.Context, job Job, route conf
 	return output, nil
 }
 
-func (p *Processor) openAICompatibleIncremental(parent context.Context, job Job, route config.Route, engine config.Engine, provider string, emit func(string) error) (Output, error) {
+func (p *Processor) openAICompatibleIncremental(parent context.Context, job Job, route config.Route, engine config.Engine, provider string, emit func(string) error) (result Output, err error) {
+	executionAttempted := false
+	defer func() {
+		if executionAttempted {
+			err = ambiguousHTTPExecution(err)
+		}
+	}()
 	started := time.Now()
 	timeout := time.Duration(engine.TimeoutSeconds) * time.Second
 	if timeout <= 0 {
@@ -588,6 +638,7 @@ func (p *Processor) openAICompatibleIncremental(parent context.Context, job Job,
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "text/event-stream")
 	applyOpenAIEngineAuth(request, engine)
+	executionAttempted = true
 	response, err := providerHTTPClient.Do(request)
 	if err != nil {
 		return Output{}, err
@@ -762,7 +813,13 @@ func scanOpenAISSE(reader io.Reader, consume func([]byte) error) error {
 	return flush()
 }
 
-func (p *Processor) openAICompatibleEmbedding(ctx context.Context, job Job, engine config.Engine, provider, model string, started time.Time) (Output, error) {
+func (p *Processor) openAICompatibleEmbedding(ctx context.Context, job Job, engine config.Engine, provider, model string, started time.Time) (result Output, err error) {
+	executionAttempted := false
+	defer func() {
+		if executionAttempted {
+			err = ambiguousHTTPExecution(err)
+		}
+	}()
 	inputs := embeddingInputs(job)
 	if len(inputs) == 0 {
 		return Output{}, errors.New("embedding task requires text or texts")
@@ -774,6 +831,7 @@ func (p *Processor) openAICompatibleEmbedding(ctx context.Context, job Job, engi
 	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(engine.URL, "/")+"/embeddings", bytes.NewReader(payload))
 	request.Header.Set("Content-Type", "application/json")
 	applyOpenAIEngineAuth(request, engine)
+	executionAttempted = true
 	response, err := providerHTTPClient.Do(request)
 	if err != nil {
 		return Output{}, err
@@ -1172,7 +1230,13 @@ func containsFolded(values []string, wanted string) bool {
 	return containsAllFolded(values, []string{wanted})
 }
 
-func (p *Processor) ollamaEmbedding(ctx context.Context, job Job, engine config.Engine, model string, started time.Time) (Output, error) {
+func (p *Processor) ollamaEmbedding(ctx context.Context, job Job, engine config.Engine, model string, started time.Time) (result Output, err error) {
+	executionAttempted := false
+	defer func() {
+		if executionAttempted {
+			err = ambiguousHTTPExecution(err)
+		}
+	}()
 	inputs := embeddingInputs(job)
 	if len(inputs) == 0 {
 		return Output{}, errors.New("embedding task requires text or texts")
@@ -1180,6 +1244,7 @@ func (p *Processor) ollamaEmbedding(ctx context.Context, job Job, engine config.
 	payload, _ := json.Marshal(map[string]interface{}{"model": model, "input": inputs})
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(engine.URL, "/")+"/api/embed", bytes.NewReader(payload))
 	req.Header.Set("Content-Type", "application/json")
+	executionAttempted = true
 	resp, err := providerHTTPClient.Do(req)
 	if err != nil {
 		return Output{}, err
@@ -1198,7 +1263,13 @@ func (p *Processor) ollamaEmbedding(ctx context.Context, job Job, engine config.
 	return output, err
 }
 
-func (p *Processor) llamaCPP(parent context.Context, job Job, route config.Route, engine config.Engine) (Output, error) {
+func (p *Processor) llamaCPP(parent context.Context, job Job, route config.Route, engine config.Engine) (result Output, err error) {
+	executionAttempted := false
+	defer func() {
+		if executionAttempted {
+			err = ambiguousHTTPExecution(err)
+		}
+	}()
 	started := time.Now()
 	ctx, cancel := context.WithTimeout(parent, time.Duration(engine.TimeoutSeconds)*time.Second)
 	defer cancel()
@@ -1231,6 +1302,7 @@ func (p *Processor) llamaCPP(parent context.Context, job Job, route config.Route
 		payload, _ := json.Marshal(map[string]interface{}{"model": model, "input": inputs})
 		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, base+"/v1/embeddings", bytes.NewReader(payload))
 		req.Header.Set("Content-Type", "application/json")
+		executionAttempted = true
 		resp, err := providerHTTPClient.Do(req)
 		if err != nil {
 			return Output{}, err
@@ -1267,6 +1339,7 @@ func (p *Processor) llamaCPP(parent context.Context, job Job, route config.Route
 	raw, _ := json.Marshal(payload)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, base+"/v1/chat/completions", bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
+	executionAttempted = true
 	resp, err := providerHTTPClient.Do(req)
 	if err != nil {
 		return Output{}, err
