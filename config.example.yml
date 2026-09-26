@@ -71,6 +71,15 @@ providers:
     principals: {}
 
 engines:
+  # Optional operator-reviewed model passport fields can be added to an engine:
+  # capabilities: [text, vision]
+  # context_window_tokens: 32768
+  # max_output_tokens: 4096
+  # max_input_images: 4
+  # max_image_bytes: 2097152
+  # max_total_image_bytes: 8388608
+  # image_media_types: [image/png, image/jpeg, image/webp]
+  # Missing values stay unknown and are never treated as zero.
   nuextract:
     type: llama_cpp
     model: nuextract3

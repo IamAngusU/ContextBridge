@@ -58,9 +58,40 @@ type Job struct {
 	TopK           int                    `json:"top_k,omitempty"`
 	ImageBase64    string                 `json:"image_base64,omitempty"`
 	ImageMediaType string                 `json:"image_media_type,omitempty"`
-	Metadata       map[string]interface{} `json:"metadata,omitempty"`
-	Output         OutputSpec             `json:"output,omitempty"`
-	CreatedAt      time.Time              `json:"created_at,omitempty"`
+	// Images is the bounded multi-image input contract. The legacy singular
+	// fields above remain accepted for existing clients, but a request must not
+	// mix both representations.
+	Images    []ImageInput           `json:"images,omitempty"`
+	Metadata  map[string]interface{} `json:"metadata,omitempty"`
+	Output    OutputSpec             `json:"output,omitempty"`
+	CreatedAt time.Time              `json:"created_at,omitempty"`
+}
+
+const (
+	MaximumInputImages           = 12
+	MaximumInputImageBytes       = 8 << 20
+	MaximumInputImagesTotalBytes = 8 << 20
+)
+
+// ImageInput carries one verified inline image. Remote URLs are deliberately
+// not accepted: producers must provide the bytes whose type is validated at
+// admission, so workers never perform an implicit network fetch.
+type ImageInput struct {
+	Name       string `json:"name,omitempty"`
+	MediaType  string `json:"media_type"`
+	DataBase64 string `json:"data_base64"`
+}
+
+// InputImages returns the canonical image list for providers. It preserves
+// the singular v1 fields as one item without mutating the submitted job.
+func (job Job) InputImages() []ImageInput {
+	if len(job.Images) > 0 {
+		return job.Images
+	}
+	if job.ImageBase64 == "" {
+		return nil
+	}
+	return []ImageInput{{MediaType: job.ImageMediaType, DataBase64: job.ImageBase64}}
 }
 
 type OutputSpec struct {

@@ -224,7 +224,7 @@ func TestSelectOllamaModelNeverPromotesANameGuess(t *testing.T) {
 	}
 }
 
-func TestAutomaticOllamaVisionJobUsesVerifiedModelAndCarriesImage(t *testing.T) {
+func TestAutomaticOllamaVisionJobUsesVerifiedModelAndCarriesMultipleImages(t *testing.T) {
 	var generated struct {
 		Model   string   `json:"model"`
 		Images  []string `json:"images"`
@@ -256,13 +256,26 @@ func TestAutomaticOllamaVisionJobUsesVerifiedModelAndCarriesImage(t *testing.T) 
 		Providers: config.Providers{Ollama: config.OllamaProvider{URL: server.URL, Model: "auto", Images: true, Timeout: 5}},
 	}
 	output := NewProcessor(cfg, nil).Process(context.Background(), Job{
-		Prompt: "Describe this image.", ImageBase64: "dmVyaWZpZWQ=", ImageMediaType: "image/png", Output: OutputSpec{Mode: "text"},
+		Prompt: "Compare these images.", Images: []ImageInput{{MediaType: "image/png", DataBase64: "dmVyaWZpZWQ="}, {MediaType: "image/jpeg", DataBase64: "c2Vjb25k"}}, Output: OutputSpec{Mode: "text"},
 	})
 	if output.Error != "" || output.Text != "described" || output.Model != "opaque-vl" {
 		t.Fatalf("verified automatic vision job failed: %#v", output)
 	}
-	if generated.Model != "opaque-vl" || len(generated.Images) != 1 || generated.Images[0] != "dmVyaWZpZWQ=" || generated.Options.NumCtx != 8192 {
+	if generated.Model != "opaque-vl" || len(generated.Images) != 2 || generated.Images[0] != "dmVyaWZpZWQ=" || generated.Images[1] != "c2Vjb25k" || generated.Options.NumCtx != 8192 {
 		t.Fatalf("selected model or verified image was not sent: %#v", generated)
+	}
+}
+
+func TestEngineImagePassportEnforcesCountBytesAndMediaType(t *testing.T) {
+	engine := config.Engine{MaxInputImages: 1, MaxImageBytes: 4, MaxTotalImageBytes: 4, ImageMediaTypes: []string{"image/png"}}
+	if err := validateEngineImageInputs(engine, []ImageInput{{MediaType: "image/png", DataBase64: "YQ=="}}); err != nil {
+		t.Fatalf("valid engine image input was rejected: %v", err)
+	}
+	if err := validateEngineImageInputs(engine, []ImageInput{{MediaType: "image/png", DataBase64: "YQ=="}, {MediaType: "image/png", DataBase64: "Yg=="}}); err == nil || !strings.Contains(err.Error(), "at most 1") {
+		t.Fatalf("known image-count limit was not enforced: %v", err)
+	}
+	if err := validateEngineImageInputs(engine, []ImageInput{{MediaType: "image/jpeg", DataBase64: "YQ=="}}); err == nil || !strings.Contains(err.Error(), "media type") {
+		t.Fatalf("known media-type limit was not enforced: %v", err)
 	}
 }
 

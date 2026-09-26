@@ -109,6 +109,12 @@ type Requirements struct {
 	MinFreeVRAM             uint64   `json:"min_free_vram_bytes,omitempty" yaml:"min_free_vram_bytes,omitempty"`
 	Vision                  bool     `json:"vision,omitempty" yaml:"vision,omitempty"`
 	Embedding               bool     `json:"embedding,omitempty" yaml:"embedding,omitempty"`
+	// InputImageCount lets the scheduler enforce a model's known hard image
+	// limit before dispatch. Zero means no image input, never "unknown".
+	InputImageCount      int      `json:"input_image_count,omitempty" yaml:"input_image_count,omitempty"`
+	InputImageBytes      int64    `json:"input_image_bytes,omitempty" yaml:"input_image_bytes,omitempty"`
+	InputImageMaxBytes   int64    `json:"input_image_max_bytes,omitempty" yaml:"input_image_max_bytes,omitempty"`
+	InputImageMediaTypes []string `json:"input_image_media_types,omitempty" yaml:"input_image_media_types,omitempty"`
 	// Egress is an authenticated producer constraint. local_only fails closed
 	// unless the relay classifies the explicit provider as local;
 	// remote_allowed does not override a stricter operator policy.
@@ -139,6 +145,14 @@ type ModelCapability struct {
 	Embedding            bool     `json:"embedding"`
 	CapabilitiesVerified bool     `json:"capabilities_verified"`
 	CapabilitySource     string   `json:"capability_source,omitempty"`
+	ContextWindowTokens  int      `json:"context_window_tokens,omitempty"`
+	MaxOutputTokens      int      `json:"max_output_tokens,omitempty"`
+	MaxInputImages       int      `json:"max_input_images,omitempty"`
+	MaxImageBytes        int64    `json:"max_image_bytes,omitempty"`
+	MaxTotalImageBytes   int64    `json:"max_total_image_bytes,omitempty"`
+	ImageMediaTypes      []string `json:"image_media_types,omitempty"`
+	LimitsVerified       bool     `json:"limits_verified"`
+	LimitSource          string   `json:"limit_source,omitempty"`
 	VRAM                 int64    `json:"vram_bytes,omitempty"`
 	Provider             string   `json:"provider,omitempty"`
 }

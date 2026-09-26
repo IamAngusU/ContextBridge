@@ -1054,6 +1054,12 @@ func modelsCommand(args []string) error {
 				state = "loaded"
 			}
 			detail := strings.Join(model.Capabilities, "+")
+			if !model.CapabilitiesVerified && detail != "" {
+				detail += "?"
+			}
+			if model.ContextWindowTokens > 0 {
+				detail += fmt.Sprintf(" · ctx %d", model.ContextWindowTokens)
+			}
 			if model.Parameters != "" {
 				detail += " · " + model.Parameters
 			}

@@ -727,10 +727,22 @@ func mcpJobInputSchema() map[string]interface{} {
 				"type": "integer", "minimum": 0, "maximum": 50,
 				"description": "Maximum RAG matches; zero uses the configured default.",
 			},
-			"image_base64": shortString("Optional standard-base64 image input, limited to 8 MiB decoded. This is input only; MCP result artifacts remain unavailable."),
+			"image_base64": shortString("Legacy singular standard-base64 image input. Do not combine with images."),
 			"image_media_type": map[string]interface{}{
 				"type": "string", "pattern": `^image/`,
 				"description": "MIME type for image_base64, for example image/png.",
+			},
+			"images": map[string]interface{}{
+				"type": "array", "maxItems": 12,
+				"description": "Up to 12 inline image inputs, limited to 8 MiB decoded in aggregate. Remote URLs are not fetched; MCP result artifacts remain unavailable.",
+				"items": map[string]interface{}{
+					"type": "object", "additionalProperties": false, "required": []string{"media_type", "data_base64"},
+					"properties": map[string]interface{}{
+						"name":        map[string]interface{}{"type": "string", "maxLength": 255},
+						"media_type":  map[string]interface{}{"type": "string", "enum": []string{"image/png", "image/jpeg", "image/webp", "image/gif"}},
+						"data_base64": map[string]interface{}{"type": "string"},
+					},
+				},
 			},
 			"metadata": map[string]interface{}{
 				"type":                 "object",

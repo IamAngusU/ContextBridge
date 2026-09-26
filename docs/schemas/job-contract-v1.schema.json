@@ -28,6 +28,15 @@
         "preferred_nodes": { "type": "array", "maxItems": 32, "items": { "type": "string" } },
         "min_free_vram_bytes": { "type": "integer", "minimum": 0 },
         "vision": { "type": "boolean" },
+        "input_image_count": { "type": "integer", "minimum": 0, "maximum": 12 },
+        "input_image_bytes": { "type": "integer", "minimum": 0, "maximum": 8388608 },
+        "input_image_max_bytes": { "type": "integer", "minimum": 0, "maximum": 8388608 },
+        "input_image_media_types": {
+          "type": "array",
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": { "type": "string", "enum": ["image/png", "image/jpeg", "image/webp", "image/gif"] }
+        },
         "embedding": { "type": "boolean" },
         "egress": { "type": "string", "enum": ["local_only", "remote_allowed"] },
         "max_cost_usd": { "type": "number", "minimum": 0, "maximum": 1000000 }

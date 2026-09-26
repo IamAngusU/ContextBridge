@@ -124,6 +124,23 @@ without a false `[DONE]`. Requiring `final-result` always keeps the buffered
 mode. Fallback, JSON, vision, adapters, cluster transport and E2EE remain
 truthfully final-result-only in this first slice.
 
+## Model capability passports
+
+ContextBridge keeps two kinds of evidence separate:
+
+- capabilities such as text, vision and embedding; and
+- numeric or format limits such as context window, maximum output tokens,
+  input-image count, byte budgets and accepted image media types.
+
+Ollama `/api/show` is used as provider evidence for advertised capabilities
+and context length. Limits not reported by the runtime remain unknown. For an
+OpenAI-compatible or other operator-reviewed engine, declare known facts in
+the engine config with `context_window_tokens`, `max_output_tokens`,
+`max_input_images`, `max_image_bytes`, `max_total_image_bytes` and
+`image_media_types`. The pool publishes both the value and its evidence source.
+Known hard limits are enforced before provider execution; missing limits do
+not silently become zero or an unsupported claim.
+
 ## MCP stdio
 
 Generate a ready-to-paste generic MCP client entry with the exact executable

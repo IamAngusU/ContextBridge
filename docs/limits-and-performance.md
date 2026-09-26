@@ -8,7 +8,7 @@ The boundaries below describe what the public core accepts and verifies.
 
 | Boundary | Core behavior |
 | --- | --- |
-| Input image | One image per job, up to exactly 8 MiB after base64 decoding. |
+| Input images | Up to 12 PNG/JPEG/WebP/GIF inputs per job, sharing exactly 8 MiB after base64 decoding. The legacy singular field remains accepted but cannot be mixed with `images[]`. |
 | Response artifacts | Up to 12 verified artifacts, sharing one aggregate decoded-byte budget. |
 | Embedded artifact bytes | 12 MiB maximum in aggregate; `max_artifact_bytes` may lower it to 1 KiB–12 MiB. |
 | Text result | 64 KiB by default; callers may request 256 B–1 MiB. Oversize text is UTF-8-safely bounded and marked `truncated: true`. |

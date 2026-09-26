@@ -55,6 +55,14 @@ type RuntimeModel struct {
 	Capabilities         []string `json:"capabilities,omitempty"`
 	CapabilitiesVerified bool     `json:"capabilities_verified"`
 	CapabilitySource     string   `json:"capability_source,omitempty"`
+	ContextWindowTokens  int      `json:"context_window_tokens,omitempty"`
+	MaxOutputTokens      int      `json:"max_output_tokens,omitempty"`
+	MaxInputImages       int      `json:"max_input_images,omitempty"`
+	MaxImageBytes        int64    `json:"max_image_bytes,omitempty"`
+	MaxTotalImageBytes   int64    `json:"max_total_image_bytes,omitempty"`
+	ImageMediaTypes      []string `json:"image_media_types,omitempty"`
+	LimitsVerified       bool     `json:"limits_verified"`
+	LimitSource          string   `json:"limit_source,omitempty"`
 }
 
 type RuntimeManager struct {
@@ -163,6 +171,7 @@ func (m *RuntimeManager) refreshExternalEngines(parent context.Context) {
 			if healthy(ctx, status.URL) {
 				status.State = "online"
 				status.Affinity = "external"
+				status.Models = []RuntimeModel{configuredRuntimeModel(engine, true)}
 			}
 			cancel()
 			m.setEngine(status)
@@ -186,7 +195,7 @@ func (m *RuntimeManager) supervise(ctx context.Context, name string, engine conf
 			return
 		}
 		if healthy(ctx, engineURL(engine)) {
-			m.setEngine(EngineStatus{Name: name, Type: engine.Type, State: "online", URL: engineURL(engine), Model: engine.Model, Affinity: "external", UpdatedAt: time.Now().UTC()})
+			m.setEngine(EngineStatus{Name: name, Type: engine.Type, State: "online", URL: engineURL(engine), Model: engine.Model, Affinity: "external", Models: []RuntimeModel{configuredRuntimeModel(engine, true)}, UpdatedAt: time.Now().UTC()})
 			select {
 			case <-ctx.Done():
 				return
@@ -294,7 +303,7 @@ func (m *RuntimeManager) runLlama(ctx context.Context, name string, engine confi
 			<-wait
 			return fmt.Errorf("engine did not become healthy; see %s", logFile.Name())
 		}
-		status := EngineStatus{Name: name, Type: engine.Type, State: "online", URL: engineURL(engine), Model: engine.Model, Affinity: affinity, Warning: warning, UpdatedAt: time.Now().UTC()}
+		status := EngineStatus{Name: name, Type: engine.Type, State: "online", URL: engineURL(engine), Model: engine.Model, Affinity: affinity, Warning: warning, Models: []RuntimeModel{configuredRuntimeModel(engine, true)}, UpdatedAt: time.Now().UTC()}
 		m.mu.RLock()
 		status.Restarts = m.engines[name].Restarts
 		m.mu.RUnlock()
@@ -422,11 +431,46 @@ func openAICompatibleStatus(parent context.Context, name string, engine config.E
 	status.Models = []RuntimeModel{{
 		Name: engine.Model, Available: available, Loaded: false,
 		Capabilities: append([]string(nil), engine.Capabilities...), CapabilitiesVerified: true, CapabilitySource: "operator_config",
+		ContextWindowTokens: engine.ContextWindowTokens, MaxOutputTokens: engine.MaxOutputTokens,
+		MaxInputImages: engine.MaxInputImages, MaxImageBytes: engine.MaxImageBytes, MaxTotalImageBytes: engine.MaxTotalImageBytes,
+		ImageMediaTypes: append([]string(nil), engine.ImageMediaTypes...), LimitsVerified: configuredEngineLimits(engine), LimitSource: configuredEngineLimitSource(engine),
 	}}
 	if !available {
 		status.Warning = "configured model is absent from /models"
 	}
 	return status
+}
+
+func configuredEngineLimits(engine config.Engine) bool {
+	return engine.ContextWindowTokens > 0 || engine.MaxOutputTokens > 0 || engine.MaxInputImages > 0 || engine.MaxImageBytes > 0 || engine.MaxTotalImageBytes > 0 || len(engine.ImageMediaTypes) > 0
+}
+
+func configuredEngineLimitSource(engine config.Engine) string {
+	if configuredEngineLimits(engine) {
+		return "operator_config"
+	}
+	return ""
+}
+
+func configuredRuntimeModel(engine config.Engine, loaded bool) RuntimeModel {
+	capabilities := append([]string(nil), engine.Capabilities...)
+	if len(capabilities) == 0 {
+		switch strings.ToLower(strings.TrimSpace(engine.Mode)) {
+		case "embedding":
+			capabilities = []string{"embedding"}
+		case "vision":
+			capabilities = []string{"text", "vision"}
+		default:
+			capabilities = []string{"text"}
+		}
+	}
+	return RuntimeModel{
+		Name: engine.Model, Available: true, Loaded: loaded,
+		Capabilities: capabilities, CapabilitiesVerified: len(engine.Capabilities) > 0, CapabilitySource: "operator_config",
+		ContextWindowTokens: engine.ContextWindowTokens, MaxOutputTokens: engine.MaxOutputTokens,
+		MaxInputImages: engine.MaxInputImages, MaxImageBytes: engine.MaxImageBytes, MaxTotalImageBytes: engine.MaxTotalImageBytes,
+		ImageMediaTypes: append([]string(nil), engine.ImageMediaTypes...), LimitsVerified: configuredEngineLimits(engine), LimitSource: configuredEngineLimitSource(engine),
+	}
 }
 
 func ollamaStatus(parent context.Context, name string, engine config.Engine) EngineStatus {
@@ -526,10 +570,14 @@ func ollamaStatus(parent context.Context, name string, engine config.Engine) Eng
 			} else {
 				model.CapabilitySource = "name_inference"
 			}
+			applyConfiguredRuntimeLimits(model, engine)
 			continue
 		}
 		modelCtx, modelCancel := context.WithTimeout(capabilityCtx, 400*time.Millisecond)
-		model.Capabilities, model.CapabilitiesVerified, model.CapabilitySource = modelregistry.ResolveOllamaCapabilityEvidence(modelCtx, http.DefaultClient, base, model.Name, item.digest, item.capabilities, item.hint)
+		evidence := modelregistry.ResolveOllamaModelEvidence(modelCtx, http.DefaultClient, base, model.Name, item.digest, item.capabilities, item.hint)
+		model.Capabilities, model.CapabilitiesVerified, model.CapabilitySource = evidence.Capabilities, evidence.CapabilitiesVerified, evidence.CapabilitySource
+		model.ContextWindowTokens, model.LimitsVerified, model.LimitSource = evidence.ContextWindowTokens, evidence.LimitsVerified, evidence.LimitSource
+		applyConfiguredRuntimeLimits(model, engine)
 		modelCancel()
 	}
 	status.Affinity = "idle"
@@ -540,6 +588,36 @@ func ollamaStatus(parent context.Context, name string, engine config.Engine) Eng
 		}
 	}
 	return status
+}
+
+func applyConfiguredRuntimeLimits(model *RuntimeModel, engine config.Engine) {
+	if model == nil || !configuredEngineLimits(engine) {
+		return
+	}
+	if engine.ContextWindowTokens > 0 {
+		model.ContextWindowTokens = engine.ContextWindowTokens
+	}
+	if engine.MaxOutputTokens > 0 {
+		model.MaxOutputTokens = engine.MaxOutputTokens
+	}
+	if engine.MaxInputImages > 0 {
+		model.MaxInputImages = engine.MaxInputImages
+	}
+	if engine.MaxImageBytes > 0 {
+		model.MaxImageBytes = engine.MaxImageBytes
+	}
+	if engine.MaxTotalImageBytes > 0 {
+		model.MaxTotalImageBytes = engine.MaxTotalImageBytes
+	}
+	if len(engine.ImageMediaTypes) > 0 {
+		model.ImageMediaTypes = append([]string(nil), engine.ImageMediaTypes...)
+	}
+	model.LimitsVerified = true
+	if model.LimitSource == "ollama_show" {
+		model.LimitSource = "ollama_show+operator_config"
+	} else {
+		model.LimitSource = "operator_config"
+	}
 }
 
 func getJSON(ctx context.Context, url string, target interface{}) bool {

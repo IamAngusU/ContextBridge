@@ -103,7 +103,7 @@ func (s *Server) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusNotFound, err.Error(), "model_not_found")
 		return
 	}
-	prompt, history, image, mediaType, err := openAIJobInput(input.Messages)
+	prompt, history, images, err := openAIJobInput(input.Messages)
 	if err != nil {
 		writeOpenAIError(w, http.StatusUnprocessableEntity, err.Error(), "invalid_request_error")
 		return
@@ -131,7 +131,7 @@ func (s *Server) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		}
 		maxBytes = maxTokens * 4
 	}
-	job := Job{Source: "openai-compatible-api", Route: route, Prompt: prompt, Text: history, ImageBase64: image, ImageMediaType: mediaType, Output: OutputSpec{Mode: mode, MaxBytes: maxBytes}}
+	job := Job{Source: "openai-compatible-api", Route: route, Prompt: prompt, Text: history, Images: images, Output: OutputSpec{Mode: mode, MaxBytes: maxBytes}}
 	prepareJob(&job)
 	job.SessionID = "openai-" + job.ID
 	job.Metadata = map[string]interface{}{"contextbridge_new_session": true, "contextbridge_close_endpoint_after_job": true}
@@ -258,9 +258,9 @@ func (s *Server) openAIRoute(model string) (string, error) {
 	return route, nil
 }
 
-func openAIJobInput(messages []openAIMessage) (prompt, history, image, mediaType string, err error) {
+func openAIJobInput(messages []openAIMessage) (prompt, history string, images []ImageInput, err error) {
 	if len(messages) == 0 || len(messages) > 128 {
-		return "", "", "", "", errors.New("messages must contain between 1 and 128 entries")
+		return "", "", nil, errors.New("messages must contain between 1 and 128 entries")
 	}
 	lastUser := -1
 	for index := len(messages) - 1; index >= 0; index-- {
@@ -270,7 +270,7 @@ func openAIJobInput(messages []openAIMessage) (prompt, history, image, mediaType
 		}
 	}
 	if lastUser < 0 {
-		return "", "", "", "", errors.New("a user message is required")
+		return "", "", nil, errors.New("a user message is required")
 	}
 	trusted := make([]string, 0)
 	historyParts := make([]string, 0)
@@ -279,20 +279,20 @@ func openAIJobInput(messages []openAIMessage) (prompt, history, image, mediaType
 		switch role {
 		case "system", "developer", "user", "assistant", "tool":
 		default:
-			return "", "", "", "", fmt.Errorf("unsupported message role %q", message.Role)
+			return "", "", nil, fmt.Errorf("unsupported message role %q", message.Role)
 		}
-		text, data, mime, parseErr := parseOpenAIContent(message.Content)
+		text, contentImages, parseErr := parseOpenAIContent(message.Content)
 		if parseErr != nil {
-			return "", "", "", "", parseErr
+			return "", "", nil, parseErr
 		}
-		if data != "" {
+		if len(contentImages) > 0 {
 			if index != lastUser {
-				return "", "", "", "", errors.New("only the final user message may contain one image")
+				return "", "", nil, errors.New("only the final user message may contain images")
 			}
-			if image != "" {
-				return "", "", "", "", errors.New("only one image is supported per request")
+			if len(images)+len(contentImages) > MaximumInputImages {
+				return "", "", nil, fmt.Errorf("at most %d images are supported per request", MaximumInputImages)
 			}
-			image, mediaType = data, mime
+			images = append(images, contentImages...)
 		}
 		if role == "system" || role == "developer" {
 			if strings.TrimSpace(text) != "" {
@@ -311,22 +311,22 @@ func openAIJobInput(messages []openAIMessage) (prompt, history, image, mediaType
 	prompt = strings.TrimSpace(strings.Join(trusted, "\n\n"))
 	history = strings.Join(historyParts, "\n")
 	if prompt == "" {
-		return "", "", "", "", errors.New("the final user request is empty")
+		return "", "", nil, errors.New("the final user request is empty")
 	}
 	if len(prompt) > 20000 || len(history) > 200000 {
-		return "", "", "", "", errors.New("messages exceed ContextBridge prompt/history limits")
+		return "", "", nil, errors.New("messages exceed ContextBridge prompt/history limits")
 	}
-	return prompt, history, image, mediaType, nil
+	return prompt, history, images, nil
 }
 
-func parseOpenAIContent(raw json.RawMessage) (text, image, mediaType string, err error) {
+func parseOpenAIContent(raw json.RawMessage) (text string, images []ImageInput, err error) {
 	var plain string
 	if json.Unmarshal(raw, &plain) == nil {
-		return plain, "", "", nil
+		return plain, nil, nil
 	}
 	var parts []openAIContentPart
 	if json.Unmarshal(raw, &parts) != nil || len(parts) > 128 {
-		return "", "", "", errors.New("message content must be text or a bounded content-part array")
+		return "", nil, errors.New("message content must be text or a bounded content-part array")
 	}
 	texts := make([]string, 0)
 	for _, part := range parts {
@@ -334,8 +334,8 @@ func parseOpenAIContent(raw json.RawMessage) (text, image, mediaType string, err
 		case "text", "input_text":
 			texts = append(texts, part.Text)
 		case "image_url", "input_image":
-			if image != "" {
-				return "", "", "", errors.New("only one image is supported per request")
+			if len(images) >= MaximumInputImages {
+				return "", nil, fmt.Errorf("at most %d images are supported per request", MaximumInputImages)
 			}
 			var value string
 			if json.Unmarshal(part.ImageURL, &value) != nil {
@@ -343,20 +343,20 @@ func parseOpenAIContent(raw json.RawMessage) (text, image, mediaType string, err
 					URL string `json:"url"`
 				}
 				if json.Unmarshal(part.ImageURL, &object) != nil {
-					return "", "", "", errors.New("image_url must contain a data URL")
+					return "", nil, errors.New("image_url must contain a data URL")
 				}
 				value = object.URL
 			}
 			mime, data, decodeErr := decodeImageDataURL(value)
 			if decodeErr != nil {
-				return "", "", "", decodeErr
+				return "", nil, decodeErr
 			}
-			image, mediaType = data, mime
+			images = append(images, ImageInput{MediaType: mime, DataBase64: data})
 		default:
-			return "", "", "", fmt.Errorf("unsupported content part %q", part.Type)
+			return "", nil, fmt.Errorf("unsupported content part %q", part.Type)
 		}
 	}
-	return strings.Join(texts, "\n"), image, mediaType, nil
+	return strings.Join(texts, "\n"), images, nil
 }
 
 func decodeImageDataURL(value string) (string, string, error) {

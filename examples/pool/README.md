@@ -203,7 +203,8 @@ gain shell or filesystem privileges by mentioning an action in its prompt.
 | Typed text | Instruction in `payload.prompt`; content in `payload.text`. |
 | UTF-8 text files | The app reads an authorized, size-bounded file and supplies its text, not a path on the worker. |
 | Several text files | Submit separate jobs, or combine selected text with clear file boundaries within the request and model limits. There is no generic `files[]` field. |
-| One image | `payload.image_base64` and `payload.image_media_type`, plus `requirements.vision: true`; up to 8 MiB decoded. The chosen route/model must support vision. |
+| One image | Legacy `payload.image_base64` + `payload.image_media_type`, or one entry in `payload.images`; plus matching vision requirements. |
+| Several images | `payload.images[]` with `media_type` + `data_base64`; up to 12 images and 8 MiB decoded in aggregate. Set `requirements.input_image_count`, `input_image_bytes`, `input_image_max_bytes`, and `input_image_media_types` so the relay can preflight known model limits. |
 | PDF / DOCX / spreadsheet | Extract text or convert selected pages in your application first, or use a separately implemented integration. The public native job is not a universal document-upload API. |
 | Audio / video input | Do not confuse output-artifact support or advertised capabilities with a generic native audio/video upload endpoint. |
 
@@ -212,6 +213,9 @@ A real CLI image request, against a pool with a compatible Ollama vision model:
 ```sh
 contextbridge cluster chat --provider ollama --model auto --attach-image ./invoice.png --artifacts off --prompt "Read the invoice date and total. Do not guess missing values."
 ```
+
+Repeat `--attach-image` for a bounded comparison batch. The CLI derives the
+routing evidence automatically; hand-built cluster contracts must declare it.
 
 For web uploads, check application authorization, count, aggregate size,
 encoding/type and allowed input paths before creating jobs. PHP's

@@ -657,6 +657,12 @@ func responseJob(job Job) Job {
 	// visual input plus a legal 12 MiB artifact exceed transport response
 	// limits. Keep its media type and routing metadata, but not the bytes.
 	job.ImageBase64 = ""
+	if len(job.Images) > 0 {
+		job.Images = append([]ImageInput(nil), job.Images...)
+		for index := range job.Images {
+			job.Images[index].DataBase64 = ""
+		}
+	}
 	// These values exist only between the relay, worker, and adapter. They
 	// must not become producer-visible correlation or topology metadata.
 	job.ContextBridgeSessionKey = ""
@@ -1392,23 +1398,46 @@ func validateJob(job Job) error {
 	if math.IsNaN(job.MaxCostUSD) || math.IsInf(job.MaxCostUSD, 0) || job.MaxCostUSD < 0 || job.MaxCostUSD > 1_000_000 {
 		return errors.New("max_cost_usd must be a finite value from 0 through 1000000")
 	}
-	if len(job.ImageBase64) > base64.StdEncoding.EncodedLen(8<<20) {
+	if job.ImageBase64 == "" && job.ImageMediaType != "" {
+		return errors.New("image_media_type requires image_base64")
+	}
+	if len(job.Images) > 0 && (job.ImageBase64 != "" || job.ImageMediaType != "") {
+		return errors.New("use either images or the legacy image_base64 fields, not both")
+	}
+	if len(job.Images) > MaximumInputImages {
+		return fmt.Errorf("images accepts at most %d inputs", MaximumInputImages)
+	}
+	if len(job.ImageBase64) > base64.StdEncoding.EncodedLen(MaximumInputImageBytes) {
 		return errors.New("image exceeds the 8 MB decoded limit")
 	}
-	if job.ImageBase64 != "" {
-		mediaType := strings.ToLower(strings.TrimSpace(job.ImageMediaType))
+	totalImageBytes := 0
+	for index, image := range job.InputImages() {
+		if len(image.Name) > 255 || strings.IndexFunc(image.Name, unicode.IsControl) >= 0 {
+			return fmt.Errorf("images[%d].name must be at most 255 bytes without control characters", index)
+		}
+		if image.DataBase64 == "" {
+			return fmt.Errorf("images[%d].data_base64 is required", index)
+		}
+		if len(image.DataBase64) > base64.StdEncoding.EncodedLen(MaximumInputImageBytes) {
+			return fmt.Errorf("images[%d] exceeds the 8 MiB decoded limit", index)
+		}
+		mediaType := strings.ToLower(strings.TrimSpace(image.MediaType))
 		if mediaType != "image/png" && mediaType != "image/jpeg" && mediaType != "image/webp" && mediaType != "image/gif" {
-			return errors.New("image_media_type must be image/png, image/jpeg, image/webp, or image/gif")
+			return fmt.Errorf("images[%d].media_type must be image/png, image/jpeg, image/webp, or image/gif", index)
 		}
-		decoded, err := base64.StdEncoding.DecodeString(job.ImageBase64)
+		decoded, err := base64.StdEncoding.DecodeString(image.DataBase64)
 		if err != nil {
-			return errors.New("image_base64 must contain valid standard base64")
+			return fmt.Errorf("images[%d].data_base64 must contain valid standard base64", index)
 		}
-		if len(decoded) > 8<<20 {
-			return errors.New("image exceeds the 8 MB decoded limit")
+		if len(decoded) == 0 || len(decoded) > MaximumInputImageBytes {
+			return fmt.Errorf("images[%d] must be non-empty and no larger than 8 MiB", index)
 		}
 		if !imageBytesMatchMediaType(mediaType, decoded) {
-			return errors.New("image bytes do not match image_media_type")
+			return fmt.Errorf("images[%d] bytes do not match media_type", index)
+		}
+		totalImageBytes += len(decoded)
+		if totalImageBytes > MaximumInputImagesTotalBytes {
+			return errors.New("combined image inputs exceed the 8 MiB decoded limit")
 		}
 	}
 	mode := outputMode(job.Output)

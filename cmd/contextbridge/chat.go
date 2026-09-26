@@ -40,7 +40,8 @@ func clusterChatCommand(args []string) error {
 	minArtifacts := flags.Int("min-artifacts", 0, "require this many verified files in the adapter response (0-12)")
 	requireImage := flags.Bool("image", false, "require a real returned image file; ask for the image in the prompt")
 	minImages := flags.Int("min-images", 0, "require this many verified image files in one adapter response (0-12)")
-	attachImage := flags.String("attach-image", "", "attach one local PNG, JPEG, WebP, or GIF image to each turn")
+	var attachImages imagePathListFlag
+	flags.Var(&attachImages, "attach-image", "attach a local PNG, JPEG, WebP, or GIF image; repeat up to 12 times")
 	newSession := flags.Bool("new-session", false, "open a fresh adapter endpoint session")
 	newSessionPerJob := flags.Bool("new-session-per-job", false, "open a fresh adapter session for every turn")
 	foregroundNewSession := flags.Bool("foreground-new-session", false, "ask the adapter to foreground a newly opened session")
@@ -83,14 +84,21 @@ func clusterChatCommand(args []string) error {
 	if *requireImage && *minImages < 1 {
 		*minImages = 1
 	}
-	var imageBase64, imageMediaType string
-	if *attachImage != "" {
-		raw, mediaType, err := readChatImage(*attachImage)
+	if len(attachImages) > bridge.MaximumInputImages {
+		return fmt.Errorf("--attach-image may be repeated at most %d times", bridge.MaximumInputImages)
+	}
+	images := make([]bridge.ImageInput, 0, len(attachImages))
+	totalImageBytes := 0
+	for _, imagePath := range attachImages {
+		raw, mediaType, err := readChatImage(imagePath)
 		if err != nil {
 			return err
 		}
-		imageMediaType = mediaType
-		imageBase64 = base64.StdEncoding.EncodeToString(raw)
+		totalImageBytes += len(raw)
+		if totalImageBytes > bridge.MaximumInputImagesTotalBytes {
+			return errors.New("combined --attach-image inputs must not exceed 8 MiB")
+		}
+		images = append(images, bridge.ImageInput{Name: filepath.Base(imagePath), MediaType: mediaType, DataBase64: base64.StdEncoding.EncodeToString(raw)})
 	}
 	cfg, err := config.Load(*path)
 	if err != nil {
@@ -113,7 +121,7 @@ func clusterChatCommand(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	state := &chatState{relayURL: clusterBaseURL(cfg), token: *token, provider: *provider, group: *group, model: *model, profile: *profile, reasoning: *reasoning, egress: *egress, maxCostUSD: *maxCostUSD, e2ee: *e2ee, sessionID: *sessionID, artifactDir: *artifactDir, minArtifacts: *minArtifacts, minImages: *minImages, requireImage: *minImages > 0, imageBase64: imageBase64, imageMediaType: imageMediaType, newSession: *newSession || *newSessionPerJob, newSessionPerJob: *newSessionPerJob, foregroundNewSession: *foregroundNewSession}
+	state := &chatState{relayURL: clusterBaseURL(cfg), token: *token, provider: *provider, group: *group, model: *model, profile: *profile, reasoning: *reasoning, egress: *egress, maxCostUSD: *maxCostUSD, e2ee: *e2ee, sessionID: *sessionID, artifactDir: *artifactDir, minArtifacts: *minArtifacts, minImages: *minImages, requireImage: *minImages > 0, images: images, newSession: *newSession || *newSessionPerJob, newSessionPerJob: *newSessionPerJob, foregroundNewSession: *foregroundNewSession}
 
 	if strings.TrimSpace(*prompt) != "" {
 		return state.turn(ctx, strings.TrimSpace(*prompt))
@@ -170,7 +178,7 @@ func looksLikePastedChatFlag(line string) bool {
 }
 
 func readChatImage(path string) ([]byte, string, error) {
-	raw, err := readRegularFileBounded(path, 8<<20)
+	raw, err := readRegularFileBounded(path, bridge.MaximumInputImageBytes)
 	if err != nil {
 		return nil, "", fmt.Errorf("read attached image: %w", err)
 	}
@@ -182,6 +190,21 @@ func readChatImage(path string) ([]byte, string, error) {
 		return nil, "", errors.New("--attach-image must be a PNG, JPEG, WebP, or GIF file")
 	}
 	return raw, mediaType, nil
+}
+
+type imagePathListFlag []string
+
+func (values *imagePathListFlag) String() string {
+	return strings.Join(*values, string(os.PathListSeparator))
+}
+
+func (values *imagePathListFlag) Set(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return errors.New("image path cannot be empty")
+	}
+	*values = append(*values, value)
+	return nil
 }
 
 func (s *chatState) command(line string) (bool, string) {
@@ -296,8 +319,7 @@ type chatState struct {
 	minArtifacts         int
 	minImages            int
 	requireImage         bool
-	imageBase64          string
-	imageMediaType       string
+	images               []bridge.ImageInput
 	newSession           bool
 	newSessionPerJob     bool
 	foregroundNewSession bool
@@ -372,7 +394,7 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 		Source: "terminal-chat", Prompt: prompt, SessionID: s.sessionID,
 		Provider: s.provider, Group: s.group, Model: s.model, AdapterProfile: s.profile,
 		Reasoning: s.reasoning, Egress: s.egress, MaxCostUSD: s.maxCostUSD,
-		ImageBase64: s.imageBase64, ImageMediaType: s.imageMediaType,
+		Images:              s.images,
 		Metadata:            s.jobMetadata(),
 		Output:              bridge.OutputSpec{Mode: "text", MaxBytes: 1 << 20, Artifacts: s.artifactDir != "", MaxArtifactBytes: 12 << 20, MinArtifacts: minimum, MinImages: minimumImages},
 		AdapterFreshSession: s.newSession || s.newSessionPerJob, AdapterEphemeralSession: s.newSessionPerJob,

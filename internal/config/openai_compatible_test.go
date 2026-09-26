@@ -300,3 +300,23 @@ func TestOpenAICompatibleBalanceFloorRequiresBoundedReviewedCosting(t *testing.T
 		t.Fatalf("unguarded balance floor was accepted: %v", err)
 	}
 }
+
+func TestEngineImageLimitsRequireVisionAndAcceptBoundedPassport(t *testing.T) {
+	cfg := validOpenAICompatibleConfig(t)
+	engine := cfg.Engines["deepseek"]
+	engine.Capabilities = []string{"text", "vision"}
+	engine.ContextWindowTokens = 128000
+	engine.MaxInputImages = 4
+	engine.MaxImageBytes = 2 << 20
+	engine.MaxTotalImageBytes = 6 << 20
+	engine.ImageMediaTypes = []string{"image/png", "image/jpeg"}
+	cfg.Engines["deepseek"] = engine
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid capability passport was rejected: %v", err)
+	}
+	engine.Capabilities = []string{"text"}
+	cfg.Engines["deepseek"] = engine
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "vision") {
+		t.Fatalf("image limits without vision capability were accepted: %v", err)
+	}
+}

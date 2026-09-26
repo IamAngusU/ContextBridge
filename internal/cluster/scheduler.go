@@ -349,7 +349,11 @@ func routingConstraintReasons(node Node, requirements Requirements) []string {
 	}
 	if explicitModel {
 		if !selectedModelSupports(capability.Models, requirements) {
-			reasons = append(reasons, "model_not_available")
+			if modelRejectedByKnownInputLimits(capability.Models, requirements) {
+				reasons = append(reasons, "model_input_limit_exceeded")
+			} else {
+				reasons = append(reasons, "model_not_available")
+			}
 		}
 	} else if requirements.Task != "" {
 		automaticTasksAreAuthoritative := strings.TrimSpace(requirements.Provider) != "" && (capability.AutomaticTasks != nil || isAutomaticOllamaRequest(requirements))
@@ -358,7 +362,11 @@ func routingConstraintReasons(node Node, requirements Requirements) []string {
 			reasons = append(reasons, "task_not_verified")
 		}
 		if isAutomaticOllamaRequest(requirements) && !modelSupports(capability.Models, requirements) {
-			reasons = appendUniqueReason(reasons, "model_not_available")
+			if modelRejectedByKnownInputLimits(capability.Models, requirements) {
+				reasons = appendUniqueReason(reasons, "model_input_limit_exceeded")
+			} else {
+				reasons = appendUniqueReason(reasons, "model_not_available")
+			}
 		}
 		if modelsAreAuthoritative && !modelSupports(capability.Models, requirements) {
 			reasons = appendUniqueReason(reasons, "task_not_verified")
@@ -630,7 +638,7 @@ func modelSupports(models []ModelCapability, requirements Requirements) bool {
 		if isAutomaticOllamaRequest(requirements) && (!model.Available || !model.CapabilitiesVerified) {
 			continue
 		}
-		if modelMatchesProvider(model, requirements.Provider) && (requirements.Task == "" || containsFold(model.Tasks, requirements.Task)) && (!requirements.Vision || model.Vision) && (!requirements.Embedding || model.Embedding) {
+		if modelMatchesProvider(model, requirements.Provider) && (requirements.Task == "" || containsFold(model.Tasks, requirements.Task)) && modelMeetsHardRequirements(model, requirements) {
 			return true
 		}
 	}
@@ -653,7 +661,7 @@ func hasLoadedAutomaticModel(models []ModelCapability, requirements Requirements
 		if requirements.Task != "" && !containsFold(model.Tasks, requirements.Task) {
 			continue
 		}
-		if (!requirements.Vision || model.Vision) && (!requirements.Embedding || model.Embedding) {
+		if modelMeetsHardRequirements(model, requirements) {
 			return true
 		}
 	}
@@ -689,9 +697,9 @@ func selectedModelSupports(models []ModelCapability, requirements Requirements) 
 			// evidence may exist on daemons that cannot report capabilities; in
 			// that case do not turn a name inference into an incompatibility.
 			// Automatic selection follows the stricter modelSupports path.
-			return model.Available
+			return model.Available && !requirements.Vision && !requirements.Embedding && requirements.InputImageCount == 0
 		}
-		if (requirements.Task == "" || containsFold(model.Tasks, requirements.Task)) && (!requirements.Vision || model.Vision) && (!requirements.Embedding || model.Embedding) {
+		if (requirements.Task == "" || containsFold(model.Tasks, requirements.Task)) && modelMeetsHardRequirements(model, requirements) {
 			return true
 		}
 	}
@@ -765,7 +773,7 @@ func modelFeature(models []ModelCapability, name, provider string, vision, embed
 				continue
 			}
 		}
-		if (!vision || model.Vision) && (!embedding || model.Embedding) {
+		if modelMeetsHardRequirements(model, Requirements{Vision: vision, Embedding: embedding}) {
 			return true
 		}
 	}
@@ -774,6 +782,70 @@ func modelFeature(models []ModelCapability, name, provider string, vision, embed
 
 func modelMatchesProvider(model ModelCapability, provider string) bool {
 	return provider == "" || strings.EqualFold(model.Provider, provider)
+}
+
+func modelMeetsHardRequirements(model ModelCapability, requirements Requirements) bool {
+	if (requirements.Vision && !model.Vision) || (requirements.Embedding && !model.Embedding) {
+		return false
+	}
+	if requirements.InputImageCount > 0 {
+		if !model.Vision || !model.CapabilitiesVerified {
+			return false
+		}
+		if model.MaxInputImages > 0 && requirements.InputImageCount > model.MaxInputImages {
+			return false
+		}
+	}
+	if requirements.InputImageBytes > 0 && model.MaxTotalImageBytes > 0 && requirements.InputImageBytes > model.MaxTotalImageBytes {
+		return false
+	}
+	if requirements.InputImageMaxBytes > 0 && model.MaxImageBytes > 0 && requirements.InputImageMaxBytes > model.MaxImageBytes {
+		return false
+	}
+	if len(requirements.InputImageMediaTypes) > 0 && len(model.ImageMediaTypes) > 0 {
+		for _, mediaType := range requirements.InputImageMediaTypes {
+			if !containsFold(model.ImageMediaTypes, mediaType) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func modelRejectedByKnownInputLimits(models []ModelCapability, requirements Requirements) bool {
+	if requirements.InputImageCount == 0 {
+		return false
+	}
+	for _, model := range models {
+		if !modelMatchesProvider(model, requirements.Provider) || !model.Available || !model.Vision || !model.CapabilitiesVerified {
+			continue
+		}
+		if requirements.Model != "" && !strings.EqualFold(requirements.Model, "auto") {
+			matches := strings.EqualFold(model.Name, requirements.Model)
+			if strings.EqualFold(requirements.Provider, "adapter") {
+				matches = adapterModelEqual(model.Name, requirements.Model)
+			}
+			if !matches {
+				continue
+			}
+		}
+		if requirements.Task != "" && !containsFold(model.Tasks, requirements.Task) {
+			continue
+		}
+		if (model.MaxInputImages > 0 && requirements.InputImageCount > model.MaxInputImages) ||
+			(model.MaxTotalImageBytes > 0 && requirements.InputImageBytes > model.MaxTotalImageBytes) ||
+			(model.MaxImageBytes > 0 && requirements.InputImageMaxBytes > model.MaxImageBytes) {
+			return true
+		}
+		if len(model.ImageMediaTypes) > 0 {
+			for _, mediaType := range requirements.InputImageMediaTypes {
+				if !containsFold(model.ImageMediaTypes, mediaType) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func bestVRAMHeadroom(node Node, required uint64) float64 {

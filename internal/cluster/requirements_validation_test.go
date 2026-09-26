@@ -56,3 +56,26 @@ func TestValidateRequirementsRejectsUnsafeRoutingLabels(t *testing.T) {
 		t.Fatal("ephemeral adapter chat was accepted without fresh-session routing")
 	}
 }
+
+func TestValidateRequirementsBoundsImageRoutingEvidence(t *testing.T) {
+	relay := &Relay{cfg: RelayConfig{AllowedTasks: []string{"generation"}}}
+	valid := Requirements{Task: "generation", Provider: "ollama", Vision: true, InputImageCount: 2, InputImageBytes: 1024, InputImageMaxBytes: 768, InputImageMediaTypes: []string{"image/png", "image/jpeg"}}
+	if err := relay.validateRequirements(valid); err != nil {
+		t.Fatalf("valid image routing evidence rejected: %v", err)
+	}
+	for name, mutate := range map[string]func(*Requirements){
+		"count":     func(value *Requirements) { value.InputImageCount = 13 },
+		"bytes":     func(value *Requirements) { value.InputImageBytes = (8 << 20) + 1 },
+		"max bytes": func(value *Requirements) { value.InputImageMaxBytes = 1025 },
+		"media":     func(value *Requirements) { value.InputImageMediaTypes = []string{"image/svg+xml"} },
+		"vision":    func(value *Requirements) { value.Vision = false },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := valid
+			mutate(&candidate)
+			if err := relay.validateRequirements(candidate); err == nil {
+				t.Fatal("invalid image routing evidence was accepted")
+			}
+		})
+	}
+}

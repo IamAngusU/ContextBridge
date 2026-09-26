@@ -102,6 +102,7 @@ func TestSharedTextJobBuilderPreservesChatRoutingAndOutputContract(t *testing.T)
 		request.Requirements.Task != "generation" || request.Requirements.Provider != "adapter" || request.Requirements.Group != "private" ||
 		request.Requirements.Model != "model-a" || request.Requirements.AdapterProfile != "profile-a" || request.Requirements.Reasoning != "high" ||
 		!request.Requirements.Vision || !request.Requirements.AdapterFreshSession || !request.Requirements.AdapterEphemeralSession ||
+		request.Requirements.InputImageCount != 1 || request.Requirements.InputImageBytes != 5 || request.Requirements.InputImageMaxBytes != 5 || len(request.Requirements.InputImageMediaTypes) != 1 ||
 		request.Requirements.Egress != "local_only" || request.Requirements.MaxCostUSD != 0.25 {
 		t.Fatalf("shared request lost routing contract: %#v", request)
 	}
@@ -118,6 +119,13 @@ func TestSharedTextJobBuilderPreservesChatRoutingAndOutputContract(t *testing.T)
 	}
 	if local.Requirements.Reasoning != "" || local.Requirements.AdapterFreshSession || local.Requirements.AdapterEphemeralSession {
 		t.Fatalf("adapter-only requirements leaked onto a local route: %#v", local.Requirements)
+	}
+	multi, err := buildClusterTextSubmitRequest(clusterTextJobOptions{Provider: "ollama", Images: []bridge.ImageInput{{MediaType: "image/png", DataBase64: "YQ=="}, {MediaType: "image/jpeg", DataBase64: "YmM="}}, Output: bridge.OutputSpec{Mode: "text"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !multi.Requirements.Vision || multi.Requirements.InputImageCount != 2 || multi.Requirements.InputImageBytes != 3 || multi.Requirements.InputImageMaxBytes != 2 || len(multi.Requirements.InputImageMediaTypes) != 2 {
+		t.Fatalf("multi-image routing evidence was not derived: %#v", multi.Requirements)
 	}
 }
 

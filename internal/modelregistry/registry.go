@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -53,6 +54,9 @@ type DiscoveryEntry struct {
 	// metadata for offline files, but must never authorize automatic routing.
 	CapabilitiesVerified bool   `json:"capabilities_verified"`
 	CapabilitySource     string `json:"capability_source,omitempty"`
+	ContextWindowTokens  int    `json:"context_window_tokens,omitempty"`
+	LimitsVerified       bool   `json:"limits_verified"`
+	LimitSource          string `json:"limit_source,omitempty"`
 	Installed            bool   `json:"installed"`
 	Ready                bool   `json:"ready"`
 	Loaded               bool   `json:"loaded"`
@@ -68,10 +72,23 @@ const maximumModelDownloadBytes int64 = 256 << 30
 const maximumOllamaShowBytes int64 = 2 << 20
 
 type ollamaCapabilityCacheEntry struct {
-	capabilities []string
-	verified     bool
-	source       string
-	expires      time.Time
+	capabilities        []string
+	verified            bool
+	source              string
+	contextWindowTokens int
+	expires             time.Time
+}
+
+// OllamaModelEvidence keeps modality and limit evidence separate. A daemon
+// may prove vision support without publishing a context window, or vice versa;
+// missing numeric fields therefore remain unknown rather than becoming zero.
+type OllamaModelEvidence struct {
+	Capabilities         []string
+	CapabilitiesVerified bool
+	CapabilitySource     string
+	ContextWindowTokens  int
+	LimitsVerified       bool
+	LimitSource          string
 }
 
 var ollamaCapabilityCache = struct {
@@ -252,8 +269,8 @@ func discoverOllama(ctx context.Context, base string) []DiscoveryEntry {
 		}
 		vram, isLoaded := loaded[strings.ToLower(model.Name)]
 		hint := model.Name + " " + model.Details.Family + " " + strings.Join(model.Details.Families, " ")
-		capabilities, verified, source := ResolveOllamaCapabilityEvidence(metadataContext, client, base, model.Name, model.Digest, model.Capabilities, hint)
-		result = append(result, DiscoveryEntry{Name: model.Name, Provider: "ollama", Format: "ollama", Size: model.Size, MemoryEstimate: memoryEstimate(model.Size), VRAM: vram, Quantization: model.Details.Quantization, Parameters: model.Details.ParameterSize, Capabilities: capabilities, CapabilitiesVerified: verified, CapabilitySource: source, Installed: true, Ready: true, Loaded: isLoaded})
+		evidence := ResolveOllamaModelEvidence(metadataContext, client, base, model.Name, model.Digest, model.Capabilities, hint)
+		result = append(result, DiscoveryEntry{Name: model.Name, Provider: "ollama", Format: "ollama", Size: model.Size, MemoryEstimate: memoryEstimate(model.Size), VRAM: vram, Quantization: model.Details.Quantization, Parameters: model.Details.ParameterSize, Capabilities: evidence.Capabilities, CapabilitiesVerified: evidence.CapabilitiesVerified, CapabilitySource: evidence.CapabilitySource, ContextWindowTokens: evidence.ContextWindowTokens, LimitsVerified: evidence.LimitsVerified, LimitSource: evidence.LimitSource, Installed: true, Ready: true, Loaded: isLoaded})
 	}
 	return result
 }
@@ -492,6 +509,13 @@ func ResolveOllamaCapabilities(ctx context.Context, client *http.Client, base, n
 // installed model. Name/family inference is returned only as unverified
 // inventory metadata and must never make an automatic model eligible.
 func ResolveOllamaCapabilityEvidence(ctx context.Context, client *http.Client, base, name, digest string, tagCapabilities []string, hint string) ([]string, bool, string) {
+	evidence := ResolveOllamaModelEvidence(ctx, client, base, name, digest, tagCapabilities, hint)
+	return evidence.Capabilities, evidence.CapabilitiesVerified, evidence.CapabilitySource
+}
+
+// ResolveOllamaModelEvidence returns provider-backed modalities plus any
+// bounded numeric limits published by /api/show.
+func ResolveOllamaModelEvidence(ctx context.Context, client *http.Client, base, name, digest string, tagCapabilities []string, hint string) OllamaModelEvidence {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	name = strings.TrimSpace(name)
 	cacheIdentity := strings.TrimSpace(digest)
@@ -502,13 +526,17 @@ func ResolveOllamaCapabilityEvidence(ctx context.Context, client *http.Client, b
 	now := time.Now()
 	ollamaCapabilityCache.Lock()
 	if cached, ok := ollamaCapabilityCache.items[cacheKey]; ok && now.Before(cached.expires) {
-		result := append([]string(nil), cached.capabilities...)
+		result := OllamaModelEvidence{Capabilities: append([]string(nil), cached.capabilities...), CapabilitiesVerified: cached.verified, CapabilitySource: cached.source, ContextWindowTokens: cached.contextWindowTokens}
+		if cached.contextWindowTokens > 0 {
+			result.LimitsVerified = true
+			result.LimitSource = "ollama_show"
+		}
 		ollamaCapabilityCache.Unlock()
-		return result, cached.verified, cached.source
+		return result
 	}
 	ollamaCapabilityCache.Unlock()
 
-	capabilities, authoritative := fetchOllamaShowCapabilities(ctx, client, base, name)
+	capabilities, contextWindowTokens, authoritative := fetchOllamaShowEvidence(ctx, client, base, name)
 	source := "ollama_show"
 	ttl := 5 * time.Minute
 	if !authoritative {
@@ -533,44 +561,74 @@ func ResolveOllamaCapabilityEvidence(ctx context.Context, client *http.Client, b
 			ollamaCapabilityCache.items = map[string]ollamaCapabilityCacheEntry{}
 		}
 	}
-	ollamaCapabilityCache.items[cacheKey] = ollamaCapabilityCacheEntry{capabilities: append([]string(nil), capabilities...), verified: authoritative, source: source, expires: now.Add(ttl)}
+	ollamaCapabilityCache.items[cacheKey] = ollamaCapabilityCacheEntry{capabilities: append([]string(nil), capabilities...), verified: authoritative, source: source, contextWindowTokens: contextWindowTokens, expires: now.Add(ttl)}
 	ollamaCapabilityCache.Unlock()
-	return capabilities, authoritative, source
+	result := OllamaModelEvidence{Capabilities: capabilities, CapabilitiesVerified: authoritative, CapabilitySource: source, ContextWindowTokens: contextWindowTokens}
+	if contextWindowTokens > 0 {
+		result.LimitsVerified = true
+		result.LimitSource = "ollama_show"
+	}
+	return result
 }
 
-func fetchOllamaShowCapabilities(ctx context.Context, client *http.Client, base, name string) ([]string, bool) {
+func fetchOllamaShowEvidence(ctx context.Context, client *http.Client, base, name string) ([]string, int, bool) {
 	if base == "" || name == "" || client == nil {
-		return nil, false
+		return nil, 0, false
 	}
 	body, err := json.Marshal(map[string]interface{}{"model": name, "verbose": false})
 	if err != nil {
-		return nil, false
+		return nil, 0, false
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/api/show", bytes.NewReader(body))
 	if err != nil {
-		return nil, false
+		return nil, 0, false
 	}
 	request.Header.Set("Content-Type", "application/json")
 	response, err := client.Do(request)
 	if err != nil {
-		return nil, false
+		return nil, 0, false
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1024))
-		return nil, false
+		return nil, 0, false
 	}
 	raw, err := io.ReadAll(io.LimitReader(response.Body, maximumOllamaShowBytes+1))
 	if err != nil || int64(len(raw)) > maximumOllamaShowBytes {
-		return nil, false
+		return nil, 0, false
 	}
 	var payload struct {
-		Capabilities []string `json:"capabilities"`
+		Capabilities []string               `json:"capabilities"`
+		ModelInfo    map[string]interface{} `json:"model_info"`
 	}
-	if json.Unmarshal(raw, &payload) != nil || len(payload.Capabilities) == 0 {
-		return nil, false
+	if json.Unmarshal(raw, &payload) != nil {
+		return nil, 0, false
 	}
-	return OllamaCapabilities(payload.Capabilities, ""), true
+	contextWindowTokens := 0
+	for key, value := range payload.ModelInfo {
+		key = strings.ToLower(strings.TrimSpace(key))
+		if key != "context_length" && !strings.HasSuffix(key, ".context_length") {
+			continue
+		}
+		candidate := 0
+		switch typed := value.(type) {
+		case float64:
+			if typed > 0 && typed <= 10_000_000 && typed == math.Trunc(typed) {
+				candidate = int(typed)
+			}
+		case string:
+			if parsed, err := strconv.Atoi(strings.TrimSpace(typed)); err == nil && parsed > 0 && parsed <= 10_000_000 {
+				candidate = parsed
+			}
+		}
+		if candidate > contextWindowTokens {
+			contextWindowTokens = candidate
+		}
+	}
+	if len(payload.Capabilities) == 0 {
+		return nil, contextWindowTokens, false
+	}
+	return OllamaCapabilities(payload.Capabilities, ""), contextWindowTokens, true
 }
 
 func Path(cfg config.Config, alias string) (string, error) {

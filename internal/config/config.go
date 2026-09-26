@@ -91,27 +91,32 @@ type Engine struct {
 	// by this engine. It lets execution approvals distinguish accounts without
 	// serializing the credential itself; rotating a secret inside the same slot
 	// intentionally leaves that identity unchanged.
-	CredentialSlot    string        `yaml:"credential_slot,omitempty" json:"credential_slot,omitempty"`
-	APIKey            string        `yaml:"api_key,omitempty" json:"-"`
-	APIKeyFile        string        `yaml:"api_key_file,omitempty" json:"-"`
-	ResolvedAPIKey    string        `yaml:"-" json:"-"`
-	Remote            bool          `yaml:"remote,omitempty" json:"remote,omitempty"`
-	Capabilities      []string      `yaml:"capabilities,omitempty" json:"capabilities,omitempty"`
-	ResourcePack      string        `yaml:"resource_pack,omitempty" json:"resource_pack,omitempty"`
-	Endpoint          string        `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`
-	Executable        string        `yaml:"executable,omitempty" json:"executable,omitempty"`
-	Listen            string        `yaml:"listen,omitempty" json:"listen,omitempty"`
-	AutoStart         bool          `yaml:"auto_start,omitempty" json:"auto_start,omitempty"`
-	GPU               string        `yaml:"gpu,omitempty" json:"gpu,omitempty"`
-	Mode              string        `yaml:"mode,omitempty" json:"mode,omitempty"`
-	Pooling           string        `yaml:"pooling,omitempty" json:"pooling,omitempty"`
-	TimeoutSeconds    int           `yaml:"timeout_seconds,omitempty" json:"timeout_seconds,omitempty"`
-	MaxOutputTokens   int           `yaml:"max_output_tokens,omitempty" json:"max_output_tokens,omitempty"`
-	ReasoningEffort   string        `yaml:"reasoning_effort,omitempty" json:"reasoning_effort,omitempty"`
-	BalancePath       string        `yaml:"balance_path,omitempty" json:"balance_path,omitempty"`
-	MinimumBalanceUSD float64       `yaml:"minimum_balance_usd,omitempty" json:"minimum_balance_usd,omitempty"`
-	Costing           EngineCosting `yaml:"costing,omitempty" json:"costing,omitempty"`
-	Args              []string      `yaml:"args,omitempty" json:"args,omitempty"`
+	CredentialSlot      string        `yaml:"credential_slot,omitempty" json:"credential_slot,omitempty"`
+	APIKey              string        `yaml:"api_key,omitempty" json:"-"`
+	APIKeyFile          string        `yaml:"api_key_file,omitempty" json:"-"`
+	ResolvedAPIKey      string        `yaml:"-" json:"-"`
+	Remote              bool          `yaml:"remote,omitempty" json:"remote,omitempty"`
+	Capabilities        []string      `yaml:"capabilities,omitempty" json:"capabilities,omitempty"`
+	ResourcePack        string        `yaml:"resource_pack,omitempty" json:"resource_pack,omitempty"`
+	Endpoint            string        `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`
+	Executable          string        `yaml:"executable,omitempty" json:"executable,omitempty"`
+	Listen              string        `yaml:"listen,omitempty" json:"listen,omitempty"`
+	AutoStart           bool          `yaml:"auto_start,omitempty" json:"auto_start,omitempty"`
+	GPU                 string        `yaml:"gpu,omitempty" json:"gpu,omitempty"`
+	Mode                string        `yaml:"mode,omitempty" json:"mode,omitempty"`
+	Pooling             string        `yaml:"pooling,omitempty" json:"pooling,omitempty"`
+	TimeoutSeconds      int           `yaml:"timeout_seconds,omitempty" json:"timeout_seconds,omitempty"`
+	MaxOutputTokens     int           `yaml:"max_output_tokens,omitempty" json:"max_output_tokens,omitempty"`
+	ContextWindowTokens int           `yaml:"context_window_tokens,omitempty" json:"context_window_tokens,omitempty"`
+	MaxInputImages      int           `yaml:"max_input_images,omitempty" json:"max_input_images,omitempty"`
+	MaxImageBytes       int64         `yaml:"max_image_bytes,omitempty" json:"max_image_bytes,omitempty"`
+	MaxTotalImageBytes  int64         `yaml:"max_total_image_bytes,omitempty" json:"max_total_image_bytes,omitempty"`
+	ImageMediaTypes     []string      `yaml:"image_media_types,omitempty" json:"image_media_types,omitempty"`
+	ReasoningEffort     string        `yaml:"reasoning_effort,omitempty" json:"reasoning_effort,omitempty"`
+	BalancePath         string        `yaml:"balance_path,omitempty" json:"balance_path,omitempty"`
+	MinimumBalanceUSD   float64       `yaml:"minimum_balance_usd,omitempty" json:"minimum_balance_usd,omitempty"`
+	Costing             EngineCosting `yaml:"costing,omitempty" json:"costing,omitempty"`
+	Args                []string      `yaml:"args,omitempty" json:"args,omitempty"`
 }
 
 // EngineCosting describes an operator-reviewed cost ceiling. It is not an
@@ -570,6 +575,34 @@ func (c Config) Validate() error {
 		if engine.TimeoutSeconds < 0 || engine.TimeoutSeconds > 86400 {
 			return fmt.Errorf("engine %s timeout_seconds must be between 1 and 86400 when set", name)
 		}
+		if engine.MaxOutputTokens < 0 || engine.MaxOutputTokens > 1_000_000 {
+			return fmt.Errorf("engine %s max_output_tokens must be between 1 and 1000000 when set", name)
+		}
+		if engine.ContextWindowTokens < 0 || engine.ContextWindowTokens > 10_000_000 {
+			return fmt.Errorf("engine %s context_window_tokens must be between 1 and 10000000 when set", name)
+		}
+		if engine.MaxInputImages < 0 || engine.MaxInputImages > 1024 {
+			return fmt.Errorf("engine %s max_input_images must be between 1 and 1024 when set", name)
+		}
+		if engine.MaxImageBytes < 0 || engine.MaxImageBytes > 1<<30 || engine.MaxTotalImageBytes < 0 || engine.MaxTotalImageBytes > 4<<30 {
+			return fmt.Errorf("engine %s image byte limits are outside the supported range", name)
+		}
+		if engine.MaxImageBytes > 0 && engine.MaxTotalImageBytes > 0 && engine.MaxTotalImageBytes < engine.MaxImageBytes {
+			return fmt.Errorf("engine %s max_total_image_bytes must not be smaller than max_image_bytes", name)
+		}
+		if len(engine.ImageMediaTypes) > 16 {
+			return fmt.Errorf("engine %s image_media_types accepts at most 16 entries", name)
+		}
+		for _, mediaType := range engine.ImageMediaTypes {
+			switch strings.ToLower(strings.TrimSpace(mediaType)) {
+			case "image/png", "image/jpeg", "image/webp", "image/gif":
+			default:
+				return fmt.Errorf("engine %s has unsupported image media type %q", name, mediaType)
+			}
+		}
+		if (engine.MaxInputImages > 0 || engine.MaxImageBytes > 0 || engine.MaxTotalImageBytes > 0 || len(engine.ImageMediaTypes) > 0) && !containsFoldConfig(engine.Capabilities, "vision") {
+			return fmt.Errorf("engine %s image limits require the vision capability", name)
+		}
 		if engine.CredentialSlot != "" && (!safeNamePattern.MatchString(engine.CredentialSlot) || strings.Contains(engine.CredentialSlot, "..")) {
 			return fmt.Errorf("engine %s credential_slot must be a stable safe identifier", name)
 		}
@@ -609,9 +642,6 @@ func (c Config) Validate() error {
 			}
 			if len(engine.Capabilities) == 0 {
 				return fmt.Errorf("engine %s requires explicit capabilities", name)
-			}
-			if engine.MaxOutputTokens < 0 || engine.MaxOutputTokens > 1_000_000 {
-				return fmt.Errorf("engine %s max_output_tokens must be between 1 and 1000000 when set", name)
 			}
 			if engine.ReasoningEffort != "" {
 				switch strings.ToLower(strings.TrimSpace(engine.ReasoningEffort)) {

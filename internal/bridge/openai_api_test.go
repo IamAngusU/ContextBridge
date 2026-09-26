@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -188,7 +189,7 @@ func TestOpenAICompatibilityAPIRejectsToolsAndRemoteImages(t *testing.T) {
 	if !rawJSONPresent(request.Tools) {
 		t.Fatal("tool request was not recognized")
 	}
-	_, _, _, _, err := openAIJobInput([]openAIMessage{{Role: "user", Content: json.RawMessage(`[{"type":"image_url","image_url":{"url":"https://example.test/private.png"}}]`)}})
+	_, _, _, err := openAIJobInput([]openAIMessage{{Role: "user", Content: json.RawMessage(`[{"type":"image_url","image_url":{"url":"https://example.test/private.png"}}]`)}})
 	if err == nil || !strings.Contains(err.Error(), "not fetched") {
 		t.Fatalf("remote image fetch was not rejected: %v", err)
 	}
@@ -200,20 +201,20 @@ func TestOpenAICompatibilityBoundaries(t *testing.T) {
 		messages[index] = openAIMessage{Role: "assistant", Content: json.RawMessage(`"history"`)}
 	}
 	messages[len(messages)-1] = openAIMessage{Role: "user", Content: json.RawMessage(`"final"`)}
-	if _, _, _, _, err := openAIJobInput(messages); err != nil {
+	if _, _, _, err := openAIJobInput(messages); err != nil {
 		t.Fatalf("documented 128-message boundary was rejected: %v", err)
 	}
 	messages = append(messages, openAIMessage{Role: "user", Content: json.RawMessage(`"overflow"`)})
-	if _, _, _, _, err := openAIJobInput(messages); err == nil || !strings.Contains(err.Error(), "128") {
+	if _, _, _, err := openAIJobInput(messages); err == nil || !strings.Contains(err.Error(), "128") {
 		t.Fatalf("129-message request escaped the boundary: %v", err)
 	}
 
 	trusted := strings.Repeat("x", 20_000-len("USER REQUEST:\n"))
-	if _, _, _, _, err := openAIJobInput([]openAIMessage{{Role: "user", Content: mustRawJSONString(t, trusted)}}); err != nil {
+	if _, _, _, err := openAIJobInput([]openAIMessage{{Role: "user", Content: mustRawJSONString(t, trusted)}}); err != nil {
 		t.Fatalf("documented trusted-text boundary was rejected: %v", err)
 	}
 	trusted += "x"
-	if _, _, _, _, err := openAIJobInput([]openAIMessage{{Role: "user", Content: mustRawJSONString(t, trusted)}}); err == nil {
+	if _, _, _, err := openAIJobInput([]openAIMessage{{Role: "user", Content: mustRawJSONString(t, trusted)}}); err == nil {
 		t.Fatal("oversized trusted instructions were accepted")
 	}
 
@@ -225,6 +226,19 @@ func TestOpenAICompatibilityBoundaries(t *testing.T) {
 	tooLarge := append(maximumImage, 0x01)
 	if _, _, err := decodeImageDataURL("data:image/png;base64," + base64.StdEncoding.EncodeToString(tooLarge)); err == nil {
 		t.Fatal("image above 8 MiB was accepted")
+	}
+}
+
+func TestOpenAICompatibilityAcceptsBoundedMultipleImageParts(t *testing.T) {
+	png := base64.StdEncoding.EncodeToString([]byte("\x89PNG\r\n\x1a\n"))
+	gif := base64.StdEncoding.EncodeToString([]byte("GIF89a"))
+	content := fmt.Sprintf(`[{"type":"text","text":"compare"},{"type":"image_url","image_url":{"url":"data:image/png;base64,%s"}},{"type":"image_url","image_url":{"url":"data:image/gif;base64,%s"}}]`, png, gif)
+	prompt, _, images, err := openAIJobInput([]openAIMessage{{Role: "user", Content: json.RawMessage(content)}})
+	if err != nil || len(images) != 2 || !strings.Contains(prompt, "compare") {
+		t.Fatalf("bounded multi-image OpenAI request was not preserved: prompt=%q images=%d err=%v", prompt, len(images), err)
+	}
+	if err := validateJob(Job{Prompt: prompt, Images: images, Output: OutputSpec{Mode: "text"}}); err != nil {
+		t.Fatalf("parsed OpenAI multi-image job failed admission: %v", err)
 	}
 }
 

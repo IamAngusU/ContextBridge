@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,7 +47,7 @@ func NewProcessor(cfg config.Config, store *Store) *Processor {
 // so v1 native streaming requires one explicit OpenAI-compatible engine.
 func (p *Processor) SupportsIncremental(job Job) bool {
 	route := p.cfg.Route(job.Route)
-	if outputMode(job.Output) != "text" || job.ImageBase64 != "" || len(route.Fallback) != 0 || strings.TrimSpace(job.Provider) != "" {
+	if outputMode(job.Output) != "text" || len(job.InputImages()) != 0 || len(route.Fallback) != 0 || strings.TrimSpace(job.Provider) != "" {
 		return false
 	}
 	engine, ok := p.cfg.Engine(route.Provider)
@@ -215,7 +216,11 @@ func (p *Processor) ollama(parent context.Context, job Job, route config.Route, 
 	if model == "" {
 		model = engine.Model
 	}
-	needsImage := job.ImageBase64 != ""
+	images := job.InputImages()
+	needsImage := len(images) > 0
+	if err := validateEngineImageInputs(engine, images); err != nil {
+		return Output{}, err
+	}
 	if needsImage && !p.cfg.Providers.Ollama.Images {
 		return Output{}, errors.New("ollama image input is disabled in providers.ollama.images")
 	}
@@ -245,8 +250,12 @@ func (p *Processor) ollama(parent context.Context, job Job, route config.Route, 
 	if outputMode(job.Output) != "text" {
 		payload["format"] = "json"
 	}
-	if p.cfg.Providers.Ollama.Images && job.ImageBase64 != "" {
-		payload["images"] = []string{job.ImageBase64}
+	if p.cfg.Providers.Ollama.Images && len(images) > 0 {
+		encoded := make([]string, 0, len(images))
+		for _, image := range images {
+			encoded = append(encoded, image.DataBase64)
+		}
+		payload["images"] = encoded
 	}
 	raw, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(engine.URL, "/")+"/api/generate", bytes.NewReader(raw))
@@ -312,18 +321,24 @@ func (p *Processor) openAICompatible(parent context.Context, job Job, route conf
 	}
 	trusted := trustedPrompt(job)
 	content := []map[string]interface{}{{"type": "text", "text": trusted}}
-	if job.ImageBase64 != "" {
+	images := job.InputImages()
+	if err := validateEngineImageInputs(engine, images); err != nil {
+		return Output{}, err
+	}
+	if len(images) > 0 {
 		if !containsFolded(engine.Capabilities, "vision") {
 			return Output{}, errors.New("openai-compatible engine is not configured for vision")
 		}
-		content = append(content, map[string]interface{}{"type": "image_url", "image_url": map[string]string{"url": "data:" + job.ImageMediaType + ";base64," + job.ImageBase64}})
+		for _, image := range images {
+			content = append(content, map[string]interface{}{"type": "image_url", "image_url": map[string]string{"url": "data:" + image.MediaType + ";base64," + image.DataBase64}})
+		}
 	}
-	reservedCost, reservationErr := providerCostReservation(engine, trusted, job.ImageBase64 != "")
+	reservedCost, reservationErr := providerCostReservation(engine, trusted, len(images) > 0)
 	if reservationErr != nil {
 		return Output{}, reservationErr
 	}
 	if job.MaxCostUSD > 0 {
-		if job.ImageBase64 != "" || reservedCost <= 0 {
+		if len(images) > 0 || reservedCost <= 0 {
 			return Output{}, errors.New("cost_budget_unverifiable: provider route has no complete reviewed cost upper-bound reservation")
 		}
 		if reservedCost > job.MaxCostUSD {
@@ -419,7 +434,7 @@ func (p *Processor) openAICompatibleIncremental(parent context.Context, job Job,
 	if requested := strings.TrimSpace(job.Model); requested != "" && !strings.EqualFold(requested, model) {
 		return Output{}, fmt.Errorf("openai-compatible job model %q does not match configured model %q", requested, model)
 	}
-	if job.ImageBase64 != "" {
+	if len(job.InputImages()) > 0 {
 		return Output{}, errors.New("incremental image input is not enabled")
 	}
 	trusted := trustedPrompt(job)
@@ -1024,8 +1039,12 @@ func (p *Processor) llamaCPP(parent context.Context, job Job, route config.Route
 	}
 	prompt := trustedPrompt(job)
 	content := []map[string]interface{}{{"type": "text", "text": prompt}}
-	if job.ImageBase64 != "" {
-		content = append(content, map[string]interface{}{"type": "image_url", "image_url": map[string]string{"url": "data:" + job.ImageMediaType + ";base64," + job.ImageBase64}})
+	images := job.InputImages()
+	if err := validateEngineImageInputs(engine, images); err != nil {
+		return Output{}, err
+	}
+	for _, image := range images {
+		content = append(content, map[string]interface{}{"type": "image_url", "image_url": map[string]string{"url": "data:" + image.MediaType + ";base64," + image.DataBase64}})
 	}
 	payload := map[string]interface{}{"model": model, "messages": []map[string]interface{}{{"role": "user", "content": content}}, "stream": false}
 	if outputMode(job.Output) != "text" {
@@ -1138,6 +1157,34 @@ func (p *Processor) adapter(parent context.Context, job Job, route config.Route)
 		p.store.Cancel(job.ID)
 		return Output{}, parent.Err()
 	}
+}
+
+func validateEngineImageInputs(engine config.Engine, images []ImageInput) error {
+	if len(images) == 0 {
+		return nil
+	}
+	if engine.MaxInputImages > 0 && len(images) > engine.MaxInputImages {
+		return fmt.Errorf("model_input_limit_exceeded: engine accepts at most %d images", engine.MaxInputImages)
+	}
+	total := int64(0)
+	for index, image := range images {
+		if len(engine.ImageMediaTypes) > 0 && !containsFolded(engine.ImageMediaTypes, image.MediaType) {
+			return fmt.Errorf("model_input_limit_exceeded: image %d media type %s is not configured for this engine", index+1, image.MediaType)
+		}
+		decoded, err := base64.StdEncoding.DecodeString(image.DataBase64)
+		if err != nil {
+			return fmt.Errorf("image %d contains invalid base64", index+1)
+		}
+		size := int64(len(decoded))
+		if engine.MaxImageBytes > 0 && size > engine.MaxImageBytes {
+			return fmt.Errorf("model_input_limit_exceeded: image %d exceeds the engine's %d-byte limit", index+1, engine.MaxImageBytes)
+		}
+		total += size
+	}
+	if engine.MaxTotalImageBytes > 0 && total > engine.MaxTotalImageBytes {
+		return fmt.Errorf("model_input_limit_exceeded: combined images exceed the engine's %d-byte limit", engine.MaxTotalImageBytes)
+	}
+	return nil
 }
 
 func trustedPrompt(job Job) string {

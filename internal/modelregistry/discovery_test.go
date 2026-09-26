@@ -141,6 +141,18 @@ func TestOllamaCapabilityEvidenceMarksNameFallbackUnverified(t *testing.T) {
 	}
 }
 
+func TestOllamaModelEvidenceReadsBoundedContextWindowWithoutInventingImageLimits(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"capabilities":["completion","vision"],"model_info":{"qwen.context_length":32768,"unrelated":99}}`))
+	}))
+	defer server.Close()
+	evidence := ResolveOllamaModelEvidence(context.Background(), server.Client(), server.URL, "opaque", "context-window-test", nil, "opaque")
+	if !evidence.CapabilitiesVerified || !evidence.LimitsVerified || evidence.ContextWindowTokens != 32768 || evidence.LimitSource != "ollama_show" {
+		t.Fatalf("Ollama context evidence was not preserved: %#v", evidence)
+	}
+}
+
 func TestDiscoverInstalledOllamaManifestWhileDaemonIsOffline(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("OLLAMA_MODELS", root)

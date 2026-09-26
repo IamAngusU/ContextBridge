@@ -939,7 +939,7 @@ func compactLocalSubmission(raw []byte) ([]byte, error) {
 		return nil, err
 	}
 	for _, field := range []string{
-		"prompt", "text", "texts", "documents", "query", "image_base64",
+		"prompt", "text", "texts", "documents", "query", "image_base64", "images",
 		"contextbridge_session_key", "contextbridge_adapter_endpoint_id", "contextbridge_adapter_principal",
 	} {
 		delete(job, field)
@@ -1247,6 +1247,14 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 						Capabilities         []string `json:"capabilities"`
 						CapabilitiesVerified bool     `json:"capabilities_verified"`
 						CapabilitySource     string   `json:"capability_source"`
+						ContextWindowTokens  int      `json:"context_window_tokens"`
+						MaxOutputTokens      int      `json:"max_output_tokens"`
+						MaxInputImages       int      `json:"max_input_images"`
+						MaxImageBytes        int64    `json:"max_image_bytes"`
+						MaxTotalImageBytes   int64    `json:"max_total_image_bytes"`
+						ImageMediaTypes      []string `json:"image_media_types"`
+						LimitsVerified       bool     `json:"limits_verified"`
+						LimitSource          string   `json:"limit_source"`
 					} `json:"models"`
 				} `json:"engines"`
 			} `json:"runtime"`
@@ -1319,7 +1327,10 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 						continue
 					}
 					tasks, vision, embedding := modelTasksFromCapabilities(model.Name, model.Capabilities)
-					runtimeModel := ModelCapability{Name: model.Name, Provider: provider, Size: model.Size, VRAM: model.VRAM, Available: model.Available || model.Loaded, Loaded: model.Loaded, Vision: vision, Embedding: embedding, Tasks: allowedModelTasks(tasks), CapabilitiesVerified: model.CapabilitiesVerified, CapabilitySource: model.CapabilitySource}
+					runtimeModel := ModelCapability{Name: model.Name, Provider: provider, Size: model.Size, VRAM: model.VRAM, Available: model.Available || model.Loaded, Loaded: model.Loaded, Vision: vision, Embedding: embedding, Tasks: allowedModelTasks(tasks), CapabilitiesVerified: model.CapabilitiesVerified, CapabilitySource: model.CapabilitySource,
+						ContextWindowTokens: model.ContextWindowTokens, MaxOutputTokens: model.MaxOutputTokens, MaxInputImages: model.MaxInputImages,
+						MaxImageBytes: model.MaxImageBytes, MaxTotalImageBytes: model.MaxTotalImageBytes, ImageMediaTypes: cleanList(model.ImageMediaTypes, 16, 80),
+						LimitsVerified: model.LimitsVerified, LimitSource: model.LimitSource}
 					key := modelCapabilityKey(provider, model.Name)
 					if existing, ok := runtimeModels[key]; ok {
 						runtimeModels[key] = mergeModelCapability(existing, runtimeModel)
@@ -1896,6 +1907,32 @@ func mergeModelCapability(current, incoming ModelCapability) ModelCapability {
 	}
 	if incoming.VRAM > current.VRAM {
 		current.VRAM = incoming.VRAM
+	}
+	if incoming.LimitsVerified {
+		// Limit fields are independently optional. Non-zero incoming values replace
+		// only the facts actually published by that evidence source.
+		if incoming.ContextWindowTokens > 0 {
+			current.ContextWindowTokens = incoming.ContextWindowTokens
+		}
+		if incoming.MaxOutputTokens > 0 {
+			current.MaxOutputTokens = incoming.MaxOutputTokens
+		}
+		if incoming.MaxInputImages > 0 {
+			current.MaxInputImages = incoming.MaxInputImages
+		}
+		if incoming.MaxImageBytes > 0 {
+			current.MaxImageBytes = incoming.MaxImageBytes
+		}
+		if incoming.MaxTotalImageBytes > 0 {
+			current.MaxTotalImageBytes = incoming.MaxTotalImageBytes
+		}
+		if len(incoming.ImageMediaTypes) > 0 {
+			current.ImageMediaTypes = append([]string(nil), incoming.ImageMediaTypes...)
+		}
+		current.LimitsVerified = true
+		if incoming.LimitSource != "" {
+			current.LimitSource = incoming.LimitSource
+		}
 	}
 	return current
 }

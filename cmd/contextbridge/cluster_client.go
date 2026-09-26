@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -41,6 +42,7 @@ type clusterTextJobOptions struct {
 	MaxCostUSD              float64
 	ImageBase64             string
 	ImageMediaType          string
+	Images                  []bridge.ImageInput
 	Metadata                map[string]interface{}
 	Output                  bridge.OutputSpec
 	AdapterFreshSession     bool
@@ -62,13 +64,31 @@ func newClusterAPIClient(baseURL, token string) *clusterAPIClient {
 // only after the relay returns an authenticated one-time assignment.
 func buildClusterTextSubmitRequest(options clusterTextJobOptions) (cluster.SubmitRequest, error) {
 	source := strings.TrimSpace(options.Source)
-	payload, err := json.Marshal(bridge.Job{
+	job := bridge.Job{
 		Source: source, Task: "generation", Prompt: options.Prompt,
 		SessionID: options.SessionID, AdapterProfile: options.AdapterProfile,
 		Model: options.Model, Reasoning: options.Reasoning, MaxCostUSD: options.MaxCostUSD,
-		ImageBase64: options.ImageBase64, ImageMediaType: options.ImageMediaType,
+		ImageBase64: options.ImageBase64, ImageMediaType: options.ImageMediaType, Images: options.Images,
 		Metadata: options.Metadata, Output: options.Output,
-	})
+	}
+	images := job.InputImages()
+	imageBytes := int64(0)
+	imageMaxBytes := int64(0)
+	imageMediaTypes := make([]string, 0, len(images))
+	for index, image := range images {
+		decoded, decodeErr := base64.StdEncoding.DecodeString(image.DataBase64)
+		if decodeErr != nil {
+			return cluster.SubmitRequest{}, fmt.Errorf("image %d contains invalid base64: %w", index+1, decodeErr)
+		}
+		imageBytes += int64(len(decoded))
+		if int64(len(decoded)) > imageMaxBytes {
+			imageMaxBytes = int64(len(decoded))
+		}
+		if !containsFolded(imageMediaTypes, image.MediaType) {
+			imageMediaTypes = append(imageMediaTypes, image.MediaType)
+		}
+	}
+	payload, err := json.Marshal(job)
 	if err != nil {
 		return cluster.SubmitRequest{}, err
 	}
@@ -76,7 +96,8 @@ func buildClusterTextSubmitRequest(options clusterTextJobOptions) (cluster.Submi
 		Task: "generation", Provider: options.Provider, AdapterProfile: options.AdapterProfile,
 		Group: options.Group, SessionID: options.SessionID, Model: options.Model,
 		Egress: options.Egress, MaxCostUSD: options.MaxCostUSD,
-		Vision: options.ImageBase64 != "",
+		Vision:          options.ImageBase64 != "" || len(options.Images) > 0,
+		InputImageCount: len(images), InputImageBytes: imageBytes, InputImageMaxBytes: imageMaxBytes, InputImageMediaTypes: imageMediaTypes,
 	}
 	if strings.EqualFold(options.Provider, "adapter") {
 		requirements.Reasoning = options.Reasoning

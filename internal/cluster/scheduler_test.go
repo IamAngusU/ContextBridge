@@ -20,6 +20,26 @@ func TestRankUsesCapabilitiesLoadAndVRAM(t *testing.T) {
 	}
 }
 
+func TestRankEnforcesKnownMultiImageLimitsAndRejectsUnverifiedVisionGuess(t *testing.T) {
+	now := time.Now().UTC()
+	base := Capabilities{Providers: []string{"ollama"}, Tasks: []string{"generation", "vision"}, MaxConcurrent: 1}
+	limited := Node{ID: "limited", Connected: true, LastSeen: now, Capabilities: base}
+	limited.Capabilities.Models = []ModelCapability{{Name: "vision", Provider: "ollama", Tasks: []string{"generation", "vision"}, Available: true, Vision: true, CapabilitiesVerified: true, MaxInputImages: 1, LimitsVerified: true}}
+	roomy := Node{ID: "roomy", Connected: true, LastSeen: now, Capabilities: base}
+	roomy.Capabilities.Models = []ModelCapability{{Name: "vision", Provider: "ollama", Tasks: []string{"generation", "vision"}, Available: true, Vision: true, CapabilitiesVerified: true, MaxInputImages: 4, MaxImageBytes: 2048, MaxTotalImageBytes: 4096, ImageMediaTypes: []string{"image/png"}, LimitsVerified: true}}
+	unverified := Node{ID: "guessed", Connected: true, LastSeen: now, Capabilities: base}
+	unverified.Capabilities.Models = []ModelCapability{{Name: "llava", Provider: "ollama", Tasks: []string{"generation", "vision"}, Available: true, Vision: true, CapabilitySource: "name_inference"}}
+	requirements := Requirements{Task: "generation", Provider: "ollama", Model: "vision", Vision: true, InputImageCount: 2, InputImageBytes: 2048, InputImageMaxBytes: 1024, InputImageMediaTypes: []string{"image/png"}}
+	ranked := Rank([]Node{limited, roomy}, requirements)
+	if len(ranked) != 1 || ranked[0].Node.ID != "roomy" {
+		t.Fatalf("known model image limits were not enforced: %#v", ranked)
+	}
+	requirements.Model = "llava"
+	if ranked = Rank([]Node{unverified}, requirements); len(ranked) != 0 {
+		t.Fatalf("name-inferred vision capability authorized image routing: %#v", ranked)
+	}
+}
+
 func TestKnownLocalModelCapabilities(t *testing.T) {
 	vision, embedding := modelFeatures("qwen2.5vl:7b", "generation")
 	if !vision || embedding {

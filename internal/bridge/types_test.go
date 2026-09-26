@@ -247,6 +247,41 @@ func TestValidateJobRejectsDisguisedOrUnsupportedImageBytes(t *testing.T) {
 	}
 }
 
+func TestValidateJobAcceptsMultipleImagesAndRejectsAmbiguousOrOversizedBatches(t *testing.T) {
+	png := base64.StdEncoding.EncodeToString([]byte("\x89PNG\r\n\x1a\n"))
+	gif := base64.StdEncoding.EncodeToString([]byte("GIF89a"))
+	job := Job{Prompt: "compare", Images: []ImageInput{{Name: "a.png", MediaType: "image/png", DataBase64: png}, {Name: "b.gif", MediaType: "image/gif", DataBase64: gif}}, Output: OutputSpec{Mode: "text"}}
+	if err := validateJob(job); err != nil {
+		t.Fatalf("valid multi-image input was rejected: %v", err)
+	}
+	ambiguous := job
+	ambiguous.ImageBase64, ambiguous.ImageMediaType = png, "image/png"
+	if err := validateJob(ambiguous); err == nil || !strings.Contains(err.Error(), "either images") {
+		t.Fatalf("mixed legacy and multi-image fields were not rejected clearly: %v", err)
+	}
+	overCount := job
+	overCount.Images = make([]ImageInput, MaximumInputImages+1)
+	if err := validateJob(overCount); err == nil || !strings.Contains(err.Error(), "at most") {
+		t.Fatalf("oversized image count was accepted: %v", err)
+	}
+}
+
+func TestValidateJobMultiImageAggregateBoundary(t *testing.T) {
+	first := make([]byte, 4<<20)
+	second := make([]byte, 4<<20)
+	copy(first, []byte("\x89PNG\r\n\x1a\n"))
+	copy(second, []byte("\x89PNG\r\n\x1a\n"))
+	job := Job{Prompt: "compare", Images: []ImageInput{{MediaType: "image/png", DataBase64: base64.StdEncoding.EncodeToString(first)}, {MediaType: "image/png", DataBase64: base64.StdEncoding.EncodeToString(second)}}, Output: OutputSpec{Mode: "text"}}
+	if err := validateJob(job); err != nil {
+		t.Fatalf("exact multi-image aggregate boundary was rejected: %v", err)
+	}
+	second = append(second, 0)
+	job.Images[1].DataBase64 = base64.StdEncoding.EncodeToString(second)
+	if err := validateJob(job); err == nil || !strings.Contains(err.Error(), "combined") {
+		t.Fatalf("one-byte aggregate overrun was accepted: %v", err)
+	}
+}
+
 func TestResponseJobDoesNotEchoVisualInput(t *testing.T) {
 	job := Job{ID: "job-1", Prompt: "describe", ImageBase64: "large-input", ImageMediaType: "image/png", Model: "vision-model"}
 	response := responseJob(job)
@@ -255,6 +290,17 @@ func TestResponseJobDoesNotEchoVisualInput(t *testing.T) {
 	}
 	if job.ImageBase64 != "large-input" {
 		t.Fatal("response compaction mutated the queued job")
+	}
+}
+
+func TestResponseJobDoesNotEchoMultiImageInputOrMutateOriginal(t *testing.T) {
+	job := Job{ID: "job-multi", Prompt: "compare", Images: []ImageInput{{Name: "a.png", MediaType: "image/png", DataBase64: "private-a"}, {Name: "b.png", MediaType: "image/png", DataBase64: "private-b"}}}
+	response := responseJob(job)
+	if len(response.Images) != 2 || response.Images[0].DataBase64 != "" || response.Images[1].DataBase64 != "" {
+		t.Fatalf("multi-image response was not compacted: %#v", response.Images)
+	}
+	if job.Images[0].DataBase64 != "private-a" || job.Images[1].DataBase64 != "private-b" {
+		t.Fatal("response compaction mutated the queued multi-image job")
 	}
 }
 

@@ -343,13 +343,22 @@ limits, highlights incomplete/invalid values, and offers only compatible next
 flags and live provider/model choices. See
 [operations](docs/operations.md#observe-diagnose-and-stop).
 
-Attach one local image when the selected worker/model supports vision:
+Attach one or several local images when the selected worker/model supports vision:
 
 ```sh
 contextbridge cluster chat --provider ollama --model auto --attach-image ./photo.jpg --artifacts off --prompt "Describe what is visible. Do not guess unreadable text."
 ```
 
-`--attach-image` accepts one PNG, JPEG, WebP, or GIF up to 8 MiB decoded. The job carries a vision requirement, so a worker that cannot satisfy it is not eligible.
+Repeat `--attach-image` up to 12 times for comparison or OCR batches. PNG,
+JPEG, WebP and GIF are accepted; all input images share an 8 MiB decoded
+budget. The job carries the exact count, aggregate bytes and media types as
+routing requirements. A worker whose verified model passport cannot satisfy a
+known hard limit is not eligible; an unknown limit is shown as unknown, never
+invented as zero.
+
+```sh
+contextbridge cluster chat --provider ollama --model auto --attach-image ./before.png --attach-image ./after.png --artifacts off --prompt "List only the visible differences."
+```
 
 You can also put hard requirements on the request. For example, if your relay policy classifies Ollama as local and your workers advertise a `private` group:
 
@@ -365,8 +374,7 @@ contextbridge cluster chat --provider ollama --group private --egress local_only
 | Input | Current native path |
 | --- | --- |
 | Text prompt | `cluster chat --prompt "..."` |
-| One image | `--attach-image FILE` for PNG/JPEG/WebP/GIF, max 8 MiB decoded |
-| Multiple images in one job | Not currently a native `cluster chat` input |
+| One or several images | Repeat `--attach-image FILE` up to 12 times for PNG/JPEG/WebP/GIF; max 8 MiB decoded in aggregate |
 | UTF-8 text file | Read the authorized file in your app and send its contents as `payload.text` |
 | PDF / DOCX / spreadsheet | Extract the text or selected pages first, or use a separate integration |
 | ZIP / arbitrary files | No generic native file-upload field today; CB does not unpack or execute a ZIP because its path was mentioned in a prompt |

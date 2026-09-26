@@ -137,7 +137,7 @@ func routingModelWarmth(models []ModelCapability, requirements Requirements) str
 			if !matches {
 				continue
 			}
-		} else if (requirements.Task != "" && !containsFold(model.Tasks, requirements.Task)) || (requirements.Vision && !model.Vision) || (requirements.Embedding && !model.Embedding) {
+		} else if (requirements.Task != "" && !containsFold(model.Tasks, requirements.Task)) || !modelMeetsHardRequirements(model, requirements) {
 			continue
 		}
 		found = true

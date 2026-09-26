@@ -1997,6 +1997,31 @@ func (r *Relay) validateRequirements(requirements Requirements) error {
 	if requirements.AdapterEphemeralSession && !requirements.AdapterFreshSession {
 		return errors.New("requirements.adapter_ephemeral_session requires adapter_fresh_session")
 	}
+	if requirements.InputImageCount < 0 || requirements.InputImageCount > 12 {
+		return errors.New("requirements.input_image_count must be between 0 and 12")
+	}
+	if requirements.InputImageBytes < 0 || requirements.InputImageBytes > 8<<20 {
+		return errors.New("requirements.input_image_bytes must be between 0 and 8388608")
+	}
+	if requirements.InputImageMaxBytes < 0 || requirements.InputImageMaxBytes > 8<<20 || requirements.InputImageMaxBytes > requirements.InputImageBytes {
+		return errors.New("requirements.input_image_max_bytes must be between 0 and input_image_bytes")
+	}
+	if len(requirements.InputImageMediaTypes) > 4 {
+		return errors.New("requirements.input_image_media_types accepts at most four entries")
+	}
+	for _, mediaType := range requirements.InputImageMediaTypes {
+		switch strings.ToLower(strings.TrimSpace(mediaType)) {
+		case "image/png", "image/jpeg", "image/webp", "image/gif":
+		default:
+			return fmt.Errorf("requirements.input_image_media_types contains unsupported value %q", mediaType)
+		}
+	}
+	if requirements.InputImageCount > 0 && !requirements.Vision {
+		return errors.New("requirements.input_image_count requires vision")
+	}
+	if requirements.InputImageCount == 0 && (requirements.InputImageBytes > 0 || requirements.InputImageMaxBytes > 0 || len(requirements.InputImageMediaTypes) > 0) {
+		return errors.New("image byte and media requirements require input_image_count")
+	}
 	if err := validateExecutionPolicyRequirements(requirements); err != nil {
 		return err
 	}
