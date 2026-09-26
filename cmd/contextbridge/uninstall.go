@@ -564,7 +564,20 @@ func pathComparisonKey(path string) string {
 func samePath(left, right string) bool {
 	leftAbs, leftErr := filepath.Abs(left)
 	rightAbs, rightErr := filepath.Abs(right)
-	return leftErr == nil && rightErr == nil && pathComparisonKey(leftAbs) == pathComparisonKey(rightAbs)
+	if leftErr != nil || rightErr != nil {
+		return false
+	}
+	if pathComparisonKey(leftAbs) == pathComparisonKey(rightAbs) {
+		return true
+	}
+	// macOS commonly exposes the same temporary or user path through both
+	// /var and /private/var. String comparison alone misses those aliases and
+	// can leave installer-owned command links behind. SameFile uses the actual
+	// filesystem identity when both paths exist; nonexistent planned paths keep
+	// the conservative lexical behavior above.
+	leftInfo, leftStatErr := os.Stat(leftAbs)
+	rightInfo, rightStatErr := os.Stat(rightAbs)
+	return leftStatErr == nil && rightStatErr == nil && os.SameFile(leftInfo, rightInfo)
 }
 
 func pathInside(path, root string) bool {

@@ -16,8 +16,11 @@ func TestCaseDistinctUnixRootsRemainVisibleForIdentityQuarantine(t *testing.T) {
 	}
 	parent := t.TempDir()
 	upper, lower := filepath.Join(parent, "Pack"), filepath.Join(parent, "pack")
-	for _, root := range []string{upper, lower} {
+	for index, root := range []string{upper, lower} {
 		if err := os.Mkdir(root, 0700); err != nil {
+			if index == 1 && os.IsExist(err) {
+				t.Skip("test filesystem is case-insensitive")
+			}
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(filepath.Join(root, MarkerName), []byte(`{"schema_version":1,"id":"same-id","name":"Duplicate"}`), 0600); err != nil {
