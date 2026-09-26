@@ -213,6 +213,10 @@ contextbridge pair
 
 Pairing prints a code and waits. In a **second terminal on the relay host**, inspect pending requests and approve the matching code:
 
+If the device has not been fully configured yet, use
+`contextbridge pair --interactive`; it asks only for the unresolved safe
+values and shows a redacted confirmation before contacting the relay.
+
 ```sh
 contextbridge cluster pairing
 contextbridge cluster pairing --approve PAIRING-CODE

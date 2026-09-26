@@ -1268,47 +1268,82 @@ func relayCommand(args []string) error {
 }
 
 func pairCommand(args []string) error {
+	return pairCommandWithIO(args, os.Stdin, os.Stdout, interactiveFiles(os.Stdin, os.Stdout))
+}
+
+func pairCommandWithIO(args []string, input io.Reader, output io.Writer, terminal bool) error {
 	flags := flag.NewFlagSet("pair", flag.ContinueOnError)
 	path := flags.String("config", defaultConfigPath(), "config path")
 	relayURL := flags.String("relay", "", "public relay URL")
 	identityFile := flags.String("identity", "", "identity file for this relay")
 	name := flags.String("name", "", "node name")
+	interactive := flags.Bool("interactive", false, "guide unresolved pairing values in a real terminal")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected pair argument %q", flags.Arg(0))
+	}
+	provided := map[string]bool{}
+	flags.Visit(func(option *flag.Flag) {
+		provided[option.Name] = true
+	})
 	cfg, err := config.Load(*path)
 	if err != nil {
 		return err
 	}
-	if *relayURL == "" {
+	if *interactive {
+		if !terminal {
+			return errors.New("guided pairing requires an interactive terminal; use explicit pair flags for scripts, pipes, CI, MCP, or services")
+		}
+		apply, guideErr := guidePairing(input, output, cfg, relayURL, identityFile, name, provided)
+		if guideErr != nil {
+			return guideErr
+		}
+		if !apply {
+			_, _ = fmt.Fprintln(output, "Cancelled. No pairing request was sent and no identity was created.")
+			return nil
+		}
+	}
+	if strings.TrimSpace(*relayURL) == "" {
 		*relayURL = cfg.Cluster.Worker.RelayURL
 	}
-	if *identityFile == "" {
+	if strings.TrimSpace(*identityFile) == "" {
 		*identityFile = cfg.Cluster.Worker.IdentityFile
 	}
+	if err := validatePairIdentityPath(*identityFile); err != nil {
+		return err
+	}
+	*relayURL = strings.TrimRight(strings.TrimSpace(*relayURL), "/")
 	if *relayURL == "" {
 		return errors.New("--relay or cluster.worker.relay_url is required")
 	}
-	if !strings.HasPrefix(*relayURL, "https://") && !strings.HasPrefix(*relayURL, "http://127.0.0.1:") && !strings.HasPrefix(*relayURL, "http://localhost:") {
-		return errors.New("pairing requires HTTPS or a localhost relay URL")
+	if err := cluster.ValidateRelayURL(*relayURL); err != nil {
+		return fmt.Errorf("--relay: %w", err)
 	}
 	if *name == "" || *name == "auto" {
 		*name, _ = os.Hostname()
+		if strings.TrimSpace(*name) == "" {
+			*name = "auto"
+		}
+	}
+	if strings.TrimSpace(*name) != *name || len([]rune(*name)) > 100 || strings.IndexFunc(*name, func(r rune) bool { return !unicode.IsPrint(r) }) >= 0 {
+		return errors.New("--name must be a printable name of at most 100 characters")
 	}
 	if cfg.Cluster.Relay.Enabled && *relayURL == "http://"+cfg.Cluster.Relay.Listen {
 		if err := cluster.BootstrapWorkerIdentity(cfg.Cluster.Relay.Database, *relayURL, *name, *identityFile, cfg.Cluster.Worker.Groups); err != nil {
 			return err
 		}
-		fmt.Println("Local worker paired directly with the relay database.")
+		_, _ = fmt.Fprintln(output, "Local worker paired directly with the relay database.")
 		return nil
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return cluster.PairWorker(ctx, *relayURL, *name, *identityFile, cfg.Cluster.Worker.Groups, func(pair cluster.PairResponse) {
-		fmt.Println("Pair this worker")
-		fmt.Println("  Code:", pair.UserCode)
-		fmt.Println("  Open:", pair.VerificationURI)
-		fmt.Println("Waiting for approval. The code expires at", pair.ExpiresAt.Local().Format(time.RFC1123))
+		_, _ = fmt.Fprintln(output, "Pair this worker")
+		_, _ = fmt.Fprintln(output, "  Code:", pair.UserCode)
+		_, _ = fmt.Fprintln(output, "  Open:", pair.VerificationURI)
+		_, _ = fmt.Fprintln(output, "Waiting for approval. The code expires at", pair.ExpiresAt.Local().Format(time.RFC1123))
 	})
 }
 

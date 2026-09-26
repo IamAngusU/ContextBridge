@@ -39,6 +39,24 @@ func TestPowerShellCompletionEscapesSingleQuotes(t *testing.T) {
 	}
 }
 
+func TestCompletionScriptsExposeGuidedPairing(t *testing.T) {
+	cases := map[string]struct {
+		script string
+		want   string
+	}{
+		"powershell": {powershellCompletionScript(), "'pair' = @('--config','--relay','--identity','--name','--interactive')"},
+		"bash":       {bashCompletionScript(), `pair) candidates="--config --relay --identity --name --interactive"`},
+		"zsh":        {zshCompletionScript(), `pair) _arguments "${config[@]}" '--relay[Public relay URL]:URL:' '--identity[Identity file]:identity file:_files' '--name[Node name]:name:' '--interactive[Guide unresolved pairing values in a real terminal]'`},
+	}
+	for name, test := range cases {
+		t.Run(name, func(t *testing.T) {
+			if !strings.Contains(test.script, test.want) {
+				t.Fatal("completion does not expose guided pairing")
+			}
+		})
+	}
+}
+
 func TestPowerShellTabExpansionTracksTrailingSpaceAndOptionPosition(t *testing.T) {
 	shell := powerShellForTest(t)
 	tests := []struct {

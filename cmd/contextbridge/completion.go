@@ -91,7 +91,7 @@ $script:ContextBridgeOptions = @{
     'benchmark' = @('--json','--samples','--warmup','--database-jobs','--idle-duration','--binary')
     'verification verify' = @('--file','--trust-key','--artifact','--require-artifact','--evidence-dir','--require-evidence','--json')
     'relay' = @('--config')
-    'pair' = @('--config','--relay','--identity','--name')
+	'pair' = @('--config','--relay','--identity','--name','--interactive')
     'worker' = @('--config','--relay','--identity','--name','--slots','--providers','--models','--tasks','--groups','--no-updates','--topmost')
     'cluster status' = @('--config','--json')
 	'cluster events' = @('--config','--token','--after','--limit','--json','--follow','--pipeline','--poll')
@@ -256,7 +256,7 @@ _contextbridge_complete() {
       submit) candidates="--config --file --artifacts" ;;
       review) candidates="--config --job-dir" ;;
       dashboard) candidates="--config --no-open" ;;
-      pair) candidates="--config --relay --identity --name" ;;
+      pair) candidates="--config --relay --identity --name --interactive" ;;
       worker) candidates="--config --relay --identity --name --slots --providers --models --tasks --groups --no-updates --topmost" ;;
       status|doctor|resources) candidates="--config --json" ;;
 	  selftest) candidates="--config --providers --local-model --run --dry-run --image --image-profile --artifacts --keep-artifacts --timeout --job-timeout --poll" ;;
@@ -498,7 +498,7 @@ case "$words[2]" in
   status|doctor|resources) _arguments "${config[@]}" '--json[Print machine-readable JSON]' ;;
   hardware) _arguments '--json[Print machine-readable JSON]' ;;
   models) _arguments "${config[@]}" '--json[Print machine-readable JSON]' '--discover[Discover local model runtimes and files]' ;;
-  pair) _arguments "${config[@]}" '--relay[Public relay URL]:URL:' '--identity[Identity file]:identity file:_files' '--name[Node name]:name:' ;;
+  pair) _arguments "${config[@]}" '--relay[Public relay URL]:URL:' '--identity[Identity file]:identity file:_files' '--name[Node name]:name:' '--interactive[Guide unresolved pairing values in a real terminal]' ;;
   worker) _arguments "${config[@]}" '--relay[Relay URL]:URL:' '--identity[Identity file]:identity file:_files' '--name[Worker display name]:name:' '--slots[Worker job limit]:slots:' '--providers[Allowed providers]:providers:' '--models[Allowed models]:models:' '--tasks[Allowed tasks]:tasks:' '--groups[Scheduling groups]:groups:' '--no-updates[Disable the worker updater]' '--topmost[Keep the Windows console above other windows]' ;;
   version|help) ;;
   *) _arguments '*:argument:_files' ;;

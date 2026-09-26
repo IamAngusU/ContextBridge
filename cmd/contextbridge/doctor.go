@@ -160,7 +160,7 @@ func checkClusterFiles(cfg config.Config, add func(string, string, string, strin
 		raw, err := os.ReadFile(cfg.Cluster.Worker.IdentityFile)
 		var identity cluster.WorkerIdentity
 		if err != nil || json.Unmarshal(raw, &identity) != nil || identity.NodeID == "" || identity.NodeToken == "" || identity.PrivateKey == "" {
-			add("fail", "cluster worker identity", "missing or incomplete", "Run `contextbridge pair --config <path>` after configuring worker mode.")
+			add("fail", "cluster worker identity", "missing or incomplete", "Run `contextbridge pair --interactive --config <path>` in a terminal, or use explicit pair flags for automation.")
 		} else {
 			add("ok", "cluster worker identity", "paired as "+identity.NodeID, "")
 		}

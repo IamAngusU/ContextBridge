@@ -50,6 +50,22 @@ An existing command can opt into the same bounded completion flow with
 `contextbridge cluster configure --interactive ...`. Fully specified commands
 without `--interactive` preserve their existing behavior and output contract.
 
+Pairing has the same opt-in human path:
+
+```sh
+contextbridge pair --interactive
+```
+
+It resolves the relay, identity path, and node name from explicit flags,
+configuration, supported environment variables, and safe local defaults. Only
+the still-missing relay URL is requested. Before contacting the relay or
+writing an identity, CB shows the relay origin (never URL credentials, path,
+query, or fragment), node, identity path, and configured group count, then
+asks for confirmation. A declined or interrupted flow sends no pairing request
+and creates no identity. If the selected identity file already exists, the
+summary says so explicitly; it is replaced only after the relay approves the
+new pairing.
+
 The guide does not invent or relax credentials, pairing approval, E2EE
 reservations, policy boundaries, idempotency keys, destructive confirmations,
 or agent approval digests. Secure LAN joining still uses a trusted join bundle
