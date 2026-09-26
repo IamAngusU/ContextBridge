@@ -62,6 +62,10 @@ func workerFailureCode(err error) string {
 	if err == nil {
 		return ""
 	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	if message == FailureExecutionStateAmbiguous || strings.HasPrefix(message, FailureExecutionStateAmbiguous+":") || strings.HasPrefix(message, FailureExecutionStateAmbiguous+"\n") {
+		return FailureExecutionStateAmbiguous
+	}
 	if errors.Is(err, errWorkerExecutionPanicked) {
 		return FailureExecutionStateAmbiguous
 	}
@@ -87,6 +91,8 @@ func normalizedWorkerFailureCode(reported, message string) string {
 func failureCodeFromText(message string) string {
 	value := strings.ToLower(strings.TrimSpace(message))
 	switch {
+	case value == FailureExecutionStateAmbiguous || strings.HasPrefix(value, FailureExecutionStateAmbiguous+":"):
+		return FailureExecutionStateAmbiguous
 	case value == FailureAdapterRateLimited || strings.HasPrefix(value, FailureAdapterRateLimited+":"):
 		return FailureAdapterRateLimited
 	case value == FailureAdapterTimeout || strings.HasPrefix(value, FailureAdapterTimeout+":"):

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -88,6 +89,100 @@ func TestJobCanSelectConfiguredRouteFallback(t *testing.T) {
 	rejected := processor.Process(context.Background(), Job{Provider: "unconfigured", Prompt: "test", Output: OutputSpec{Mode: "text"}})
 	if rejected.Error != "provider_not_allowed_for_route" {
 		t.Fatalf("unconfigured provider was not rejected: %#v", rejected)
+	}
+}
+
+func TestHTTPProviderExecutionFailureDoesNotRunFallback(t *testing.T) {
+	tests := []struct {
+		name       string
+		engineType string
+		mode       string
+		path       string
+	}{
+		{name: "ollama generation", engineType: "ollama", mode: "text", path: "/api/generate"},
+		{name: "ollama embedding", engineType: "ollama", mode: "embedding", path: "/api/embed"},
+		{name: "openai generation", engineType: "openai_compatible", mode: "text", path: "/chat/completions"},
+		{name: "openai embedding", engineType: "openai_compatible", mode: "embedding", path: "/embeddings"},
+		{name: "llama generation", engineType: "llama_cpp", mode: "text", path: "/v1/chat/completions"},
+		{name: "llama embedding", engineType: "llama_cpp", mode: "embedding", path: "/v1/embeddings"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var primaryCalls, fallbackCalls atomic.Int32
+			primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != test.path {
+					http.NotFound(w, r)
+					return
+				}
+				primaryCalls.Add(1)
+				http.Error(w, "request may have executed", http.StatusInternalServerError)
+			}))
+			defer primary.Close()
+			fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fallbackCalls.Add(1)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"response": "unexpected fallback"})
+			}))
+			defer fallback.Close()
+			cfg := config.Config{
+				Routes: map[string]config.Route{"default": {Provider: "primary", Fallback: []string{"fallback"}}},
+				Engines: map[string]config.Engine{
+					"primary":  {Type: test.engineType, URL: primary.URL, Model: "test", TimeoutSeconds: 2, Capabilities: []string{"embedding"}},
+					"fallback": {Type: "ollama", URL: fallback.URL, Model: "test", TimeoutSeconds: 2},
+				},
+			}
+			output := NewProcessor(cfg, nil).Process(context.Background(), Job{Prompt: "perform once", Text: "perform once", Output: OutputSpec{Mode: test.mode}})
+			if output.Error != "execution_state_ambiguous" || output.CostStatus != "unknown" || primaryCalls.Load() != 1 || fallbackCalls.Load() != 0 {
+				t.Fatalf("post-dispatch failure ran fallback: output=%#v primary=%d fallback=%d", output, primaryCalls.Load(), fallbackCalls.Load())
+			}
+		})
+	}
+}
+
+func TestHTTPProviderTimeoutAfterDispatchDoesNotRunFallback(t *testing.T) {
+	var primaryCalls, fallbackCalls atomic.Int32
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		primaryCalls.Add(1)
+		select {
+		case <-r.Context().Done():
+		case <-time.After(2 * time.Second):
+		}
+	}))
+	defer primary.Close()
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fallbackCalls.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"response": "unexpected fallback"})
+	}))
+	defer fallback.Close()
+	cfg := config.Config{
+		Routes: map[string]config.Route{"default": {Provider: "primary", Fallback: []string{"fallback"}}},
+		Engines: map[string]config.Engine{
+			"primary":  {Type: "ollama", URL: primary.URL, Model: "test", TimeoutSeconds: 1},
+			"fallback": {Type: "ollama", URL: fallback.URL, Model: "test", TimeoutSeconds: 2},
+		},
+	}
+	output := NewProcessor(cfg, nil).Process(context.Background(), Job{Prompt: "perform once", Output: OutputSpec{Mode: "text"}})
+	if output.Error != "execution_state_ambiguous" || output.CostStatus != "unknown" || primaryCalls.Load() != 1 || fallbackCalls.Load() != 0 {
+		t.Fatalf("timed-out HTTP execution ran fallback: output=%#v primary=%d fallback=%d", output, primaryCalls.Load(), fallbackCalls.Load())
+	}
+}
+
+func TestHTTPProviderPreflightFailureCanUseFallback(t *testing.T) {
+	var fallbackCalls atomic.Int32
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fallbackCalls.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"response": "safe fallback"})
+	}))
+	defer fallback.Close()
+	cfg := config.Config{
+		Routes: map[string]config.Route{"default": {Provider: "primary", Fallback: []string{"fallback"}}},
+		Engines: map[string]config.Engine{
+			"primary":  {Type: "openai_compatible", URL: "http://127.0.0.1:1", TimeoutSeconds: 1},
+			"fallback": {Type: "ollama", URL: fallback.URL, Model: "test", TimeoutSeconds: 2},
+		},
+	}
+	output := NewProcessor(cfg, nil).Process(context.Background(), Job{Prompt: "safe to run", Output: OutputSpec{Mode: "text"}})
+	if output.Error != "" || output.Text != "safe fallback" || fallbackCalls.Load() != 1 {
+		t.Fatalf("preflight failure did not use fallback: output=%#v fallback=%d", output, fallbackCalls.Load())
 	}
 }
 

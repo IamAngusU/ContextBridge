@@ -266,7 +266,7 @@ func TestOpenAICompatibleProviderPreservesFilteringAndRejectsTools(t *testing.T)
 			}
 			output := NewProcessor(cfg, nil).Process(context.Background(), Job{Prompt: "test", Output: OutputSpec{Mode: "text"}})
 			if test.wantError {
-				if output.Error != "providers_unavailable" {
+				if output.Error != "execution_state_ambiguous" {
 					t.Fatalf("unsupported tool completion was accepted: %#v", output)
 				}
 				return

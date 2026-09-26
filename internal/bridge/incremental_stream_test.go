@@ -28,7 +28,7 @@ func TestIncrementalProviderRequiresDoneAndDoesNotPublishFinalOutput(t *testing.
 	if len(deltas) != 1 || deltas[0] != "partial" {
 		t.Fatalf("ordered partial delta was lost: %#v", deltas)
 	}
-	if output.Error != "providers_unavailable" || output.Text != "" {
+	if output.Error != "execution_state_ambiguous" || output.Text != "" {
 		t.Fatalf("incomplete provider stream became authoritative: %#v", output)
 	}
 }
@@ -47,7 +47,7 @@ func TestIncrementalProviderStopsWhenDownstreamRejectsDelta(t *testing.T) {
 		calls++
 		return errors.New("downstream disconnected")
 	})
-	if calls != 1 || output.Error != "providers_unavailable" || output.Text != "" {
+	if calls != 1 || output.Error != "execution_state_ambiguous" || output.Text != "" {
 		t.Fatalf("downstream backpressure/cancellation failed: calls=%d output=%#v", calls, output)
 	}
 }
@@ -68,7 +68,7 @@ func TestIncrementalProviderRejectsEventFloodAndFallbackRoutes(t *testing.T) {
 	}
 	processor = incrementalTestProcessor(provider.URL, nil)
 	output := processor.ProcessIncremental(context.Background(), job, func(string) error { return nil })
-	if output.Error != "providers_unavailable" {
+	if output.Error != "execution_state_ambiguous" {
 		t.Fatalf("event flood escaped the bound: %#v", output)
 	}
 }
@@ -103,7 +103,7 @@ func TestIncrementalProviderRequiresTerminalChoiceBeforeDone(t *testing.T) {
 	}))
 	defer provider.Close()
 	output := incrementalTestProcessor(provider.URL, nil).ProcessIncremental(context.Background(), Job{Route: "default", Prompt: "test", Output: OutputSpec{Mode: "text"}}, func(string) error { return nil })
-	if output.Error != "providers_unavailable" || output.Text != "" {
+	if output.Error != "execution_state_ambiguous" || output.Text != "" {
 		t.Fatalf("stream without terminal choice became authoritative: %#v", output)
 	}
 }
@@ -128,7 +128,7 @@ func TestIncrementalProviderPreservesFilteringAndRejectsTools(t *testing.T) {
 			defer provider.Close()
 			output := incrementalTestProcessor(provider.URL, nil).ProcessIncremental(context.Background(), Job{Route: "default", Prompt: "test", Output: OutputSpec{Mode: "text"}}, func(string) error { return nil })
 			if test.wantProvider {
-				if output.Error != "providers_unavailable" {
+				if output.Error != "execution_state_ambiguous" {
 					t.Fatalf("unsupported tool completion was accepted: %#v", output)
 				}
 				return
