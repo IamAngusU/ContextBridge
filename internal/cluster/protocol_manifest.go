@@ -49,6 +49,7 @@ func CurrentProtocolManifest(configuredJobBytes int64) ProtocolManifest {
 			"durable_execution_policy_v1",
 			"durable_worker_drain_v1",
 			"failure_aware_routing_v1",
+			"identity_preserving_lan_relocation_v1",
 			"job_contract_dry_run",
 			"load_context_performance_routing_v1",
 			"performance_aware_routing_v1",

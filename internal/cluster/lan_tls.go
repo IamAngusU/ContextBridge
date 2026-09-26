@@ -176,6 +176,88 @@ func LoadLANTLSIdentity(certificatePath, privateKeyPath, advertisedHost string, 
 	return loadRelayTrustAndKey(certificatePath, privateKeyPath, advertisedHost, now)
 }
 
+// IssueLANTLSCertificateForExistingKey creates (or validates) a certificate
+// for a new LAN address while retaining the relay's existing Ed25519 key and
+// therefore its pinned SPKI identity. It never overwrites an existing file;
+// the operator can switch config to the new path only after every check and
+// bundle write has succeeded.
+func IssueLANTLSCertificateForExistingKey(certificatePath, privateKeyPath, advertisedHost string, now time.Time) (RelayTrust, error) {
+	certificatePath = filepath.Clean(strings.TrimSpace(certificatePath))
+	privateKeyPath = filepath.Clean(strings.TrimSpace(privateKeyPath))
+	advertisedHost = strings.TrimSpace(advertisedHost)
+	if certificatePath == "." || privateKeyPath == "." || advertisedHost == "" || sameCleanPath(certificatePath, privateKeyPath) {
+		return RelayTrust{}, errors.New("new LAN certificate, existing private key, and advertised host are required")
+	}
+	if exists, err := regularFileExists(certificatePath, maximumLANCertificateBytes); err != nil {
+		return RelayTrust{}, fmt.Errorf("new LAN TLS certificate: %w", err)
+	} else if exists {
+		return loadRelayTrustAndKey(certificatePath, privateKeyPath, advertisedHost, now)
+	}
+	privatePEM, err := readLANIdentityFile(privateKeyPath, maximumLANCertificateBytes, true)
+	if err != nil {
+		return RelayTrust{}, fmt.Errorf("LAN TLS private key: %w", err)
+	}
+	block, rest := pem.Decode(privatePEM)
+	if block == nil || block.Type != "PRIVATE KEY" || len(bytes.TrimSpace(rest)) != 0 {
+		return RelayTrust{}, errors.New("LAN TLS private key must contain exactly one PKCS#8 private key")
+	}
+	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return RelayTrust{}, errors.New("LAN TLS private key is invalid")
+	}
+	privateKey, ok := parsed.(ed25519.PrivateKey)
+	if !ok || len(privateKey) != ed25519.PrivateKeySize {
+		return RelayTrust{}, errors.New("LAN TLS private key must be Ed25519")
+	}
+	certificatePEM, err := createLANTLSCertificate(privateKey.Public().(ed25519.PublicKey), privateKey, advertisedHost, now)
+	if err != nil {
+		return RelayTrust{}, err
+	}
+	if err := writeNewPrivateFile(certificatePath, certificatePEM); err != nil {
+		return RelayTrust{}, fmt.Errorf("write new LAN TLS certificate: %w", err)
+	}
+	trust, err := loadRelayTrustAndKey(certificatePath, privateKeyPath, advertisedHost, now)
+	if err != nil {
+		_ = os.Remove(certificatePath)
+		return RelayTrust{}, err
+	}
+	return trust, nil
+}
+
+func createLANTLSCertificate(publicKey ed25519.PublicKey, privateKey ed25519.PrivateKey, advertisedHost string, now time.Time) ([]byte, error) {
+	if address := net.ParseIP(advertisedHost); address == nil {
+		if err := ValidateRelayURL("https://" + net.JoinHostPort(advertisedHost, "443")); err != nil {
+			return nil, errors.New("advertised LAN host is invalid")
+		}
+	}
+	serialLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serial, err := cryptorand.Int(cryptorand.Reader, serialLimit)
+	if err != nil {
+		return nil, fmt.Errorf("generate LAN TLS serial: %w", err)
+	}
+	if serial.Sign() == 0 {
+		serial.SetInt64(1)
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	template := &x509.Certificate{
+		SerialNumber: serial, Subject: pkix.Name{CommonName: "ContextBridge LAN Relay"},
+		NotBefore: now.Add(-5 * time.Minute), NotAfter: now.AddDate(5, 0, 0),
+		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, BasicConstraintsValid: true,
+	}
+	if address := net.ParseIP(advertisedHost); address != nil {
+		template.IPAddresses = []net.IP{address}
+	} else {
+		template.DNSNames = []string{advertisedHost}
+	}
+	der, err := x509.CreateCertificate(cryptorand.Reader, template, template, publicKey, privateKey)
+	if err != nil {
+		return nil, fmt.Errorf("create LAN TLS certificate: %w", err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), nil
+}
+
 func normalizeLANTLSIdentityInputs(certificatePath, privateKeyPath, advertisedHost string) (string, string, string, error) {
 	certificatePath = filepath.Clean(strings.TrimSpace(certificatePath))
 	privateKeyPath = filepath.Clean(strings.TrimSpace(privateKeyPath))

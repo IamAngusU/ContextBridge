@@ -1750,6 +1750,54 @@ func LoadWorkerRelayTrust(identityFile, relayURL string) (RelayTrust, error) {
 	return *identity.RelayTrust, nil
 }
 
+// LoadWorkerRelayBinding returns only the public relay URL and trust bound to
+// a saved identity. Worker credentials and private key material never leave
+// this package through this API.
+func LoadWorkerRelayBinding(identityFile string) (string, RelayTrust, error) {
+	raw, err := readBoundedRegularFile(identityFile, maximumWorkerIdentityBytes)
+	if err != nil {
+		return "", RelayTrust{}, err
+	}
+	var identity WorkerIdentity
+	if err := json.Unmarshal(raw, &identity); err != nil || validateWorkerIdentity(identity) != nil {
+		return "", RelayTrust{}, errors.New("worker identity is invalid")
+	}
+	if identity.RelayTrust == nil {
+		return identity.RelayURL, RelayTrust{}, nil
+	}
+	return identity.RelayURL, *identity.RelayTrust, nil
+}
+
+// RebindWorkerRelayTrust updates only the relay address/certificate of an
+// existing worker identity and only when the new certificate proves the same
+// already-pinned SPKI key. A different key still requires explicit re-pairing.
+func RebindWorkerRelayTrust(identityFile, relayURL string, trust RelayTrust) error {
+	relayURL = strings.TrimRight(strings.TrimSpace(relayURL), "/")
+	if err := ValidateRelayURL(relayURL); err != nil {
+		return fmt.Errorf("new worker relay URL: %w", err)
+	}
+	if _, err := relayTLSConfig(relayURL, trust, time.Now().UTC()); err != nil {
+		return fmt.Errorf("new worker relay trust: %w", err)
+	}
+	raw, err := readBoundedRegularFile(identityFile, maximumWorkerIdentityBytes)
+	if err != nil {
+		return err
+	}
+	var identity WorkerIdentity
+	if err := json.Unmarshal(raw, &identity); err != nil || validateWorkerIdentity(identity) != nil {
+		return errors.New("worker identity is invalid")
+	}
+	if identity.RelayTrust == nil || identity.RelayTrust.SPKISHA256 == "" {
+		return errors.New("worker identity has no pinned LAN relay identity; pair it explicitly")
+	}
+	if !strings.EqualFold(identity.RelayTrust.SPKISHA256, trust.SPKISHA256) {
+		return errors.New("new LAN bundle uses a different relay identity; explicit re-pairing is required")
+	}
+	identity.RelayURL = relayURL
+	identity.RelayTrust = &trust
+	return saveIdentity(identityFile, identity)
+}
+
 func validatePairResponse(response PairResponse) error {
 	if !validOpaqueSecret(response.DeviceCode, 16, 1024) {
 		return errors.New("relay returned an invalid pairing device code")

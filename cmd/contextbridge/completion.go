@@ -113,7 +113,11 @@ $script:ContextBridgeOptions = @{
     'cluster login' = @('--config','--token-file')
     'cluster token' = @('--config','--role','--subject','--groups','--lifetime-hours','--max-queued-jobs','--max-jobs-per-hour','--providers','--egress')
 	'cluster pairing' = @('--config','--approve','--deny')
-	'cluster lan' = @('init','join','status','--config','--listen','--advertise-host','--out','--bundle','--name')
+	'cluster lan' = @('init','relocate','join','status','--config','--listen','--advertise-host','--certificate-out','--out','--bundle','--name')
+	'cluster lan init' = @('--config','--listen','--advertise-host','--out')
+	'cluster lan relocate' = @('--config','--listen','--advertise-host','--certificate-out','--out')
+	'cluster lan join' = @('--config','--bundle','--name')
+	'cluster lan status' = @('--config')
     'update' = @('--config','--force','--json','--managed-service','--relay-only')
 }
 $script:ContextBridgeValueOptions = @{
@@ -124,7 +128,7 @@ $script:ContextBridgeValueOptions = @{
     '--role' = @('producer','observer')
 }
 $script:ContextBridgeTakesValue = @(
-	'--config','--install-dir','--file','--job','--artifacts','--artifact','--attach-image','--identity','--job-dir','--token-file','--trust-key','--evidence-dir','--write-env','--bundle','--advertise-host',
+	'--config','--install-dir','--file','--job','--artifacts','--artifact','--attach-image','--identity','--job-dir','--token-file','--trust-key','--evidence-dir','--write-env','--bundle','--advertise-host','--certificate-out',
     '--slots','--endpoint','--relay','--name','--providers','--models','--tasks','--groups',
     '--token','--provider','--group','--model','--profile','--reasoning','--session','--prompt',
 	'--min-artifacts','--min-images','--local-model','--image-profile','--timeout','--job-timeout','--poll','--after','--limit','--idempotency-key','--subject','--groups','--lifetime-hours',
@@ -150,6 +154,9 @@ Register-ArgumentCompleter -Native -CommandName contextbridge, cb -ScriptBlock {
     $command = if ($completed.Count -ge 1) { $completed[0] } else { '' }
     $subcommand = if ($completed.Count -ge 2 -and $script:ContextBridgeSubcommands.ContainsKey($command) -and -not $completed[1].StartsWith('-')) { $completed[1] } else { '' }
     $key = if ($subcommand) { "$command $subcommand" } else { $command }
+    if ($key -eq 'cluster lan' -and $completed.Count -ge 3 -and -not $completed[2].StartsWith('-')) {
+        $key = "$key $($completed[2])"
+    }
     $previous = if ($completed.Count -ge 1) { $completed[$completed.Count - 1] } else { '' }
     $expectsValue = $script:ContextBridgeTakesValue -contains $previous
 
@@ -200,9 +207,12 @@ _contextbridge_complete() {
         ;;
     esac
   fi
+  if [[ "$option_key" == "cluster lan" && "$COMP_CWORD" -gt 3 && -n "${COMP_WORDS[3]:-}" && "${COMP_WORDS[3]}" != -* ]]; then
+    option_key="$option_key ${COMP_WORDS[3]}"
+  fi
 
   case "$previous" in
-    --config|--file|--artifacts|--artifact|--attach-image|--identity|--job-dir|--token-file|--binary|--trust-key|--evidence-dir|--write-env)
+    --config|--file|--artifacts|--artifact|--attach-image|--identity|--job-dir|--token-file|--binary|--trust-key|--evidence-dir|--write-env|--certificate-out|--out|--bundle)
       if declare -F _filedir >/dev/null 2>&1; then _filedir; else COMPREPLY=( $(compgen -f -- "$current") ); fi
       return ;;
     --provider) candidates="adapter ollama nuextract jina" ;;
@@ -239,7 +249,11 @@ _contextbridge_complete() {
       "cluster login") candidates="--config --token-file" ;;
       "cluster token") candidates="--config --role --subject --groups --lifetime-hours --max-queued-jobs --max-jobs-per-hour --providers --egress" ;;
       "cluster pairing") candidates="--config --approve --deny" ;;
-	  "cluster lan") candidates="init join status --config --listen --advertise-host --out --bundle --name" ;;
+	  "cluster lan") candidates="init relocate join status --config --listen --advertise-host --certificate-out --out --bundle --name" ;;
+	  "cluster lan init") candidates="--config --listen --advertise-host --out" ;;
+	  "cluster lan relocate") candidates="--config --listen --advertise-host --certificate-out --out" ;;
+	  "cluster lan join") candidates="--config --bundle --name" ;;
+	  "cluster lan status") candidates="--config" ;;
       "mcp serve") candidates="--config" ;;
       "integrate openai") candidates="--config --json --show-token --write-env --check --live" ;;
       "integrate mcp") candidates="--config --json" ;;
@@ -274,6 +288,8 @@ _contextbridge_complete() {
     candidates="plan run auto"
 	elif [[ "$option_key" == "cluster receipt" && "$COMP_CWORD" -eq 3 ]]; then
 	  candidates="show export verify keygen"
+	elif [[ "$option_key" == "cluster lan" && "$COMP_CWORD" -eq 3 ]]; then
+	  candidates="init relocate join status"
   elif [ "$COMP_CWORD" -eq 1 ]; then
     candidates="init serve run stop uninstall console submit schedule result review health dashboard status doctor guide hardware models resources pull runtime mcp integrate benchmark verification relay pair worker cluster route selftest update completion version help"
   elif [ "$COMP_CWORD" -eq 2 ]; then
@@ -462,11 +478,12 @@ case "$words[2]" in
       pairing) _arguments "${config[@]}" '--approve[Approve pairing code]:code:' '--deny[Deny pairing code]:code:' ;;
 	  lan)
 		if (( CURRENT == 4 )); then
-		  _values 'LAN action' init join status
+		  _values 'LAN action' init relocate join status
 		  return
 		fi
 		case "$words[4]" in
 		  init) _arguments "${config[@]}" '--listen[Private or wildcard LAN address]:address:' '--advertise-host[Reachable LAN IP or local DNS name]:host:' '--out[New join bundle]:file:_files' ;;
+		  relocate) _arguments "${config[@]}" '--listen[New private or wildcard LAN address]:address:' '--advertise-host[New LAN IP or local DNS name]:host:' '--certificate-out[New same-key certificate]:file:_files' '--out[New relocation bundle]:file:_files' ;;
 		  join) _arguments "${config[@]}" '--bundle[Trusted LAN join bundle]:file:_files' '--name[Worker node name]:name:' ;;
 		  status) _arguments "${config[@]}" ;;
 		esac

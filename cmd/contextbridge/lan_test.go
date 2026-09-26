@@ -54,6 +54,108 @@ func TestClusterLANInitCreatesReusablePublicBundleAndPrivateIdentity(t *testing.
 	}
 }
 
+func TestClusterLANRelocateRetainsIdentityAndWritesNewHostBoundBundle(t *testing.T) {
+	directory := t.TempDir()
+	configPath := filepath.Join(directory, "config.yml")
+	if err := config.Default(configPath); err != nil {
+		t.Fatal(err)
+	}
+	oldBundlePath := filepath.Join(directory, "old.json")
+	if err := clusterLANInitCommand([]string{"--config", configPath, "--listen", "127.0.0.1:32151", "--advertise-host", "127.0.0.1", "--out", oldBundlePath}); err != nil {
+		t.Fatal(err)
+	}
+	oldBundle, err := cluster.LoadLANJoinBundle(oldBundlePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newBundlePath := filepath.Join(directory, "new.json")
+	if err := clusterLANRelocateCommand([]string{"--config", configPath, "--listen", "127.0.0.2:32151", "--advertise-host", "127.0.0.2", "--out", newBundlePath}); err != nil {
+		t.Fatal(err)
+	}
+	configured, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newBundle, err := cluster.LoadLANJoinBundle(newBundlePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configured.Cluster.Relay.LAN.PublicURL != "https://127.0.0.2:32151" || configured.Cluster.Relay.LAN.Listen != "127.0.0.2:32151" {
+		t.Fatalf("relocated config = %#v", configured.Cluster.Relay.LAN)
+	}
+	if oldBundle.Trust.SPKISHA256 != newBundle.Trust.SPKISHA256 || oldBundle.Trust.CertificatePEM == newBundle.Trust.CertificatePEM {
+		t.Fatalf("relocation identity/certificate = old %#v new %#v", oldBundle.Trust, newBundle.Trust)
+	}
+	if configured.Cluster.Relay.LAN.CertificateFile == filepath.Join(configured.Storage.Directory, "lan", "relay-cert.pem") {
+		t.Fatal("relocation overwrote the original certificate path instead of using a recoverable new file")
+	}
+}
+
+func TestClusterLANJoinMovesExistingWorkerOnlyAfterLiveSameKeyProof(t *testing.T) {
+	directory := t.TempDir()
+	certificatePath := filepath.Join(directory, "relay.pem")
+	privateKeyPath := filepath.Join(directory, "relay-key.pem")
+	trust, err := cluster.EnsureLANTLSIdentity(certificatePath, privateKeyPath, "127.0.0.1", time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair, err := tls.LoadX509KeyPair(certificatePath, privateKeyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/health" {
+			http.NotFound(writer, request)
+			return
+		}
+		writer.WriteHeader(http.StatusOK)
+	}))
+	server.TLS = &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{pair}}
+	server.StartTLS()
+	defer server.Close()
+
+	configPath := filepath.Join(directory, "config.yml")
+	if err := config.Default(configPath); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(cfg.Cluster.Worker.IdentityFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	privateKey, publicKey, err := cluster.NewIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldURL := "https://127.0.0.1:32151"
+	identity := cluster.WorkerIdentity{NodeID: "node_move_live", NodeToken: strings.Repeat("n", 40), PrivateKey: privateKey, PublicKey: publicKey, RelayURL: oldURL, RelayTrust: &trust}
+	raw, _ := json.Marshal(identity)
+	if err := os.WriteFile(cfg.Cluster.Worker.IdentityFile, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Cluster.Worker.RelayURL = oldURL
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	bundlePath := filepath.Join(directory, "move.json")
+	if err := cluster.SaveLANJoinBundle(bundlePath, cluster.LANJoinBundle{Version: cluster.LANJoinBundleVersion, RelayURL: server.URL, Trust: trust, CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := clusterLANJoinCommand([]string{"--config", configPath, "--bundle", bundlePath}); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundURL, boundTrust, err := cluster.LoadWorkerRelayBinding(updated.Cluster.Worker.IdentityFile)
+	if err != nil || boundURL != server.URL || updated.Cluster.Worker.RelayURL != server.URL || boundTrust.SPKISHA256 != trust.SPKISHA256 {
+		t.Fatalf("relocated worker config=%q binding=%q trust=%q err=%v", updated.Cluster.Worker.RelayURL, boundURL, boundTrust.SPKISHA256, err)
+	}
+}
+
 func TestClusterLANInitDefaultsToAdvertisedInterface(t *testing.T) {
 	directory := t.TempDir()
 	configPath := filepath.Join(directory, "config.yml")

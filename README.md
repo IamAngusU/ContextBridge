@@ -184,7 +184,10 @@ contextbridge cluster lan join --bundle ./contextbridge-lan-join.json --name hom
 
 The bundle pins the relay certificate; CB does not weaken the boundary to
 cleartext private-network HTTP. See [Secure offline LAN pools](docs/offline-lan.md)
-for approval, firewall, air-gap and WAN-loss behavior.
+for approval, firewall, air-gap and WAN-loss behavior. If the relay later gets
+a new private IP or local DNS name, `contextbridge cluster lan relocate`
+creates a same-key relocation bundle; workers accept it only after the live
+new endpoint proves the identity they already pinned.
 
 <details>
 <summary><strong>Set up a relay, pair another machine and issue an app token</strong></summary>

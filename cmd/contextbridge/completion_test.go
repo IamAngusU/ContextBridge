@@ -232,6 +232,8 @@ func TestBashCompletionOffersRootCommandFlagsAtCurrentWord(t *testing.T) {
 		{"after update boolean", "contextbridge update apply --force ''", 4, []string{"--json", "--relay-only"}, nil},
 		{"cluster status", "contextbridge cluster status --", 3, []string{"--config", "--json"}, []string{"--token"}},
 		{"cluster node", "contextbridge cluster node --", 3, []string{"--config", "--token", "--json"}, nil},
+		{"cluster LAN actions", "contextbridge cluster lan ", 3, []string{"init", "relocate", "join", "status"}, nil},
+		{"cluster LAN relocate", "contextbridge cluster lan relocate --", 4, []string{"--config", "--listen", "--advertise-host", "--certificate-out", "--out"}, []string{"--bundle", "--name"}},
 		{"short alias", "cb run --", 2, []string{"--slots"}, nil},
 	}
 	for _, test := range tests {

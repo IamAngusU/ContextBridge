@@ -78,6 +78,32 @@ contextbridge doctor
 contextbridge cluster status
 ```
 
+## Move a relay to a new LAN address
+
+An IP or local DNS-name change is not accepted silently. On the relay, mint a
+new host-bound certificate from the existing relay private key and write a new
+public relocation bundle:
+
+```sh
+contextbridge cluster lan relocate --advertise-host 192.168.1.30
+```
+
+The command keeps the existing Ed25519 key, verifies that the new certificate
+has the same SPKI fingerprint, writes it to a new file, and changes the relay
+configuration only after the certificate and bundle are valid. Restart the
+relay, then transfer the printed bundle through the same trusted channel used
+for initial pairing. On each existing worker:
+
+```sh
+contextbridge cluster lan join --bundle ./contextbridge-lan-relocate-....json
+```
+
+The worker contacts the new address with the certificate from the bundle and
+updates its saved binding only after the live endpoint proves the already
+pinned relay key. A different key is rejected and requires explicit fresh
+pairing. Keep the old certificate and configuration backup until every worker
+has moved successfully; relocation is not key rotation.
+
 To stop contributing compute while retaining the pinned identity and sender
 ability, stop CB and switch the device to client mode. Switching back to
 worker mode for the same relay reuses the saved identity:
@@ -119,12 +145,13 @@ runtime and model files in advance for an air-gapped installation.
 - A changed relay key is rejected. Automatic key rotation is intentionally
   absent until a separately authenticated rotation workflow exists.
 - The generated certificate is valid for the advertised host. Changing the
-  IP/DNS name requires an explicit identity/rotation decision; CB does not
-  silently mint a replacement.
+  IP/DNS name requires explicit `cluster lan relocate`; CB does not silently
+  trust a replacement address or key.
 - A local firewall must permit the configured LAN TLS port on the intended
   private network.
 
-The protocol advertises this boundary as
-`secure_offline_lan_pinning_v1`. That feature proves support for explicit
-pinned LAN transport; it is not a claim that mDNS discovery, key rotation or a
-multi-relay HA topology exists.
+The protocol advertises these boundaries as
+`secure_offline_lan_pinning_v1` and
+`identity_preserving_lan_relocation_v1`. They prove support for explicit
+pinned LAN transport and same-key address relocation; they are not a claim
+that mDNS discovery, key rotation or a multi-relay HA topology exists.

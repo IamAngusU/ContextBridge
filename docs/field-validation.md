@@ -74,8 +74,10 @@ Secure offline-LAN evidence additionally records:
 - worker sleep/resume and a 24-hour reconnect soak without hosted CB traffic.
 
 The unit/integration suite exercises pinned TLS HTTP, pairing and WebSocket
-transport entirely on loopback. It does not replace the isolated-switch and
-WAN fault-injection evidence above.
+transport entirely on loopback. It also exercises an explicit relay-address
+move that retains the pinned SPKI identity and rejects a different key. It does
+not replace the isolated-switch, real DHCP/IP-change and WAN fault-injection
+evidence above.
 
 Issue
 [#12](https://github.com/IamAngusU/ContextBridge/issues/12) is the living,

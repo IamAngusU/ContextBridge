@@ -57,6 +57,75 @@ func TestPinnedLANRelayClientRejectsUntrustedAndWrongIdentity(t *testing.T) {
 	}
 }
 
+func TestLANCertificateRelocationRetainsPinnedKeyAndChangesHost(t *testing.T) {
+	directory := t.TempDir()
+	keyPath := filepath.Join(directory, "relay-key.pem")
+	oldCert := filepath.Join(directory, "relay-old.pem")
+	newCert := filepath.Join(directory, "relay-new.pem")
+	now := time.Now().UTC()
+	oldTrust, err := EnsureLANTLSIdentity(oldCert, keyPath, "127.0.0.1", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newTrust, err := IssueLANTLSCertificateForExistingKey(newCert, keyPath, "127.0.0.2", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if oldTrust.SPKISHA256 != newTrust.SPKISHA256 || oldTrust.CertificatePEM == newTrust.CertificatePEM {
+		t.Fatalf("relocation did not retain key/change certificate: old=%#v new=%#v", oldTrust, newTrust)
+	}
+	if _, err := NewRelayHTTPClient("https://127.0.0.2:32151", newTrust, time.Second); err != nil {
+		t.Fatalf("new host trust rejected: %v", err)
+	}
+	if _, err := NewRelayHTTPClient("https://127.0.0.2:32151", oldTrust, time.Second); err == nil {
+		t.Fatal("old host-bound certificate was accepted for the relocated address")
+	}
+	if repeated, err := IssueLANTLSCertificateForExistingKey(newCert, keyPath, "127.0.0.2", now); err != nil || repeated.SPKISHA256 != newTrust.SPKISHA256 {
+		t.Fatalf("idempotent certificate issue = %#v, %v", repeated, err)
+	}
+}
+
+func TestWorkerRelayRebindRequiresSamePinnedSPKI(t *testing.T) {
+	directory := t.TempDir()
+	now := time.Now().UTC()
+	keyPath := filepath.Join(directory, "relay-key.pem")
+	oldTrust, err := EnsureLANTLSIdentity(filepath.Join(directory, "old.pem"), keyPath, "127.0.0.1", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newTrust, err := IssueLANTLSCertificateForExistingKey(filepath.Join(directory, "new.pem"), keyPath, "127.0.0.2", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateKey, publicKey, err := NewIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	identityPath := filepath.Join(directory, "worker.json")
+	identity := WorkerIdentity{NodeID: "node_relocate", NodeToken: strings.Repeat("n", 40), PrivateKey: privateKey, PublicKey: publicKey, RelayURL: "https://127.0.0.1:32151", RelayTrust: &oldTrust}
+	if err := saveIdentity(identityPath, identity); err != nil {
+		t.Fatal(err)
+	}
+	if err := RebindWorkerRelayTrust(identityPath, "https://127.0.0.2:32151", newTrust); err != nil {
+		t.Fatal(err)
+	}
+	boundURL, boundTrust, err := LoadWorkerRelayBinding(identityPath)
+	if err != nil || boundURL != "https://127.0.0.2:32151" || boundTrust.CertificatePEM != newTrust.CertificatePEM {
+		t.Fatalf("new binding = %q %#v, %v", boundURL, boundTrust, err)
+	}
+	wrongTrust, err := EnsureLANTLSIdentity(filepath.Join(directory, "wrong.pem"), filepath.Join(directory, "wrong-key.pem"), "127.0.0.3", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RebindWorkerRelayTrust(identityPath, "https://127.0.0.3:32151", wrongTrust); err == nil || !strings.Contains(err.Error(), "different relay identity") {
+		t.Fatalf("different pinned key rebind error = %v", err)
+	}
+	unchangedURL, _, err := LoadWorkerRelayBinding(identityPath)
+	if err != nil || unchangedURL != boundURL {
+		t.Fatalf("failed rebind changed identity: %q, %v", unchangedURL, err)
+	}
+}
+
 func TestLANJoinBundleIsStrictAndHostBound(t *testing.T) {
 	directory := t.TempDir()
 	trust, err := EnsureLANTLSIdentity(filepath.Join(directory, "cert.pem"), filepath.Join(directory, "key.pem"), "127.0.0.1", time.Now().UTC())
