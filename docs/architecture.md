@@ -73,6 +73,8 @@ not be presented as authoritative CB execution evidence.
 | External workflow triggers, branches and approvals | external orchestrator |
 | External gateway-only routing, retries and budgets | external gateway |
 | Runtime installation, loading and shutdown | runtime manager, unless explicitly CB-managed |
+| External document ACLs, chunking, retrieval, reranking and index lifecycle | external context/vector system |
+| Built-in local vector compatibility and tenant-space binding | ContextBridge local RAG store |
 | Retained copies outside a CB receipt | external archive |
 | Admitted CB job policy and placement | ContextBridge relay |
 | CB lease, cancellation and terminal state | ContextBridge relay |

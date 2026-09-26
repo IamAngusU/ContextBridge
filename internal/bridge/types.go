@@ -146,6 +146,8 @@ type Output struct {
 	Text              string              `json:"text,omitempty"`
 	Embeddings        [][]float32         `json:"embeddings,omitempty"`
 	Dimensions        int                 `json:"dimensions,omitempty"`
+	EmbeddingSpace    string              `json:"embedding_space,omitempty"`
+	EmbeddingEvidence string              `json:"embedding_evidence,omitempty"`
 	TenantID          string              `json:"tenant_id,omitempty"`
 	Matches           []vectorstore.Match `json:"matches,omitempty"`
 	Indexed           int                 `json:"indexed,omitempty"`

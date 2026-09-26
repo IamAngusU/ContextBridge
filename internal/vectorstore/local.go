@@ -23,8 +23,9 @@ type Local struct {
 }
 
 type record struct {
-	Document Document  `json:"document"`
-	Vector   []float32 `json:"vector"`
+	Document       Document       `json:"document"`
+	Vector         []float32      `json:"vector"`
+	EmbeddingSpace EmbeddingSpace `json:"embedding_space,omitempty"`
 }
 
 func NewLocal(directory string, max int) (*Local, error) {
@@ -65,9 +66,13 @@ func decodeLocalVectorStore(path string, target interface{}) error {
 	return nil
 }
 
-func (s *Local) Upsert(ctx context.Context, tenant string, documents []Document, vectors [][]float32) error {
+func (s *Local) Upsert(ctx context.Context, tenant string, space EmbeddingSpace, documents []Document, vectors [][]float32) error {
 	if len(documents) != len(vectors) {
 		return errors.New("document and vector counts differ")
+	}
+	space, err := NormalizeEmbeddingSpace(space)
+	if err != nil {
+		return err
 	}
 	if tenant == "" {
 		tenant = "default"
@@ -76,12 +81,31 @@ func (s *Local) Upsert(ctx context.Context, tenant string, documents []Document,
 	defer s.mu.Unlock()
 	// Validate the complete request before constructing a candidate. A rejected
 	// later document must never leave earlier documents visible in memory.
+	incoming := make(map[string]struct{}, len(documents))
 	for index, document := range documents {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if document.ID == "" || len(vectors[index]) == 0 {
+		if document.ID == "" || !validVector(vectors[index], space.Dimensions) {
 			return errors.New("documents require IDs and vectors")
+		}
+		incoming[document.ID] = struct{}{}
+	}
+	completeReplacement := len(s.data[tenant]) > 0
+	for id := range s.data[tenant] {
+		if _, exists := incoming[id]; !exists {
+			completeReplacement = false
+			break
+		}
+	}
+	if !completeReplacement {
+		for _, item := range s.data[tenant] {
+			if !item.EmbeddingSpace.Valid() {
+				return ErrEmbeddingSpaceReindexRequired
+			}
+			if item.EmbeddingSpace.Fingerprint != space.Fingerprint {
+				return ErrEmbeddingSpaceMismatch
+			}
 		}
 	}
 	candidate := make(map[string]map[string]record, len(s.data)+1)
@@ -101,7 +125,7 @@ func (s *Local) Upsert(ctx context.Context, tenant string, documents []Document,
 		if count > s.max {
 			return errors.New("local vector store reached max_documents")
 		}
-		tenantRecords[document.ID] = record{Document: document, Vector: append([]float32(nil), vectors[index]...)}
+		tenantRecords[document.ID] = record{Document: document, Vector: append([]float32(nil), vectors[index]...), EmbeddingSpace: space}
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -113,7 +137,14 @@ func (s *Local) Upsert(ctx context.Context, tenant string, documents []Document,
 	return nil
 }
 
-func (s *Local) Search(ctx context.Context, tenant string, vector []float32, limit int) ([]Match, error) {
+func (s *Local) Search(ctx context.Context, tenant string, space EmbeddingSpace, vector []float32, limit int) ([]Match, error) {
+	space, err := NormalizeEmbeddingSpace(space)
+	if err != nil {
+		return nil, err
+	}
+	if !validVector(vector, space.Dimensions) {
+		return nil, errors.New("query vector does not match embedding space")
+	}
 	if tenant == "" {
 		tenant = "default"
 	}
@@ -130,8 +161,14 @@ func (s *Local) Search(ctx context.Context, tenant string, vector []float32, lim
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if len(item.Vector) != len(vector) {
-			continue
+		if !item.EmbeddingSpace.Valid() {
+			return nil, ErrEmbeddingSpaceReindexRequired
+		}
+		if item.EmbeddingSpace.Fingerprint != space.Fingerprint {
+			return nil, ErrEmbeddingSpaceMismatch
+		}
+		if !validVector(item.Vector, space.Dimensions) {
+			return nil, errors.New("stored vector does not match its embedding space")
 		}
 		candidate := Match{ID: item.Document.ID, Text: item.Document.Text, Metadata: item.Document.Metadata, Score: cosine(item.Vector, vector)}
 		if len(matches) < limit {
@@ -144,6 +181,18 @@ func (s *Local) Search(ctx context.Context, tenant string, vector []float32, lim
 	}
 	sort.Slice(matches, func(i, j int) bool { return matchBetter(matches[i], matches[j]) })
 	return matches, nil
+}
+
+func validVector(vector []float32, dimensions int) bool {
+	if dimensions < 1 || len(vector) != dimensions {
+		return false
+	}
+	for _, value := range vector {
+		if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
+			return false
+		}
+	}
+	return true
 }
 
 func matchBetter(left, right Match) bool {

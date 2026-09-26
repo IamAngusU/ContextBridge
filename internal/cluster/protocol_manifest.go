@@ -64,6 +64,7 @@ func CurrentProtocolManifest(configuredJobBytes int64) ProtocolManifest {
 			"producer_resource_governance_v1",
 			"producer_required_e2ee_v1",
 			"producer_scoped_idempotency",
+			"rag_embedding_space_identity_v1",
 			"relay_conformance_v1",
 			"relay_role_health_v1",
 			"routing_recovery_probation_v1",

@@ -92,6 +92,52 @@ func TestJobCanSelectConfiguredRouteFallback(t *testing.T) {
 	}
 }
 
+func TestLlamaCPPOutputPreservesConfiguredProviderIdentity(t *testing.T) {
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/embeddings" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": []map[string]interface{}{{"embedding": []float64{1, 2}, "index": 0}},
+		})
+	}))
+	defer provider.Close()
+	cfg := config.Config{
+		Routes: map[string]config.Route{"default": {Provider: "private-llama", Task: "embedding"}},
+		Engines: map[string]config.Engine{"private-llama": {
+			Type: "llama_cpp", URL: provider.URL, Model: "embed-model", TimeoutSeconds: 2, Capabilities: []string{"embedding"},
+		}},
+	}
+	output := NewProcessor(cfg, nil).Process(context.Background(), Job{Text: "embed", Output: OutputSpec{Mode: "embedding"}})
+	if output.Error != "" || output.Provider != "private-llama" || output.Model != "embed-model" || output.Dimensions != 2 {
+		t.Fatalf("llama.cpp provider identity was lost: %#v", output)
+	}
+}
+
+func TestOllamaEmbeddingOutputPreservesConfiguredProviderIdentity(t *testing.T) {
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/embed" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"embeddings": []interface{}{[]float64{1, 2}},
+		})
+	}))
+	defer provider.Close()
+	cfg := config.Config{
+		Routes: map[string]config.Route{"default": {Provider: "private-ollama", Task: "embedding"}},
+		Engines: map[string]config.Engine{"private-ollama": {
+			Type: "ollama", URL: provider.URL, Model: "embed-model", TimeoutSeconds: 2, Capabilities: []string{"embedding"},
+		}},
+	}
+	output := NewProcessor(cfg, nil).Process(context.Background(), Job{Text: "embed", Output: OutputSpec{Mode: "embedding"}})
+	if output.Error != "" || output.Provider != "private-ollama" || output.Model != "embed-model" || output.Dimensions != 2 {
+		t.Fatalf("Ollama provider identity was lost: %#v", output)
+	}
+}
+
 func TestHTTPProviderExecutionFailureDoesNotRunFallback(t *testing.T) {
 	tests := []struct {
 		name       string

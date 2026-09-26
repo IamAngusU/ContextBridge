@@ -126,6 +126,7 @@ rag:
   backend: local
   directory: ./data/rag
   embedding_route: embedding
+  embedding_revision: "" # immutable provider/model revision when the route uses a mutable alias
   max_documents: 10000
 
 cluster:

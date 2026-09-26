@@ -70,6 +70,27 @@ func TestPlacementConfigurationIsBounded(t *testing.T) {
 	}
 }
 
+func TestRAGEmbeddingRevisionIsBoundedPrintableEvidence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := Default(path); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.RAG.EmbeddingRevision = "provider-revision-2026-09-27"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid embedding revision rejected: %v", err)
+	}
+	for _, invalid := range []string{" padded", "line\nbreak", strings.Repeat("x", 201)} {
+		cfg.RAG.EmbeddingRevision = invalid
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "embedding_revision") {
+			t.Fatalf("invalid embedding revision accepted: %q, %v", invalid, err)
+		}
+	}
+}
+
 func TestPortableResourceEngineRejectsCredentialInheritance(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yml")
 	if err := Default(path); err != nil {

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Bound built-in RAG records to a versioned embedding-space fingerprint rather
+  than treating equal vector dimensions as compatibility. Provider/runtime,
+  model, immutable or operator revision evidence, dimensions, similarity,
+  normalization, pooling and hashed query/passage preprocessing now travel as
+  one persisted identity. Cross-space and legacy searches fail closed; a full
+  tenant reingest or new tenant namespace is required instead of silently
+  mixing vectors. RAG outputs expose the fingerprint and evidence strength,
+  while external context/vector systems remain optional and authoritative for
+  their own ACLs, retrieval and index lifecycle.
 - Added credential-bound E2EE admission. Producer credentials issued with
   `--require-e2ee` reject every cleartext job and the currently unsupported
   cleartext pipeline path with stable `privacy.e2ee_required` evidence. The
