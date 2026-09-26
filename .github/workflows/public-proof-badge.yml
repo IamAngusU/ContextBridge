@@ -1,0 +1,57 @@
+name: Publish public proof badge
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: public-proof-badge
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    # The public proof is intentionally produced only by the separate mirror
+    # account. Upstream keeps this workflow inert even when its own CI finishes.
+    if: ${{ github.repository == 'angusu-de/ContextBridge' && github.event.workflow_run.head_branch == 'main' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Render proof badge from the completed CI run
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PROOF_REPOSITORY: ${{ github.repository }}
+          PROOF_RUN_ID: ${{ github.event.workflow_run.id }}
+          PROOF_RUN_NUMBER: ${{ github.event.workflow_run.run_number }}
+          PROOF_RUN_EVENT: ${{ github.event.workflow_run.event }}
+          PROOF_RUN_URL: ${{ github.event.workflow_run.html_url }}
+          PROOF_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          python3 scripts/render-public-proof-badge.py /tmp/public-proof.svg /tmp/public-proof.json
+
+      - name: Publish the tiny proof branch
+        env:
+          PROOF_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          proof_dir="$(mktemp -d)"
+          cp /tmp/public-proof.svg "$proof_dir/public-proof.svg"
+          cp /tmp/public-proof.json "$proof_dir/public-proof.json"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch --orphan ci-proof
+          git rm -rf . >/dev/null 2>&1 || true
+          mkdir -p proof
+          cp "$proof_dir/public-proof.svg" proof/public-proof.svg
+          cp "$proof_dir/public-proof.json" proof/public-proof.json
+          git add proof
+          git commit -m "Update public CI proof for ${PROOF_HEAD_SHA:0:7} [skip ci]"
+          git push --force origin HEAD:ci-proof
