@@ -14,9 +14,9 @@
   <a href="LICENSING.md"><img src="docs/assets/readme/badge-core.svg" height="34" alt="Core: AGPL-3.0-only"></a>
   <a href="docs/compatibility.md"><img src="docs/assets/readme/badge-interfaces.svg" height="34" alt="Defined integration surfaces: Apache-2.0"></a>
   <a href="docs/operations.md"><img src="docs/assets/readme/badge-platforms.svg" height="34" alt="Windows, Linux and macOS"></a>
-  <a href="https://github.com/angusu-de/ContextBridge/actions/workflows/ci.yml"><img src="https://raw.githubusercontent.com/angusu-de/ContextBridge/ci-proof/proof/public-proof.svg" height="34" alt="Public CI mirror proof"></a>
+  <a href="https://github.com/angusu-de/ContextBridge/actions/workflows/ci.yml"><img src="https://raw.githubusercontent.com/angusu-de/ContextBridge/ci-proof/proof/public-proof.svg" height="42" alt="Public CI mirror proof"></a>
 </p>
-<p align="center"><sub>Public CI mirror: <a href="https://github.com/angusu-de/ContextBridge">separate GitHub account</a>, same maintainer · reproducibility proof, not a third-party audit.</sub></p>
+<p align="center"><sub>Public CI mirror: <a href="https://github.com/angusu-de/ContextBridge">separate GitHub account</a>, same maintainer · live status uses the ContextBridge badge-system design · reproducibility proof, not a third-party audit.</sub></p>
 
 <p align="center"><a href="#get-running">Install</a> · <a href="#connect-your-devices">Connect devices</a> · <a href="#just-prompt-the-pool">Prompt the pool</a> · <a href="#send-work-from-your-app">Send a job</a> · <a href="#measured-overhead">Benchmarks</a> · <a href="#uninstall">Uninstall</a> · <a href="docs/README.md">Docs</a></p>
 
