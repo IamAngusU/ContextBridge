@@ -505,11 +505,12 @@ type PairRequest struct {
 }
 
 type PairResponse struct {
-	DeviceCode      string    `json:"device_code"`
-	UserCode        string    `json:"user_code"`
-	VerificationURI string    `json:"verification_uri"`
-	ExpiresAt       time.Time `json:"expires_at"`
-	IntervalSeconds int       `json:"interval_seconds"`
+	DeviceCode              string    `json:"device_code"`
+	UserCode                string    `json:"user_code"`
+	VerificationURI         string    `json:"verification_uri"`
+	VerificationURIComplete string    `json:"verification_uri_complete,omitempty"`
+	ExpiresAt               time.Time `json:"expires_at"`
+	IntervalSeconds         int       `json:"interval_seconds"`
 }
 
 // ProducerLimits are durable, admin-issued boundaries attached to one

@@ -553,7 +553,11 @@ func TestStorePersistsQueueAndOneTimePairing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.DecidePairing(pair.UserCode, true); err != nil {
+	if pair.VerificationURIComplete != "https://relay.test/#pair="+pair.UserCode {
+		t.Fatalf("complete verification URI = %q", pair.VerificationURIComplete)
+	}
+	tolerantCode := strings.ToLower(strings.ReplaceAll(pair.UserCode, "-", " "))
+	if _, err := store.DecidePairing(tolerantCode, true); err != nil {
 		t.Fatal(err)
 	}
 	state, _, token, err := store.PollPairing(pair.DeviceCode)
@@ -580,6 +584,19 @@ func TestStorePersistsQueueAndOneTimePairing(t *testing.T) {
 	raw, _ := os.ReadFile(path)
 	if bytes.Contains(raw, []byte(issuedToken)) {
 		t.Fatal("database exposed a raw token")
+	}
+}
+
+func TestNormalizePairingUserCodeIsTolerantButBounded(t *testing.T) {
+	for _, input := range []string{"abcd-efgh", "ABCD EFGH", "abcd\u2013efgh", "  ABCDEFGH  "} {
+		if got, ok := normalizePairingUserCode(input); !ok || got != "ABCD-EFGH" {
+			t.Fatalf("normalize %q = %q, %v", input, got, ok)
+		}
+	}
+	for _, input := range []string{"ABC-EFGH", "ABCD-EFGHI", "ABCD_ EFGH", "ABCD-EF01", "ABC\u017F-EFGH", ""} {
+		if got, ok := normalizePairingUserCode(input); ok {
+			t.Fatalf("unsafe code %q normalized to %q", input, got)
+		}
 	}
 }
 

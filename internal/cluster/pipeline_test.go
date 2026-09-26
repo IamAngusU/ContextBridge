@@ -70,4 +70,9 @@ func TestDashboardHasNoRemoteRuntimeOrPersistentTokenStorage(t *testing.T) {
 	if !strings.Contains(value, "gpus.slice(0,8)") || !strings.Contains(value, "more GPUs") {
 		t.Fatal("dashboard does not render bounded details for every reported GPU")
 	}
+	for _, required := range []string{"fragment.get('pair')", "requested by this link", ".pair.target"} {
+		if !strings.Contains(value, required) {
+			t.Fatalf("dashboard does not preserve the explicit pairing-link behavior: missing %q", required)
+		}
+	}
 }
