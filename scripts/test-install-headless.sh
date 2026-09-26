@@ -384,6 +384,7 @@ HOME="$inferred_lan_worker/home" \
   CONTEXTBRIDGE_CONFIG="$inferred_lan_worker/config.yml" \
   CONTEXTBRIDGE_PROVIDER="later" \
   CONTEXTBRIDGE_CLUSTER_MODE="ask" \
+  CONTEXTBRIDGE_RELAY_URL="" \
   CONTEXTBRIDGE_LAN_BUNDLE="$inferred_lan_worker/contextbridge-lan-join.json" \
   CONTEXTBRIDGE_WORKER_NAME="lan-worker" \
   CONTEXTBRIDGE_NO_COMPLETION="1" \
