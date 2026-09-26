@@ -56,17 +56,26 @@ signature can be verified independently.
 
 ## Reproduce a release
 
-Use the Go version declared by `go.mod`, check out the exact release commit,
-and keep the worktree clean. On Windows PowerShell:
+Use the Go version declared by `go.mod`, check out the exact release tag,
+and keep the worktree clean. For example, to reproduce the current v0.8.0
+release on Windows PowerShell:
 
 ```powershell
+$version = "v0.8.0"
+git checkout $version
 git status --short
 $epoch = git show -s --format=%ct HEAD
 $env:SOURCE_DATE_EPOCH = $epoch
-$repro = Join-Path ([IO.Path]::GetTempPath()) "contextbridge-v0.6.2-repro"
-pwsh ./scripts/build-release.ps1 -Version v0.6.2 -OutputDirectory "$repro-a"
-pwsh ./scripts/build-release.ps1 -Version v0.6.2 -OutputDirectory "$repro-b"
+$repro = Join-Path ([IO.Path]::GetTempPath()) "contextbridge-$version-repro"
+pwsh ./scripts/build-release.ps1 -Version $version -OutputDirectory "$repro-a"
+pwsh ./scripts/build-release.ps1 -Version $version -OutputDirectory "$repro-b"
 ```
+
+Published v0.6.x releases are MIT-era historical releases. Reproduce one by
+checking out that exact historical tag and following the build tooling shipped
+with that tag. The current AGPL release builder intentionally rejects versions
+below v0.7.0; do not run current-`main` release scripts while labelling the
+result as a v0.6.x release.
 
 Because absolute paths differ, a direct content comparison is clearer:
 
