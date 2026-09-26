@@ -154,7 +154,7 @@ func TestAttachedConsoleOnlyLogsObservedChanges(t *testing.T) {
 	var output bytes.Buffer
 	session := &Session{out: &output, interactive: true, style: "panel", widthFn: func() int { return 140 },
 		jobs: map[string]jobState{}, adapterSelections: map[int]adapterSelection{}}
-	snapshot := ServiceSnapshot{Version: "v0.test", AdapterConnected: true, ActiveEndpoints: 1,
+	snapshot := ServiceSnapshot{Version: "v0.test", UptimeSeconds: 125, AdapterConnected: true, ActiveEndpoints: 1,
 		Endpoints:      []cluster.AdapterSessionCapability{{EndpointID: 7, Profile: "profile-one", CurrentModel: "Adapter Model A"}},
 		LocalProviders: []string{"ollama"},
 		LocalModels:    []cluster.ModelCapability{{Name: "local-text", Provider: "ollama", Loaded: true, Tasks: []string{"generation"}}}}
@@ -170,6 +170,9 @@ func TestAttachedConsoleOnlyLogsObservedChanges(t *testing.T) {
 	}
 	if !strings.Contains(got, "queue 0 · adapters 0/1 busy") {
 		t.Fatalf("attached console live status is missing: %q", got)
+	}
+	if !strings.Contains(got, "service uptime · 02m05s") || !strings.Contains(got, "service v0.test · up 02m05s") {
+		t.Fatalf("attached console does not separate service uptime from idle state: %q", got)
 	}
 	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(got, "")
 	for _, indicator := range []string{"◆ADP", "▣LOC", "TXT", "VIS", "IMG", "AUD", "MUS", "VID", "FIL", "EMB"} {

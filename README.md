@@ -163,6 +163,19 @@ The [minimal Python and Node.js examples](examples/server-app/README.md) use
 only their standard runtimes and demonstrate durable submit, bounded polling
 and terminal-result handling.
 
+For a custom dashboard, desktop client, website backend, or terminal UI,
+create a separate read-only observer credential and use the reusable
+dependency-free JavaScript client:
+
+```sh
+contextbridge integrate ui --subject my-dashboard --write-env ./contextbridge-ui.env
+node examples/server-app/javascript-observe.mjs
+```
+
+It exposes versioned pool, node, job, pipeline, timing, capability and event
+data without granting submit/cancel authority. Keep its token in the trusted
+backend or desktop secret store, never in a public browser bundle.
+
 > [!TIP]
 > Trying CB does not lock you in. `contextbridge uninstall --dry-run` previews removal without stopping or deleting anything. [Uninstall keeps your configuration and data by default.](#uninstall)
 
@@ -538,6 +551,7 @@ For `route explain`, use a native cluster job such as [examples/cluster-job.json
 | --- | --- |
 | Connect an OpenAI-compatible app | `contextbridge integrate openai --write-env .contextbridge.env` · [Integrations](docs/integrations.md) |
 | Connect an MCP client | `contextbridge mcp serve` · [Integrations](docs/integrations.md) |
+| Build a custom dashboard or terminal UI | `contextbridge integrate ui --subject my-ui --write-env ./contextbridge-ui.env` · [UI data API](docs/integrations.md#read-only-ui-and-observability-clients) |
 | Inspect schedules | `contextbridge schedule list` · [Automation](docs/automation.md) |
 | Drain or resume a worker for maintenance | `contextbridge cluster node drain\|resume NODE_ID` · [Pools and placement](docs/pools-and-placement.md) |
 | Export or verify execution evidence | `contextbridge cluster receipt show JOB_ID` · [Execution receipts](docs/execution-receipts.md) |

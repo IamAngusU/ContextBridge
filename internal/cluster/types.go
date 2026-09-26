@@ -662,10 +662,11 @@ type PipelineRun struct {
 }
 
 type Overview struct {
-	NodesOnline      int               `json:"nodes_online"`
-	NodesTotal       int               `json:"nodes_total"`
-	JobsByState      map[string]uint64 `json:"jobs_by_state"`
-	Usage            Usage             `json:"usage"`
-	GeneratedAt      time.Time         `json:"generated_at"`
-	UTCOffsetSeconds int               `json:"utc_offset_seconds"`
+	NodesOnline        int               `json:"nodes_online"`
+	NodesTotal         int               `json:"nodes_total"`
+	JobsByState        map[string]uint64 `json:"jobs_by_state"`
+	Usage              Usage             `json:"usage"`
+	GeneratedAt        time.Time         `json:"generated_at"`
+	UTCOffsetSeconds   int               `json:"utc_offset_seconds"`
+	RelayUptimeSeconds uint64            `json:"relay_uptime_seconds,omitempty"`
 }

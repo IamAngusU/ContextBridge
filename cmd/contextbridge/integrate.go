@@ -46,6 +46,7 @@ type openAIIntegrationCheck struct {
 
 type relayIntegrationInfo struct {
 	Kind       string    `json:"kind"`
+	Role       string    `json:"role"`
 	RelayURL   string    `json:"relay_url"`
 	Subject    string    `json:"subject"`
 	TokenID    string    `json:"token_id"`
@@ -57,7 +58,7 @@ const maximumIntegrationResponseBytes = 1 << 20
 
 func integrateCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: contextbridge integrate openai|mcp|relay [--config path] [--json]")
+		return errors.New("usage: contextbridge integrate openai|mcp|relay|ui [--config path] [--json]")
 	}
 	target := strings.ToLower(strings.TrimSpace(args[0]))
 	flags := flag.NewFlagSet("integrate "+target, flag.ContinueOnError)
@@ -198,8 +199,40 @@ func integrateCommand(args []string) error {
 		fmt.Println()
 		fmt.Println("Transfer the file through a secure channel and load it only into the intended server-side application.")
 		return nil
+	case "ui":
+		if *showToken || *check || *live {
+			return errors.New("--show-token, --check, and --live are not available for UI integration")
+		}
+		if strings.TrimSpace(*subject) == "" {
+			return errors.New("--subject is required for a read-only UI credential")
+		}
+		if strings.TrimSpace(*writeEnv) == "" {
+			return errors.New("--write-env is required so the observer token never enters terminal output")
+		}
+		if *lifetimeHours < 0 || *lifetimeHours > 10*365*24 {
+			return errors.New("--lifetime-hours must be between 0 and 87600")
+		}
+		if strings.TrimSpace(*groups) != "" || *maxQueuedJobs != 0 || *maxJobsPerHour != 0 || strings.TrimSpace(*providers) != "" || strings.TrimSpace(*egress) != "" {
+			return errors.New("producer groups, admission limits, providers, and egress do not apply to a read-only UI credential")
+		}
+		path, err := filepath.Abs(*writeEnv)
+		if err != nil {
+			return err
+		}
+		info, err := createObserverIntegrationBundle(context.Background(), cfg, path, *subject, *lifetimeHours)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Created private read-only UI integration file %s\n", info.OutputPath)
+		fmt.Printf("Relay observer %s · token %s", info.Subject, info.TokenID)
+		if !info.ExpiresAt.IsZero() {
+			fmt.Printf(" · expires %s", info.ExpiresAt.Format(time.RFC3339))
+		}
+		fmt.Println()
+		fmt.Println("Keep the token in a trusted backend, desktop secret store, or private environment; never ship it in browser JavaScript.")
+		return nil
 	default:
-		return fmt.Errorf("unsupported integration %q; use openai, mcp, or relay", target)
+		return fmt.Errorf("unsupported integration %q; use openai, mcp, relay, or ui", target)
 	}
 }
 
@@ -208,6 +241,20 @@ func createRelayIntegrationBundle(ctx context.Context, cfg config.Config, path, 
 }
 
 func createRelayIntegrationBundleGoverned(ctx context.Context, cfg config.Config, path, subject string, groups []string, lifetimeHours int, limits cluster.ProducerLimits) (relayIntegrationInfo, error) {
+	return createScopedRelayIntegrationBundle(ctx, cfg, path, "producer", "contextbridge-relay-producer", "CONTEXTBRIDGE_PRODUCER_TOKEN", subject, groups, lifetimeHours, limits)
+}
+
+func createObserverIntegrationBundle(ctx context.Context, cfg config.Config, path, subject string, lifetimeHours int) (relayIntegrationInfo, error) {
+	return createScopedRelayIntegrationBundle(ctx, cfg, path, "observer", "contextbridge-relay-observer", "CONTEXTBRIDGE_OBSERVER_TOKEN", subject, nil, lifetimeHours, cluster.ProducerLimits{})
+}
+
+func createScopedRelayIntegrationBundle(ctx context.Context, cfg config.Config, path, role, kind, environmentKey, subject string, groups []string, lifetimeHours int, limits cluster.ProducerLimits) (relayIntegrationInfo, error) {
+	if role != "producer" && role != "observer" {
+		return relayIntegrationInfo{}, errors.New("integration credential role must be producer or observer")
+	}
+	if environmentKey != "CONTEXTBRIDGE_PRODUCER_TOKEN" && environmentKey != "CONTEXTBRIDGE_OBSERVER_TOKEN" {
+		return relayIntegrationInfo{}, errors.New("integration credential environment key is not supported")
+	}
 	// #nosec G703 -- path is the operator-selected absolute --write-env target; O_EXCL prevents replacing existing data.
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -227,27 +274,27 @@ func createRelayIntegrationBundleGoverned(ctx context.Context, cfg config.Config
 	}
 	relayURL := clusterBaseURL(cfg)
 	if err := clusterPOST(ctx, relayURL+"/v1/cluster/tokens", cfg.Cluster.Relay.AdminToken, map[string]interface{}{
-		"role": "producer", "subject": subject, "groups": groups, "lifetime_hours": lifetimeHours, "producer_limits": limits,
+		"role": role, "subject": subject, "groups": groups, "lifetime_hours": lifetimeHours, "producer_limits": limits,
 	}, &output); err != nil {
-		return relayIntegrationInfo{}, fmt.Errorf("issue scoped producer credential: %w", err)
+		return relayIntegrationInfo{}, fmt.Errorf("issue scoped %s credential: %w", role, err)
 	}
 	for _, value := range []string{relayURL, output.Token} {
 		if strings.TrimSpace(value) == "" || strings.ContainsAny(value, "\r\n\x00") {
 			return relayIntegrationInfo{}, errors.New("relay returned an empty or unsafe integration value; the credential may need operator revocation")
 		}
 	}
-	content := fmt.Sprintf("CONTEXTBRIDGE_RELAY_URL=%s\nCONTEXTBRIDGE_PRODUCER_TOKEN=%s\n", relayURL, output.Token)
+	content := fmt.Sprintf("CONTEXTBRIDGE_RELAY_URL=%s\n%s=%s\n", relayURL, environmentKey, output.Token)
 	if _, err := file.WriteString(content); err != nil {
-		return relayIntegrationInfo{}, fmt.Errorf("write producer integration file; the issued credential may need operator revocation: %w", err)
+		return relayIntegrationInfo{}, fmt.Errorf("write %s integration file; the issued credential may need operator revocation: %w", role, err)
 	}
 	if err := file.Sync(); err != nil {
-		return relayIntegrationInfo{}, fmt.Errorf("sync producer integration file; the issued credential may need operator revocation: %w", err)
+		return relayIntegrationInfo{}, fmt.Errorf("sync %s integration file; the issued credential may need operator revocation: %w", role, err)
 	}
 	if err := file.Close(); err != nil {
-		return relayIntegrationInfo{}, fmt.Errorf("close producer integration file; the issued credential may need operator revocation: %w", err)
+		return relayIntegrationInfo{}, fmt.Errorf("close %s integration file; the issued credential may need operator revocation: %w", role, err)
 	}
 	remove = false
-	return relayIntegrationInfo{Kind: "contextbridge-relay-producer", RelayURL: relayURL, Subject: output.Record.Subject, TokenID: output.Record.ID, ExpiresAt: output.Record.ExpiresAt, OutputPath: path}, nil
+	return relayIntegrationInfo{Kind: kind, Role: role, RelayURL: relayURL, Subject: output.Record.Subject, TokenID: output.Record.ID, ExpiresAt: output.Record.ExpiresAt, OutputPath: path}, nil
 }
 
 func splitIntegrationList(value string) []string {

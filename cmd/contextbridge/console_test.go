@@ -31,8 +31,9 @@ func TestFetchConsoleStatusUsesReadOnlyAuthenticatedRequest(t *testing.T) {
 	if err != nil || requests != 1 {
 		t.Fatalf("console request failed: %v; requests=%d", err, requests)
 	}
+	status.UptimeSeconds = 125
 	snapshot := toServiceSnapshot(status)
-	if snapshot.Version != "v0.test" || snapshot.Queued != 2 || snapshot.ActiveJobs != 1 || !snapshot.AdapterConnected || snapshot.Endpoints[0].CurrentModel != "model-a" || snapshot.Endpoints[0].State != "working" || snapshot.GPU != "RTX" ||
+	if snapshot.Version != "v0.test" || snapshot.UptimeSeconds != 125 || snapshot.Queued != 2 || snapshot.ActiveJobs != 1 || !snapshot.AdapterConnected || snapshot.Endpoints[0].CurrentModel != "model-a" || snapshot.Endpoints[0].State != "working" || snapshot.GPU != "RTX" ||
 		len(snapshot.LocalProviders) != 1 || snapshot.LocalProviders[0] != "ollama" || len(snapshot.LocalModels) != 1 || snapshot.LocalModels[0].Name != "qwen3:8b" || !snapshot.LocalModels[0].Loaded || len(snapshot.APIProviders) != 1 || snapshot.APIProviders[0] != "remote" || len(snapshot.APIModels) != 1 || snapshot.APIModels[0].Name != "api-model" || len(snapshot.ResourcePacks) != 1 || snapshot.ResourcePacks[0].ID != "example.modelkit" {
 		t.Fatalf("console snapshot lost status data: %#v", snapshot)
 	}

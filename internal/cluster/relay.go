@@ -82,6 +82,7 @@ const (
 
 type Relay struct {
 	cfg              RelayConfig
+	startedAt        time.Time
 	store            *Store
 	authority        RelayAuthority
 	logger           *log.Logger
@@ -442,7 +443,7 @@ func NewRelay(cfg RelayConfig, logger *log.Logger) (*Relay, error) {
 	if logger == nil {
 		logger = log.Default()
 	}
-	return &Relay{cfg: cfg, store: store, authority: authority, logger: logger, workers: map[string]*workerConnection{}, rate: map[string]*rateWindow{}, workerRate: map[string]*rateWindow{}, wake: make(chan struct{}, 1), nextRetention: now.Add(cfg.RetentionSweep), lastOwner: map[int]string{}, eventStreamSlots: make(chan struct{}, maximumExecutionEventStreams), eventStreams: map[string]int{}}, nil
+	return &Relay{cfg: cfg, startedAt: now, store: store, authority: authority, logger: logger, workers: map[string]*workerConnection{}, rate: map[string]*rateWindow{}, workerRate: map[string]*rateWindow{}, wake: make(chan struct{}, 1), nextRetention: now.Add(cfg.RetentionSweep), lastOwner: map[int]string{}, eventStreamSlots: make(chan struct{}, maximumExecutionEventStreams), eventStreams: map[string]int{}}, nil
 }
 
 func applyRetentionDefaults(cfg *RelayConfig) error {
@@ -591,7 +592,14 @@ func shutdownRelayServers(servers []*http.Server) error {
 }
 
 func (r *Relay) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "service": "contextbridge-relay", "version": r.cfg.Version, "protocol": ProtocolVersion})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "service": "contextbridge-relay", "version": r.cfg.Version, "protocol": ProtocolVersion, "uptime_seconds": relayUptimeSeconds(time.Now(), r.startedAt)})
+}
+
+func relayUptimeSeconds(now, startedAt time.Time) uint64 {
+	if startedAt.IsZero() || now.Before(startedAt) {
+		return 0
+	}
+	return uint64(now.Sub(startedAt) / time.Second)
 }
 
 // Liveness deliberately proves only that this process can answer HTTP. It
@@ -656,7 +664,7 @@ func (r *Relay) handleLifecycle(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	idle := r.idleWithOverview(overview)
-	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "service": "contextbridge-relay", "version": r.cfg.Version, "protocol": ProtocolVersion, "idle": idle})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "service": "contextbridge-relay", "version": r.cfg.Version, "protocol": ProtocolVersion, "idle": idle, "uptime_seconds": relayUptimeSeconds(time.Now(), r.startedAt)})
 }
 
 func (r *Relay) handlePairRequest(w http.ResponseWriter, req *http.Request) {
@@ -729,6 +737,7 @@ func (r *Relay) handleOverview(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	overview.RelayUptimeSeconds = relayUptimeSeconds(time.Now(), r.startedAt)
 	writeJSON(w, http.StatusOK, overview)
 }
 

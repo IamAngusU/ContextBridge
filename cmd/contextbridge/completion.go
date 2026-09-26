@@ -16,7 +16,7 @@ var completionSubcommands = map[string][]string{
 	"schedule":     {"add", "list", "show", "pause", "resume", "run", "delete"},
 	"runtime":      {"install"},
 	"mcp":          {"serve"},
-	"integrate":    {"openai", "mcp", "relay"},
+	"integrate":    {"openai", "mcp", "relay", "ui"},
 	"verification": {"verify"},
 	"cluster":      {"status", "events", "estimate", "node", "protocol", "conformance", "submit", "chat", "agent", "selftest", "route", "contract", "receipt", "login", "token", "pairing", "configure", "dashboard", "pipeline", "lan"},
 	"route":        {"explain"},
@@ -56,7 +56,7 @@ $script:ContextBridgeSubcommands = @{
     schedule = @('add','list','show','pause','resume','run','delete')
     runtime = @('install')
     mcp = @('serve')
-    integrate = @('openai','mcp','relay')
+    integrate = @('openai','mcp','relay','ui')
     verification = @('verify')
 	cluster = @('status','events','estimate','node','protocol','conformance','submit','chat','agent','selftest','route','contract','receipt','login','token','pairing','configure','dashboard','pipeline','lan')
     route = @('explain')
@@ -88,6 +88,7 @@ $script:ContextBridgeOptions = @{
     'integrate openai' = @('--config','--json','--show-token','--write-env','--check','--live')
     'integrate mcp' = @('--config','--json')
     'integrate relay' = @('--config','--json','--write-env','--subject','--groups','--lifetime-hours','--max-queued-jobs','--max-jobs-per-hour','--providers','--egress')
+    'integrate ui' = @('--config','--write-env','--subject','--lifetime-hours')
     'benchmark' = @('--json','--samples','--warmup','--database-jobs','--idle-duration','--binary')
     'verification verify' = @('--file','--trust-key','--artifact','--require-artifact','--evidence-dir','--require-evidence','--json')
     'relay' = @('--config')
@@ -260,6 +261,7 @@ _contextbridge_complete() {
       "integrate openai") candidates="--config --json --show-token --write-env --check --live" ;;
       "integrate mcp") candidates="--config --json" ;;
       "integrate relay") candidates="--config --json --write-env --subject --groups --lifetime-hours --max-queued-jobs --max-jobs-per-hour --providers --egress" ;;
+      "integrate ui") candidates="--config --write-env --subject --lifetime-hours" ;;
       "verification verify") candidates="--file --trust-key --artifact --require-artifact --evidence-dir --require-evidence --json" ;;
       benchmark) candidates="--json --samples --warmup --database-jobs --idle-duration --binary" ;;
       "schedule add") candidates="--config --file" ;;
@@ -299,7 +301,7 @@ _contextbridge_complete() {
       schedule) candidates="add list show pause resume run delete" ;;
       runtime) candidates="install" ;;
       mcp) candidates="serve" ;;
-      integrate) candidates="openai mcp relay" ;;
+      integrate) candidates="openai mcp relay ui" ;;
       verification) candidates="verify" ;;
 	  cluster) candidates="status events estimate node protocol conformance submit chat agent selftest route contract receipt login token pairing configure dashboard pipeline lan" ;;
       route) candidates="explain" ;;
@@ -385,13 +387,14 @@ case "$words[2]" in
     ;;
   integrate)
     if (( CURRENT == 3 )); then
-      _values 'integration target' openai mcp relay
+	  _values 'integration target' openai mcp relay ui
       return
     fi
     case "$words[3]" in
       openai) _arguments "${config[@]}" '--json[Print redacted machine-readable connection settings]' '--show-token[Explicitly include the local API token in terminal output]' '--write-env[Create a new private environment file without overwriting]:environment file:_files' '--check[Verify service, authentication and route without inference]' '--live[Also send one explicit bounded live inference smoke request]' ;;
       mcp) _arguments "${config[@]}" '--json[Print the MCP client configuration as JSON]' ;;
       relay) _arguments "${config[@]}" '--json[Print redacted credential metadata]' '--write-env[Create a new private producer environment file]:environment file:_files' '--subject[Remote application identity]:identity:' '--groups[Comma-separated scheduling groups]:groups:' '--lifetime-hours[Credential lifetime; 0 never expires]:hours:' '--max-queued-jobs[Producer queued-job limit]:count:' '--max-jobs-per-hour[Durable hourly admission limit]:count:' '--providers[Comma-separated provider allowlist]:providers:' '--egress[Producer egress ceiling]:egress:(local_only)' ;;
+      ui) _arguments "${config[@]}" '--write-env[Create a new private observer environment file]:environment file:_files' '--subject[Read-only UI identity]:identity:' '--lifetime-hours[Credential lifetime; 0 never expires]:hours:' ;;
       *) _arguments '*:argument:' ;;
     esac
     ;;

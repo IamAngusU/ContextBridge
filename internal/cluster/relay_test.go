@@ -51,6 +51,48 @@ func TestRateLimitClientKeyTrustsOnlyLoopbackProxy(t *testing.T) {
 	}
 }
 
+func TestRelayOverviewExposesProcessUptime(t *testing.T) {
+	admin := "admin_012345678901234567890123456789012345"
+	relay, err := NewRelay(RelayConfig{Database: filepath.Join(t.TempDir(), "relay.db"), AdminToken: admin}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+	relay.startedAt = time.Now().Add(-65 * time.Second)
+
+	for _, item := range []struct {
+		path          string
+		authenticated bool
+	}{
+		{path: "/health"},
+		{path: "/v1/cluster/overview", authenticated: true},
+	} {
+		request := httptest.NewRequest(http.MethodGet, item.path, nil)
+		if item.authenticated {
+			request.Header.Set("Authorization", "Bearer "+admin)
+		}
+		response := httptest.NewRecorder()
+		relay.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s returned %d: %s", item.path, response.Code, response.Body.String())
+		}
+		var body struct {
+			UptimeSeconds uint64 `json:"uptime_seconds"`
+			RelayUptime   uint64 `json:"relay_uptime_seconds"`
+		}
+		if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		uptime := body.UptimeSeconds
+		if item.authenticated {
+			uptime = body.RelayUptime
+		}
+		if uptime < 64 || uptime > 70 {
+			t.Fatalf("%s uptime = %d seconds, want relay process lifetime", item.path, uptime)
+		}
+	}
+}
+
 func TestPublicNodeResponseRedactsAdapterSessionKeys(t *testing.T) {
 	nodes := []Node{{ID: "node-a", RoutingHealth: []RoutingHealth{{Provider: "private-provider", Model: "private-model", ConsecutiveFailures: 2}}, Capabilities: Capabilities{AdapterSessions: []AdapterSessionCapability{{
 		EndpointID: 7, Profile: "profile-one", Principal: "adapter-a", SessionKey: "cb:" + strings.Repeat("a", 64), SessionKeySupported: true,

@@ -110,6 +110,50 @@ func TestRelayIntegrationCreatesScopedPrivateBundleWithoutTerminalSecret(t *test
 	}
 }
 
+func TestUIIntegrationCreatesReadOnlyObserverBundle(t *testing.T) {
+	const admin = "admin-token"
+	var issued struct {
+		Role           string                 `json:"role"`
+		Subject        string                 `json:"subject"`
+		ProducerLimits cluster.ProducerLimits `json:"producer_limits"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/v1/cluster/tokens" || request.Header.Get("Authorization") != "Bearer "+admin {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if err := json.NewDecoder(request.Body).Decode(&issued); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		_, _ = w.Write([]byte(`{"token":"cb_scoped_observer_secret","record":{"id":"tok_ui","role":"observer","subject":"custom-dashboard","created_at":"2026-09-26T00:00:00Z","expires_at":"2026-10-26T00:00:00Z","revoked":false}}`))
+	}))
+	t.Cleanup(server.Close)
+	cfg := config.Config{Cluster: config.Cluster{Relay: config.ClusterRelay{PublicURL: server.URL, AdminToken: admin}}}
+	path := filepath.Join(t.TempDir(), "ui.env")
+	info, err := createObserverIntegrationBundle(context.Background(), cfg, path, "custom-dashboard", 720)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issued.Role != "observer" || issued.Subject != "custom-dashboard" || issued.ProducerLimits.MaxQueuedJobs != 0 || issued.ProducerLimits.MaxJobsPerHour != 0 || len(issued.ProducerLimits.Providers) != 0 || issued.ProducerLimits.Egress != "" {
+		t.Fatalf("UI integration did not request a plain observer identity: %#v", issued)
+	}
+	if info.Kind != "contextbridge-relay-observer" || info.Role != "observer" || info.TokenID != "tok_ui" {
+		t.Fatalf("unexpected UI integration metadata: %#v", info)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(raw)
+	if !strings.Contains(content, "CONTEXTBRIDGE_RELAY_URL="+server.URL) || !strings.Contains(content, "CONTEXTBRIDGE_OBSERVER_TOKEN=cb_scoped_observer_secret") {
+		t.Fatalf("observer bundle is incomplete: %q", content)
+	}
+	if strings.Contains(content, "CONTEXTBRIDGE_PRODUCER_TOKEN") {
+		t.Fatalf("read-only UI bundle was labelled as a producer credential: %q", content)
+	}
+}
+
 func TestRelayIntegrationIssuesDurableProducerGovernance(t *testing.T) {
 	const admin = "admin-token"
 	var issued struct {

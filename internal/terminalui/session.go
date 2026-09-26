@@ -101,6 +101,7 @@ type FeatureState struct {
 // reflects a service status response, not inferred worker or job events.
 type ServiceSnapshot struct {
 	Version          string
+	UptimeSeconds    uint64
 	Queued           int
 	Completed        int
 	ActiveJobs       int
@@ -133,6 +134,7 @@ type Session struct {
 	partial            string
 	status             string
 	statusSince        time.Time
+	startedAt          time.Time
 	frame              int
 	retries            int
 	jobs               map[string]jobState
@@ -752,7 +754,7 @@ func NewWithStyle(output *os.File, style string) *Session {
 	if os.Getenv("TERM") == "dumb" || os.Getenv("NO_COLOR") != "" {
 		interactive = false
 	}
-	session := &Session{out: output, console: output, interactive: interactive, style: style, jobs: map[string]jobState{}, adapterSelections: map[int]adapterSelection{}, localModels: map[string]localModelSelection{}, nodeDetails: map[string]nodeDetailVisibility{}, width: terminalWidth(output), widthFn: func() int { return terminalWidth(output) }, heightFn: func() int { return terminalHeight(output) }, done: make(chan struct{}), closed: make(chan struct{})}
+	session := &Session{out: output, console: output, interactive: interactive, style: style, startedAt: time.Now(), jobs: map[string]jobState{}, adapterSelections: map[int]adapterSelection{}, localModels: map[string]localModelSelection{}, nodeDetails: map[string]nodeDetailVisibility{}, width: terminalWidth(output), widthFn: func() int { return terminalWidth(output) }, heightFn: func() int { return terminalHeight(output) }, done: make(chan struct{}), closed: make(chan struct{})}
 	if interactive {
 		go session.animate()
 	} else {
@@ -1575,6 +1577,10 @@ func localModelPanelRow(value string, loaded bool) string {
 }
 
 func (s *Session) panelStatusLocked() string {
+	uptime := ""
+	if value, ok := s.serviceUptimeLocked(); ok {
+		uptime = " · up " + compactDuration(value)
+	}
 	if s.observing {
 		if !s.observedOnline {
 			return "◇ Offline · service offline · retrying connection"
@@ -1583,7 +1589,7 @@ func (s *Session) panelStatusLocked() string {
 		if s.observed.ActiveJobs > 0 || s.observed.BusyEndpoints > 0 {
 			state = "Working"
 		}
-		return fmt.Sprintf("◇ %s · service %s · queue %d · adapters %d/%d busy · jobs %d · errors %d", state, s.observed.Version,
+		return fmt.Sprintf("◇ %s · service %s%s · queue %d · adapters %d/%d busy · jobs %d · errors %d", state, s.observed.Version, uptime,
 			s.observed.Queued, s.observed.BusyEndpoints, s.observed.ActiveEndpoints, s.observed.JobsTotal, s.observed.JobsFailed)
 	}
 	if s.status == "" {
@@ -1594,8 +1600,18 @@ func (s *Session) panelStatusLocked() string {
 		status, _ = s.visibleJobStatusLocked(70)
 	}
 	slots := max(1, s.slots)
-	return fmt.Sprintf("◇ %s %s · %d/%d jobs · %d%% · %s", status, compactDuration(time.Since(s.statusSince)),
+	return fmt.Sprintf("◇ %s %s%s · %d/%d jobs · %d%% · %s", status, compactDuration(time.Since(s.statusSince)), uptime,
 		len(s.jobs), slots, min(100, len(s.jobs)*100/slots), nodeLabel(s.node, s.nodeID, false))
+}
+
+func (s *Session) serviceUptimeLocked() (time.Duration, bool) {
+	if s.observing {
+		return secondsDuration(s.observed.UptimeSeconds), s.observedOnline
+	}
+	if s.startedAt.IsZero() {
+		return 0, false
+	}
+	return nonNegativeDuration(time.Since(s.startedAt)), true
 }
 
 // The panel uses the alternate screen so old snapshots never become logs on
@@ -1647,6 +1663,9 @@ func (s *Session) renderPanelLocked() {
 	}
 	if s.observing && len(s.observed.Features) > 0 {
 		rows = append(rows, "  | ·  "+featureIndicatorLabel(s.observed.Features))
+	}
+	if uptime, ok := s.serviceUptimeLocked(); ok {
+		rows = append(rows, "  | ·  "+line("service uptime · "+compactDuration(uptime)))
 	}
 	rows = gap(rows)
 	rows = append(rows, panelSection("CONNECTION", width))
@@ -2047,6 +2066,9 @@ func (s *Session) drawStatusLocked() {
 			line = fmt.Sprintf("  %s%s%s [%s%s%s] [%d/%d jobs · %d%%] %s %s %s %s", ansiCyan, frames[s.frame%len(frames)], ansiReset, ansiCyan, bar, ansiReset, len(s.jobs), slots, load, indicators, ansiYellow+status+ansiReset, elapsed, identity)
 		}
 	}
+	if uptime, ok := s.serviceUptimeLocked(); ok {
+		line += " [up " + compactDuration(uptime) + "]"
+	}
 	s.drawLineLocked(line)
 }
 
@@ -2063,6 +2085,9 @@ func (s *Session) drawObservedStatusLocked() {
 			cleanTerminalLabel(s.observed.Version, 30), s.observed.Queued, adapter, s.observed.JobsTotal, s.observed.JobsFailed)
 		if s.observed.GPU != "" {
 			line += fmt.Sprintf(" [%s · %d%%]", cleanTerminalLabel(s.observed.GPU, 36), s.observed.GPUUtilization)
+		}
+		if uptime, ok := s.serviceUptimeLocked(); ok {
+			line += " [up " + compactDuration(uptime) + "]"
 		}
 	}
 	s.drawLineLocked(line)
@@ -2245,6 +2270,21 @@ func millisecondsDuration(value uint64) time.Duration {
 		return time.Duration(math.MaxInt64)
 	}
 	return time.Duration(value) * time.Millisecond
+}
+
+func secondsDuration(value uint64) time.Duration {
+	maximum := uint64(math.MaxInt64 / int64(time.Second))
+	if value > maximum {
+		return time.Duration(math.MaxInt64)
+	}
+	return time.Duration(value) * time.Second
+}
+
+func nonNegativeDuration(value time.Duration) time.Duration {
+	if value < 0 {
+		return 0
+	}
+	return value
 }
 
 func nodeLabel(name, id string, colored bool) string {

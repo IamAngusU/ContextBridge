@@ -173,6 +173,67 @@ limits, authentication, and result semantics as other inputs. Operational
 status is scrubbed of bearer tokens, credential-shaped fields, and opaque
 session-routing keys before it crosses the MCP boundary.
 
+## Read-only UI and observability clients
+
+A dashboard, website backend, trusted desktop application, or alternate
+terminal UI should use a dedicated observer identity. Create its private
+environment file on the relay host without printing the token:
+
+```sh
+contextbridge integrate ui \
+  --subject my-dashboard \
+  --lifetime-hours 720 \
+  --write-env ./contextbridge-ui.env
+```
+
+The file contains `CONTEXTBRIDGE_RELAY_URL` and
+`CONTEXTBRIDGE_OBSERVER_TOKEN`. It is deliberately read-only: it can inspect
+the pool but cannot submit, cancel, pair, drain, resume, change policy, or
+issue another token. Keep it in a server-side environment or trusted desktop
+secret store. Do not place it in a public browser bundle, mobile binary,
+repository, URL, log, or screenshot. A public web interface should call its
+own authenticated backend; that backend owns the observer token.
+
+The dependency-free reference client is
+[`examples/server-app/contextbridge-ui-client.mjs`](../examples/server-app/contextbridge-ui-client.mjs).
+Node.js 18+ can print one bounded snapshot with:
+
+```sh
+node examples/server-app/javascript-observe.mjs
+```
+
+`ContextBridgeUIClient.snapshot()` reads the protocol manifest, overview,
+nodes, bounded job history, and configured pipelines concurrently. Individual
+methods expose the same stable native resources without a presentation layer:
+
+```text
+GET /v1/cluster/protocol
+GET /v1/cluster/overview
+GET /v1/cluster/nodes
+GET /v1/cluster/events?limit=100
+GET /v1/cluster/jobs?limit=50&status=running
+GET /v1/cluster/jobs/JOB_ID
+GET /v1/cluster/jobs/JOB_ID/events?after=SEQUENCE&limit=100
+GET /v1/cluster/jobs/JOB_ID/estimate
+GET /v1/cluster/pipelines
+GET /v1/cluster/pipeline-runs/RUN_ID
+GET /v1/cluster/pipeline-runs/RUN_ID/activity
+GET /v1/cluster/pipeline-runs/RUN_ID/events?after=SEQUENCE&limit=100
+```
+
+Every response is JSON. The protocol manifest advertises feature and limit
+support so clients can degrade honestly instead of guessing by version. Job
+and pipeline event pages use `contextbridge.event.v1`, monotonically increasing
+cursors, explicit retention gaps, and authoritative/advisory source labels.
+For live timelines use the bearer-authenticated SSE endpoints documented in
+[execution-events.md](execution-events.md); unlike native `EventSource`, a
+backend/desktop `fetch` client can set the Authorization header.
+
+The native HTTP contract is the primary language-neutral SDK boundary. MCP is
+an additional bounded tool interface for agent hosts, while the
+OpenAI-compatible endpoint targets applications that already speak that
+protocol. They share routing and policy but are not interchangeable APIs.
+
 ## PHP and shared hosting
 
 On the relay host, create a scoped producer file without printing either the

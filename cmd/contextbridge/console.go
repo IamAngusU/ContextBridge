@@ -24,12 +24,13 @@ import (
 var errConsoleUnauthorized = errors.New("the local pairing token was rejected; check config.yml")
 
 type consoleStatus struct {
-	Version    string                     `json:"version"`
-	Queued     int                        `json:"queued"`
-	Completed  int                        `json:"completed"`
-	ActiveJobs int                        `json:"active_jobs"`
-	Adapter    bridge.AdapterClientStatus `json:"adapter"`
-	Runtime    struct {
+	Version       string                     `json:"version"`
+	UptimeSeconds uint64                     `json:"uptime_seconds"`
+	Queued        int                        `json:"queued"`
+	Completed     int                        `json:"completed"`
+	ActiveJobs    int                        `json:"active_jobs"`
+	Adapter       bridge.AdapterClientStatus `json:"adapter"`
+	Runtime       struct {
 		Hardware systeminfo.Snapshot            `json:"hardware"`
 		Engines  map[string]bridge.EngineStatus `json:"engines"`
 		Packs    []resourcepacks.Pack           `json:"resource_packs"`
@@ -144,7 +145,7 @@ func fetchConsoleStatus(ctx context.Context, client *http.Client, cfg config.Con
 
 func toServiceSnapshot(status consoleStatus, configs ...config.Config) terminalui.ServiceSnapshot {
 	snapshot := terminalui.ServiceSnapshot{
-		Version: status.Version, Queued: status.Queued, Completed: status.Completed, ActiveJobs: status.ActiveJobs,
+		Version: status.Version, UptimeSeconds: status.UptimeSeconds, Queued: status.Queued, Completed: status.Completed, ActiveJobs: status.ActiveJobs,
 		AdapterConnected: status.Adapter.Connected, ActiveEndpoints: status.Adapter.ActiveEndpoints, BusyEndpoints: status.Adapter.BusyEndpoints,
 		JobsTotal: status.Metrics.JobsTotal, JobsFailed: status.Metrics.JobsFailed,
 		ResourcePacks: append([]resourcepacks.Pack(nil), status.Runtime.Packs...),

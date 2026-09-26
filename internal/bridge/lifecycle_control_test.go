@@ -108,6 +108,7 @@ func TestHealthUsesConfiguredAggregateLifecycleIdle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	server.startedAt = time.Now().Add(-65 * time.Second)
 	server.SetLifecycleControl(func() bool { return false }, func() {})
 	httpServer := httptest.NewServer(server.Handler())
 	defer httpServer.Close()
@@ -118,13 +119,37 @@ func TestHealthUsesConfiguredAggregateLifecycleIdle(t *testing.T) {
 	}
 	defer response.Body.Close()
 	var health struct {
-		Idle bool `json:"idle"`
+		Idle          bool   `json:"idle"`
+		UptimeSeconds uint64 `json:"uptime_seconds"`
 	}
 	if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
 		t.Fatal(err)
 	}
 	if health.Idle {
 		t.Fatal("health exposed local-only idle instead of the configured aggregate state")
+	}
+	if health.UptimeSeconds < 64 || health.UptimeSeconds > 70 {
+		t.Fatalf("health uptime = %d seconds, want the service lifetime", health.UptimeSeconds)
+	}
+
+	request, err := http.NewRequest(http.MethodGet, httpServer.URL+"/v1/status", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+lifecycleTestToken)
+	statusResponse, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer statusResponse.Body.Close()
+	var status struct {
+		UptimeSeconds uint64 `json:"uptime_seconds"`
+	}
+	if err := json.NewDecoder(statusResponse.Body).Decode(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status.UptimeSeconds < 64 || status.UptimeSeconds > 70 {
+		t.Fatalf("status uptime = %d seconds, want the same service lifetime", status.UptimeSeconds)
 	}
 }
 

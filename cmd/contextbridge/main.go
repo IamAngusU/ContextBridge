@@ -175,7 +175,7 @@ LOCAL RESOURCES AND INTEGRATIONS
   contextbridge hardware | models | resources Inspect usable local capacity
   contextbridge pull MODEL                    Download a configured model safely
   contextbridge runtime install llama.cpp     Install the supported local runtime
-  contextbridge integrate openai|mcp|relay    Print copy-ready integration settings
+  contextbridge integrate openai|mcp|relay|ui Print copy-ready integration settings
   contextbridge mcp serve                     Expose the bounded MCP surface
 
 OPERATE AND MAINTAIN
@@ -218,7 +218,7 @@ func writeCommandGroupHelp(out io.Writer, path []string) bool {
 	case "mcp":
 		help = "Usage: contextbridge mcp serve [--config PATH]\n"
 	case "integrate":
-		help = "Usage: contextbridge integrate openai|mcp|relay [options]\n"
+		help = "Usage: contextbridge integrate openai|mcp|relay|ui [options]\n"
 	case "verification":
 		help = "Usage: contextbridge verification verify [options]\n"
 	case "update":
@@ -2144,7 +2144,11 @@ func clusterStatusCommand(args []string) error {
 			running += node.Capabilities.Running
 		}
 	}
-	fmt.Printf("Pool  [%d/%d PCs online]  [%d/%d slots busy]  [%d queued]\n", overview.NodesOnline, overview.NodesTotal, running, totalSlots, overview.JobsByState[cluster.JobQueued])
+	fmt.Printf("Pool  [%d/%d PCs online]  [%d/%d slots busy]  [%d queued]", overview.NodesOnline, overview.NodesTotal, running, totalSlots, overview.JobsByState[cluster.JobQueued])
+	if overview.RelayUptimeSeconds > 0 {
+		fmt.Printf("  [relay up %s]", formatUptime(overview.RelayUptimeSeconds))
+	}
+	fmt.Println()
 	if cfg.Cluster.Relay.LAN.Enabled {
 		fmt.Printf("LAN  [relay · pinned TLS · %s]  [Internet not required for local routes]\n", cfg.Cluster.Relay.LAN.PublicURL)
 	} else if trust, trustErr := cluster.LoadWorkerRelayTrust(cfg.Cluster.Worker.IdentityFile, cfg.Cluster.Worker.RelayURL); trustErr == nil && trust.SPKISHA256 != "" {

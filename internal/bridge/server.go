@@ -34,6 +34,7 @@ import (
 
 type Server struct {
 	cfg                 config.Config
+	startedAt           time.Time
 	store               *Store
 	schedules           *scheduleStore
 	processor           *Processor
@@ -134,7 +135,7 @@ func NewServer(cfg config.Config, logger *log.Logger) (*Server, error) {
 		logger = log.New(os.Stderr, "", log.LstdFlags)
 	}
 	server := &Server{
-		cfg: cfg, store: store, schedules: schedules, processor: NewProcessor(cfg, store),
+		cfg: cfg, startedAt: time.Now(), store: store, schedules: schedules, processor: NewProcessor(cfg, store),
 		runtime: NewRuntimeManager(cfg, logger), logger: logger,
 		jobAdmissionLimit: admissionLimit,
 		inboxSlots:        make(chan struct{}, maximumInboxConcurrent),
@@ -392,16 +393,24 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	queued, completed := s.store.Stats()
 	adapter := s.store.AdapterStatus()
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"ok":          true,
-		"service":     "contextbridge",
-		"version":     Version,
-		"queued":      queued,
-		"active_jobs": s.activeJobs.Load(),
-		"idle":        s.lifecycleIsIdle(),
-		"completed":   completed,
-		"adapter":     adapter.Connected,
-		"server_time": serverNow.UTC(),
+		"ok":             true,
+		"service":        "contextbridge",
+		"version":        Version,
+		"queued":         queued,
+		"active_jobs":    s.activeJobs.Load(),
+		"idle":           s.lifecycleIsIdle(),
+		"completed":      completed,
+		"adapter":        adapter.Connected,
+		"server_time":    serverNow.UTC(),
+		"uptime_seconds": serviceUptimeSeconds(serverNow, s.startedAt),
 	})
+}
+
+func serviceUptimeSeconds(now, startedAt time.Time) uint64 {
+	if startedAt.IsZero() || now.Before(startedAt) {
+		return 0
+	}
+	return uint64(now.Sub(startedAt) / time.Second)
 }
 
 func (s *Server) handleSystemStop(w http.ResponseWriter, r *http.Request) {
@@ -505,6 +514,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"version":                   Version,
 		"server_time":               serverNow.UTC(),
 		"server_utc_offset_seconds": utcOffset,
+		"uptime_seconds":            serviceUptimeSeconds(serverNow, s.startedAt),
 		"listen":                    s.cfg.Server.Listen,
 		"queued":                    queued,
 		"completed":                 completed,
