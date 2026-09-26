@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="72" viewBox="0 0 480 72" role="img" aria-label="Public CI proof for ContextBridge · 8/8" data-badge-system="IamAngusU/Badges" data-badge-layout="proof">
+  <title>Public CI proof for ContextBridge · 8/8</title>
+  
+  <style>.badge-bg{fill:#fff;stroke:#dfe3e9}.badge-fg{fill:#11151b}.badge-muted{fill:#667085}.badge-sep{stroke:#d2d8e0}.proof-success{stroke:#4f9a6c}.proof-failure{stroke:#c25b5b}.proof-warning{stroke:#b68a3f}.proof-neutral{stroke:#a3abb6}.proof-success,.proof-failure,.proof-warning,.proof-neutral{stroke-width:5;stroke-linecap:round}@media(prefers-color-scheme:dark){.badge-bg{fill:#0b0f14;stroke:#303741}.badge-fg{fill:#f7f8fa}.badge-muted{fill:#949eac}.badge-sep{stroke:#49515c}.proof-success{stroke:#73c994}.proof-failure{stroke:#ef8585}.proof-warning{stroke:#dfb164}.proof-neutral{stroke:#6f7782}}</style>
+  <rect class="badge-bg" x="1" y="1" width="478" height="70" rx="18"/>
+  <svg x="16" y="11" width="50" height="50" viewBox="240 0 560 440" preserveAspectRatio="xMidYMid meet" overflow="hidden" aria-hidden="true">
+    <path class="badge-fg" d="M533 66L533 143L677 143L686 145L695 150L700 155L705 164L706 168L706 226L710 226L718 224L729 219L735 215L747 204L753 196L757 189L761 179L764 161L763 144L759 129L752 114L743 101L731 89L718 80L706 74L695 70L682 67L673 66ZM279 124L272 135L267 146L264 156L262 167L262 287L264 298L267 307L271 316L278 327L283 333L294 343L303 349L311 353L322 357L337 360L355 360L366 358L379 354L509 287L574 252L598 240L606 238L618 238L625 240L655 254L685 266L692 270L701 279L705 287L706 291L706 320L704 327L700 334L693 341L690 343L683 346L672 348L482 348L482 427L668 427L677 426L685 424L700 417L740 392L751 384L762 373L769 364L777 349L781 336L783 321L783 298L782 290L779 280L776 274L772 268L766 262L759 257L749 252L714 238L700 231L658 214L635 203L628 201L621 197L613 194L598 190L592 189L565 189L550 192L538 196L452 239L395 269L373 280L364 283L358 284L350 284L339 281L332 277L323 268L318 258L316 250L316 195L318 186L322 176L327 168L333 161L340 155L348 150L355 147L368 144L482 144L483 8L417 41L316 94L304 101L292 110Z" fill-rule="evenodd"/>
+  </svg>
+  <path class="badge-sep" d="M82 15V57" fill="none" stroke-width="1.25"/>
+  <text class="badge-muted" x="101" y="27" font-family="Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,Helvetica,sans-serif" font-size="12" font-weight="700" letter-spacing="1.6">PUBLIC CI PROOF</text>
+  <text class="badge-fg" x="101" y="49" font-family="Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,Helvetica,sans-serif" font-size="21" font-weight="720">ContextBridge</text>
+  <text id="proof-metric" class="badge-fg" x="456" y="49" text-anchor="end" font-family="Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,Helvetica,sans-serif" font-size="21" font-weight="760">8/8</text>
+  <g id="proof-segments">
+    <line class="proof-success" x1="101" y1="63" x2="141.88" y2="63"/>
+    <line class="proof-success" x1="145.88" y1="63" x2="186.75" y2="63"/>
+    <line class="proof-success" x1="190.75" y1="63" x2="231.63" y2="63"/>
+    <line class="proof-success" x1="235.63" y1="63" x2="276.5" y2="63"/>
+    <line class="proof-success" x1="280.5" y1="63" x2="321.38" y2="63"/>
+    <line class="proof-success" x1="325.38" y1="63" x2="366.25" y2="63"/>
+    <line class="proof-success" x1="370.25" y1="63" x2="411.13" y2="63"/>
+    <line class="proof-success" x1="415.13" y1="63" x2="456" y2="63"/>
+  </g>
+</svg>
