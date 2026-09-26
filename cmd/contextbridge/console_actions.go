@@ -249,21 +249,46 @@ func consoleEventNotice(jobID string, event cluster.JobEvent) string {
 }
 
 func consoleJobsNotice(jobs []cluster.Job) string {
+	return consoleJobsNoticeAt(jobs, time.Now().UTC())
+}
+
+func consoleJobsNoticeAt(jobs []cluster.Job, now time.Time) string {
 	if len(jobs) == 0 {
 		return "No jobs are visible to this producer credential."
 	}
 	lines := []string{"YOUR RECENT JOBS · request/result content omitted"}
 	for _, job := range jobs {
-		lines = append(lines, fmt.Sprintf("%s · %s · %s", job.ID, job.Status, emptyLabel(job.Requirements.Task, "task unavailable")))
+		lines = append(lines, fmt.Sprintf("%s · %s%s · %s", job.ID, job.Status, consoleJobTimingSuffix(job, now), emptyLabel(job.Requirements.Task, "task unavailable")))
 	}
 	return strings.Join(lines, "\n")
 }
 
 func consoleJobNotice(job cluster.Job) string {
-	lines := []string{fmt.Sprintf("JOB %s · %s", job.ID, job.Status)}
+	return consoleJobNoticeAt(job, time.Now().UTC())
+}
+
+func consoleJobNoticeAt(job cluster.Job, now time.Time) string {
+	timing := cluster.AuthoritativeJobTimingAt(job, now)
+	lines := []string{fmt.Sprintf("JOB %s · %s%s", job.ID, job.Status, consoleJobTimingSuffix(job, now))}
 	lines = append(lines, "task · "+emptyLabel(job.Requirements.Task, "unavailable"))
+	if job.Pipeline != "" {
+		lines = append(lines, "pipeline · "+job.Pipeline)
+	}
+	if job.Step != "" {
+		lines = append(lines, "step · "+job.Step)
+	}
 	if job.AssignedNode != "" {
 		lines = append(lines, "node · "+job.AssignedNode)
+	}
+	if timing.QueueAvailable {
+		lines = append(lines, "queue · "+terminalui.CompactDuration(timing.Queue))
+	}
+	if timing.ExecutionAvailable {
+		label := "execution"
+		if !timing.Terminal {
+			label += " elapsed"
+		}
+		lines = append(lines, label+" · "+terminalui.CompactDuration(timing.Execution))
 	}
 	if job.FailureCode != "" {
 		lines = append(lines, "failure · "+job.FailureCode)
@@ -273,7 +298,7 @@ func consoleJobNotice(job cluster.Job) string {
 }
 
 func consoleResultNotice(job cluster.Job) string {
-	heading := fmt.Sprintf("JOB %s · %s", job.ID, job.Status)
+	heading := fmt.Sprintf("JOB %s · %s%s", job.ID, job.Status, consoleJobTimingSuffix(job, time.Now().UTC()))
 	if job.Status != cluster.JobCompleted {
 		if job.FailureCode != "" {
 			return heading + " · " + job.FailureCode
@@ -301,6 +326,18 @@ func consoleResultNotice(job cluster.Job) string {
 		text += "\n[worker marked this result truncated at output.max_bytes]"
 	}
 	return heading + "\n" + text
+}
+
+func consoleJobTimingSuffix(job cluster.Job, now time.Time) string {
+	timing := cluster.AuthoritativeJobTimingAt(job, now)
+	if !timing.ElapsedAvailable {
+		return ""
+	}
+	label := "elapsed"
+	if timing.Terminal {
+		label = "execution"
+	}
+	return " · " + label + " " + terminalui.CompactDuration(timing.Elapsed)
 }
 
 func boundedConsoleText(value string) string {

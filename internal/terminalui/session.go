@@ -2239,23 +2239,6 @@ func colorGPUPercent(value string, utilization int) string {
 	return value
 }
 
-func compactDuration(value time.Duration) string {
-	if value < time.Second {
-		return fmt.Sprintf("%dms", max(0, value.Milliseconds()))
-	}
-	if value < time.Minute {
-		return fmt.Sprintf("%.1fs", value.Seconds())
-	}
-	seconds := int64(value.Round(time.Second) / time.Second)
-	if seconds < 3600 {
-		return fmt.Sprintf("%dm%ds", seconds/60, seconds%60)
-	}
-	if seconds < 86400 {
-		return fmt.Sprintf("%dh%dm", seconds/3600, seconds%3600/60)
-	}
-	return fmt.Sprintf("%dd%dh", seconds/86400, seconds%86400/3600)
-}
-
 func millisecondsDuration(value uint64) time.Duration {
 	maximum := uint64(math.MaxInt64 / int64(time.Millisecond))
 	if value > maximum {

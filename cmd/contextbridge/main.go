@@ -1945,19 +1945,28 @@ func clusterPipelineCommand(args []string) error {
 	if err := clusterPOST(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/pipelines/"+url.PathEscape(*name)+"/run", cfg.Cluster.Relay.AdminToken, json.RawMessage(raw), &run); err != nil {
 		return err
 	}
-	fmt.Println("Pipeline run:", run.ID)
+	fmt.Printf("Pipeline run: %s%s\n", run.ID, pipelineTimingSuffix(run, time.Now().UTC()))
 	for {
 		time.Sleep(500 * time.Millisecond)
 		if err := clusterGET(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/pipeline-runs/"+url.PathEscape(run.ID), cfg.Cluster.Relay.AdminToken, &run); err != nil {
 			return err
 		}
 		if run.Status == "completed" {
+			fmt.Fprintf(os.Stderr, "Pipeline %s completed%s\n", run.ID, pipelineTimingSuffix(run, time.Now().UTC()))
 			return json.NewEncoder(os.Stdout).Encode(run.Output)
 		}
 		if run.Status == "failed" {
-			return errors.New(run.Error)
+			return fmt.Errorf("pipeline %s failed%s: %s", run.ID, pipelineTimingSuffix(run, time.Now().UTC()), run.Error)
 		}
 	}
+}
+
+func pipelineTimingSuffix(run cluster.PipelineRun, now time.Time) string {
+	timing := cluster.AuthoritativePipelineTimingAt(run, now)
+	if !timing.ElapsedAvailable {
+		return ""
+	}
+	return " · " + run.Status + " · elapsed " + terminalui.CompactDuration(timing.Elapsed)
 }
 
 func clusterStatusCommand(args []string) error {

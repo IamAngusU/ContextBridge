@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/IamAngusU/ContextBridge/internal/bridge"
 	"github.com/IamAngusU/ContextBridge/internal/cluster"
@@ -210,6 +211,43 @@ func TestConsoleResultNoticeIsBoundedAndExplicit(t *testing.T) {
 	sealed := consoleResultNotice(cluster.Job{ID: "job-sealed", Status: cluster.JobCompleted, SealedResult: &cluster.SealedEnvelope{Ciphertext: "opaque"}})
 	if !strings.Contains(sealed, "originating E2EE client") {
 		t.Fatalf("sealed result implied a plaintext downgrade: %q", sealed)
+	}
+}
+
+func TestConsoleJobNoticesShowAuthoritativeElapsedQueueAndExecution(t *testing.T) {
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	running := cluster.Job{
+		ID: "job-running", Status: cluster.JobRunning, Requirements: cluster.Requirements{Task: "generation"}, AssignedNode: "node-a",
+		CreatedAt: now.Add(-90 * time.Second), AssignedAt: now.Add(-86 * time.Second), StartedAt: now.Add(-83 * time.Second),
+	}
+	detail := consoleJobNoticeAt(running, now)
+	for _, want := range []string{"running · elapsed 01m23s", "queue · 4s", "execution elapsed · 01m23s"} {
+		if !strings.Contains(detail, want) {
+			t.Fatalf("job detail is missing %q:\n%s", want, detail)
+		}
+	}
+	list := consoleJobsNoticeAt([]cluster.Job{running}, now)
+	if !strings.Contains(list, "job-running · running · elapsed 01m23s · generation") {
+		t.Fatalf("job list lacks elapsed timing: %q", list)
+	}
+
+	terminal := running
+	terminal.Status = cluster.JobCompleted
+	terminal.FinishedAt = now.Add(-45 * time.Second)
+	first := consoleJobNoticeAt(terminal, now)
+	second := consoleJobNoticeAt(terminal, now.Add(24*time.Hour))
+	if first != second || !strings.Contains(first, "completed · execution 38s") {
+		t.Fatalf("terminal duration was not stable: first=%q second=%q", first, second)
+	}
+}
+
+func TestPipelineTimingSuffixUsesStableRelayTimestamps(t *testing.T) {
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	run := cluster.PipelineRun{Status: "completed", CreatedAt: now.Add(-26 * time.Hour), FinishedAt: now.Add(-16 * time.Minute)}
+	first := pipelineTimingSuffix(run, now)
+	second := pipelineTimingSuffix(run, now.Add(48*time.Hour))
+	if first != " · completed · elapsed 1d01h44m" || second != first {
+		t.Fatalf("pipeline suffix first=%q second=%q", first, second)
 	}
 }
 

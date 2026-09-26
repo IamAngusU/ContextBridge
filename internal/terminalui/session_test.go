@@ -59,9 +59,11 @@ func TestCompactDurationKeepsDaysAndHours(t *testing.T) {
 		duration time.Duration
 		want     string
 	}{
-		{time.Minute + 23*time.Second, "1m23s"},
-		{3*time.Hour + 5*time.Minute, "3h5m"},
-		{2*24*time.Hour + 4*time.Hour, "2d4h"},
+		{38 * time.Second, "38s"},
+		{time.Minute + 23*time.Second, "01m23s"},
+		{3*time.Hour + 5*time.Minute, "03h05m"},
+		{2*24*time.Hour + 4*time.Hour + 7*time.Minute, "2d04h07m"},
+		{-time.Second, "0s"},
 	} {
 		if got := compactDuration(item.duration); got != item.want {
 			t.Fatalf("compactDuration(%s) = %q, want %q", item.duration, got, item.want)
@@ -239,7 +241,7 @@ func TestStatusFitsCurrentWidthAfterZoom(t *testing.T) {
 			t.Fatalf("zoomed status lost the %s indicator: %q", mode, last)
 		}
 	}
-	if !strings.Contains(output.String(), "#") || !strings.Contains(output.String(), "2d1h") {
+	if !strings.Contains(output.String(), "#") || !strings.Contains(output.String(), "2d01h00m") {
 		t.Fatalf("status is missing the discriminator or day/hour duration: %q", output.String())
 	}
 }
@@ -330,7 +332,7 @@ func TestCompletedAdapterJobKeepsMetadataGapBelowSuccess(t *testing.T) {
 	session := &Session{out: &output, jobs: map[string]jobState{}}
 	session.HandleWorker(cluster.WorkerEvent{Kind: cluster.WorkerJobCompleted, JobID: "job-123456789", ComputeMS: 1500, ReportedProvider: "adapter"})
 	got := output.String()
-	if !strings.Contains(got, "✓  Job job-123456789 completed · 1.5s\n     └─ model metadata unavailable · adapter selection unverified\n") {
+	if !strings.Contains(got, "✓  Job job-123456789 completed · 1s\n     └─ model metadata unavailable · adapter selection unverified\n") {
 		t.Fatalf("success and observational metadata must be distinct: %q", got)
 	}
 	if strings.Contains(got, "needs attention") || strings.Contains(got, "adapter_model_unavailable") {

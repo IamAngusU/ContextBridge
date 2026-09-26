@@ -43,6 +43,26 @@ role and producer-ownership checks as bounded polling, contains the same
 content-minimizing event JSON, and does not stream incremental result content
 (which remains a separate contract).
 
+## Authoritative elapsed time
+
+Human-facing job and pipeline views may calculate elapsed wall-clock time from
+the lifecycle timestamps already owned by the relay. This is a presentation
+projection only; it does not write periodic timer events or change the JSON
+contract.
+
+- queued jobs use `now - created_at`;
+- assigned jobs use `now - assigned_at`;
+- running jobs use `now - started_at`;
+- terminal execution duration uses `finished_at - started_at` and therefore
+  remains stable after reconnect or restart;
+- pipeline duration uses `created_at` through `finished_at` (or `now` while
+  active);
+- CB-owned pipeline steps use the corresponding child job timestamps.
+
+Queue and execution time stay distinct. Negative wall-clock deltas are shown
+as zero. Elapsed time is not a percentage, semantic phase, success prediction,
+or ETA.
+
 The endpoint accepts administrator and observer credentials. A producer may
 read only events for its own job. Responses use `contextbridge.event.v1` and a
 relay-assigned monotonic sequence per job:
