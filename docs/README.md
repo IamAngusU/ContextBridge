@@ -48,6 +48,8 @@ described as vendor integrations here.
   managed coordination service.
 - [Privacy boundaries](privacy.md): cleartext, optional E2EE,
   credential-required E2EE, and the coordination metadata a relay still needs.
+- [Producer identity and tenant labels](tenancy.md): caller-selected tenant
+  labels, optional credential-bound scopes, and the hosted-isolation boundary.
 - [Job Contract v1 schema](schemas/job-contract-v1.schema.json): reusable
   machine-readable submission boundary.
 - [Verification Statement v1 schema](schemas/verification-statement-v1.schema.json):

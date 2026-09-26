@@ -23,7 +23,7 @@ Follow [device pairing and token setup](../../README.md#connect-your-devices).
 On the running relay host, issue a separate credential for this application:
 
 ```sh
-contextbridge cluster token --role producer --subject my-web-app --max-queued-jobs 8 --max-jobs-per-hour 120
+contextbridge cluster token --role producer --subject my-web-app --allowed-tenants my-web-app --max-queued-jobs 8 --max-jobs-per-hour 120
 ```
 
 Keep the returned token server-side. Workers pair separately; they do not need
@@ -31,6 +31,8 @@ this producer token. Never distribute the relay admin credential to an app.
 An application using one producer token must still authorize its own users
 and map their requests to their own jobs. A caller-supplied `tenant_id` or job
 ID is not a replacement for application authentication.
+The single credential-bound tenant is applied automatically to requests that
+omit `tenant_id`; another label is rejected before policy selection.
 
 ## 2. What goes to the pool
 

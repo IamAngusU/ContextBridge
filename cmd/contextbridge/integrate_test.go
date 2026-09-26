@@ -133,7 +133,14 @@ func TestOpenAIIntegrationCheckHonorsCallerDeadlineDuringHeaderAndBodyStalls(t *
 
 func TestRelayIntegrationJSONWritesSecretOnlyToPrivateFile(t *testing.T) {
 	const secret = "cb_scoped_secret_never_stdout"
+	var issued struct {
+		ProducerLimits cluster.ProducerLimits `json:"producer_limits"`
+	}
 	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if err := json.NewDecoder(request.Body).Decode(&issued); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"token": secret, "record": map[string]interface{}{"id": "tok_json", "role": "producer", "subject": "json-app", "created_at": "2026-09-26T00:00:00Z"}})
 	}))
 	defer relay.Close()
@@ -157,13 +164,16 @@ func TestRelayIntegrationJSONWritesSecretOnlyToPrivateFile(t *testing.T) {
 	}
 	previousStdout := os.Stdout
 	os.Stdout = writeEnd
-	commandErr := integrateCommand([]string{"relay", "--config", configPath, "--subject", "json-app", "--write-env", envPath, "--json"})
+	commandErr := integrateCommand([]string{"relay", "--config", configPath, "--subject", "json-app", "--allowed-tenants", "tenant-a,tenant-b", "--write-env", envPath, "--json"})
 	_ = writeEnd.Close()
 	os.Stdout = previousStdout
 	stdout, _ := io.ReadAll(readEnd)
 	_ = readEnd.Close()
 	if commandErr != nil {
 		t.Fatal(commandErr)
+	}
+	if len(issued.ProducerLimits.AllowedTenants) != 2 || issued.ProducerLimits.AllowedTenants[0] != "tenant-a" || issued.ProducerLimits.AllowedTenants[1] != "tenant-b" {
+		t.Fatalf("relay integration lost --allowed-tenants: %#v", issued.ProducerLimits)
 	}
 	var report relayIntegrationInfo
 	if err := json.Unmarshal(stdout, &report); err != nil || report.TokenID != "tok_json" || strings.Contains(string(stdout), secret) {
@@ -247,7 +257,7 @@ func TestUIIntegrationCreatesReadOnlyObserverBundle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if issued.Role != "observer" || issued.Subject != "custom-dashboard" || issued.ProducerLimits.MaxQueuedJobs != 0 || issued.ProducerLimits.MaxJobsPerHour != 0 || len(issued.ProducerLimits.Providers) != 0 || issued.ProducerLimits.Egress != "" {
+	if issued.Role != "observer" || issued.Subject != "custom-dashboard" || issued.ProducerLimits.MaxQueuedJobs != 0 || issued.ProducerLimits.MaxJobsPerHour != 0 || len(issued.ProducerLimits.Providers) != 0 || len(issued.ProducerLimits.AllowedTenants) != 0 || issued.ProducerLimits.Egress != "" {
 		t.Fatalf("UI integration did not request a plain observer identity: %#v", issued)
 	}
 	if info.Kind != "contextbridge-relay-observer" || info.Role != "observer" || info.TokenID != "tok_ui" {
@@ -285,11 +295,11 @@ func TestRelayIntegrationIssuesDurableProducerGovernance(t *testing.T) {
 	t.Cleanup(server.Close)
 	cfg := config.Config{Cluster: config.Cluster{Relay: config.ClusterRelay{PublicURL: server.URL, AdminToken: admin}}}
 	path := filepath.Join(t.TempDir(), "bounded.env")
-	want := cluster.ProducerLimits{MaxQueuedJobs: 3, MaxJobsPerHour: 25, Providers: []string{"ollama"}, Egress: "local_only", RequireE2EE: true}
+	want := cluster.ProducerLimits{MaxQueuedJobs: 3, MaxJobsPerHour: 25, Providers: []string{"ollama"}, AllowedTenants: []string{"tenant-a"}, Egress: "local_only", RequireE2EE: true}
 	if _, err := createRelayIntegrationBundleGoverned(context.Background(), cfg, path, "bounded-app", nil, 24, want); err != nil {
 		t.Fatal(err)
 	}
-	if issued.ProducerLimits.MaxQueuedJobs != want.MaxQueuedJobs || issued.ProducerLimits.MaxJobsPerHour != want.MaxJobsPerHour || issued.ProducerLimits.Egress != want.Egress || len(issued.ProducerLimits.Providers) != 1 || issued.ProducerLimits.Providers[0] != "ollama" || !issued.ProducerLimits.RequireE2EE {
+	if issued.ProducerLimits.MaxQueuedJobs != want.MaxQueuedJobs || issued.ProducerLimits.MaxJobsPerHour != want.MaxJobsPerHour || issued.ProducerLimits.Egress != want.Egress || len(issued.ProducerLimits.Providers) != 1 || issued.ProducerLimits.Providers[0] != "ollama" || len(issued.ProducerLimits.AllowedTenants) != 1 || issued.ProducerLimits.AllowedTenants[0] != "tenant-a" || !issued.ProducerLimits.RequireE2EE {
 		t.Fatalf("governance was not sent to the relay: %#v", issued.ProducerLimits)
 	}
 }

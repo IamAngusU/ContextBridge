@@ -59,6 +59,14 @@ func (r *Relay) handlePipelineRun(w http.ResponseWriter, req *http.Request) {
 		writeErrorCode(w, http.StatusForbidden, AdmissionCodeE2EERequired, errors.New("this producer credential requires E2EE, but pipeline execution does not yet support sealed step payloads"))
 		return
 	}
+	if err := validateTenantID(pipeline.TenantID); err != nil {
+		writeErrorCode(w, http.StatusUnprocessableEntity, AdmissionCodeTenantInvalid, err)
+		return
+	}
+	if err := scopeTenantID(&pipeline.TenantID, record); err != nil {
+		writeErrorCode(w, http.StatusForbidden, AdmissionCodeTenantScopeForbidden, err)
+		return
+	}
 	for index := range pipeline.Steps {
 		if err := scopeRequirements(&pipeline.Steps[index].Requirements, record); err != nil {
 			writeError(w, http.StatusForbidden, err)

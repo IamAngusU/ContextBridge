@@ -521,6 +521,10 @@ type ProducerLimits struct {
 	MaxQueuedJobs  int      `json:"max_queued_jobs,omitempty"`
 	MaxJobsPerHour int      `json:"max_jobs_per_hour,omitempty"`
 	Providers      []string `json:"providers,omitempty"`
+	// AllowedTenants binds caller-selected tenant_id values to the authenticated
+	// producer credential. One value also supplies a safe default when a request
+	// omits tenant_id; multiple values require an explicit allowed value.
+	AllowedTenants []string `json:"allowed_tenants,omitempty"`
 	Egress         string   `json:"egress,omitempty"`
 	// RequireE2EE makes payload encryption a credential-bound admission rule,
 	// not a caller convention. It protects prompt/result bytes from the relay;

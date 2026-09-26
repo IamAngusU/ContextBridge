@@ -34,6 +34,7 @@ const (
 	AdmissionCodePayloadRequired       = "payload.required"
 	AdmissionCodePayloadTooLarge       = "payload.too_large"
 	AdmissionCodeE2EERequired          = "privacy.e2ee_required"
+	AdmissionCodeTenantScopeForbidden  = "scope.tenant_forbidden"
 	AdmissionCodePolicyCostExceeded    = PolicyCodeCostExceeded
 	AdmissionCodePolicyCostRequired    = PolicyCodeCostRequired
 	AdmissionCodePolicyCostUnknown     = PolicyCodeCostUnverifiable
@@ -96,6 +97,7 @@ var stableAdmissionErrorCodes = []string{
 	AdmissionCodeReservationRequired,
 	AdmissionCodeReservationSubmitOnly,
 	AdmissionCodeScopeForbidden,
+	AdmissionCodeTenantScopeForbidden,
 	AdmissionCodeServiceStopping,
 	AdmissionCodeSourceInvalid,
 	AdmissionCodeTenantInvalid,
@@ -196,6 +198,9 @@ func (r *Relay) prepareAdmission(input SubmitRequest, record TokenRecord, mode a
 	if err := validateTenantID(input.TenantID); err != nil {
 		return SubmitRequest{}, ContractValidation{}, rejectAdmission(http.StatusUnprocessableEntity, AdmissionCodeTenantInvalid, err)
 	}
+	if err := scopeTenantID(&input.TenantID, record); err != nil {
+		return SubmitRequest{}, ContractValidation{}, rejectAdmission(http.StatusForbidden, AdmissionCodeTenantScopeForbidden, err)
+	}
 	policyDecision, err := EvaluateExecutionPolicy(r.cfg.ExecutionPolicy, input.TenantID, input.Requirements, time.Now().UTC())
 	if err != nil {
 		var violation *PolicyViolation
@@ -266,6 +271,8 @@ func admissionStoreErrorCode(err error) string {
 		return AdmissionCodeNodeDraining
 	case errors.Is(err, ErrE2EERequired):
 		return AdmissionCodeE2EERequired
+	case errors.Is(err, ErrTenantScopeForbidden):
+		return AdmissionCodeTenantScopeForbidden
 	default:
 		return ""
 	}

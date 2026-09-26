@@ -246,6 +246,7 @@ contextbridge integrate relay \
   --max-queued-jobs 8 \
   --max-jobs-per-hour 120 \
   --providers ollama \
+  --allowed-tenants my-server-app \
   --egress local_only \
   --write-env ./contextbridge-producer.env
 ```
@@ -267,6 +268,14 @@ hourly admission. Current governance deliberately does not claim daily token,
 compute, or cost quotas: unknown provider usage is never treated as zero, and
 those budgets require reservation-grade usage evidence before enforcement can
 be trustworthy.
+
+`tenant_id` is caller-selected unless the credential has an
+`--allowed-tenants` scope. One allowed value becomes a safe default; with
+multiple values, every request must choose an exact allowed value. Enforcement
+precedes execution-policy lookup and returns `scope.tenant_forbidden` for an
+out-of-scope label. This scopes an application credential but does not replace
+the application's own user authentication. See [Producer identity and tenant
+labels](tenancy.md).
 
 `--require-e2ee` can bind that producer credential to sealed native job
 admission. The relay rejects cleartext submissions and current cleartext
