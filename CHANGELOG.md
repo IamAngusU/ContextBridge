@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Added content-free workload normalization for advisory runtime estimates.
+  Each node/route retains at most 16 opaque ETA-only profiles derived from
+  coarse payload-byte, image-count, image-byte and assignment-load classes;
+  stable operator-owned pipeline steps additionally learn independent local
+  histories. Profiles retain at most 32 fresh successful durations, never
+  store prompt/result/pipeline/step text, cannot be forged by heartbeats, and
+  never participate in eligibility, policy or placement authority. Sparse
+  specific evidence falls back to the existing load/route distributions.
 - Added opt-in, TTY-only guided cluster submission. `cluster submit
   --interactive` asks only for a missing prepared job-contract file, displays
   a redacted relay/credential/E2EE/wait/artifact summary, and sends no network

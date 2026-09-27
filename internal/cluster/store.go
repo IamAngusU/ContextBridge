@@ -2574,7 +2574,7 @@ func (s *Store) completeJobWithFailure(id, nodeID string, attempt int, fence *As
 				node.CostUnknownJobs = saturatingUint64Add(node.CostUnknownJobs, usage.CostUnknownJobs)
 				recordRoutingOutcomeForOwnerRoute(&node, job.Requirements, job.OwnerSubject, jobRoutingHealthRouteKey(job), job.ID, job.Status == JobCompleted, job.FailureCode, job.FinishedAt)
 				if job.Status == JobCompleted {
-					recordRoutingPerformance(&node, job.Requirements, jobRoutingHealthRouteKey(job), routingObservedComputeMS(job), job.FinishedAt, jobRoutingPerformanceContext(job))
+					recordJobRoutingPerformance(&node, job, routingObservedComputeMS(job), job.FinishedAt)
 				}
 				if err := putJSON(tx.Bucket(bucketNodes), node.ID, node); err != nil {
 					return err

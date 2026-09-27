@@ -78,8 +78,9 @@ model state. A class needs the same minimum number of fresh successful samples
 before it can override the route-wide baseline. This lets two nodes with equal
 current telemetry be compared using how each one historically behaved under
 that kind of load, while keeping state bounded to twelve classes per route.
-It is deliberately not a black-box model and it does not yet normalize for
-prompt/token size; those remain visible limitations rather than guessed data.
+It is deliberately not a black-box model. Placement itself does not normalize
+by prompt/content size: hard eligibility and this soft routing curve remain
+independent from the ETA-only workload profiles described below.
 
 The operator controls this soft behavior centrally in `config.yml`:
 
@@ -125,10 +126,22 @@ tenant name or model label, and the public node list still redacts all
 relay-owned route evidence. Disabling `performance_learning` disables both the
 soft placement history and this advisory projection.
 
-This first estimate boundary uses the selected node, opaque route and bounded
-assignment load/model-warmth class. It does not yet learn a separate stable
-pipeline-step profile or normalize text work by measured input/output tokens;
-unknown workload size remains unknown instead of being guessed from content.
+The estimate first tries a separate, ETA-only workload profile. The relay
+derives a coarse class from facts it already owns: clear or sealed payload byte
+bucket, input-image count/byte buckets, assignment load, and model warmth. It
+does not inspect or retain prompt/result content and does not relabel bytes as
+tokens. A configured pipeline child also includes an opaque digest of its
+stable operator-owned pipeline/step identity, so repeated steps learn their
+own local duration distribution without persisting those names in performance
+state. Each route retains at most 16 such profiles and each profile at most 32
+fresh successful samples. Selection falls back in order from pipeline-step +
+workload/load evidence, to route + workload/load, to the existing route/load
+and route-wide distributions. These profiles never affect eligibility,
+policy, trust or placement scoring.
+
+Measured token-count normalization remains future work because an active job
+does not necessarily have authoritative token counts yet. Unknown facts stay
+unknown instead of being inferred from text length.
 
 Recent transient failures are relay-owned placement evidence. A matching
 execution route receives a bounded soft penalty after the first failure. Route

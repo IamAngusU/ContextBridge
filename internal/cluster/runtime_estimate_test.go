@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -34,6 +35,105 @@ func TestHistoricalRuntimeEstimateConditionsRemainingOnElapsedTime(t *testing.T)
 	estimate = EstimateJobRuntimeAt(job, node, DefaultPlacementPolicy(), now)
 	if estimate.Status != "outside_typical_range" || !estimate.OutsideTypical || estimate.RemainingP50MS != 0 || estimate.RemainingP90MS != 0 {
 		t.Fatalf("long-running job retained a false countdown: %#v", estimate)
+	}
+}
+
+func TestHistoricalRuntimeEstimatePrefersBoundedPipelineStepWorkloadEvidence(t *testing.T) {
+	now := time.Now().UTC()
+	requirements := Requirements{Task: "generation", Provider: "ollama", Model: "qwen-test"}
+	node := Node{ID: "node-step-estimate"}
+	routeKey, _, _ := routingHealthKey(requirements)
+	jobFor := func(pipeline, step string, payloadBytes int, duration uint64, completedAt time.Time) Job {
+		job := Job{
+			Pipeline: pipeline, Step: step, Status: JobCompleted, Requirements: requirements, AssignedNode: node.ID,
+			Payload:         json.RawMessage(strings.Repeat("x", payloadBytes)),
+			RoutingDecision: &RoutingDecision{RouteKey: routeKey, SelectedNodeID: node.ID, Candidates: []RoutingCandidateDecision{{NodeID: node.ID, Eligible: true, PerformanceContext: "idle:warm"}}},
+		}
+		recordJobRoutingPerformance(&node, job, duration, completedAt)
+		return job
+	}
+	for index := 0; index < MinimumRuntimeEstimateSamples; index++ {
+		jobFor("release", "render", 1024, uint64(1000+index*100), now.Add(time.Duration(index-20)*time.Minute))
+		jobFor("release", "summarize", 1024, uint64(9000+index*100), now.Add(time.Duration(index-10)*time.Minute))
+	}
+
+	active := Job{
+		Pipeline: "release", Step: "render", Status: JobRunning, Requirements: requirements, AssignedNode: node.ID,
+		Payload: json.RawMessage(strings.Repeat("x", 1024)), StartedAt: now.Add(-500 * time.Millisecond),
+		RoutingDecision: &RoutingDecision{RouteKey: routeKey, SelectedNodeID: node.ID, Candidates: []RoutingCandidateDecision{{NodeID: node.ID, Eligible: true, PerformanceContext: "idle:warm"}}},
+	}
+	estimate := EstimateJobRuntimeAt(active, node, DefaultPlacementPolicy(), now)
+	if estimate.Status != "available" || estimate.Profile != runtimeProfilePipelineStepWorkloadLoad || estimate.Samples != MinimumRuntimeEstimateSamples || estimate.TotalP90MS != 1400 {
+		t.Fatalf("stable pipeline step did not use its own workload history: %#v", estimate)
+	}
+
+	active.Step = "new-step"
+	estimate = EstimateJobRuntimeAt(active, node, DefaultPlacementPolicy(), now)
+	if estimate.Status != "available" || estimate.Profile != runtimeProfileRouteWorkloadLoad || estimate.Samples != MinimumRuntimeEstimateSamples*2 {
+		t.Fatalf("unknown step did not fall back to bounded route/workload history: %#v", estimate)
+	}
+
+	encoded, err := json.Marshal(node.RoutingPerformance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "release") || strings.Contains(string(encoded), "render") || strings.Contains(string(encoded), "summarize") {
+		t.Fatalf("runtime profile retained raw pipeline identity: %s", encoded)
+	}
+}
+
+func TestHistoricalRuntimeEstimateSeparatesBoundedPayloadClasses(t *testing.T) {
+	now := time.Now().UTC()
+	requirements := Requirements{Task: "generation", Provider: "ollama", Model: "qwen-test"}
+	node := Node{ID: "node-workload-estimate"}
+	routeKey, _, _ := routingHealthKey(requirements)
+	record := func(payloadBytes int, duration uint64, completedAt time.Time) Job {
+		job := Job{
+			Status: JobCompleted, Requirements: requirements, AssignedNode: node.ID,
+			Payload:         json.RawMessage(strings.Repeat("x", payloadBytes)),
+			RoutingDecision: &RoutingDecision{RouteKey: routeKey, SelectedNodeID: node.ID, Candidates: []RoutingCandidateDecision{{NodeID: node.ID, Eligible: true, PerformanceContext: "light:cold"}}},
+		}
+		recordJobRoutingPerformance(&node, job, duration, completedAt)
+		return job
+	}
+	for index := 0; index < MinimumRuntimeEstimateSamples; index++ {
+		record(1024, uint64(1000+index*100), now.Add(time.Duration(index-20)*time.Minute))
+		record(128<<10, uint64(12000+index*100), now.Add(time.Duration(index-10)*time.Minute))
+	}
+	active := Job{
+		Status: JobAssigned, Requirements: requirements, AssignedNode: node.ID,
+		Payload:         json.RawMessage(strings.Repeat("x", 128<<10)),
+		RoutingDecision: &RoutingDecision{RouteKey: routeKey, SelectedNodeID: node.ID, Candidates: []RoutingCandidateDecision{{NodeID: node.ID, Eligible: true, PerformanceContext: "light:cold"}}},
+	}
+	estimate := EstimateJobRuntimeAt(active, node, DefaultPlacementPolicy(), now)
+	if estimate.Status != "available" || estimate.Profile != runtimeProfileRouteWorkloadLoad || estimate.Samples != MinimumRuntimeEstimateSamples || estimate.TotalP50MS < 12000 {
+		t.Fatalf("large payload estimate was contaminated by small-payload history: %#v", estimate)
+	}
+}
+
+func TestRuntimeWorkloadProfilesAreBoundedAndValidated(t *testing.T) {
+	now := time.Now().UTC()
+	requirements := Requirements{Task: "generation", Provider: "ollama", Model: "qwen-test"}
+	node := Node{ID: "node-bounded-profiles"}
+	routeKey, _, _ := routingHealthKey(requirements)
+	for index := 0; index < MaximumRuntimeProfilesPerRoute+8; index++ {
+		job := Job{
+			Pipeline: "pipeline", Step: fmt.Sprintf("step-%02d", index), Requirements: requirements, AssignedNode: node.ID,
+			Payload:         json.RawMessage(`{"prompt":"bounded"}`),
+			RoutingDecision: &RoutingDecision{RouteKey: routeKey, SelectedNodeID: node.ID, Candidates: []RoutingCandidateDecision{{NodeID: node.ID, Eligible: true, PerformanceContext: "idle:warm"}}},
+		}
+		recordJobRoutingPerformance(&node, job, uint64(index+1)*1000, now.Add(time.Duration(index)*time.Second))
+	}
+	if len(node.RoutingPerformance) != 1 || len(node.RoutingPerformance[0].RuntimeProfiles) != MaximumRuntimeProfilesPerRoute {
+		t.Fatalf("runtime workload profiles are not bounded: %#v", node.RoutingPerformance)
+	}
+	node.RoutingPerformance[0].RuntimeProfiles = append(node.RoutingPerformance[0].RuntimeProfiles,
+		RoutingRuntimePerformance{ProfileKey: "not-a-digest", Kind: runtimeProfileRouteWorkloadLoad, RecentSuccessSamples: []RoutingDurationSample{{ComputeMS: 1, CompletedAt: now}}},
+		RoutingRuntimePerformance{ProfileKey: strings.Repeat("a", 64), Kind: "forged-kind", RecentSuccessSamples: []RoutingDurationSample{{ComputeMS: 1, CompletedAt: now}}},
+	)
+	bounded := boundedRoutingPerformance(node.RoutingPerformance)
+	if len(bounded) != 1 || len(bounded[0].RuntimeProfiles) != MaximumRuntimeProfilesPerRoute {
+		t.Fatalf("invalid runtime profiles survived normalization: %#v", bounded)
 	}
 }
 
