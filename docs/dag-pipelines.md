@@ -73,7 +73,8 @@ worker capacity, producer limits or execution policy.
 
 The authenticated protocol manifest advertises
 `dag_pipeline_contract_validation_v1`, `durable_dag_checkpoint_contract_v1`
-and the exact fixed limits. It does not claim a DAG executor.
+and `durable_dag_terminal_reconciliation_v1` plus the exact fixed limits. It
+does not claim a DAG executor.
 
 ## Durable graph truth
 
@@ -102,15 +103,25 @@ This removes the crash window where a child could exist while the graph still
 claimed the node was merely ready. The public run endpoint remains disabled;
 the primitive is a tested invariant, not a partially enabled executor.
 
+An additional retry-safe store primitive reconciles a child that is already
+terminal. The child snapshot, its bound graph node, every newly ready node,
+recursively blocked descendants, and their authoritative
+`pipeline.step.ready` / `pipeline.step.blocked` events commit in one Bolt
+transaction. Failed, cancelled and ambiguous predecessors block descendants;
+siblings that were already queued or running are not cancelled or rewritten.
+An event-write failure rolls the whole reconciliation back, and a retry of a
+successful reconciliation neither changes checkpoint time nor emits duplicate
+events. This primitive creates no jobs and still does not enable DAG execution.
+
 ## What remains before execution can be enabled
 
 The next slices must add and prove:
 
 1. bounded ready-set scheduling around the atomic admission primitive;
-2. descendant blocking after failed, cancelled or ambiguous predecessors;
-3. honest treatment of siblings that were already dispatched;
-4. restart tests at every checkpoint, exact usage accounting, and authoritative
-   graph events.
+2. restart tests around admission and terminal reconciliation;
+3. exact run-level usage/output finalization after all branches settle;
+4. an explicit supported-execution gate only after the executor itself is
+   proven.
 
 Until those properties exist, linear pipelines are the supported execution
 path. This contract is useful for validating and reviewing future workflows,
