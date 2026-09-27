@@ -265,6 +265,11 @@ type RoutingPerformance struct {
 	// the live load class observed at assignment. The overall fields above
 	// remain the neutral fallback when a class has too little fresh evidence.
 	LoadProfiles []RoutingLoadPerformance `json:"load_profiles,omitempty"`
+	// RuntimeProfiles are a separate, content-free ETA evidence layer. They
+	// never participate in eligibility or placement. ProfileKey is an opaque
+	// relay-derived digest of bounded workload classes and, where applicable,
+	// stable operator-owned pipeline/step identity.
+	RuntimeProfiles []RoutingRuntimePerformance `json:"runtime_profiles,omitempty"`
 }
 
 // RoutingLoadPerformance is a bounded point on a route's explainable load
@@ -277,6 +282,17 @@ type RoutingLoadPerformance struct {
 	LastComputeMS        uint64                  `json:"last_compute_ms"`
 	LastCompletedAt      time.Time               `json:"last_completed_at"`
 	RecentSuccessMS      []uint64                `json:"recent_success_ms,omitempty"`
+	RecentSuccessSamples []RoutingDurationSample `json:"recent_success_samples,omitempty"`
+}
+
+// RoutingRuntimePerformance retains bounded successful durations for one
+// coarse workload profile. Kind is a fixed relay-owned vocabulary; ProfileKey
+// contains no prompt, result, tenant, session, pipeline, or step text.
+type RoutingRuntimePerformance struct {
+	ProfileKey           string                  `json:"profile_key"`
+	Kind                 string                  `json:"kind"`
+	Samples              uint32                  `json:"samples"`
+	LastCompletedAt      time.Time               `json:"last_completed_at"`
 	RecentSuccessSamples []RoutingDurationSample `json:"recent_success_samples,omitempty"`
 }
 

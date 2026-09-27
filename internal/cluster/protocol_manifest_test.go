@@ -64,6 +64,9 @@ func TestProtocolManifestIsDeterministicAndNamesPublicBoundaries(t *testing.T) {
 	if !containsString(first.Features, "historical_runtime_estimates_v1") || first.Limits.MaximumRoutingDurationSamples != MaximumRoutingDurationSamples {
 		t.Fatalf("bounded historical runtime estimates are not advertised: %#v %#v", first.Features, first.Limits)
 	}
+	if !containsString(first.Features, "workload_normalized_runtime_estimates_v1") || first.Limits.MaximumRuntimeProfiles != MaximumRuntimeProfilesPerRoute {
+		t.Fatalf("bounded workload runtime profiles are not advertised: %#v %#v", first.Features, first.Limits)
+	}
 	if !containsString(first.Features, "rag_embedding_space_identity_v1") {
 		t.Fatalf("RAG embedding-space identity is not advertised: %#v", first.Features)
 	}

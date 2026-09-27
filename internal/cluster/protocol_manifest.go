@@ -27,6 +27,7 @@ type ProtocolLimits struct {
 	MaximumRoutingHealthPerOwner     int   `json:"maximum_routing_health_records_per_owner"`
 	MaximumRoutingPerformanceRecords int   `json:"maximum_routing_performance_records"`
 	MaximumRoutingLoadProfiles       int   `json:"maximum_routing_load_profiles_per_route"`
+	MaximumRuntimeProfiles           int   `json:"maximum_runtime_profiles_per_route"`
 	MaximumRoutingDurationSamples    int   `json:"maximum_routing_duration_samples_per_profile"`
 	MaximumExecutionEventStreams     int   `json:"maximum_execution_event_streams"`
 	MaximumEventStreamsPerSubject    int   `json:"maximum_execution_event_streams_per_subject"`
@@ -59,6 +60,7 @@ func CurrentProtocolManifest(configuredJobBytes int64) ProtocolManifest {
 			"identity_preserving_lan_relocation_v1",
 			"job_contract_dry_run",
 			"load_context_performance_routing_v1",
+			"workload_normalized_runtime_estimates_v1",
 			"performance_aware_routing_v1",
 			"prometheus_metrics_v1",
 			"producer_resource_governance_v1",
@@ -90,6 +92,7 @@ func CurrentProtocolManifest(configuredJobBytes int64) ProtocolManifest {
 			MaximumRoutingHealthPerOwner:     MaximumRoutingHealthRecordsPerOwner,
 			MaximumRoutingPerformanceRecords: MaximumRoutingPerformanceRecords,
 			MaximumRoutingLoadProfiles:       MaximumRoutingLoadProfilesPerRoute,
+			MaximumRuntimeProfiles:           MaximumRuntimeProfilesPerRoute,
 			MaximumRoutingDurationSamples:    MaximumRoutingDurationSamples,
 			MaximumExecutionEventStreams:     maximumExecutionEventStreams,
 			MaximumEventStreamsPerSubject:    maximumEventStreamsPerSubject,

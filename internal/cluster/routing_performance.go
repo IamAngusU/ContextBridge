@@ -1,6 +1,8 @@
 package cluster
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -9,11 +11,22 @@ import (
 const (
 	MaximumRoutingPerformanceRecords      = 64
 	MaximumRoutingLoadProfilesPerRoute    = 12
+	MaximumRuntimeProfilesPerRoute        = 16
 	MaximumRoutingDurationSamples         = 32
 	routingPerformanceEWMAWeight          = uint64(8)
 	routingPerformanceSourceContext       = "load_context"
 	routingPerformanceSourceRouteBaseline = "route_baseline"
 )
+
+const (
+	runtimeProfileRouteWorkloadLoad        = "node_route_load_workload"
+	runtimeProfilePipelineStepWorkloadLoad = "node_route_pipeline_step_load_workload" // #nosec G101 -- fixed profile vocabulary, not a credential.
+)
+
+type runtimeProfileIdentity struct {
+	key  string
+	kind string
+}
 
 // PlacementPolicy controls only soft performance ranking. Hard requirements,
 // policy, trust, capacity and failure circuits always run first and cannot be
@@ -165,6 +178,15 @@ func validRoutingPerformanceContext(value string) bool {
 }
 
 func recordRoutingPerformance(node *Node, requirements Requirements, admittedRouteKey string, computeMS uint64, completedAt time.Time, contextClass string) {
+	recordRoutingPerformanceWithProfiles(node, requirements, admittedRouteKey, computeMS, completedAt, contextClass, nil)
+}
+
+func recordJobRoutingPerformance(node *Node, job Job, computeMS uint64, completedAt time.Time) {
+	contextClass := jobRoutingPerformanceContext(job)
+	recordRoutingPerformanceWithProfiles(node, job.Requirements, jobRoutingHealthRouteKey(job), computeMS, completedAt, contextClass, runtimeProfileIdentities(job, contextClass))
+}
+
+func recordRoutingPerformanceWithProfiles(node *Node, requirements Requirements, admittedRouteKey string, computeMS uint64, completedAt time.Time, contextClass string, runtimeProfiles []runtimeProfileIdentity) {
 	if node == nil || computeMS == 0 || completedAt.IsZero() {
 		return
 	}
@@ -226,6 +248,120 @@ func recordRoutingPerformance(node *Node, requirements Requirements, admittedRou
 	updateRoutingPerformanceSample(&profile.Samples, &profile.EWMAComputeMS, &profile.LastComputeMS, &profile.LastCompletedAt, computeMS, completedAt)
 	profile.RecentSuccessMS = appendBoundedDuration(profile.RecentSuccessMS, computeMS)
 	profile.RecentSuccessSamples = appendBoundedDurationSample(profile.RecentSuccessSamples, computeMS, completedAt)
+
+	for _, identity := range runtimeProfiles {
+		if !validRuntimeProfileIdentity(identity) {
+			continue
+		}
+		profileIndex := -1
+		for index := range record.RuntimeProfiles {
+			if record.RuntimeProfiles[index].ProfileKey == identity.key && record.RuntimeProfiles[index].Kind == identity.kind {
+				profileIndex = index
+				break
+			}
+		}
+		if profileIndex < 0 {
+			if len(record.RuntimeProfiles) >= MaximumRuntimeProfilesPerRoute {
+				oldest := 0
+				for index := 1; index < len(record.RuntimeProfiles); index++ {
+					if record.RuntimeProfiles[index].LastCompletedAt.Before(record.RuntimeProfiles[oldest].LastCompletedAt) {
+						oldest = index
+					}
+				}
+				record.RuntimeProfiles = append(record.RuntimeProfiles[:oldest], record.RuntimeProfiles[oldest+1:]...)
+			}
+			record.RuntimeProfiles = append(record.RuntimeProfiles, RoutingRuntimePerformance{ProfileKey: identity.key, Kind: identity.kind})
+			profileIndex = len(record.RuntimeProfiles) - 1
+		}
+		profile := &record.RuntimeProfiles[profileIndex]
+		if profile.Samples < ^uint32(0) {
+			profile.Samples++
+		}
+		profile.LastCompletedAt = completedAt
+		profile.RecentSuccessSamples = appendBoundedDurationSample(profile.RecentSuccessSamples, computeMS, completedAt)
+	}
+}
+
+func runtimeProfileIdentities(job Job, contextClass string) []runtimeProfileIdentity {
+	if !validRoutingPerformanceContext(contextClass) {
+		return nil
+	}
+	workload := runtimeWorkloadClass(job)
+	identities := []runtimeProfileIdentity{newRuntimeProfileIdentity(runtimeProfileRouteWorkloadLoad, contextClass, workload)}
+	if pipeline := strings.TrimSpace(job.Pipeline); pipeline != "" {
+		if step := strings.TrimSpace(job.Step); step != "" {
+			identities = append([]runtimeProfileIdentity{newRuntimeProfileIdentity(runtimeProfilePipelineStepWorkloadLoad, pipeline, step, contextClass, workload)}, identities...)
+		}
+	}
+	return identities
+}
+
+func newRuntimeProfileIdentity(kind string, parts ...string) runtimeProfileIdentity {
+	digest := sha256.Sum256([]byte(kind + "\x00" + strings.Join(parts, "\x00")))
+	return runtimeProfileIdentity{key: fmt.Sprintf("%x", digest[:]), kind: kind}
+}
+
+func validRuntimeProfileIdentity(identity runtimeProfileIdentity) bool {
+	if identity.kind != runtimeProfileRouteWorkloadLoad && identity.kind != runtimeProfilePipelineStepWorkloadLoad {
+		return false
+	}
+	if len(identity.key) != sha256.Size*2 {
+		return false
+	}
+	for _, character := range identity.key {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// runtimeWorkloadClass uses only bounded metadata the relay already owns. It
+// deliberately does not retain content or pretend that bytes are token counts.
+func runtimeWorkloadClass(job Job) string {
+	payloadMode := "none"
+	payloadBytes := int64(0)
+	if len(job.Payload) > 0 {
+		payloadMode = "plain"
+		payloadBytes = int64(len(job.Payload))
+	} else if job.SealedPayload != nil && job.SealedPayload.Ciphertext != "" {
+		payloadMode = "sealed"
+		payloadBytes = int64(len(job.SealedPayload.Ciphertext))
+	}
+	return strings.Join([]string{
+		payloadMode,
+		boundedByteClass(payloadBytes),
+		boundedImageCountClass(job.Requirements.InputImageCount),
+		boundedByteClass(job.Requirements.InputImageBytes),
+	}, ":")
+}
+
+func boundedByteClass(value int64) string {
+	switch {
+	case value <= 0:
+		return "0"
+	case value <= 4<<10:
+		return "xs"
+	case value <= 64<<10:
+		return "sm"
+	case value <= 1<<20:
+		return "md"
+	default:
+		return "lg"
+	}
+}
+
+func boundedImageCountClass(value int) string {
+	switch {
+	case value <= 0:
+		return "0"
+	case value == 1:
+		return "1"
+	case value <= 4:
+		return "2-4"
+	default:
+		return "5+"
+	}
 }
 
 func appendBoundedDuration(existing []uint64, value uint64) []uint64 {
@@ -427,6 +563,25 @@ func boundedRoutingPerformance(records []RoutingPerformance) []RoutingPerformanc
 			}
 		}
 		record.LoadProfiles = profiles
+		runtimeProfiles := make([]RoutingRuntimePerformance, 0, min(len(record.RuntimeProfiles), MaximumRuntimeProfilesPerRoute))
+		seenRuntimeProfiles := make(map[string]struct{}, MaximumRuntimeProfilesPerRoute)
+		for _, profile := range record.RuntimeProfiles {
+			identity := runtimeProfileIdentity{key: profile.ProfileKey, kind: profile.Kind}
+			if !validRuntimeProfileIdentity(identity) {
+				continue
+			}
+			identityKey := profile.Kind + ":" + profile.ProfileKey
+			if _, exists := seenRuntimeProfiles[identityKey]; exists {
+				continue
+			}
+			seenRuntimeProfiles[identityKey] = struct{}{}
+			profile.RecentSuccessSamples = boundedRoutingDurationSamples(profile.RecentSuccessSamples)
+			runtimeProfiles = append(runtimeProfiles, profile)
+			if len(runtimeProfiles) == MaximumRuntimeProfilesPerRoute {
+				break
+			}
+		}
+		record.RuntimeProfiles = runtimeProfiles
 		result = append(result, record)
 	}
 	return result

@@ -1,7 +1,9 @@
 package cluster
 
 import (
+	"encoding/json"
 	"math"
+	"strings"
 	"testing"
 	"time"
 )
@@ -213,15 +215,22 @@ func TestWorkerHeartbeatCannotForgeRoutingPerformance(t *testing.T) {
 	now := time.Now().UTC()
 	requirements := Requirements{Task: "generation", Provider: "ollama", Model: "model"}
 	existing := Node{ID: "node"}
+	routeKey, _, _ := routingHealthKey(requirements)
 	for i := 0; i < 3; i++ {
-		recordRoutingPerformance(&existing, requirements, "", 40000, now.Add(time.Duration(i)*time.Second), "idle:cold")
+		job := Job{
+			Pipeline: "trusted", Step: "step", Requirements: requirements, AssignedNode: existing.ID,
+			Payload:         json.RawMessage(`{"prompt":"trusted"}`),
+			RoutingDecision: &RoutingDecision{RouteKey: routeKey, SelectedNodeID: existing.ID, Candidates: []RoutingCandidateDecision{{NodeID: existing.ID, Eligible: true, PerformanceContext: "idle:cold"}}},
+		}
+		recordJobRoutingPerformance(&existing, job, 40000, now.Add(time.Duration(i)*time.Second))
 	}
 	incoming := Node{ID: "node", RoutingPerformance: []RoutingPerformance{{
 		RouteKey: "forged", Samples: math.MaxUint32, EWMAComputeMS: 1, RecentSuccessMS: []uint64{1},
-		LoadProfiles: []RoutingLoadPerformance{{ContextClass: "idle:cold", Samples: math.MaxUint32, EWMAComputeMS: 1, RecentSuccessMS: []uint64{1}}},
+		LoadProfiles:    []RoutingLoadPerformance{{ContextClass: "idle:cold", Samples: math.MaxUint32, EWMAComputeMS: 1, RecentSuccessMS: []uint64{1}}},
+		RuntimeProfiles: []RoutingRuntimePerformance{{ProfileKey: strings.Repeat("f", 64), Kind: runtimeProfileRouteWorkloadLoad, Samples: math.MaxUint32, RecentSuccessSamples: []RoutingDurationSample{{ComputeMS: 1, CompletedAt: now}}}},
 	}}}
 	mergeStoredNodeState(&incoming, existing)
-	if len(incoming.RoutingPerformance) != 1 || incoming.RoutingPerformance[0].EWMAComputeMS == 1 || incoming.RoutingPerformance[0].RecentSuccessMS[0] == 1 || len(incoming.RoutingPerformance[0].LoadProfiles) != 1 || incoming.RoutingPerformance[0].LoadProfiles[0].EWMAComputeMS == 1 || incoming.RoutingPerformance[0].LoadProfiles[0].RecentSuccessMS[0] == 1 {
+	if len(incoming.RoutingPerformance) != 1 || incoming.RoutingPerformance[0].EWMAComputeMS == 1 || incoming.RoutingPerformance[0].RecentSuccessMS[0] == 1 || len(incoming.RoutingPerformance[0].LoadProfiles) != 1 || incoming.RoutingPerformance[0].LoadProfiles[0].EWMAComputeMS == 1 || incoming.RoutingPerformance[0].LoadProfiles[0].RecentSuccessMS[0] == 1 || len(incoming.RoutingPerformance[0].RuntimeProfiles) != 2 || incoming.RoutingPerformance[0].RuntimeProfiles[0].RecentSuccessSamples[0].ComputeMS == 1 {
 		t.Fatalf("worker forged relay-owned performance: %#v", incoming.RoutingPerformance)
 	}
 }

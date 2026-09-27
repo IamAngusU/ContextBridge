@@ -109,9 +109,20 @@ func runtimeDistributionFor(node Node, job Job, policy PlacementPolicy, now time
 		routeKey = admitted
 	}
 	contextClass := jobRoutingPerformanceContext(job)
+	profileIdentities := runtimeProfileIdentities(job, contextClass)
 	for _, record := range node.RoutingPerformance {
 		if record.RouteKey != routeKey {
 			continue
+		}
+		for _, identity := range profileIdentities {
+			for _, profile := range record.RuntimeProfiles {
+				if profile.ProfileKey != identity.key || profile.Kind != identity.kind {
+					continue
+				}
+				if values, lastCompletedAt, ok := freshRuntimeDistribution(profile.RecentSuccessSamples, minimum, policy.HistoryTTL, now); ok {
+					return runtimeDistribution{values: values, lastCompletedAt: lastCompletedAt, profile: identity.kind}, true
+				}
+			}
 		}
 		if validRoutingPerformanceContext(contextClass) {
 			for _, profile := range record.LoadProfiles {
