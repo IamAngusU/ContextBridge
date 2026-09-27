@@ -143,7 +143,7 @@ func (s *mcpStdioServer) serve(ctx context.Context, input io.Reader, output io.W
 
 func (s *mcpStdioServer) handleMessage(ctx context.Context, raw []byte) *mcpResponse {
 	var request mcpRequest
-	if err := json.Unmarshal(raw, &request); err != nil {
+	if err := strictjson.Decode(raw, &request); err != nil {
 		return mcpErrorResponse(nil, -32700, "Parse error", nil)
 	}
 	if request.JSONRPC != "2.0" || strings.TrimSpace(request.Method) == "" || !validMCPRequestID(request.ID) {

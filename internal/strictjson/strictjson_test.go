@@ -7,14 +7,26 @@ import (
 )
 
 type nestedDocument struct {
-	Priority int               `json:"priority"`
-	Nested   nestedField       `json:"nested"`
-	Payload  json.RawMessage   `json:"payload"`
-	Labels   map[string]string `json:"labels"`
+	Priority int                    `json:"priority"`
+	Nested   nestedField            `json:"nested"`
+	Items    []nestedField          `json:"items"`
+	ByName   map[string]nestedField `json:"by_name"`
+	Payload  json.RawMessage        `json:"payload"`
+	Labels   map[string]string      `json:"labels"`
+	Custom   customDocument         `json:"custom"`
 }
 
 type nestedField struct {
 	Enabled bool `json:"enabled"`
+}
+
+type customDocument struct {
+	Raw json.RawMessage
+}
+
+func (document *customDocument) UnmarshalJSON(raw []byte) error {
+	document.Raw = append(document.Raw[:0], raw...)
+	return nil
 }
 
 func TestDecodeRejectsAmbiguousStructProperties(t *testing.T) {
@@ -22,6 +34,8 @@ func TestDecodeRejectsAmbiguousStructProperties(t *testing.T) {
 		`{"priority":1,"priority":2}`,
 		`{"priority":1,"Priority":2}`,
 		`{"nested":{"enabled":true,"Enabled":false}}`,
+		`{"items":[{"enabled":true,"Enabled":false}]}`,
+		`{"by_name":{"first":{"enabled":true,"Enabled":false}}}`,
 	} {
 		var document nestedDocument
 		if err := Decode([]byte(raw), &document); err == nil {
@@ -31,12 +45,12 @@ func TestDecodeRejectsAmbiguousStructProperties(t *testing.T) {
 }
 
 func TestDecodePreservesOpaqueCaseSensitiveKeys(t *testing.T) {
-	raw := []byte(`{"payload":{"A":1,"a":2},"labels":{"A":"one","a":"two"}}`)
+	raw := []byte(`{"payload":{"A":1,"a":2},"labels":{"A":"one","a":"two"},"custom":{"Enabled":true}}`)
 	var document nestedDocument
 	if err := Decode(raw, &document); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(document.Payload), `"A":1`) || len(document.Labels) != 2 {
+	if !strings.Contains(string(document.Payload), `"A":1`) || len(document.Labels) != 2 || !strings.Contains(string(document.Custom.Raw), `"Enabled":true`) {
 		t.Fatalf("opaque keys were not preserved: payload=%s labels=%v", document.Payload, document.Labels)
 	}
 }

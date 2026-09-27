@@ -22,10 +22,7 @@ var (
 // aliases of declared struct fields, unknown struct fields, and trailing JSON.
 // Map keys and json.RawMessage contents remain case-sensitive opaque data.
 func Decode(raw []byte, target any) error {
-	if err := Validate(raw); err != nil {
-		return err
-	}
-	if err := rejectCaseAliasedStructFields(raw, reflect.TypeOf(target)); err != nil {
+	if err := validate(raw, reflect.TypeOf(target)); err != nil {
 		return err
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
@@ -42,12 +39,16 @@ func Decode(raw []byte, target any) error {
 // Validate checks UTF-8 and JSON syntax and rejects duplicate properties
 // recursively.
 func Validate(raw []byte) error {
+	return validate(raw, nil)
+}
+
+func validate(raw []byte, target reflect.Type) error {
 	if !utf8.Valid(raw) {
 		return errors.New("JSON must be valid UTF-8")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
-	if err := scanUniqueValue(decoder); err != nil {
+	if err := scanUniqueValue(decoder, target); err != nil {
 		return err
 	}
 	if _, err := decoder.Token(); err != io.EOF {
@@ -59,7 +60,7 @@ func Validate(raw []byte) error {
 	return nil
 }
 
-func scanUniqueValue(decoder *json.Decoder) error {
+func scanUniqueValue(decoder *json.Decoder, target reflect.Type) error {
 	token, err := decoder.Token()
 	if err != nil {
 		return err
@@ -70,6 +71,7 @@ func scanUniqueValue(decoder *json.Decoder) error {
 	}
 	switch delimiter {
 	case '{':
+		fields, mapValue := schemaObject(target)
 		seen := make(map[string]struct{})
 		for decoder.More() {
 			keyToken, err := decoder.Token()
@@ -84,7 +86,20 @@ func scanUniqueValue(decoder *json.Decoder) error {
 				return fmt.Errorf("duplicate JSON property %q", key)
 			}
 			seen[key] = struct{}{}
-			if err := scanUniqueValue(decoder); err != nil {
+			childType := mapValue
+			if fields != nil {
+				var exact bool
+				childType, exact = fields[key]
+				if !exact {
+					for name := range fields {
+						if strings.EqualFold(key, name) {
+							return fmt.Errorf("JSON property %q must use exact spelling %q", key, name)
+						}
+					}
+					childType = nil
+				}
+			}
+			if err := scanUniqueValue(decoder, childType); err != nil {
 				return err
 			}
 		}
@@ -93,8 +108,9 @@ func scanUniqueValue(decoder *json.Decoder) error {
 			return errors.New("invalid JSON object")
 		}
 	case '[':
+		elementType := schemaArrayElement(target)
 		for decoder.More() {
-			if err := scanUniqueValue(decoder); err != nil {
+			if err := scanUniqueValue(decoder, elementType); err != nil {
 				return err
 			}
 		}
@@ -108,66 +124,37 @@ func scanUniqueValue(decoder *json.Decoder) error {
 	return nil
 }
 
-func rejectCaseAliasedStructFields(raw []byte, target reflect.Type) error {
+func schemaType(target reflect.Type) reflect.Type {
 	if target == nil {
 		return nil
 	}
-	var document any
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	if err := decoder.Decode(&document); err != nil {
-		return err
-	}
-	return inspectValue(document, target)
-}
-
-func inspectValue(value any, target reflect.Type) error {
 	for target.Kind() == reflect.Pointer {
 		target = target.Elem()
 	}
 	if target == rawMessageType || reflect.PointerTo(target).Implements(unmarshalerType) {
 		return nil
 	}
+	return target
+}
+
+func schemaObject(target reflect.Type) (map[string]reflect.Type, reflect.Type) {
+	target = schemaType(target)
+	if target == nil {
+		return nil, nil
+	}
 	switch target.Kind() {
 	case reflect.Struct:
-		object, ok := value.(map[string]any)
-		if !ok {
-			return nil
-		}
-		fields := jsonFields(target)
-		for key, child := range object {
-			if childType, exact := fields[key]; exact {
-				if err := inspectValue(child, childType); err != nil {
-					return err
-				}
-				continue
-			}
-			for name := range fields {
-				if strings.EqualFold(key, name) {
-					return fmt.Errorf("JSON property %q must use exact spelling %q", key, name)
-				}
-			}
-		}
-	case reflect.Slice, reflect.Array:
-		items, ok := value.([]any)
-		if !ok {
-			return nil
-		}
-		for _, item := range items {
-			if err := inspectValue(item, target.Elem()); err != nil {
-				return err
-			}
-		}
+		return jsonFields(target), nil
 	case reflect.Map:
-		object, ok := value.(map[string]any)
-		if !ok {
-			return nil
-		}
-		for _, child := range object {
-			if err := inspectValue(child, target.Elem()); err != nil {
-				return err
-			}
-		}
+		return nil, target.Elem()
+	}
+	return nil, nil
+}
+
+func schemaArrayElement(target reflect.Type) reflect.Type {
+	target = schemaType(target)
+	if target != nil && (target.Kind() == reflect.Slice || target.Kind() == reflect.Array) {
+		return target.Elem()
 	}
 	return nil
 }
