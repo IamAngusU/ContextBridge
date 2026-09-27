@@ -118,28 +118,21 @@ func (r *Relay) handlePipelineRun(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Relay) handlePipelineRunStatus(w http.ResponseWriter, req *http.Request) {
-	run, err := r.store.GetPipelineRun(req.PathValue("id"))
+	run, err := r.visiblePipelineRun(req.Context(), req.PathValue("id"))
 	if err != nil {
 		writeError(w, http.StatusNotFound, errors.New("pipeline run not found"))
-		return
-	}
-	if record, ok := tokenRecord(req.Context()); ok && record.Role == "producer" && run.OwnerSubject != record.Subject {
-		writeError(w, http.StatusForbidden, errors.New("pipeline run belongs to another producer"))
 		return
 	}
 	writeJSON(w, http.StatusOK, run)
 }
 
 func (r *Relay) handlePipelineRunActivity(w http.ResponseWriter, req *http.Request) {
-	run, complete, err := r.pipelineRunWithCurrentSteps(req.PathValue("id"))
+	run, err := r.visiblePipelineRun(req.Context(), req.PathValue("id"))
 	if err != nil {
 		writeError(w, http.StatusNotFound, errors.New("pipeline run not found"))
 		return
 	}
-	if record, ok := tokenRecord(req.Context()); ok && record.Role == "producer" && run.OwnerSubject != record.Subject {
-		writeError(w, http.StatusForbidden, errors.New("pipeline run belongs to another producer"))
-		return
-	}
+	run, complete := r.pipelineRunCurrentSteps(run)
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, ProjectPipelineActivity(run, complete))
 }
@@ -149,6 +142,11 @@ func (r *Relay) pipelineRunWithCurrentSteps(id string) (PipelineRun, bool, error
 	if err != nil {
 		return PipelineRun{}, false, err
 	}
+	run, complete := r.pipelineRunCurrentSteps(run)
+	return run, complete, nil
+}
+
+func (r *Relay) pipelineRunCurrentSteps(run PipelineRun) (PipelineRun, bool) {
 	complete := true
 	knownJobs := make(map[string]struct{}, len(run.Steps))
 	validated := make([]Job, 0, len(run.Steps))
@@ -200,7 +198,7 @@ func (r *Relay) pipelineRunWithCurrentSteps(id string) (PipelineRun, bool, error
 			knownJobs[event.JobID] = struct{}{}
 		}
 	}
-	return run, complete, nil
+	return run, complete
 }
 
 func pipelineChildBelongsToRun(job Job, run PipelineRun) bool {
@@ -209,13 +207,9 @@ func pipelineChildBelongsToRun(job Job, run PipelineRun) bool {
 }
 
 func (r *Relay) handlePipelineRunEvents(w http.ResponseWriter, req *http.Request) {
-	run, err := r.store.GetPipelineRun(req.PathValue("id"))
+	run, err := r.visiblePipelineRun(req.Context(), req.PathValue("id"))
 	if err != nil {
 		writeError(w, http.StatusNotFound, errors.New("pipeline run not found"))
-		return
-	}
-	if record, ok := tokenRecord(req.Context()); ok && record.Role == "producer" && run.OwnerSubject != record.Subject {
-		writeError(w, http.StatusForbidden, errors.New("pipeline run belongs to another producer"))
 		return
 	}
 	after := uint64(0)

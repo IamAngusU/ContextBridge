@@ -653,7 +653,6 @@ func mcpClusterContractInputSchema() map[string]interface{} {
 		"description": "Cleartext native ContextBridge cluster job envelope. The relay remains authoritative for byte limits, token scope, and current policy; one-time sealed reservations are intentionally unavailable through this read-only MCP tool.",
 		"properties": map[string]interface{}{
 			"contract_version": map[string]interface{}{"type": "string", "enum": []string{cluster.JobContractV1}},
-			"id":               map[string]interface{}{"type": "string", "minLength": 1, "maxLength": 128},
 			"tenant_id":        map[string]interface{}{"type": "string"},
 			"source":           map[string]interface{}{"type": "string"},
 			"requirements":     map[string]interface{}{"type": "object"},

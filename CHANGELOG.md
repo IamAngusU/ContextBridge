@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Made producer execution IDs relay-assigned and normalized point lookups so a
+  producer cannot reserve another integration's predictable job ID or learn
+  whether a guessed ID belongs to a different producer. Producer idempotency
+  remains explicit and owner-scoped through `Idempotency-Key`; one-time E2EE
+  submissions may echo only their relay-issued reservation job ID. Job and
+  pipeline point APIs now return the same not-found response for missing and
+  foreign-owned records, while admin/observer aggregate visibility remains.
 - Bound built-in RAG records to a versioned embedding-space fingerprint rather
   than treating equal vector dimensions as compatibility. Provider/runtime,
   model, immutable or operator revision evidence, dimensions, similarity,

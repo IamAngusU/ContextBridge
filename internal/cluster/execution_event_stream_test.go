@@ -79,7 +79,7 @@ func TestJobEventStreamReplaysResumesAndPreservesOwnership(t *testing.T) {
 		t.Fatalf("resumed stream = status %d events %#v body %s", response.StatusCode, resumed, resumedBody)
 	}
 
-	if status, _, _ := readEventStream(t, endpoint, producerB, ""); status != http.StatusForbidden {
+	if status, _, _ := readEventStream(t, endpoint, producerB, ""); status != http.StatusNotFound {
 		t.Fatalf("another producer read stream with status %d", status)
 	}
 	if status, _, _ := readEventStream(t, endpoint, producerA, "not-a-sequence"); status != http.StatusBadRequest {

@@ -322,12 +322,12 @@ func TestConsoleClientUsesRealRelayOwnershipAndProducerGovernance(t *testing.T) 
 	}
 	if _, err := other.Job(context.Background(), job.ID); err == nil {
 		t.Fatal("second producer read another producer's console job")
-	} else if apiErr, ok := err.(*clusterAPIError); !ok || apiErr.StatusCode != http.StatusForbidden {
+	} else if apiErr, ok := err.(*clusterAPIError); !ok || apiErr.StatusCode != http.StatusNotFound {
 		t.Fatalf("cross-owner read error = %#v", err)
 	}
 	if _, err := other.Cancel(context.Background(), job.ID); err == nil {
 		t.Fatal("second producer cancelled another producer's console job")
-	} else if apiErr, ok := err.(*clusterAPIError); !ok || apiErr.StatusCode != http.StatusForbidden {
+	} else if apiErr, ok := err.(*clusterAPIError); !ok || apiErr.StatusCode != http.StatusNotFound {
 		t.Fatalf("cross-owner cancel error = %#v", err)
 	}
 	if _, err := owner.Submit(context.Background(), request, "console-owner-second"); err == nil {

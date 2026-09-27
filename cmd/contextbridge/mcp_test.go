@@ -164,6 +164,9 @@ func TestMCPSubmitSchemaDescribesSafeNativeJobFields(t *testing.T) {
 	if _, ok := contractProperties["sealed_payload"]; ok {
 		t.Fatalf("unverifiable sealed payload escaped into read-only MCP schema: %#v", contractProperties)
 	}
+	if _, ok := contractProperties["id"]; ok {
+		t.Fatalf("producer-selected job ID escaped into read-only MCP schema: %#v", contractProperties)
+	}
 }
 
 func TestMCPClusterContractValidationIsReadOnlyAndAuthenticated(t *testing.T) {

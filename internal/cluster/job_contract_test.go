@@ -39,7 +39,6 @@ func TestContractValidationUsesSubmitAdmissionWithoutQueueing(t *testing.T) {
 	}
 
 	legacy := SubmitRequest{
-		ID:           "contract-parity",
 		Requirements: Requirements{Task: "generation"},
 		Payload:      json.RawMessage(`{"prompt":"safe"}`),
 	}
@@ -371,7 +370,7 @@ func TestAdmissionStoreErrorsHaveStableCodes(t *testing.T) {
 	}
 }
 
-func TestSubmitReturnsStableConflictAndCapacityCodes(t *testing.T) {
+func TestSubmitReturnsStableRelayAssignedAndCapacityCodes(t *testing.T) {
 	relay, err := NewRelay(RelayConfig{
 		Database:      filepath.Join(t.TempDir(), "relay.db"),
 		AdminToken:    "admin_012345678901234567890123456789012345",
@@ -405,13 +404,13 @@ func TestSubmitReturnsStableConflictAndCapacityCodes(t *testing.T) {
 		return status, response
 	}
 
-	if status, response := submit("stable-conflict"); status != http.StatusAccepted {
-		t.Fatalf("first submit returned %d: %#v", status, response)
+	if status, response := submit("producer-chosen"); status != http.StatusUnprocessableEntity || response.Code != AdmissionCodeJobIDRelayAssigned {
+		t.Fatalf("producer-chosen ID returned %d: %#v", status, response)
 	}
-	if status, response := submit("stable-conflict"); status != http.StatusConflict || response.Code != AdmissionCodeJobIDConflict {
-		t.Fatalf("duplicate submit returned %d: %#v", status, response)
+	if status, response := submit(""); status != http.StatusAccepted {
+		t.Fatalf("relay-assigned submit returned %d: %#v", status, response)
 	}
-	if status, response := submit("stable-capacity"); status != http.StatusServiceUnavailable || response.Code != AdmissionCodeCapacityQueue {
+	if status, response := submit(""); status != http.StatusServiceUnavailable || response.Code != AdmissionCodeCapacityQueue {
 		t.Fatalf("capacity submit returned %d: %#v", status, response)
 	}
 }

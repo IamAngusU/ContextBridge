@@ -267,7 +267,7 @@ func TestJobEventEndpointScopesProducerOwnership(t *testing.T) {
 	}
 	server := httptest.NewServer(relay.Handler())
 	defer server.Close()
-	if status, _ := relayHTTPTest(t, http.MethodGet, server.URL+"/v1/cluster/jobs/"+job.ID+"/events?after=0&limit=1", producerB, nil); status != http.StatusForbidden {
+	if status, _ := relayHTTPTest(t, http.MethodGet, server.URL+"/v1/cluster/jobs/"+job.ID+"/events?after=0&limit=1", producerB, nil); status != http.StatusNotFound {
 		t.Fatalf("another producer read job events with status %d", status)
 	}
 	status, raw := relayHTTPTest(t, http.MethodGet, server.URL+"/v1/cluster/jobs/"+job.ID+"/events?after=0&limit=1", producerA, nil)

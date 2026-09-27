@@ -187,7 +187,7 @@ func TestProducerTenantScopeIsDurableAndEnforcedByStore(t *testing.T) {
 	if err := store.CreateReservationAdmitted(assignment, "tenant-scope-secret", "tenant-app", 10, 10); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.ConsumeReservationAdmittedGovernedWithPolicy(assignment.ID, "tenant-scope-secret", &SealedEnvelope{Algorithm: sealedAlgorithm, Ciphertext: "opaque"}, "test", "tenant-b", "tenant-app", 0, 1, 10, limits, policy); !errors.Is(err, ErrTenantScopeForbidden) {
+	if _, err := store.ConsumeReservationAdmittedGovernedWithPolicy(assignment.ID, "tenant-scope-secret", "", &SealedEnvelope{Algorithm: sealedAlgorithm, Ciphertext: "opaque"}, "test", "tenant-b", "tenant-app", 0, 1, 10, limits, policy); !errors.Is(err, ErrTenantScopeForbidden) {
 		t.Fatalf("reserved admission escaped its durable tenant scope: %v", err)
 	}
 }

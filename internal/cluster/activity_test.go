@@ -67,7 +67,7 @@ func TestPipelineActivityEndpointRefreshesChildStateAndScopesOwnership(t *testin
 	server := httptest.NewServer(relay.Handler())
 	defer server.Close()
 	endpoint := server.URL + "/v1/cluster/pipeline-runs/" + run.ID + "/activity"
-	if status, _ := relayHTTPTest(t, http.MethodGet, endpoint, other, nil); status != http.StatusForbidden {
+	if status, _ := relayHTTPTest(t, http.MethodGet, endpoint, other, nil); status != http.StatusNotFound {
 		t.Fatalf("foreign producer read activity with status %d", status)
 	}
 	status, raw := relayHTTPTest(t, http.MethodGet, endpoint, owner, nil)
