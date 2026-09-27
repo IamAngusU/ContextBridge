@@ -78,7 +78,9 @@ func Install(ctx context.Context, directory string, progress Progress) (string, 
 	}
 	versionDir := filepath.Join(directory, release.Tag)
 	temporary := versionDir + ".partial"
-	_ = os.RemoveAll(temporary)
+	if err := os.RemoveAll(temporary); err != nil {
+		return "", fmt.Errorf("clean temporary llama.cpp runtime: %w", err)
+	}
 	if err := os.MkdirAll(temporary, 0700); err != nil {
 		return "", err
 	}
@@ -345,15 +347,20 @@ func extractZip(path, target string) error {
 	if len(reader.File) > maximumRuntimeArchiveEntries {
 		return fmt.Errorf("runtime archive contains more than %d entries", maximumRuntimeArchiveEntries)
 	}
+	targetRoot, err := openExtractionRoot(target)
+	if err != nil {
+		return err
+	}
+	defer targetRoot.Close()
 	var extracted int64
 	seen := map[string]struct{}{}
 	for _, item := range reader.File {
-		path, ok := safeArchivePath(target, item.Name)
+		entryName, ok := safeArchiveName(item.Name)
 		if !ok {
 			return fmt.Errorf("unsafe path in runtime archive: %s", item.Name)
 		}
 		if item.FileInfo().IsDir() {
-			if err := os.MkdirAll(path, 0700); err != nil {
+			if err := targetRoot.MkdirAll(entryName, 0700); err != nil {
 				return err
 			}
 			continue
@@ -365,19 +372,19 @@ func extractZip(path, target string) error {
 		if err != nil {
 			return fmt.Errorf("runtime archive exceeds extraction limits")
 		}
-		key := strings.ToLower(filepath.Clean(path))
+		key := strings.ToLower(entryName)
 		if _, duplicate := seen[key]; duplicate {
 			return fmt.Errorf("duplicate path in runtime archive: %s", item.Name)
 		}
 		seen[key] = struct{}{}
-		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		if err := targetRoot.MkdirAll(filepath.Dir(entryName), 0700); err != nil {
 			return err
 		}
 		source, err := item.Open()
 		if err != nil {
 			return err
 		}
-		destination, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0700)
+		destination, err := targetRoot.OpenFile(entryName, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0700)
 		if err != nil {
 			source.Close()
 			return err
@@ -424,6 +431,11 @@ func extractTarGz(path, target string) error {
 	}
 	defer gzipReader.Close()
 	reader := tar.NewReader(gzipReader)
+	targetRoot, err := openExtractionRoot(target)
+	if err != nil {
+		return err
+	}
+	defer targetRoot.Close()
 	entries := 0
 	var extracted int64
 	seen := map[string]struct{}{}
@@ -439,28 +451,28 @@ func extractTarGz(path, target string) error {
 		if entries > maximumRuntimeArchiveEntries {
 			return fmt.Errorf("runtime archive contains more than %d entries", maximumRuntimeArchiveEntries)
 		}
-		path, ok := safeArchivePath(target, header.Name)
+		entryName, ok := safeArchiveName(header.Name)
 		if !ok {
 			return fmt.Errorf("unsafe path in runtime archive: %s", header.Name)
 		}
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(path, 0700); err != nil {
+			if err := targetRoot.MkdirAll(entryName, 0700); err != nil {
 				return err
 			}
 		case tar.TypeReg:
 			if header.Size < 0 || header.Size > maximumRuntimeEntryBytes || header.Size > maximumRuntimeExtractedBytes-extracted {
 				return fmt.Errorf("runtime archive exceeds extraction limits")
 			}
-			key := strings.ToLower(filepath.Clean(path))
+			key := strings.ToLower(entryName)
 			if _, duplicate := seen[key]; duplicate {
 				return fmt.Errorf("duplicate path in runtime archive: %s", header.Name)
 			}
 			seen[key] = struct{}{}
-			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			if err := targetRoot.MkdirAll(filepath.Dir(entryName), 0700); err != nil {
 				return err
 			}
-			destination, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0700)
+			destination, err := targetRoot.OpenFile(entryName, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0700)
 			if err != nil {
 				return err
 			}
@@ -484,13 +496,54 @@ func secureDownloadURL(raw string) bool {
 }
 
 func safeArchivePath(root, name string) (string, bool) {
-	clean := filepath.Clean(filepath.FromSlash(name))
-	if clean == "." || filepath.IsAbs(clean) || filepath.VolumeName(clean) != "" || strings.HasPrefix(clean, string(os.PathSeparator)) || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+	clean, ok := safeArchiveName(name)
+	if !ok {
 		return "", false
 	}
 	path := filepath.Join(root, clean)
 	relative, err := filepath.Rel(root, path)
 	return path, err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator))
+}
+
+func openExtractionRoot(target string) (*os.Root, error) {
+	absolute, err := filepath.Abs(target)
+	if err != nil {
+		return nil, err
+	}
+	parent, name := filepath.Dir(absolute), filepath.Base(absolute)
+	parentRoot, err := os.OpenRoot(parent)
+	if err != nil {
+		return nil, err
+	}
+	defer parentRoot.Close()
+	entryInfo, err := parentRoot.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if !entryInfo.IsDir() || entryInfo.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("runtime extraction target is not a regular directory")
+	}
+	targetRoot, err := parentRoot.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	openedInfo, err := targetRoot.Stat(".")
+	if err != nil || !os.SameFile(entryInfo, openedInfo) {
+		_ = targetRoot.Close()
+		if err != nil {
+			return nil, err
+		}
+		return nil, errors.New("runtime extraction target changed while it was opened")
+	}
+	return targetRoot, nil
+}
+
+func safeArchiveName(name string) (string, bool) {
+	clean := filepath.Clean(filepath.FromSlash(name))
+	if clean == "." || filepath.IsAbs(clean) || filepath.VolumeName(clean) != "" || strings.HasPrefix(clean, string(os.PathSeparator)) || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+		return "", false
+	}
+	return clean, true
 }
 
 func findServer(root string) (string, error) {
