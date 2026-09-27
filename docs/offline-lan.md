@@ -32,6 +32,12 @@ identity to publish and lists the candidates. Select the address explicitly:
 contextbridge cluster lan init --advertise-host 192.168.1.20
 ```
 
+Eligible literal endpoints are RFC1918 IPv4, IPv6 ULA, link-local/loopback,
+and RFC6598 `100.64.0.0/10` when an operator deliberately selects an overlay
+or VPN interface. Ordinary globally routable IP literals remain outside this
+private-network command. Address eligibility establishes reachability only;
+the transferred TLS identity remains the trust boundary.
+
 The command creates:
 
 - a persistent Ed25519 TLS leaf identity owned by the relay;

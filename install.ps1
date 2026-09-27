@@ -210,7 +210,7 @@ if ($ClusterMode -eq 'ask') {
     Muted "     Keep execution local; no other machine is required."
     Write-Host "  5) Advanced setup"
     Muted "     Choose relay, worker, and client roles yourself."
-    Muted "You can change this later. Joining another pool requires approval; moving pool authority is a separate protected operation."
+    Muted "You can change this later. Joining another pool requires approval. Changing the pool coordinator is not an ordinary role change."
     $clusterChoice = Read-Host "Choose 1, 2, 3, 4, or 5 [4]"
     if (-not $clusterChoice) { $clusterChoice = '4' }
     if ($clusterChoice -eq '1') {
@@ -606,8 +606,29 @@ if (-not $NoStart) {
 }
 
 Write-Host ""
-Good "ContextBridge is installed."
+if ($NoStart) {
+    Good "ContextBridge is installed."
+} else {
+    Good "ContextBridge is installed and healthy."
+}
+$modeLabel = switch ($ClusterMode) {
+    'relay'  { 'pool coordinator' }
+    'worker' { 'pool worker' }
+    'client' { 'send-only client' }
+    'all'    { 'pool coordinator + worker' }
+    default  { 'this device only' }
+}
+Write-Host "Mode:   $modeLabel"
 Write-Host "Config: $config"
+Write-Host ""
+Write-Host "Next:"
+Write-Host "  Check setup   $preferredCommand doctor --config `"$config`""
+if ($ClusterMode -eq 'local') {
+    Write-Host "  Test readiness $preferredCommand selftest --config `"$config`""
+} else {
+    Write-Host "  Check pool    $preferredCommand cluster status --config `"$config`""
+}
+Write-Host "  Open console  $preferredCommand console --config `"$config`""
 if (-not $NoStart -and -not $NoDashboard) {
     Start-Sleep -Milliseconds 700
     & $exe dashboard --config $config

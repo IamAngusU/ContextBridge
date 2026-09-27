@@ -134,7 +134,7 @@ if [ "$cluster_mode" = "ask" ] && [ "$interactive" = "1" ]; then
   printf '  3) Use an existing pool\n     Send work without accepting pool jobs on this device.\n' >/dev/tty
   printf '  4) Use ContextBridge only on this device\n     Keep execution local; no other machine is required.\n' >/dev/tty
   printf '  5) Advanced setup\n     Choose relay, worker, and client roles yourself.\n' >/dev/tty
-  printf 'You can change this later. Joining another pool requires approval; moving pool authority is a separate protected operation.\n' >/dev/tty
+  printf 'You can change this later. Joining another pool requires approval. Changing the pool coordinator is not an ordinary role change.\n' >/dev/tty
   printf 'Choose 1, 2, 3, 4, or 5 [4]: ' >/dev/tty
   read -r cluster_choice </dev/tty || cluster_choice="4"
   case "${cluster_choice:-4}" in
@@ -570,7 +570,26 @@ else
   echo "Start ContextBridge with: $preferred_command run --config $config"
 fi
 
+case "$cluster_mode" in
+  relay) mode_label="pool coordinator" ;;
+  worker) mode_label="pool worker" ;;
+  client) mode_label="send-only client" ;;
+  all) mode_label="pool coordinator + worker" ;;
+  *) mode_label="this device only" ;;
+esac
+echo ""
+echo "ContextBridge is installed."
+echo "Mode:   $mode_label"
 echo "Config: $config"
+echo ""
+echo "Next:"
+printf '  Check setup    %s doctor --config "%s"\n' "$preferred_command" "$config"
+if [ "$cluster_mode" = "local" ]; then
+  printf '  Test readiness %s selftest --config "%s"\n' "$preferred_command" "$config"
+else
+  printf '  Check pool     %s cluster status --config "%s"\n' "$preferred_command" "$config"
+fi
+printf '  Open console   %s console --config "%s"\n' "$preferred_command" "$config"
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
   *) echo "Add $BIN_DIR to PATH to run contextbridge without its full path." ;;

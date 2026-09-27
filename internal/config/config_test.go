@@ -558,6 +558,12 @@ func TestLANRelayRequiresPrivateListenerAndHTTPSIdentity(t *testing.T) {
 	if err := base.Validate(); err != nil {
 		t.Fatalf("valid private LAN relay rejected: %v", err)
 	}
+	overlay := base
+	overlay.Cluster.Relay.LAN.Listen = "100.100.42.8:32151"
+	overlay.Cluster.Relay.LAN.PublicURL = "https://100.100.42.8:32151"
+	if err := overlay.Validate(); err != nil {
+		t.Fatalf("valid shared overlay relay rejected: %v", err)
+	}
 	for name, mutate := range map[string]func(*Config){
 		"public-listener": func(candidate *Config) { candidate.Cluster.Relay.LAN.Listen = "8.8.8.8:32151" },
 		"cleartext-url":   func(candidate *Config) { candidate.Cluster.Relay.LAN.PublicURL = "http://192.168.1.20:32151" },

@@ -20,6 +20,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/IamAngusU/ContextBridge/internal/cluster"
+	"github.com/IamAngusU/ContextBridge/internal/netpolicy"
 	"github.com/IamAngusU/ContextBridge/internal/updater"
 	"gopkg.in/yaml.v3"
 )
@@ -1454,8 +1455,8 @@ func validateLANListen(value string) error {
 	if ip == nil {
 		return errors.New("LAN listen address host must be an IP or wildcard, not a DNS name")
 	}
-	if !ip.IsUnspecified() && !ip.IsPrivate() && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() {
-		return errors.New("LAN listen address must be private, link-local, loopback, or a wildcard")
+	if !ip.IsUnspecified() && !netpolicy.TrustedPrivateEndpointIP(ip) {
+		return errors.New("LAN listen address must be private, shared overlay/CGNAT, link-local, loopback, or a wildcard")
 	}
 	return nil
 }

@@ -18,6 +18,7 @@ import (
 
 	"github.com/IamAngusU/ContextBridge/internal/cluster"
 	"github.com/IamAngusU/ContextBridge/internal/config"
+	"github.com/IamAngusU/ContextBridge/internal/netpolicy"
 )
 
 var pinnedClusterClients sync.Map // map[scheme://host]*http.Client
@@ -69,8 +70,8 @@ func clusterLANRelocateCommand(args []string) error {
 		return fmt.Errorf("load existing LAN identity: %w", err)
 	}
 	*advertiseHost = strings.Trim(strings.TrimSpace(*advertiseHost), "[]")
-	if parsed := net.ParseIP(*advertiseHost); parsed != nil && !parsed.IsPrivate() && !parsed.IsLinkLocalUnicast() && !parsed.IsLoopback() {
-		return errors.New("--advertise-host IP must be private, link-local, or loopback")
+	if parsed := net.ParseIP(*advertiseHost); parsed != nil && !netpolicy.TrustedPrivateEndpointIP(parsed) {
+		return errors.New("--advertise-host IP must be private, shared overlay/CGNAT, link-local, or loopback")
 	}
 	if *listen == "" {
 		*listen = net.JoinHostPort(*advertiseHost, currentURL.Port())
@@ -151,8 +152,8 @@ func clusterLANInitCommand(args []string) error {
 		}
 	}
 	*advertiseHost = strings.Trim(strings.TrimSpace(*advertiseHost), "[]")
-	if parsed := net.ParseIP(*advertiseHost); parsed != nil && !parsed.IsPrivate() && !parsed.IsLinkLocalUnicast() && !parsed.IsLoopback() {
-		return errors.New("--advertise-host IP must be private, link-local, or loopback")
+	if parsed := net.ParseIP(*advertiseHost); parsed != nil && !netpolicy.TrustedPrivateEndpointIP(parsed) {
+		return errors.New("--advertise-host IP must be private, shared overlay/CGNAT, link-local, or loopback")
 	}
 	if !explicitListen {
 		// The generated join bundle names exactly one reachable LAN endpoint, so
@@ -374,7 +375,7 @@ func preferredLANAddress() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	var ipv4, ipv6 []string
+	var candidates []net.IP
 	for _, networkInterface := range interfaces {
 		if networkInterface.Flags&net.FlagUp == 0 || networkInterface.Flags&net.FlagLoopback != 0 {
 			continue
@@ -385,14 +386,25 @@ func preferredLANAddress() (string, error) {
 		}
 		for _, raw := range addresses {
 			host, _, splitErr := net.ParseCIDR(raw.String())
-			if splitErr != nil || (!host.IsPrivate() && !host.IsLinkLocalUnicast()) {
+			if splitErr != nil {
 				continue
 			}
-			if host.To4() != nil {
-				ipv4 = append(ipv4, host.String())
-			} else {
-				ipv6 = append(ipv6, host.String())
-			}
+			candidates = append(candidates, host)
+		}
+	}
+	return preferredLANAddressFromIPs(candidates)
+}
+
+func preferredLANAddressFromIPs(candidates []net.IP) (string, error) {
+	var ipv4, ipv6 []string
+	for _, host := range candidates {
+		if !netpolicy.TrustedPrivateEndpointIP(host) || host.IsLoopback() {
+			continue
+		}
+		if host.To4() != nil {
+			ipv4 = append(ipv4, host.String())
+		} else {
+			ipv6 = append(ipv6, host.String())
 		}
 	}
 	sort.Strings(ipv4)
@@ -401,15 +413,15 @@ func preferredLANAddress() (string, error) {
 		return ipv4[0], nil
 	}
 	if len(ipv4) > 1 {
-		return "", fmt.Errorf("multiple private LAN addresses detected (%s); pass the intended one with --advertise-host", strings.Join(ipv4, ", "))
+		return "", fmt.Errorf("multiple private/overlay addresses detected (%s); pass the intended one with --advertise-host", strings.Join(ipv4, ", "))
 	}
 	if len(ipv6) == 1 {
 		return ipv6[0], nil
 	}
 	if len(ipv6) > 1 {
-		return "", fmt.Errorf("multiple private LAN addresses detected (%s); pass the intended one with --advertise-host", strings.Join(ipv6, ", "))
+		return "", fmt.Errorf("multiple private/overlay addresses detected (%s); pass the intended one with --advertise-host", strings.Join(ipv6, ", "))
 	}
-	return "", errors.New("no private or link-local LAN address detected; pass --advertise-host explicitly")
+	return "", errors.New("no private, shared overlay/CGNAT, or link-local address detected; pass --advertise-host explicitly")
 }
 
 func registerClusterTrust(cfg config.Config, target string) {
