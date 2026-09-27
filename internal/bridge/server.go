@@ -29,6 +29,7 @@ import (
 
 	"github.com/IamAngusU/ContextBridge/internal/cluster"
 	"github.com/IamAngusU/ContextBridge/internal/config"
+	"github.com/IamAngusU/ContextBridge/internal/strictjson"
 	"github.com/IamAngusU/ContextBridge/internal/updater"
 	"github.com/IamAngusU/ContextBridge/internal/vectorstore"
 )
@@ -1659,87 +1660,8 @@ func decodeJSON(reader io.Reader, target interface{}, limit int64) error {
 	if int64(len(raw)) > limit {
 		return fmt.Errorf("JSON body exceeds %d bytes", limit)
 	}
-	if !utf8.Valid(raw) {
-		return errors.New("invalid JSON: input is not valid UTF-8")
-	}
-	// Go's encoding/json otherwise accepts the last value of a duplicate
-	// property. That makes a signed, logged, or reviewed job ambiguous to a
-	// different parser. Reject duplicates recursively at every local API and
-	// inbox boundary just as the cluster relay does.
-	if err := rejectDuplicateJSONKeys(raw); err != nil {
+	if err := strictjson.Decode(raw, target); err != nil {
 		return fmt.Errorf("invalid JSON: %w", err)
-	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return fmt.Errorf("invalid JSON: %w", err)
-	}
-	if decoder.Decode(&struct{}{}) != io.EOF {
-		return errors.New("request must contain one JSON value")
-	}
-	return nil
-}
-
-func rejectDuplicateJSONKeys(raw []byte) error {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	if err := scanUniqueJSONValue(decoder); err != nil {
-		return err
-	}
-	if _, err := decoder.Token(); err != io.EOF {
-		if err == nil {
-			return errors.New("request must contain one JSON value")
-		}
-		return err
-	}
-	return nil
-}
-
-func scanUniqueJSONValue(decoder *json.Decoder) error {
-	token, err := decoder.Token()
-	if err != nil {
-		return err
-	}
-	delimiter, ok := token.(json.Delim)
-	if !ok {
-		return nil
-	}
-	switch delimiter {
-	case '{':
-		seen := make(map[string]struct{})
-		for decoder.More() {
-			keyToken, err := decoder.Token()
-			if err != nil {
-				return err
-			}
-			key, ok := keyToken.(string)
-			if !ok {
-				return errors.New("JSON object key must be a string")
-			}
-			if _, duplicate := seen[key]; duplicate {
-				return fmt.Errorf("duplicate JSON property %q", key)
-			}
-			seen[key] = struct{}{}
-			if err := scanUniqueJSONValue(decoder); err != nil {
-				return err
-			}
-		}
-		closing, err := decoder.Token()
-		if err != nil || closing != json.Delim('}') {
-			return errors.New("invalid JSON object")
-		}
-	case '[':
-		for decoder.More() {
-			if err := scanUniqueJSONValue(decoder); err != nil {
-				return err
-			}
-		}
-		closing, err := decoder.Token()
-		if err != nil || closing != json.Delim(']') {
-			return errors.New("invalid JSON array")
-		}
-	default:
-		return errors.New("invalid JSON delimiter")
 	}
 	return nil
 }

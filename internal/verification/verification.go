@@ -1,7 +1,6 @@
 package verification
 
 import (
-	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
@@ -18,6 +17,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/IamAngusU/ContextBridge/internal/strictjson"
 )
 
 const (
@@ -386,17 +387,5 @@ func validDigest(value string) bool {
 }
 
 func decodeClosedJSON(raw []byte, target any) error {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return err
-	}
-	var extra any
-	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return errors.New("JSON contains trailing data")
-		}
-		return err
-	}
-	return nil
+	return strictjson.Decode(raw, target)
 }

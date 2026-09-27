@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/IamAngusU/ContextBridge/internal/config"
+	"github.com/IamAngusU/ContextBridge/internal/strictjson"
 )
 
 type Entry struct {
@@ -164,13 +165,11 @@ func readInstallationManifest(root, alias string, model config.Model) (installat
 	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maximumInstallationManifestBytes {
 		return installationManifest{}, false
 	}
-	decoder := json.NewDecoder(io.LimitReader(file, maximumInstallationManifestBytes+1))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&manifest); err != nil {
+	raw, err := io.ReadAll(io.LimitReader(file, maximumInstallationManifestBytes+1))
+	if err != nil || len(raw) == 0 || int64(len(raw)) > maximumInstallationManifestBytes {
 		return installationManifest{}, false
 	}
-	var trailing interface{}
-	if err := decoder.Decode(&trailing); err != io.EOF {
+	if err := strictjson.Decode(raw, &manifest); err != nil {
 		return installationManifest{}, false
 	}
 	if manifest.Schema != installationManifestSchema || manifest.Alias != alias || manifest.Repository != model.Repository || !validHexDigest(manifest.Revision, 40, 64) {
