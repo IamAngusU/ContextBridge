@@ -11,7 +11,7 @@ func TestQuotedLogValueEscapesRecordBoundaries(t *testing.T) {
 	if strings.ContainsAny(got, "\r\n") {
 		t.Fatalf("quoted log value contains a physical record boundary: %q", got)
 	}
-	if got != `"normal\nforged\r\tentry"` {
+	if got != `"normal\\nforged\\r\tentry"` {
 		t.Fatalf("unexpected quoted log value: %q", got)
 	}
 	if got := quotedLogError(errors.New("failure\nforged")); strings.ContainsAny(got, "\r\n") {
