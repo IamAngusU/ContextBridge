@@ -102,7 +102,8 @@ func ResultAAD(context EncryptionContext) []byte { return encryptionAAD("result"
 
 // ValidateAssignmentResponse prevents a producer from encrypting after an
 // assignment response changed an explicitly requested execution context. A
-// blank group may be filled by the relay from a single-group producer token.
+// blank tenant or group may be filled by the relay from a single-value
+// producer-token scope.
 func ValidateAssignmentResponse(request AssignmentRequest, response AssignmentResponse, now time.Time) (EncryptionContext, error) {
 	assignment := response.Assignment
 	if assignment.ID == "" || assignment.PublicKey == "" || response.Secret == "" {
@@ -138,12 +139,16 @@ func ValidateAssignmentResponse(request AssignmentRequest, response AssignmentRe
 	if strings.EqualFold(expectedRequirements.Provider, "adapter") && assignment.Requirements.AdapterSessionRecovery {
 		expectedRequirements.AdapterSessionRecovery = true
 	}
+	expectedTenantID := request.TenantID
+	if expectedTenantID == "" {
+		expectedTenantID = assignment.TenantID
+	}
 	expected := EncryptionContext{
 		JobID:          assignment.JobID,
 		NodeID:         assignment.NodeID,
 		Attempt:        assignment.Attempt,
 		OwnerSubject:   assignment.OwnerSubject,
-		TenantID:       request.TenantID,
+		TenantID:       expectedTenantID,
 		Requirements:   expectedRequirements,
 		PolicyDecision: assignment.PolicyDecision,
 	}

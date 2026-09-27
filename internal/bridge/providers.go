@@ -1286,7 +1286,7 @@ func (p *Processor) llamaCPP(parent context.Context, job Job, route config.Route
 		if len(inputs) == 0 {
 			return Output{}, errors.New("embedding task requires text or texts")
 		}
-		if configured, ok := p.cfg.Models[engine.Model]; ok {
+		if configured, ok := resolvedEmbeddingModelConfig(p.cfg, engine, model); ok {
 			prefix := configured.QueryPrefix
 			if strings.EqualFold(fmt.Sprint(job.Metadata["embedding_role"]), "passage") {
 				prefix = configured.PassagePrefix
@@ -1383,6 +1383,18 @@ func (p *Processor) llamaCPP(parent context.Context, job Job, route config.Route
 		return Output{}, errors.New(output.Error)
 	}
 	return output, nil
+}
+
+// resolvedEmbeddingModelConfig keeps preprocessing and embedding-space
+// evidence on the same effective model identity. A route/job model is the
+// model sent to the runtime and therefore takes precedence over the engine's
+// fallback model passport.
+func resolvedEmbeddingModelConfig(cfg config.Config, engine config.Engine, effectiveModel string) (config.Model, bool) {
+	if configured, ok := cfg.Models[strings.TrimSpace(effectiveModel)]; ok {
+		return configured, true
+	}
+	configured, ok := cfg.Models[strings.TrimSpace(engine.Model)]
+	return configured, ok
 }
 
 func embeddingInputs(job Job) []string {
