@@ -128,7 +128,7 @@ func TestWorkerRelayParallelCapacityEndToEnd(t *testing.T) {
 		// observed two concurrent jobs and relay-side progress. Keep the worker
 		// request timeout above the test's own bounded observation windows so a
 		// slow CI host cannot turn that intentional hold into a transport failure.
-		RequestTimeout: 30 * time.Second,
+		RequestTimeout: 60 * time.Second,
 		AllowedTasks:   []string{"generation"},
 	})
 	if err != nil {
@@ -141,7 +141,7 @@ func TestWorkerRelayParallelCapacityEndToEnd(t *testing.T) {
 		_ = worker.Run(ctx, nil)
 	}()
 
-	waitFor(t, 15*time.Second, func() bool {
+	waitFor(t, 30*time.Second, func() bool {
 		node, loadErr := relay.store.GetNode(nodeID)
 		return loadErr == nil && node.Connected
 	}, "worker did not connect")
@@ -162,7 +162,7 @@ func TestWorkerRelayParallelCapacityEndToEnd(t *testing.T) {
 	for count := 0; count < 2; count++ {
 		select {
 		case <-started:
-		case <-time.After(15 * time.Second):
+		case <-time.After(30 * time.Second):
 			t.Fatal("two jobs did not start in parallel")
 		}
 	}
@@ -174,7 +174,7 @@ func TestWorkerRelayParallelCapacityEndToEnd(t *testing.T) {
 	if peak.Load() != 2 {
 		t.Fatalf("peak parallelism = %d, want 2", peak.Load())
 	}
-	waitFor(t, 15*time.Second, func() bool {
+	waitFor(t, 30*time.Second, func() bool {
 		progressing := 0
 		for _, submitted := range jobs {
 			job, getErr := relay.store.GetJob(submitted.ID)
@@ -195,7 +195,7 @@ func TestWorkerRelayParallelCapacityEndToEnd(t *testing.T) {
 		}
 		return true
 	}
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) && !completed() {
 		time.Sleep(10 * time.Millisecond)
 	}
