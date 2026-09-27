@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -124,6 +125,8 @@ jobs:
         with:
           persist-credentials: false
       - run: pwsh -NoProfile -File scripts/test-release-readme-compatibility.ps1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
 
   release-reproducibility:
     name: Reproducible release and SBOM
