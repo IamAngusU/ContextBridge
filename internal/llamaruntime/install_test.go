@@ -5,8 +5,13 @@ import (
 	"archive/zip"
 	"bytes"
 	"compress/gzip"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +25,92 @@ func TestRuntimeAssetUsesGitHubDownloadField(t *testing.T) {
 	}
 	if len(release.Assets) != 1 || release.Assets[0].URL != "https://example.test/runtime.zip" {
 		t.Fatalf("GitHub runtime download URL was not decoded: %#v", release)
+	}
+}
+
+func TestResolveRuntimeReleaseFollowsVerifiedPointer(t *testing.T) {
+	pointerBody := []byte("b12345\n")
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/nightly-tag.txt" {
+			http.NotFound(response, request)
+			return
+		}
+		_, _ = response.Write(pointerBody)
+	}))
+	defer server.Close()
+	digest := sha256.Sum256(pointerBody)
+	stable := Release{Tag: "v0.5.0", Assets: []Asset{{
+		Name: "nightly-tag.txt", URL: server.URL + "/nightly-tag.txt", Size: int64(len(pointerBody)), Digest: "sha256:" + hex.EncodeToString(digest[:]),
+	}}}
+	loaded := ""
+	resolved, err := resolveRuntimeReleaseWith(context.Background(), stable, server.Client(), func(_ context.Context, tag string) (Release, error) {
+		loaded = tag
+		return Release{Tag: tag, Assets: []Asset{{Name: "llama-" + tag + "-bin-win-cpu-x64.zip"}}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded != "b12345" || resolved.Tag != loaded || len(resolved.Assets) != 1 {
+		t.Fatalf("resolved release = %#v, loaded tag = %q", resolved, loaded)
+	}
+}
+
+func TestResolveRuntimeReleaseRejectsUnverifiedOrUnsafePointer(t *testing.T) {
+	tests := []struct {
+		name    string
+		content []byte
+		digest  string
+	}{
+		{name: "digest mismatch", content: []byte("b12345\n"), digest: "sha256:" + strings.Repeat("0", 64)},
+		{name: "unsafe tag", content: []byte("../b12345\n")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+				_, _ = response.Write(test.content)
+			}))
+			defer server.Close()
+			digest := test.digest
+			if digest == "" {
+				sum := sha256.Sum256(test.content)
+				digest = "sha256:" + hex.EncodeToString(sum[:])
+			}
+			loaded := false
+			_, err := resolveRuntimeReleaseWith(context.Background(), Release{Assets: []Asset{{
+				Name: "nightly-tag.txt", URL: server.URL, Size: int64(len(test.content)), Digest: digest,
+			}}}, server.Client(), func(context.Context, string) (Release, error) {
+				loaded = true
+				return Release{}, nil
+			})
+			if err == nil {
+				t.Fatal("accepted an unverified or unsafe runtime pointer")
+			}
+			if loaded {
+				t.Fatal("loaded a release before the pointer was verified")
+			}
+		})
+	}
+}
+
+func TestResolveRuntimeReleaseRejectsMissingPointerAndTagMismatch(t *testing.T) {
+	if _, err := resolveRuntimeReleaseWith(context.Background(), Release{}, http.DefaultClient, func(context.Context, string) (Release, error) {
+		return Release{}, nil
+	}); err == nil {
+		t.Fatal("accepted a stable release without a runtime asset or pointer")
+	}
+	pointerBody := []byte("b12345\n")
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		_, _ = response.Write(pointerBody)
+	}))
+	defer server.Close()
+	digest := sha256.Sum256(pointerBody)
+	_, err := resolveRuntimeReleaseWith(context.Background(), Release{Assets: []Asset{{
+		Name: "nightly-tag.txt", URL: server.URL, Size: int64(len(pointerBody)), Digest: "sha256:" + hex.EncodeToString(digest[:]),
+	}}}, server.Client(), func(context.Context, string) (Release, error) {
+		return Release{Tag: "different"}, nil
+	})
+	if err == nil {
+		t.Fatal("accepted a release that did not match the verified pointer")
 	}
 }
 

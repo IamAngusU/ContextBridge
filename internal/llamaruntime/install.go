@@ -41,6 +41,9 @@ const (
 	maximumRuntimeExtractedBytes int64 = 8 << 30
 	maximumRuntimeEntryBytes     int64 = 4 << 30
 	maximumRuntimeArchiveEntries       = 20000
+	maximumReleasePointerBytes   int64 = 128
+	latestReleaseURL                   = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
+	releaseByTagURLPrefix              = "https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/"
 )
 
 var safeReleaseTagPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$`)
@@ -55,7 +58,14 @@ func Install(ctx context.Context, directory string, progress Progress) (string, 
 	}
 	asset, err := selectAsset(release.Assets)
 	if err != nil {
-		return "", err
+		release, err = resolveRuntimeRelease(ctx, release)
+		if err != nil {
+			return "", fmt.Errorf("resolve official llama.cpp runtime release: %w", err)
+		}
+		asset, err = selectAsset(release.Assets)
+		if err != nil {
+			return "", err
+		}
 	}
 	if !strings.HasPrefix(asset.Digest, "sha256:") {
 		return "", fmt.Errorf("official release asset %s has no SHA256 digest", asset.Name)
@@ -207,10 +217,28 @@ func writeCurrentPointer(directory, executable string) error {
 }
 
 func latest(ctx context.Context) (Release, error) {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest", nil)
+	return fetchRelease(ctx, releaseMetadataClient(), latestReleaseURL)
+}
+
+func releaseByTag(ctx context.Context, tag string) (Release, error) {
+	if !safeReleaseTagPattern.MatchString(tag) || strings.Contains(tag, "..") {
+		return Release{}, errors.New("official runtime pointer contains an unsafe release tag")
+	}
+	release, err := fetchRelease(ctx, releaseMetadataClient(), releaseByTagURLPrefix+url.PathEscape(tag))
+	if err != nil {
+		return Release{}, err
+	}
+	if release.Tag != tag {
+		return Release{}, fmt.Errorf("official runtime pointer resolved to unexpected release %q", release.Tag)
+	}
+	return release, nil
+}
+
+func fetchRelease(ctx context.Context, client *http.Client, endpoint string) (Release, error) {
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "ContextBridge")
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return Release{}, err
 	}
@@ -223,6 +251,86 @@ func latest(ctx context.Context) (Release, error) {
 		return Release{}, err
 	}
 	return release, nil
+}
+
+func resolveRuntimeRelease(ctx context.Context, release Release) (Release, error) {
+	return resolveRuntimeReleaseWith(ctx, release, releaseMetadataClient(), releaseByTag)
+}
+
+func resolveRuntimeReleaseWith(ctx context.Context, release Release, client *http.Client, load func(context.Context, string) (Release, error)) (Release, error) {
+	var pointer Asset
+	for _, asset := range release.Assets {
+		if asset.Name == "nightly-tag.txt" {
+			pointer = asset
+			break
+		}
+	}
+	if pointer.Name == "" {
+		return Release{}, errors.New("official release has no supported runtime asset or nightly release pointer")
+	}
+	tag, err := readReleasePointer(ctx, client, pointer)
+	if err != nil {
+		return Release{}, err
+	}
+	resolved, err := load(ctx, tag)
+	if err != nil {
+		return Release{}, err
+	}
+	if resolved.Tag != tag {
+		return Release{}, fmt.Errorf("official runtime pointer resolved to unexpected release %q", resolved.Tag)
+	}
+	return resolved, nil
+}
+
+func readReleasePointer(ctx context.Context, client *http.Client, asset Asset) (string, error) {
+	if asset.Size <= 0 || asset.Size > maximumReleasePointerBytes || !strings.HasPrefix(asset.Digest, "sha256:") || !secureDownloadURL(asset.URL) {
+		return "", errors.New("official runtime pointer metadata is invalid")
+	}
+	expected, err := hex.DecodeString(strings.TrimPrefix(asset.Digest, "sha256:"))
+	if err != nil || len(expected) != sha256.Size {
+		return "", errors.New("official runtime pointer has an invalid SHA256 digest")
+	}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, asset.URL, nil)
+	req.Header.Set("User-Agent", "ContextBridge")
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("official runtime pointer download returned %s", resp.Status)
+	}
+	if resp.ContentLength > 0 && resp.ContentLength != asset.Size {
+		return "", errors.New("official runtime pointer size differs from release metadata")
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maximumReleasePointerBytes+1))
+	if err != nil {
+		return "", err
+	}
+	if int64(len(raw)) != asset.Size || int64(len(raw)) > maximumReleasePointerBytes {
+		return "", errors.New("official runtime pointer size differs from release metadata")
+	}
+	actual := sha256.Sum256(raw)
+	if !strings.EqualFold(hex.EncodeToString(actual[:]), hex.EncodeToString(expected)) {
+		return "", errors.New("SHA256 mismatch for official runtime pointer")
+	}
+	tag := strings.TrimSpace(string(raw))
+	if !safeReleaseTagPattern.MatchString(tag) || strings.Contains(tag, "..") {
+		return "", errors.New("official runtime pointer contains an unsafe release tag")
+	}
+	return tag, nil
+}
+
+func releaseMetadataClient() *http.Client {
+	return &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			return errors.New("too many release metadata redirects")
+		}
+		if !secureDownloadURL(req.URL.String()) {
+			return errors.New("release metadata redirect must use HTTPS")
+		}
+		return nil
+	}}
 }
 
 func selectAsset(assets []Asset) (Asset, error) {
