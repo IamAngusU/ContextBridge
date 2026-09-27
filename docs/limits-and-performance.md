@@ -112,6 +112,69 @@ advertised endpoints, diagnostics, GPUs, models, capabilities, reconnects, and
 configured intervals. Bolt reuses pages and does not compact on deletion, so
 fresh-file growth is not a forecast for every retention mix.
 
+## Dated Windows/amd64 laptop snapshot
+
+This snapshot was measured on 2026-09-27 from source commit
+`120387fcaaa63dd597cac498f3c490af186ad60f`. The binary was built with Go
+1.27.1 for Windows/amd64 using `-trimpath -buildvcs=true -ldflags "-s -w -X
+main.version=v0.7.0-dev"`. The host was a Samsung 750XGK laptop with an Intel
+Core i7-1355U (10 physical cores and 12 logical CPUs), 16 GB of RAM, and
+Windows 11 Home build 26200. It was on AC power with a full battery; the active
+power scheme was `Samsung Mode`.
+
+Three sequential runs used 128 measured samples, eight warmups, concurrency
+1/4/16/64, 1,000 cancelled jobs for database growth, and a ten-second idle
+window. Run 2 is shown below because it had the smallest summed normalized
+deviation from the three-run median across every operation/concurrency p50,
+p95, p99, and throughput value. The [complete reports and selection
+details](benchmarks/2026-09-27-windows-i7-1355u/) are published together. This
+is one laptop observation, not an SLA; thermal behavior and background load
+were not controlled beyond the recorded power state.
+
+### Durable relay submit/read/cancel
+
+| Clients | p50 | p95 | p99 | Throughput |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 13.109 ms | 15.010 ms | 15.510 ms | 76.1 ops/s |
+| 4 | 50.002 ms | 54.098 ms | 63.363 ms | 79.3 ops/s |
+| 16 | 197.841 ms | 202.257 ms | 202.975 ms | 80.2 ops/s |
+| 64 | 803.013 ms | 805.901 ms | 808.310 ms | 79.2 ops/s |
+
+### Small E2EE job and result
+
+| Clients | p50 | p95 | p99 | Throughput |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.125 ms | 0.157 ms | 0.158 ms | 8,608.5 ops/s |
+| 4 | 0.187 ms | 0.344 ms | 0.375 ms | 19,835.6 ops/s |
+| 16 | 0.469 ms | 0.939 ms | 1.063 ms | 26,370.8 ops/s |
+| 64 | 1.519 ms | 4.347 ms | 4.512 ms | 26,144.3 ops/s |
+
+### Verify one 64 KiB artifact
+
+| Clients | p50 | p95 | p99 | Throughput |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.065 ms | 0.126 ms | 0.157 ms | 12,807.9 ops/s |
+| 4 | 0.136 ms | 0.174 ms | 0.178 ms | 28,037.9 ops/s |
+| 16 | 0.467 ms | 0.625 ms | 0.721 ms | 32,666.7 ops/s |
+| 64 | 1.155 ms | 2.035 ms | 2.545 ms | 45,605.2 ops/s |
+
+### Resource footprint
+
+| Measurement | Observation | Scope |
+| --- | ---: | --- |
+| Stripped core binary | 13.3 MiB | Built executable only |
+| Idle benchmark process + relay RSS | 15.3 MiB | Current Windows working set after warmup |
+| Go heap allocated / runtime reserved | 1.2 MiB / 15.6 MiB | Same process and sample window |
+| Idle CPU | below sampling resolution | No process CPU tick recorded during the 10 s window; not claimed as literal zero |
+| Fresh Bolt allocation growth | 8.0 MiB / 1,000 jobs | 1,000 small jobs created and cancelled; allocated file growth, not device writes |
+| Generic adapter status payload | 245 B / heartbeat; 172.3 KiB/hour | One idle endpoint at 5 s; application JSON only |
+| Worker heartbeat payload | 728 B / heartbeat; 511.9 KiB/hour | One GPU and one model at 5 s; WebSocket JSON only |
+
+Across runs 1/2/3, concurrency-1 durable queue throughput was 75.8/76.1/76.8
+ops/s and idle RSS was 15.1/15.3/15.1 MiB. All runs completed without a
+benchmark warning. The same heartbeat, Bolt allocation, and exclusion caveats
+as the other snapshots apply.
+
 ### Bounded history and control traffic
 
 The relay job-list endpoint is a bounded summary index: at most 200 records
@@ -139,7 +202,7 @@ allowance.
 
 ## Dated Linux/amd64 VPS snapshot
 
-This second snapshot was measured on 2026-09-20 from source commit
+This VPS snapshot was measured on 2026-09-20 from source commit
 `7018d831798f09719386432dde82db22b1184707`. The binary was built with the
 checksum-verified official Go 1.25.14 Linux/amd64 toolchain using `-trimpath
 -ldflags "-s -w"` and version label `v0.7.0-dev`. The host was Ubuntu 22.04.5

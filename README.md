@@ -606,17 +606,17 @@ Handle `failed` and `cancelled` separately. Text output can also report `truncat
 
 ## Measured overhead
 
-**Coordination, not inference.** Dated development measurements from **20 September 2026**, with 128 samples after 8 warmups and one concurrent client:
+**Coordination, not inference.** Dated development measurements from **20 and 27 September 2026**, with 128 samples after 8 warmups and one concurrent client:
 
-| Operation | Windows p50 / p99 | Linux VPS p50 / p99 |
-| --- | ---: | ---: |
-| Durable submit → read → cancel | 2.402 / 3.740 ms | 12.165 / 36.304 ms |
-| Small E2EE job + result | 0.098 / 0.193 ms | 0.217 / 0.496 ms |
-| Verify a 64 KiB artifact | 0.065 / 0.134 ms | 0.141 / 0.446 ms |
+| Operation | Windows i9 p50 / p99 | Windows i7 laptop p50 / p99 | Linux VPS p50 / p99 |
+| --- | ---: | ---: | ---: |
+| Durable submit → read → cancel | 2.402 / 3.740 ms | 13.109 / 15.510 ms | 12.165 / 36.304 ms |
+| Small E2EE job + result | 0.098 / 0.193 ms | 0.125 / 0.158 ms | 0.217 / 0.496 ms |
+| Verify a 64 KiB artifact | 0.065 / 0.134 ms | 0.065 / 0.157 ms | 0.141 / 0.446 ms |
 
-Queue throughput: **418.5 ops/s** on the Windows i9-12900K; **73.8 ops/s** on the shared two-vCPU Linux VPS. Sampled idle benchmark-process + relay RSS: **14.4 / 12.7 MiB**, respectively. No models were running in these measurements.
+Queue throughput: **418.5 ops/s** on the Windows i9-12900K desktop, **76.1 ops/s** on the Windows i7-1355U laptop, and **73.8 ops/s** on the shared two-vCPU Linux VPS. Sampled idle benchmark-process + relay RSS: **14.4 / 15.3 / 12.7 MiB**, respectively. No models were running in these measurements.
 
-These are different machines, not an OS comparison or an SLA. Model execution and cross-device network latency are excluded; shared-VPS contention was uncontrolled. [Exact commits, methodology, p95, concurrency 1/4/16/64 and limits](docs/limits-and-performance.md). Reproduce on your hardware with `contextbridge benchmark --json`.
+These are different machines and source/toolchain snapshots, not an OS or CPU comparison or an SLA. Model execution and cross-device network latency are excluded; laptop thermals/background load and shared-VPS contention were uncontrolled. [Exact commits, methodology, raw laptop reports, p95, concurrency 1/4/16/64 and limits](docs/limits-and-performance.md). Reproduce on your hardware with `contextbridge benchmark --json`.
 
 ## Command desk
 
