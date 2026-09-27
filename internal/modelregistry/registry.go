@@ -34,6 +34,7 @@ type Entry struct {
 	SHA256        string `json:"sha256,omitempty"`
 	Kind          string `json:"kind,omitempty"`
 	ProjectorFile string `json:"projector_file,omitempty"`
+	Evidence      string `json:"evidence,omitempty"`
 }
 
 // DiscoveryEntry describes a model that can be used without requiring it to
@@ -68,6 +69,25 @@ type Progress func(message string, received, total int64)
 // enough for workstation/server models while still preventing an unbounded
 // response or corrupt resume file from consuming the entire volume.
 const maximumModelDownloadBytes int64 = 256 << 30
+
+const (
+	installationManifestName               = ".contextbridge-model-installation.json"
+	installationManifestSchema             = "contextbridge.model-installation.v1"
+	maximumInstallationManifestBytes int64 = 64 << 10
+)
+
+type installationManifest struct {
+	Schema     string                              `json:"schema"`
+	Alias      string                              `json:"alias"`
+	Repository string                              `json:"repository"`
+	Revision   string                              `json:"revision"`
+	Files      map[string]installationManifestFile `json:"files"`
+}
+
+type installationManifestFile struct {
+	SHA256 string `json:"sha256"`
+	Size   int64  `json:"size_bytes"`
+}
 
 const maximumOllamaShowBytes int64 = 2 << 20
 
@@ -114,14 +134,89 @@ func List(cfg config.Config) []Entry {
 	for name, model := range cfg.Models {
 		path := filepath.Join(cfg.Storage.Models, name, model.File)
 		entry := Entry{Name: name, Repository: model.Repository, Revision: model.Revision, File: model.File, Path: path, SHA256: model.SHA256, Kind: model.Kind, ProjectorFile: model.ProjectorFile}
+		if entry.Revision != "" || entry.SHA256 != "" {
+			entry.Evidence = "operator_config"
+		}
 		if stat, err := os.Stat(path); err == nil && stat.Mode().IsRegular() {
 			entry.Installed = true
 			entry.Size = stat.Size()
+			if manifest, ok := readInstallationManifest(cfg.Storage.Models, name, model); ok {
+				entry.Revision = manifest.Revision
+				entry.SHA256 = manifest.Files[model.File].SHA256
+				entry.Evidence = "verified_download_manifest"
+			}
 		}
 		entries = append(entries, entry)
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
 	return entries
+}
+
+func readInstallationManifest(root, alias string, model config.Model) (installationManifest, bool) {
+	var manifest installationManifest
+	path := filepath.Join(root, alias, installationManifestName)
+	file, err := os.Open(path)
+	if err != nil {
+		return manifest, false
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maximumInstallationManifestBytes {
+		return installationManifest{}, false
+	}
+	decoder := json.NewDecoder(io.LimitReader(file, maximumInstallationManifestBytes+1))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&manifest); err != nil {
+		return installationManifest{}, false
+	}
+	var trailing interface{}
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return installationManifest{}, false
+	}
+	if manifest.Schema != installationManifestSchema || manifest.Alias != alias || manifest.Repository != model.Repository || !validHexDigest(manifest.Revision, 40, 64) {
+		return installationManifest{}, false
+	}
+	if model.Revision != "" && !strings.EqualFold(model.Revision, manifest.Revision) {
+		return installationManifest{}, false
+	}
+	expectedFiles := []string{model.File}
+	if model.ProjectorFile != "" {
+		expectedFiles = append(expectedFiles, model.ProjectorFile)
+	}
+	if len(manifest.Files) != len(expectedFiles) {
+		return installationManifest{}, false
+	}
+	for _, name := range expectedFiles {
+		record, exists := manifest.Files[name]
+		if !exists || !validHexDigest(record.SHA256, sha256.Size*2) || record.Size <= 0 || record.Size > maximumModelDownloadBytes {
+			return installationManifest{}, false
+		}
+		stat, err := os.Stat(filepath.Join(root, alias, name))
+		if err != nil || !stat.Mode().IsRegular() || stat.Size() != record.Size {
+			return installationManifest{}, false
+		}
+	}
+	mainDigest := manifest.Files[model.File].SHA256
+	if model.SHA256 != "" && !strings.EqualFold(strings.TrimPrefix(model.SHA256, "sha256:"), mainDigest) {
+		return installationManifest{}, false
+	}
+	return manifest, true
+}
+
+func validHexDigest(value string, lengths ...int) bool {
+	value = strings.TrimSpace(value)
+	validLength := false
+	for _, length := range lengths {
+		if len(value) == length {
+			validLength = true
+			break
+		}
+	}
+	if !validLength {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 // Discover inventories Ollama plus user-selected model directories. It never
@@ -667,6 +762,10 @@ func Pull(ctx context.Context, cfg config.Config, alias string, progress Progres
 	if err != nil {
 		return nil, fmt.Errorf("cannot resolve immutable model revision: %w", err)
 	}
+	manifestPath := filepath.Join(dir, installationManifestName)
+	if err := os.Remove(manifestPath); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("remove stale model installation manifest: %w", err)
+	}
 	for _, file := range files {
 		expected := model.SHA256
 		if file != model.File {
@@ -686,7 +785,40 @@ func Pull(ctx context.Context, cfg config.Config, alias string, progress Progres
 		stat, _ := os.Stat(path)
 		entries = append(entries, Entry{Name: alias, Repository: model.Repository, Revision: metadata.Revision, File: file, Path: path, Installed: true, Size: stat.Size(), SHA256: expected, Kind: model.Kind})
 	}
+	manifest := installationManifest{
+		Schema: installationManifestSchema, Alias: alias, Repository: model.Repository,
+		Revision: metadata.Revision, Files: make(map[string]installationManifestFile, len(entries)),
+	}
+	for _, entry := range entries {
+		manifest.Files[entry.File] = installationManifestFile{SHA256: entry.SHA256, Size: entry.Size}
+	}
+	if err := writeInstallationManifest(manifestPath, manifest); err != nil {
+		return nil, fmt.Errorf("persist verified model installation identity: %w", err)
+	}
+	for index := range entries {
+		entries[index].Evidence = "verified_download_manifest"
+	}
 	return entries, nil
+}
+
+func writeInstallationManifest(path string, manifest installationManifest) error {
+	raw, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	if int64(len(raw)) > maximumInstallationManifestBytes {
+		return errors.New("model installation manifest exceeds 64 KiB")
+	}
+	raw = append(raw, '\n')
+	temporary := path + ".tmp"
+	if err := os.WriteFile(temporary, raw, 0600); err != nil {
+		return err
+	}
+	if err := os.Rename(temporary, path); err != nil {
+		_ = os.Remove(temporary)
+		return err
+	}
+	return nil
 }
 
 type huggingFaceModelMetadata struct {

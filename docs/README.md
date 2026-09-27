@@ -14,6 +14,8 @@ described as vendor integrations here.
   a worker pool, and repeatable health checks.
 - [Pools and placement](pools-and-placement.md): topologies, capacity,
   capability evidence, and failure semantics.
+- [Models and runtimes](models.md): Ollama, arbitrary compatible Hugging Face
+  GGUF files, managed/external llama.cpp, model passports, and honest limits.
 - [Secure offline LAN pools](offline-lan.md): explicit pinned trust for
   Internet-free multi-machine operation.
 - [Guided CLI setup](guided-setup.md): bounded human prompts without changing

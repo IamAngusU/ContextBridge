@@ -14,7 +14,7 @@
   <a href="LICENSING.md"><img src="docs/assets/readme/badge-core.svg" height="38" alt="Core: AGPL-3.0-only"></a>
   <a href="docs/compatibility.md"><img src="docs/assets/readme/badge-interfaces.svg" height="38" alt="Defined integration surfaces: Apache-2.0"></a>
   <a href="docs/operations.md"><img src="docs/assets/readme/badge-platforms.svg" height="38" alt="Windows, Linux and macOS"></a>
-  <a href="https://github.com/angusu-de/ContextBridge/actions/workflows/ci.yml"><img src="https://raw.githubusercontent.com/angusu-de/ContextBridge/ci-proof/proof/public-proof.svg" height="42" alt="Public CI mirror proof"></a>
+  <a href="https://github.com/angusu-de/ContextBridge/actions/workflows/ci.yml"><img src="https://raw.githubusercontent.com/angusu-de/ContextBridge/ci-proof/proof/public-proof.svg?proof-layout=v2" height="42" alt="Live public CI mirror proof"></a>
 </p>
 <p align="center"><sub>Public CI mirror: <a href="https://github.com/angusu-de/ContextBridge">separate GitHub account</a>, same maintainer · live status uses the ContextBridge badge-system design · reproducibility proof, not a third-party audit.</sub></p>
 
@@ -136,6 +136,12 @@ contextbridge cluster chat --provider ollama --model auto --artifacts off --prom
 ```
 
 Your local relay queues the request, your worker runs a compatible installed model, and the answer returns to the terminal. `auto` selects an available compatible model, not a promised quality tier.
+
+Already have a model from Hugging Face? Compatible GGUF models can be declared,
+downloaded at an immutable revision with LFS SHA-256 verification, and run via
+managed llama.cpp. Other model formats need a runtime that can execute them,
+then join through Ollama, an OpenAI-compatible endpoint, or an adapter. CB never
+treats a discovered file as executable proof. See [Models and runtimes](docs/models.md).
 
 Commands use the installer-created configuration automatically. For a custom installation, append `--config /path/to/config.yml`. Read [install.ps1](install.ps1) / [install.sh](install.sh) before executing them, or use the [release archives](https://github.com/IamAngusU/ContextBridge/releases/latest).
 

@@ -107,3 +107,12 @@ must not implement v1.
 The contract deliberately contains no driver implementation or vendor
 identifier. Private and third-party adapters map their own mechanics onto this
 small lifecycle without adding implementation-specific code to the core.
+
+The dependency-free [minimal Node.js reference adapter](../examples/adapter-v2/README.md)
+implements this public contract without importing ContextBridge internals. Its
+unit test uses a fake core to prove request shape, scoped capabilities,
+lifecycle ordering, and no retry after an HTTP failure. A second offline CI
+test builds the real public binary and proves one complete job across the
+process boundary. It returns a fixed string rather than bundling a provider.
+Passing these examples is not certification; a standalone adversarial adapter
+conformance harness remains a separate compatibility milestone.
