@@ -106,6 +106,21 @@ job, and redirected input/output, CI, MCP, and other non-TTY callers still fail
 deterministically instead of waiting for input. Fully specified automation
 continues to use the existing non-interactive command unchanged.
 
+Creating a durable local schedule can resolve its prepared JSON file the same
+way:
+
+```sh
+contextbridge schedule add --interactive
+```
+
+The summary shows only the schedule name, timing class/timezone, route/model
+selection, enabled state and bounded follow-up count. Prompt and step content
+are never echoed. The file is read once before confirmation and those exact
+bytes are sent afterward, so replacing the pathname between review and submit
+cannot change the admitted request. `--file -` remains available only for the
+deterministic non-interactive path because guided prompts and schedule JSON may
+not share stdin. Cancellation sends no request and creates no schedule.
+
 The short pairing code is displayed as `XXXX-XXXX`, but input is tolerant of
 case, spaces, and common Unicode dash characters. The response also contains a
 `verification_uri_complete` fragment URL for browsers and clients that render
