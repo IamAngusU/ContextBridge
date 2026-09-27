@@ -38,6 +38,11 @@ contextbridge schedule run --config ./config.yml SCHEDULE_ID
 contextbridge schedule delete --config ./config.yml SCHEDULE_ID
 ```
 
+For a person at a real terminal, `contextbridge schedule add --interactive`
+asks only for a missing prepared schedule file, displays a content-minimizing
+summary, and sends exactly one request after confirmation. Scripts, pipes, CI,
+MCP and services never prompt; keep using the explicit `--file` form there.
+
 Timing types are `at`, `interval`, `daily`, `weekdays`, `weekly`, and five-field
 `cron`, with an explicit IANA timezone where wall-clock meaning matters.
 Intervals are elapsed-time schedules. Missing daylight-saving times are

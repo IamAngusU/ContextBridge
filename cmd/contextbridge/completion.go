@@ -71,7 +71,7 @@ $script:ContextBridgeOptions = @{
     'uninstall' = @('--config','--install-dir','--purge','--force','--yes','--dry-run')
     'console' = @('--config','--token')
     'submit' = @('--file','--artifacts','--config')
-    'schedule' = @('--file','--config')
+    'schedule' = @('--file','--config','--interactive')
     'result' = @('--config')
     'review' = @('--job-dir','--config')
     'health' = @('--config')
@@ -272,7 +272,7 @@ _contextbridge_complete() {
       "integrate ui") candidates="--config --json --write-env --subject --lifetime-hours" ;;
       "verification verify") candidates="--file --trust-key --artifact --require-artifact --evidence-dir --require-evidence --json" ;;
       benchmark) candidates="--json --samples --warmup --database-jobs --idle-duration --binary" ;;
-      "schedule add") candidates="--config --file" ;;
+      "schedule add") candidates="--config --file --interactive" ;;
       "schedule "*) candidates="--config --file" ;;
       console) candidates="--config --token" ;;
       init|serve|result|health|guide|pull|relay) candidates="--config" ;;
@@ -377,7 +377,7 @@ case "$words[2]" in
       _values 'schedule action' add list show pause resume run delete
       return
     fi
-    _arguments "${config[@]}" '--file[Schedule JSON file]:schedule file:_files' '*:schedule ID:'
+    _arguments "${config[@]}" '--file[Schedule JSON file]:schedule file:_files' '--interactive[Guide unresolved schedule-add values in a real terminal]' '*:schedule ID:'
     ;;
   runtime)
     if (( CURRENT == 3 )); then

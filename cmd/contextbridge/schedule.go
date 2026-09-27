@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -17,6 +18,10 @@ import (
 )
 
 func scheduleCommand(args []string) error {
+	return scheduleCommandWithIO(args, os.Stdin, os.Stdout, interactiveFiles(os.Stdin, os.Stdout))
+}
+
+func scheduleCommandWithIO(args []string, stdin io.Reader, output io.Writer, terminal bool) error {
 	if len(args) == 0 {
 		return errors.New("schedule needs add, list, show, pause, resume, run, or delete")
 	}
@@ -24,8 +29,15 @@ func scheduleCommand(args []string) error {
 	flags := flag.NewFlagSet("schedule "+action, flag.ContinueOnError)
 	configPath := flags.String("config", defaultConfigPath(), "config path")
 	file := flags.String("file", "", "schedule JSON file; - reads stdin")
+	interactive := flags.Bool("interactive", false, "guide unresolved schedule-add values in a real terminal")
 	if err := parseInterspersedFlags(flags, args[1:]); err != nil {
 		return err
+	}
+	if *interactive && action != "add" {
+		return errors.New("--interactive is supported only for schedule add")
+	}
+	if *interactive && !terminal {
+		return errors.New("guided schedule creation requires an interactive terminal; use explicit flags for scripts, pipes, CI, MCP, or services")
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -38,17 +50,32 @@ func scheduleCommand(args []string) error {
 		if flags.NArg() != 0 {
 			return errors.New("schedule add accepts --file but no positional arguments")
 		}
+		if *interactive {
+			provided := map[string]bool{}
+			flags.Visit(func(option *flag.Flag) { provided[option.Name] = true })
+			apply, prepared, guideErr := guideScheduleAdd(stdin, output, cfg, file, provided)
+			if guideErr != nil {
+				return guideErr
+			}
+			if !apply {
+				_, _ = fmt.Fprintln(output, "Cancelled. No schedule was created.")
+				return nil
+			}
+			body = prepared
+		}
 		if *file == "" {
-			return errors.New("--file is required")
+			return errors.New("--file is required (or use --interactive in a real terminal)")
 		}
 		method = http.MethodPost
-		if *file == "-" {
-			body, err = readScheduleInput(os.Stdin)
-		} else {
-			body, err = readRegularFileBounded(*file, 12<<20)
-		}
-		if err != nil {
-			return fmt.Errorf("read schedule input: %w", err)
+		if !*interactive {
+			if *file == "-" {
+				body, err = readScheduleInput(stdin)
+			} else {
+				body, err = readRegularFileBounded(*file, 12<<20)
+			}
+			if err != nil {
+				return fmt.Errorf("read schedule input: %w", err)
+			}
 		}
 	case "list":
 		if flags.NArg() != 0 {
@@ -94,7 +121,20 @@ func scheduleCommand(args []string) error {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("schedule returned %s: %s", resp.Status, strings.TrimSpace(string(raw)))
 	}
-	_, err = os.Stdout.Write(raw)
+	if *interactive && action == "add" {
+		var created struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal(raw, &created) == nil {
+			if id, labelErr := guidedScheduleLabel(created.ID, "", 128); labelErr == nil && id != "" {
+				_, err = fmt.Fprintf(output, "Created schedule %s.\n", id)
+				return err
+			}
+		}
+		_, err = fmt.Fprintln(output, "Schedule created. Run `contextbridge schedule list` to inspect it.")
+		return err
+	}
+	_, err = output.Write(raw)
 	return err
 }
 

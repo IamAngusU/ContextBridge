@@ -75,6 +75,24 @@ func TestCompletionScriptsExposeGuidedClusterSubmission(t *testing.T) {
 	}
 }
 
+func TestCompletionScriptsExposeGuidedScheduleCreation(t *testing.T) {
+	cases := map[string]struct {
+		script string
+		want   string
+	}{
+		"powershell": {powershellCompletionScript(), "'schedule' = @('--file','--config','--interactive')"},
+		"bash":       {bashCompletionScript(), `"schedule add") candidates="--config --file --interactive"`},
+		"zsh":        {zshCompletionScript(), "--interactive[Guide unresolved schedule-add values in a real terminal]"},
+	}
+	for name, test := range cases {
+		t.Run(name, func(t *testing.T) {
+			if !strings.Contains(test.script, test.want) {
+				t.Fatal("completion does not expose guided schedule creation")
+			}
+		})
+	}
+}
+
 func TestPowerShellTabExpansionTracksTrailingSpaceAndOptionPosition(t *testing.T) {
 	shell := powerShellForTest(t)
 	tests := []struct {
