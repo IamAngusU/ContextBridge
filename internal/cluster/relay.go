@@ -2601,13 +2601,22 @@ func priceUsage(usage Usage, pricing Pricing) Usage {
 	default:
 		configured := pricing.Mode != "" || pricing.ComputePerHourUSD > 0 || pricing.InputPerMillionUSD > 0 || pricing.OutputPerMillionUSD > 0
 		if configured {
-			usage.EstimatedCostUSD = float64(usage.ComputeMS)/3600000*pricing.ComputePerHourUSD + float64(usage.InputTokens)/1000000*pricing.InputPerMillionUSD + float64(usage.OutputTokens)/1000000*pricing.OutputPerMillionUSD
-			usage.CostStatus = CostEstimated
-			usage.CostSource = strings.TrimSpace(pricing.Source)
-			if usage.CostSource == "" {
-				usage.CostSource = "relay_config"
+			estimated := float64(usage.ComputeMS)/3600000*pricing.ComputePerHourUSD + float64(usage.InputTokens)/1000000*pricing.InputPerMillionUSD + float64(usage.OutputTokens)/1000000*pricing.OutputPerMillionUSD
+			if finiteBoundedCost(estimated) {
+				usage.EstimatedCostUSD = estimated
+				usage.CostStatus = CostEstimated
+				usage.CostSource = strings.TrimSpace(pricing.Source)
+				if usage.CostSource == "" {
+					usage.CostSource = "relay_config"
+				}
+				usage.CostKnownJobs = 1
+			} else {
+				usage.CostStatus = CostUnknown
+				usage.CostSource = ""
+				usage.ReservedCostUSD = 0
+				usage.EstimatedCostUSD = 0
+				usage.CostUnknownJobs = 1
 			}
-			usage.CostKnownJobs = 1
 		} else {
 			usage.CostStatus = CostUnknown
 			usage.CostSource = ""

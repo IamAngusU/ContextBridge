@@ -55,6 +55,25 @@ func TestPriceUsageContainsMaliciousWorkerAccounting(t *testing.T) {
 	}
 }
 
+func TestPriceUsageRejectsRelayEstimateAboveCostBound(t *testing.T) {
+	usage := priceUsage(Usage{InputTokens: 1_000_000_000_000}, Pricing{
+		Mode:               "estimated",
+		Source:             "operator rates",
+		InputPerMillionUSD: 1_000_000,
+	})
+	if usage.CostStatus != CostUnknown || usage.CostKnownJobs != 0 || usage.CostUnknownJobs != 1 || usage.EstimatedCostUSD != 0 {
+		t.Fatalf("oversized relay estimate did not fail closed: %#v", usage)
+	}
+	boundary := priceUsage(Usage{InputTokens: 1_000_000_000}, Pricing{
+		Mode:               "estimated",
+		Source:             "operator rates",
+		InputPerMillionUSD: 1_000_000,
+	})
+	if boundary.CostStatus != CostEstimated || boundary.CostKnownJobs != 1 || boundary.CostUnknownJobs != 0 || boundary.EstimatedCostUSD != 1_000_000_000 {
+		t.Fatalf("exact relay estimate bound was rejected: %#v", boundary)
+	}
+}
+
 func TestUsageAggregationSaturates(t *testing.T) {
 	target := Usage{InputTokens: math.MaxUint64, EstimatedCostUSD: 999_999_999}
 	mergeUsage(&target, Usage{InputTokens: 1, EstimatedCostUSD: 10})
