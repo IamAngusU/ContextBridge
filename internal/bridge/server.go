@@ -426,10 +426,7 @@ func (s *Server) ragEmbeddingSpace(output Output) (vectorstore.EmbeddingSpace, e
 	if modelName == "" {
 		modelName = strings.TrimSpace(selectedEngine.Model)
 	}
-	configuredModel, hasConfiguredModel := s.cfg.Models[modelName]
-	if !hasConfiguredModel && selectedEngine.Model != "" {
-		configuredModel, hasConfiguredModel = s.cfg.Models[selectedEngine.Model]
-	}
+	configuredModel, hasConfiguredModel := resolvedEmbeddingModelConfig(s.cfg, selectedEngine, modelName)
 	revision := ""
 	operatorRevision := strings.TrimSpace(s.cfg.RAG.EmbeddingRevision)
 	evidence := "mutable_alias"

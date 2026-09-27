@@ -851,16 +851,45 @@ func (m *Manager) loadState() (State, error) {
 	return state, nil
 }
 
-func (m *Manager) saveState(state State) error {
+func (m *Manager) saveState(state State) (returnErr error) {
 	raw, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
 	}
-	temporary := m.statePath() + ".tmp"
-	if err := os.WriteFile(temporary, append(raw, '\n'), 0600); err != nil {
+	directory := filepath.Dir(m.statePath())
+	temporary, err := os.CreateTemp(directory, ".contextbridge-update-state-*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(temporary, m.statePath())
+	temporaryPath := temporary.Name()
+	closed := false
+	defer func() {
+		if !closed {
+			if closeErr := temporary.Close(); returnErr == nil && closeErr != nil {
+				returnErr = closeErr
+			}
+		}
+		if removeErr := os.Remove(temporaryPath); returnErr == nil && removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			returnErr = removeErr
+		}
+	}()
+	if err := temporary.Chmod(0600); err != nil {
+		return err
+	}
+	if _, err := temporary.Write(append(raw, '\n')); err != nil {
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	closed = true
+	if err := replaceStateFile(temporaryPath, m.statePath()); err != nil {
+		return err
+	}
+	return syncStateDirectory(directory)
 }
 
 func managedVersion(value string) bool {

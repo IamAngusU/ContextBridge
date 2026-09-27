@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -16,6 +17,38 @@ func TestReleaseAssetUsesGitHubDownloadField(t *testing.T) {
 	}
 	if len(release.Assets) != 1 || release.Assets[0].BrowserDownloadURL != "https://example.test/core.zip" {
 		t.Fatalf("GitHub release download URL was not decoded: %#v", release)
+	}
+}
+
+func TestSaveStateDoesNotFollowPredictableTemporarySymlink(t *testing.T) {
+	directory := t.TempDir()
+	manager, err := New(Settings{}, directory, "v0.5.9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(t.TempDir(), "root-owned.conf")
+	if err := os.WriteFile(victim, []byte("preserve me\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, manager.statePath()+".tmp"); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := manager.saveState(State{LastAvailable: "v0.5.10"}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != "preserve me\n" {
+		t.Fatalf("state save followed attacker-controlled temporary symlink: %q", raw)
+	}
+	info, err := os.Lstat(manager.statePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("state path is not a regular non-symlink file: %s", info.Mode())
 	}
 }
 

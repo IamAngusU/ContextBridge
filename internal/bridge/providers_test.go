@@ -115,6 +115,44 @@ func TestLlamaCPPOutputPreservesConfiguredProviderIdentity(t *testing.T) {
 	}
 }
 
+func TestLlamaCPPEmbeddingPrefixUsesEffectiveModelPassport(t *testing.T) {
+	var requested struct {
+		Model string   `json:"model"`
+		Input []string `json:"input"`
+	}
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/embeddings" {
+			http.NotFound(w, r)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&requested); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": []map[string]interface{}{{"embedding": []float64{1, 2}, "index": 0}},
+		})
+	}))
+	defer provider.Close()
+	cfg := config.Config{
+		Routes: map[string]config.Route{"default": {Provider: "private-llama", Model: "route-model", Task: "embedding"}},
+		Engines: map[string]config.Engine{"private-llama": {
+			Type: "llama_cpp", URL: provider.URL, Model: "engine-model", TimeoutSeconds: 2, Capabilities: []string{"embedding"},
+		}},
+		Models: map[string]config.Model{
+			"engine-model": {Repository: "example/engine", File: "engine.gguf", QueryPrefix: "engine: "},
+			"route-model":  {Repository: "example/route", File: "route.gguf", QueryPrefix: "route: "},
+		},
+	}
+	output := NewProcessor(cfg, nil).Process(context.Background(), Job{Text: "embed", Output: OutputSpec{Mode: "embedding"}})
+	if output.Error != "" {
+		t.Fatalf("embedding failed: %#v", output)
+	}
+	if requested.Model != "route-model" || len(requested.Input) != 1 || requested.Input[0] != "route: embed" {
+		t.Fatalf("execution used a different model passport than its reported model: %#v", requested)
+	}
+}
+
 func TestOllamaEmbeddingOutputPreservesConfiguredProviderIdentity(t *testing.T) {
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/embed" {

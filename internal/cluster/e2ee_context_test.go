@@ -161,6 +161,26 @@ func TestProducerRejectsChangedAssignmentContextBeforeEncryption(t *testing.T) {
 	}
 }
 
+func TestProducerAcceptsRelayScopedTenantWhenRequestOmitted(t *testing.T) {
+	_, publicKey, err := NewIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := AssignmentRequest{Requirements: Requirements{Task: "generation", Model: "model-a"}}
+	response := AssignmentResponse{Assignment: Assignment{
+		ID: "assignment-scoped", JobID: "job-scoped", NodeID: "node-a", PublicKey: publicKey, Attempt: 1,
+		OwnerSubject: "producer-a", TenantID: "tenant-from-credential", ExpiresAt: time.Now().UTC().Add(time.Minute),
+		Requirements: request.Requirements,
+	}, Secret: "assignment-secret"}
+	context, err := ValidateAssignmentResponse(request, response, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("single-tenant credential default was rejected before encryption: %v", err)
+	}
+	if context.TenantID != "tenant-from-credential" {
+		t.Fatalf("relay-scoped tenant was not authenticated in E2EE context: %#v", context)
+	}
+}
+
 func TestProducerAcceptsOnlyRelaySelectedAdapterEndpointInAssignment(t *testing.T) {
 	_, publicKey, err := NewIdentity()
 	if err != nil {
