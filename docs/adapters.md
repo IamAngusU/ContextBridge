@@ -105,7 +105,7 @@ unsupported-protocol response, never after `401` or `403`. New integrations
 must not implement v1.
 
 The contract deliberately contains no driver implementation or vendor
-identifier. Private and third-party adapters map their own mechanics onto this
+identifier. Out-of-tree and third-party adapters map their own mechanics onto this
 small lifecycle without adding implementation-specific code to the core.
 
 The dependency-free [minimal Node.js reference adapter](../examples/adapter-v2/README.md)

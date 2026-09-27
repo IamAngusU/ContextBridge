@@ -25,6 +25,7 @@ import (
 	"github.com/IamAngusU/ContextBridge/internal/bridge"
 	"github.com/IamAngusU/ContextBridge/internal/cluster"
 	"github.com/IamAngusU/ContextBridge/internal/config"
+	"github.com/IamAngusU/ContextBridge/internal/strictjson"
 )
 
 const (
@@ -645,22 +646,12 @@ func validateReceiptSignerIdentity(keyID, issuer string) error {
 }
 
 func decodeReceiptClosedJSON(raw []byte, target interface{}) error {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return err
-	}
-	return ensureJSONEOF(decoder)
+	return strictjson.Decode(raw, target)
 }
 
 func decodeExecutionReceipt(raw []byte) (executionReceiptEnvelope, error) {
 	var receipt executionReceiptEnvelope
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&receipt); err != nil {
-		return receipt, fmt.Errorf("decode receipt: %w", err)
-	}
-	if err := ensureJSONEOF(decoder); err != nil {
+	if err := strictjson.Decode(raw, &receipt); err != nil {
 		return receipt, fmt.Errorf("decode receipt: %w", err)
 	}
 	if receipt.Schema != executionReceiptSchema && receipt.Schema != executionReceiptSignedSchema {

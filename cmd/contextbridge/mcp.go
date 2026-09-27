@@ -19,6 +19,7 @@ import (
 	"github.com/IamAngusU/ContextBridge/internal/bridge"
 	"github.com/IamAngusU/ContextBridge/internal/cluster"
 	"github.com/IamAngusU/ContextBridge/internal/config"
+	"github.com/IamAngusU/ContextBridge/internal/strictjson"
 )
 
 const (
@@ -142,7 +143,7 @@ func (s *mcpStdioServer) serve(ctx context.Context, input io.Reader, output io.W
 
 func (s *mcpStdioServer) handleMessage(ctx context.Context, raw []byte) *mcpResponse {
 	var request mcpRequest
-	if err := json.Unmarshal(raw, &request); err != nil {
+	if err := strictjson.Decode(raw, &request); err != nil {
 		return mcpErrorResponse(nil, -32700, "Parse error", nil)
 	}
 	if request.JSONRPC != "2.0" || strings.TrimSpace(request.Method) == "" || !validMCPRequestID(request.ID) {
@@ -774,12 +775,7 @@ func decodeMCPObject(raw json.RawMessage, target interface{}) error {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		raw = json.RawMessage(`{}`)
 	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return err
-	}
-	return ensureJSONEOF(decoder)
+	return strictjson.Decode(raw, target)
 }
 
 func ensureJSONEOF(decoder *json.Decoder) error {
