@@ -126,7 +126,7 @@ func TestPipelineEventEndpointScopesProducerOwnership(t *testing.T) {
 	server := httptest.NewServer(relay.Handler())
 	defer server.Close()
 	endpoint := server.URL + "/v1/cluster/pipeline-runs/" + run.ID + "/events"
-	if status, _ := relayHTTPTest(t, http.MethodGet, endpoint, producerB, nil); status != http.StatusForbidden {
+	if status, _ := relayHTTPTest(t, http.MethodGet, endpoint, producerB, nil); status != http.StatusNotFound {
 		t.Fatalf("another producer read pipeline events with status %d", status)
 	}
 	status, raw := relayHTTPTest(t, http.MethodGet, endpoint, producerA, nil)

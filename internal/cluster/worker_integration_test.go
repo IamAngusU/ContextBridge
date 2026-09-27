@@ -124,7 +124,11 @@ func TestWorkerRelayParallelCapacityEndToEnd(t *testing.T) {
 		LocalURL:       local.URL,
 		LocalToken:     "local-test-token",
 		HeartbeatEvery: 20 * time.Millisecond,
-		RequestTimeout: 5 * time.Second,
+		// The local handler is deliberately held open until the assertions have
+		// observed two concurrent jobs and relay-side progress. Keep the worker
+		// request timeout above the test's own bounded observation windows so a
+		// slow CI host cannot turn that intentional hold into a transport failure.
+		RequestTimeout: 30 * time.Second,
 		AllowedTasks:   []string{"generation"},
 	})
 	if err != nil {

@@ -854,26 +854,18 @@ func (r *Relay) handleJobs(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Relay) handleJob(w http.ResponseWriter, req *http.Request) {
-	job, err := r.store.GetJob(req.PathValue("id"))
+	job, err := r.visibleJob(req.Context(), req.PathValue("id"))
 	if err != nil {
 		writeError(w, http.StatusNotFound, errors.New("job not found"))
-		return
-	}
-	if !canReadJob(req.Context(), job) {
-		writeError(w, http.StatusForbidden, errors.New("job belongs to another producer"))
 		return
 	}
 	writeJSON(w, http.StatusOK, jobResponse(job, req.URL.Query().Get("compact") == "1"))
 }
 
 func (r *Relay) handleJobEvents(w http.ResponseWriter, req *http.Request) {
-	job, err := r.store.GetJob(req.PathValue("id"))
+	job, err := r.visibleJob(req.Context(), req.PathValue("id"))
 	if err != nil {
 		writeError(w, http.StatusNotFound, errors.New("job not found"))
-		return
-	}
-	if !canReadJob(req.Context(), job) {
-		writeError(w, http.StatusForbidden, errors.New("job belongs to another producer"))
 		return
 	}
 	after := uint64(0)
@@ -895,13 +887,9 @@ func (r *Relay) handleJobEvents(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Relay) handleJobRoute(w http.ResponseWriter, req *http.Request) {
-	job, err := r.store.GetJob(req.PathValue("id"))
+	job, err := r.visibleJob(req.Context(), req.PathValue("id"))
 	if err != nil {
 		writeError(w, http.StatusNotFound, errors.New("job not found"))
-		return
-	}
-	if !canReadJob(req.Context(), job) {
-		writeError(w, http.StatusForbidden, errors.New("job belongs to another producer"))
 		return
 	}
 	if job.RoutingDecision == nil {
@@ -912,13 +900,9 @@ func (r *Relay) handleJobRoute(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Relay) handleJobRuntimeEstimate(w http.ResponseWriter, req *http.Request) {
-	job, err := r.store.GetJob(req.PathValue("id"))
+	job, err := r.visibleJob(req.Context(), req.PathValue("id"))
 	if err != nil {
 		writeError(w, http.StatusNotFound, errors.New("job not found"))
-		return
-	}
-	if !canReadJob(req.Context(), job) {
-		writeError(w, http.StatusForbidden, errors.New("job belongs to another producer"))
 		return
 	}
 	var node Node
@@ -982,17 +966,22 @@ func (r *Relay) handleRouteExplain(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Relay) handleCancel(w http.ResponseWriter, req *http.Request) {
-	existing, err := r.store.GetJob(req.PathValue("id"))
+	existing, err := r.visibleJob(req.Context(), req.PathValue("id"))
 	if err != nil {
 		writeError(w, http.StatusNotFound, errors.New("job not found"))
 		return
 	}
-	if !canReadJob(req.Context(), existing) {
-		writeError(w, http.StatusForbidden, errors.New("job belongs to another producer"))
-		return
+	record, _ := tokenRecord(req.Context())
+	owner := ""
+	if record.Role == "producer" {
+		owner = record.Subject
 	}
-	job, err := r.store.CancelJob(req.PathValue("id"))
+	job, err := r.store.CancelJobOwned(req.PathValue("id"), owner)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			writeError(w, http.StatusNotFound, errors.New("job not found"))
+			return
+		}
 		writeError(w, http.StatusConflict, err)
 		return
 	}
@@ -1080,9 +1069,9 @@ func (r *Relay) handleSubmit(w http.ResponseWriter, req *http.Request) {
 	limits := r.producerLimits(record)
 	if input.AssignmentID != "" {
 		if idempotencyKey != "" {
-			job, replayed, err = r.store.ConsumeReservationAdmittedIdempotentGovernedWithPolicy(input.AssignmentID, input.AssignmentSecret, input.Sealed, input.Source, input.TenantID, input.OwnerSubject, input.Priority, input.MaxAttempts, r.cfg.MaxQueuedJobs, limits, idempotencyKey, requestHash, input.PolicyDecision)
+			job, replayed, err = r.store.ConsumeReservationAdmittedIdempotentGovernedWithPolicy(input.AssignmentID, input.AssignmentSecret, input.ID, input.Sealed, input.Source, input.TenantID, input.OwnerSubject, input.Priority, input.MaxAttempts, r.cfg.MaxQueuedJobs, limits, idempotencyKey, requestHash, input.PolicyDecision)
 		} else {
-			job, err = r.store.ConsumeReservationAdmittedGovernedWithPolicy(input.AssignmentID, input.AssignmentSecret, input.Sealed, input.Source, input.TenantID, input.OwnerSubject, input.Priority, input.MaxAttempts, r.cfg.MaxQueuedJobs, limits, input.PolicyDecision)
+			job, err = r.store.ConsumeReservationAdmittedGovernedWithPolicy(input.AssignmentID, input.AssignmentSecret, input.ID, input.Sealed, input.Source, input.TenantID, input.OwnerSubject, input.Priority, input.MaxAttempts, r.cfg.MaxQueuedJobs, limits, input.PolicyDecision)
 		}
 	} else {
 		if idempotencyKey != "" {
@@ -2531,6 +2520,30 @@ func scopeTenantID(tenantID *string, record TokenRecord) error {
 func canReadJob(ctx context.Context, job Job) bool {
 	record, ok := tokenRecord(ctx)
 	return !ok || record.Role != "producer" || job.OwnerSubject == record.Subject
+}
+
+// visibleJob deliberately collapses a missing job and a foreign producer's
+// job into the same result. Producer credentials must not gain an existence
+// oracle for another producer's execution IDs; aggregate operators retain the
+// existing global view.
+func (r *Relay) visibleJob(ctx context.Context, id string) (Job, error) {
+	job, err := r.store.GetJob(id)
+	if err != nil || !canReadJob(ctx, job) {
+		return Job{}, os.ErrNotExist
+	}
+	return job, nil
+}
+
+func (r *Relay) visiblePipelineRun(ctx context.Context, id string) (PipelineRun, error) {
+	run, err := r.store.GetPipelineRun(id)
+	if err != nil {
+		return PipelineRun{}, os.ErrNotExist
+	}
+	record, ok := tokenRecord(ctx)
+	if ok && record.Role == "producer" && run.OwnerSubject != record.Subject {
+		return PipelineRun{}, os.ErrNotExist
+	}
+	return run, nil
 }
 
 func intersectFold(values, allowed []string) []string {

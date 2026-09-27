@@ -25,6 +25,7 @@ without sending an inference request.
 | Surface | Stable identifier or boundary | Evidence |
 | --- | --- | --- |
 | Producer job input | `contextbridge.job.v1` | Published JSON Schema plus relay dry-run validation |
+| Producer execution identity | `relay_assigned_producer_job_ids_v1`, `job_id.relay_assigned` | Ordinary producer IDs are relay-generated; retry reconciliation uses a producer-scoped `Idempotency-Key`; a sealed submission may echo only its one-time reservation ID |
 | Relay behavior | `contextbridge.protocol-manifest.v1`, current wire version | Machine-readable protocol manifest and Relay Conformance v1 report |
 | Relay proxy probes | `relay_role_health_v1` | Separate `/livez`, `/readyz`, and `/leaderz`; current mode is explicitly `standalone` |
 | Assignment authority | `assignment_fencing_v1`, wire v3 | Stable cluster identity, monotonic relay epoch, and exact per-assignment generation echoed by workers |
@@ -133,6 +134,13 @@ Compatibility identifiers are exact. During the pre-1.0 period, callers must
 not assume that a product version alone proves protocol compatibility. A
 future breaking contract requires a new contract or conformance identifier;
 the protocol manifest remains the runtime source of truth.
+
+Security tightening within the pre-1.0 Job Contract v1 removed ordinary
+producer-selected execution IDs from relay admission. Integrations already
+following the reference flow—omit `id`, persist the accepted response ID, and
+reuse an exact producer-scoped `Idempotency-Key` after an ambiguous submit—do
+not change. The manifest feature and stable admission code make this boundary
+machine-readable.
 
 The schema, this document, adapter contract, and examples are licensed under
 Apache-2.0 so independent software can implement these boundaries. The relay,

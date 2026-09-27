@@ -181,6 +181,11 @@ producer-scoped `Idempotency-Key` for one logical action and preserve the exact
 request bytes across an ambiguous submit retry. Persist the accepted CB job ID
 and poll it; never turn a result poll into a new submission.
 
+Producer job IDs are relay-assigned. Ordinary submissions must omit `id`;
+predictable business identifiers belong in the producer-scoped
+`Idempotency-Key`. A sealed E2EE submission may echo only the opaque job ID
+issued by its one-time assignment reservation.
+
 The dependency-free Node.js reference client demonstrates:
 
 - one bounded repeat after a lost or malformed submit response, using the

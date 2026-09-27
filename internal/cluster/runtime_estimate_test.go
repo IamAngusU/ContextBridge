@@ -215,7 +215,7 @@ func TestHistoricalRuntimeEstimateEndpointScopesProducerAndMinimizesEvidence(t *
 	request.Header.Set("Authorization", "Bearer "+producerB)
 	response := httptest.NewRecorder()
 	relay.Handler().ServeHTTP(response, request)
-	if response.Code != http.StatusForbidden {
+	if response.Code != http.StatusNotFound {
 		t.Fatalf("other producer read runtime evidence with status %d: %s", response.Code, response.Body.String())
 	}
 

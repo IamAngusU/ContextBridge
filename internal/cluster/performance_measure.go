@@ -160,7 +160,7 @@ func measureRelayQueueCycles(ctx context.Context, samples, warmup, concurrency i
 
 func relayQueueCycle(ctx context.Context, client *http.Client, baseURL, token, id string) error {
 	request := SubmitRequest{
-		ID: id, Source: "performance-measurement",
+		Source:       "performance-measurement-" + id,
 		Requirements: Requirements{Task: "generation"},
 		Payload:      json.RawMessage(`{"prompt":"CB-MEASURE","output":{"mode":"text","max_bytes":1024}}`),
 		MaxAttempts:  1,
@@ -173,21 +173,21 @@ func relayQueueCycle(ctx context.Context, client *http.Client, baseURL, token, i
 	if err := measurementJSONRequest(ctx, client, http.MethodPost, baseURL+"/v1/cluster/jobs?compact=1", token, body, http.StatusAccepted, &admitted); err != nil {
 		return err
 	}
-	if admitted.ID != id || admitted.Status != JobQueued {
+	if admitted.ID == "" || admitted.Status != JobQueued {
 		return errors.New("relay returned an invalid admitted job")
 	}
 	var readback Job
-	if err := measurementJSONRequest(ctx, client, http.MethodGet, baseURL+"/v1/cluster/jobs/"+id+"?compact=1", token, nil, http.StatusOK, &readback); err != nil {
+	if err := measurementJSONRequest(ctx, client, http.MethodGet, baseURL+"/v1/cluster/jobs/"+admitted.ID+"?compact=1", token, nil, http.StatusOK, &readback); err != nil {
 		return err
 	}
-	if readback.ID != id || readback.Status != JobQueued {
+	if readback.ID != admitted.ID || readback.Status != JobQueued {
 		return errors.New("relay returned an invalid compact readback")
 	}
 	var cancelled Job
-	if err := measurementJSONRequest(ctx, client, http.MethodDelete, baseURL+"/v1/cluster/jobs/"+id, token, nil, http.StatusOK, &cancelled); err != nil {
+	if err := measurementJSONRequest(ctx, client, http.MethodDelete, baseURL+"/v1/cluster/jobs/"+admitted.ID, token, nil, http.StatusOK, &cancelled); err != nil {
 		return err
 	}
-	if cancelled.ID != id || cancelled.Status != JobCancelled {
+	if cancelled.ID != admitted.ID || cancelled.Status != JobCancelled {
 		return errors.New("relay returned an invalid cancellation")
 	}
 	return nil

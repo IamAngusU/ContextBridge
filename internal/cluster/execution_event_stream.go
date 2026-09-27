@@ -29,26 +29,18 @@ type executionEventStreamControl struct {
 }
 
 func (r *Relay) handleJobEventStream(w http.ResponseWriter, req *http.Request) {
-	job, err := r.store.GetJob(req.PathValue("id"))
+	job, err := r.visibleJob(req.Context(), req.PathValue("id"))
 	if err != nil {
 		writeError(w, http.StatusNotFound, errors.New("job not found"))
-		return
-	}
-	if !canReadJob(req.Context(), job) {
-		writeError(w, http.StatusForbidden, errors.New("job belongs to another producer"))
 		return
 	}
 	r.streamExecutionEvents(w, req, job.ID, r.store.ListJobEvents, terminalJobStatus(job.Status))
 }
 
 func (r *Relay) handlePipelineRunEventStream(w http.ResponseWriter, req *http.Request) {
-	run, err := r.store.GetPipelineRun(req.PathValue("id"))
+	run, err := r.visiblePipelineRun(req.Context(), req.PathValue("id"))
 	if err != nil {
 		writeError(w, http.StatusNotFound, errors.New("pipeline run not found"))
-		return
-	}
-	if record, ok := tokenRecord(req.Context()); ok && record.Role == "producer" && run.OwnerSubject != record.Subject {
-		writeError(w, http.StatusForbidden, errors.New("pipeline run belongs to another producer"))
 		return
 	}
 	r.streamExecutionEvents(w, req, run.ID, r.store.ListPipelineEvents, terminalPipelineStatus(run.Status))

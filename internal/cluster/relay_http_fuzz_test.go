@@ -35,10 +35,9 @@ func TestProducerJobHTTPIsolatesListReadAndCancel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	submit := func(token, id, secret string) Job {
+	submit := func(token, secret string) Job {
 		t.Helper()
 		input := SubmitRequest{
-			ID:           id,
 			Requirements: Requirements{Task: "generation"},
 			Payload:      json.RawMessage(`{"prompt":"` + secret + `"}`),
 		}
@@ -48,7 +47,7 @@ func TestProducerJobHTTPIsolatesListReadAndCancel(t *testing.T) {
 		}
 		status, body := relayHTTPTest(t, http.MethodPost, server.URL+"/v1/cluster/jobs", token, raw)
 		if status != http.StatusAccepted {
-			t.Fatalf("submit %s returned %d: %s", id, status, body)
+			t.Fatalf("submit returned %d: %s", status, body)
 		}
 		var job Job
 		if err := json.Unmarshal(body, &job); err != nil {
@@ -57,8 +56,8 @@ func TestProducerJobHTTPIsolatesListReadAndCancel(t *testing.T) {
 		return job
 	}
 
-	jobA := submit(producerA, "owner-a-job", "owner-a-secret")
-	jobB := submit(producerB, "owner-b-job", "owner-b-secret")
+	jobA := submit(producerA, "owner-a-secret")
+	jobB := submit(producerB, "owner-b-secret")
 
 	status, body := relayHTTPTest(t, http.MethodGet, server.URL+"/v1/cluster/jobs?limit=100", producerA, nil)
 	if status != http.StatusOK {
@@ -77,8 +76,8 @@ func TestProducerJobHTTPIsolatesListReadAndCancel(t *testing.T) {
 
 	for _, method := range []string{http.MethodGet, http.MethodDelete} {
 		status, body = relayHTTPTest(t, method, server.URL+"/v1/cluster/jobs/"+jobA.ID, producerB, nil)
-		if status != http.StatusForbidden {
-			t.Fatalf("foreign %s returned %d, want 403: %s", method, status, body)
+		if status != http.StatusNotFound {
+			t.Fatalf("foreign %s returned %d, want 404: %s", method, status, body)
 		}
 		if bytes.Contains(body, []byte("owner-a-secret")) {
 			t.Fatalf("foreign %s leaked job content: %s", method, body)
@@ -131,7 +130,7 @@ func TestSubmitHTTPRejectsMalformedUTF8AndUnsafeUnicodeLabels(t *testing.T) {
 	if len(exact160) != 160 {
 		t.Fatalf("invalid test fixture length: %d", len(exact160))
 	}
-	valid := SubmitRequest{ID: "unicode-exact", Requirements: Requirements{Task: "generation", Model: exact160}, Payload: json.RawMessage(`{}`)}
+	valid := SubmitRequest{Requirements: Requirements{Task: "generation", Model: exact160}, Payload: json.RawMessage(`{}`)}
 	validRaw, err := json.Marshal(valid)
 	if err != nil {
 		t.Fatal(err)
@@ -152,9 +151,9 @@ func TestSubmitHTTPRejectsMalformedUTF8AndUnsafeUnicodeLabels(t *testing.T) {
 		{name: "provider isolate", requirements: Requirements{Task: "generation", Provider: "adapter\u2066spoof"}},
 		{name: "tag at 81 bytes", requirements: Requirements{Task: "generation", RequiredTags: []string{strings.Repeat("t", 81)}}},
 	}
-	for index, item := range cases {
+	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
-			input := SubmitRequest{ID: "unsafe-label-" + string(rune('a'+index)), Requirements: item.requirements, Payload: json.RawMessage(`{}`)}
+			input := SubmitRequest{Requirements: item.requirements, Payload: json.RawMessage(`{}`)}
 			raw, err := json.Marshal(input)
 			if err != nil {
 				t.Fatal(err)

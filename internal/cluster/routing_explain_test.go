@@ -183,8 +183,8 @@ func TestDurableRouteEndpointEnforcesJobStateAndOwnership(t *testing.T) {
 	if status := authenticatedGETStatus(t, target, producerA, &stored); status != http.StatusOK || stored.JobID != job.ID || stored.SelectedNodeID != "node-a" {
 		t.Fatalf("owner route response = status %d decision %#v", status, stored)
 	}
-	if status := authenticatedGETStatus(t, target, producerB, nil); status != http.StatusForbidden {
-		t.Fatalf("other producer route status = %d, want %d", status, http.StatusForbidden)
+	if status := authenticatedGETStatus(t, target, producerB, nil); status != http.StatusNotFound {
+		t.Fatalf("other producer route status = %d, want %d", status, http.StatusNotFound)
 	}
 }
 

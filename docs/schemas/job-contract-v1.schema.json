@@ -7,7 +7,12 @@
   "required": ["requirements"],
   "properties": {
     "contract_version": { "const": "contextbridge.job.v1", "default": "contextbridge.job.v1" },
-    "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", "not": { "pattern": "\\.\\." } },
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+      "not": { "pattern": "\\.\\." },
+      "description": "Relay-assigned execution ID returned by a one-time E2EE reservation. Ordinary producer submissions must omit this field and use Idempotency-Key for retry reconciliation."
+    },
     "tenant_id": { "type": "string" },
     "source": { "type": "string" },
     "requirements": {
@@ -69,6 +74,7 @@
     { "required": ["sealed_payload"], "not": { "required": ["payload"] } }
   ],
   "allOf": [
+    { "if": { "required": ["id"] }, "then": { "required": ["assignment_id", "assignment_secret", "sealed_payload"] } },
     { "if": { "required": ["sealed_payload"] }, "then": { "required": ["assignment_id", "assignment_secret"] } },
     {
       "if": { "anyOf": [{ "required": ["assignment_id"] }, { "required": ["assignment_secret"] }] },

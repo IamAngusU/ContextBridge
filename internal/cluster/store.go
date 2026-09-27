@@ -1487,7 +1487,7 @@ func (s *Store) ConsumeReservationAdmitted(id, secret string, sealed *SealedEnve
 	if len(maxOwner) > 0 {
 		ownerLimit = maxOwner[0]
 	}
-	job, _, err := s.consumeReservationAdmitted(id, secret, sealed, source, tenant, owner, priority, attempts, maxQueued, ProducerLimits{MaxQueuedJobs: ownerLimit}, "", "", nil)
+	job, _, err := s.consumeReservationAdmitted(id, secret, "", sealed, source, tenant, owner, priority, attempts, maxQueued, ProducerLimits{MaxQueuedJobs: ownerLimit}, "", "", nil)
 	return job, err
 }
 
@@ -1500,12 +1500,12 @@ func (s *Store) ConsumeReservationAdmittedWithPolicy(id, secret string, sealed *
 	if len(maxOwner) > 0 {
 		ownerLimit = maxOwner[0]
 	}
-	job, _, err := s.consumeReservationAdmitted(id, secret, sealed, source, tenant, owner, priority, attempts, maxQueued, ProducerLimits{MaxQueuedJobs: ownerLimit}, "", "", &policy)
+	job, _, err := s.consumeReservationAdmitted(id, secret, "", sealed, source, tenant, owner, priority, attempts, maxQueued, ProducerLimits{MaxQueuedJobs: ownerLimit}, "", "", &policy)
 	return job, err
 }
 
-func (s *Store) ConsumeReservationAdmittedGovernedWithPolicy(id, secret string, sealed *SealedEnvelope, source, tenant, owner string, priority, attempts, maxQueued int, limits ProducerLimits, policy PolicyDecision) (Job, error) {
-	job, _, err := s.consumeReservationAdmitted(id, secret, sealed, source, tenant, owner, priority, attempts, maxQueued, limits, "", "", &policy)
+func (s *Store) ConsumeReservationAdmittedGovernedWithPolicy(id, secret, requestedJobID string, sealed *SealedEnvelope, source, tenant, owner string, priority, attempts, maxQueued int, limits ProducerLimits, policy PolicyDecision) (Job, error) {
+	job, _, err := s.consumeReservationAdmitted(id, secret, requestedJobID, sealed, source, tenant, owner, priority, attempts, maxQueued, limits, "", "", &policy)
 	return job, err
 }
 
@@ -1514,18 +1514,18 @@ func (s *Store) ConsumeReservationAdmittedGovernedWithPolicy(id, secret string, 
 // consumed reservation is read, but only when the exact sealed request hash
 // matches the producer-scoped key.
 func (s *Store) ConsumeReservationAdmittedIdempotent(id, secret string, sealed *SealedEnvelope, source, tenant, owner string, priority, attempts, maxQueued, maxOwner int, idempotencyKey, requestHash string) (Job, bool, error) {
-	return s.consumeReservationAdmitted(id, secret, sealed, source, tenant, owner, priority, attempts, maxQueued, ProducerLimits{MaxQueuedJobs: maxOwner}, idempotencyKey, requestHash, nil)
+	return s.consumeReservationAdmitted(id, secret, "", sealed, source, tenant, owner, priority, attempts, maxQueued, ProducerLimits{MaxQueuedJobs: maxOwner}, idempotencyKey, requestHash, nil)
 }
 
 func (s *Store) ConsumeReservationAdmittedIdempotentWithPolicy(id, secret string, sealed *SealedEnvelope, source, tenant, owner string, priority, attempts, maxQueued, maxOwner int, idempotencyKey, requestHash string, policy PolicyDecision) (Job, bool, error) {
-	return s.consumeReservationAdmitted(id, secret, sealed, source, tenant, owner, priority, attempts, maxQueued, ProducerLimits{MaxQueuedJobs: maxOwner}, idempotencyKey, requestHash, &policy)
+	return s.consumeReservationAdmitted(id, secret, "", sealed, source, tenant, owner, priority, attempts, maxQueued, ProducerLimits{MaxQueuedJobs: maxOwner}, idempotencyKey, requestHash, &policy)
 }
 
-func (s *Store) ConsumeReservationAdmittedIdempotentGovernedWithPolicy(id, secret string, sealed *SealedEnvelope, source, tenant, owner string, priority, attempts, maxQueued int, limits ProducerLimits, idempotencyKey, requestHash string, policy PolicyDecision) (Job, bool, error) {
-	return s.consumeReservationAdmitted(id, secret, sealed, source, tenant, owner, priority, attempts, maxQueued, limits, idempotencyKey, requestHash, &policy)
+func (s *Store) ConsumeReservationAdmittedIdempotentGovernedWithPolicy(id, secret, requestedJobID string, sealed *SealedEnvelope, source, tenant, owner string, priority, attempts, maxQueued int, limits ProducerLimits, idempotencyKey, requestHash string, policy PolicyDecision) (Job, bool, error) {
+	return s.consumeReservationAdmitted(id, secret, requestedJobID, sealed, source, tenant, owner, priority, attempts, maxQueued, limits, idempotencyKey, requestHash, &policy)
 }
 
-func (s *Store) consumeReservationAdmitted(id, secret string, sealed *SealedEnvelope, source, tenant, owner string, priority, attempts, maxQueued int, limits ProducerLimits, idempotencyKey, requestHash string, expectedPolicy *PolicyDecision) (Job, bool, error) {
+func (s *Store) consumeReservationAdmitted(id, secret, requestedJobID string, sealed *SealedEnvelope, source, tenant, owner string, priority, attempts, maxQueued int, limits ProducerLimits, idempotencyKey, requestHash string, expectedPolicy *PolicyDecision) (Job, bool, error) {
 	var job Job
 	replayed := false
 	owner = cleanLabel(owner, 120)
@@ -1573,6 +1573,9 @@ func (s *Store) consumeReservationAdmitted(id, secret string, sealed *SealedEnve
 		}
 		if saved.OwnerSubject == "" || saved.OwnerSubject != owner || saved.Assignment.OwnerSubject != owner {
 			return ErrReservationOwnerMismatch
+		}
+		if requestedJobID != "" && requestedJobID != saved.Assignment.JobID {
+			return ErrReservationContextMismatch
 		}
 		if tenant != saved.Assignment.TenantID {
 			return ErrReservationContextMismatch
@@ -2360,10 +2363,20 @@ func (s *Store) updateJobProgress(id, nodeID string, attempt int, fence *Assignm
 }
 
 func (s *Store) CancelJob(id string) (Job, error) {
+	return s.CancelJobOwned(id, "")
+}
+
+// CancelJobOwned atomically checks producer ownership and transitions the job.
+// A foreign owner is indistinguishable from a missing ID; an empty owner keeps
+// the trusted aggregate-operator behavior used by internal callers.
+func (s *Store) CancelJobOwned(id, owner string) (Job, error) {
 	var job Job
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		if err := getJSON(tx.Bucket(bucketJobs), id, &job); err != nil {
 			return err
+		}
+		if owner != "" && job.OwnerSubject != owner {
+			return os.ErrNotExist
 		}
 		if job.Status == JobCompleted || job.Status == JobFailed || job.Status == JobCancelled {
 			return errors.New("job is already final")

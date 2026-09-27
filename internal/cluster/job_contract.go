@@ -29,6 +29,7 @@ const (
 	AdmissionCodeIdempotencyInvalid    = "idempotency.invalid"
 	AdmissionCodeJobIDConflict         = "job_id.conflict"
 	AdmissionCodeJobIDInvalid          = "job_id.invalid"
+	AdmissionCodeJobIDRelayAssigned    = "job_id.relay_assigned"
 	AdmissionCodeNodeDraining          = "node.draining"
 	AdmissionCodePayloadInvalid        = "payload.invalid"
 	AdmissionCodePayloadRequired       = "payload.required"
@@ -72,6 +73,7 @@ var stableAdmissionErrorCodes = []string{
 	AdmissionCodeIdempotencyInvalid,
 	AdmissionCodeJobIDConflict,
 	AdmissionCodeJobIDInvalid,
+	AdmissionCodeJobIDRelayAssigned,
 	AdmissionCodeNodeDraining,
 	AdmissionCodePayloadInvalid,
 	AdmissionCodePayloadRequired,
@@ -168,6 +170,9 @@ func (r *Relay) prepareAdmission(input SubmitRequest, record TokenRecord, mode a
 	}
 	if input.ID != "" && !validJobID(input.ID) {
 		return SubmitRequest{}, ContractValidation{}, rejectAdmission(http.StatusUnprocessableEntity, AdmissionCodeJobIDInvalid, errors.New("job id must use 1-128 safe ASCII characters and must not contain '..'"))
+	}
+	if record.Role == "producer" && input.ID != "" && input.AssignmentID == "" {
+		return SubmitRequest{}, ContractValidation{}, rejectAdmission(http.StatusUnprocessableEntity, AdmissionCodeJobIDRelayAssigned, errors.New("job id is relay-assigned for producer submissions; use Idempotency-Key to reconcile retries"))
 	}
 	if input.Priority < -100 || input.Priority > 100 {
 		return SubmitRequest{}, ContractValidation{}, rejectAdmission(http.StatusUnprocessableEntity, AdmissionCodePriorityInvalid, errors.New("priority must be between -100 and 100"))
