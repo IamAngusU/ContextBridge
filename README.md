@@ -49,7 +49,7 @@ Ollama is one possible resource. So is llama.cpp. So is an OpenAI-compatible mod
 
 The relay authenticates and queues jobs, applies configured policy, filters incompatible workers and ranks the remaining resources using current capacity and capability evidence. It records what actually handled the work. Workers connect outbound, so the machines doing the work do not need public inbound ports.
 
-## Weird shit works.
+## Weird shit works
 
 CB is developed against a deliberately messy setup, not a clean two-node demo that has never seen a router reboot.
 
@@ -432,7 +432,6 @@ For your own app, use the producer token with the [native job API or PHP client]
 
 </details>
 
-
 ## Just prompt the pool
 
 Once a client has a producer credential, you do not need to build a job file just to use the pool:
@@ -606,17 +605,17 @@ Handle `failed` and `cancelled` separately. Text output can also report `truncat
 
 ## Measured overhead
 
-**Coordination, not inference.** Dated development measurements from **20 and 27 September 2026**, with 128 samples after 8 warmups and one concurrent client:
+**Coordination, not inference.** Dated development measurements from **20, 27, and 28 September 2026**, with 128 samples after 8 warmups and one concurrent client:
 
-| Operation | Windows i9 p50 / p99 | Windows i7 laptop p50 / p99 | Linux VPS p50 / p99 |
+| Operation | Current Windows i9 p50 / p99 | Windows i7 laptop p50 / p99 | Linux VPS p50 / p99 |
 | --- | ---: | ---: | ---: |
-| Durable submit → read → cancel | 2.402 / 3.740 ms | 13.109 / 15.510 ms | 12.165 / 36.304 ms |
-| Small E2EE job + result | 0.098 / 0.193 ms | 0.125 / 0.158 ms | 0.217 / 0.496 ms |
-| Verify a 64 KiB artifact | 0.065 / 0.134 ms | 0.065 / 0.157 ms | 0.141 / 0.446 ms |
+| Durable submit → read → cancel | 3.075 / 5.247 ms | 13.109 / 15.510 ms | 12.165 / 36.304 ms |
+| Small E2EE job + result | 0.127 / 0.223 ms | 0.125 / 0.158 ms | 0.217 / 0.496 ms |
+| Verify a 64 KiB artifact | 0.089 / 0.405 ms | 0.065 / 0.157 ms | 0.141 / 0.446 ms |
 
-Queue throughput: **418.5 ops/s** on the Windows i9-12900K desktop, **76.1 ops/s** on the Windows i7-1355U laptop, and **73.8 ops/s** on the shared two-vCPU Linux VPS. Sampled idle benchmark-process + relay RSS: **14.4 / 15.3 / 12.7 MiB**, respectively. No models were running in these measurements.
+Queue throughput: **315.3 ops/s** on the current Windows i9-12900K desktop snapshot, **76.1 ops/s** on the Windows i7-1355U laptop, and **73.8 ops/s** on the shared two-vCPU Linux VPS. Sampled idle benchmark-process + relay RSS: **15.3 / 15.3 / 12.7 MiB**, respectively. No models were running in these measurements.
 
-These are different machines and source/toolchain snapshots, not an OS or CPU comparison or an SLA. Model execution and cross-device network latency are excluded; laptop thermals/background load and shared-VPS contention were uncontrolled. [Exact commits, methodology, raw laptop reports, p95, concurrency 1/4/16/64 and limits](docs/limits-and-performance.md). Reproduce on your hardware with `contextbridge benchmark --json`.
+These are different machines and source/toolchain snapshots, not an OS or CPU comparison or an SLA. Model execution and cross-device network latency are excluded; workstation background load, laptop thermals, and shared-VPS noisy-neighbour contention were uncontrolled. The faster 20 September i9 observation remains published as historical evidence rather than being overwritten. [Exact commits, methodology, raw reports, p95, concurrency 1/4/16/64 and limits](docs/limits-and-performance.md). Reproduce on your hardware with `contextbridge benchmark --json`.
 
 ## Command desk
 
@@ -676,7 +675,7 @@ contextbridge uninstall
 
 Acts on **this machine only**, not the whole pool. Active work blocks removal unless explicitly overridden. To deliberately remove locally managed data as well, review [the separate `--purge` option and preserved paths](docs/operations.md#remove-contextbridge-safely). No purge or force flag is needed for an ordinary uninstall.
 
-## Open by design. Precise about trust.
+## Open by design. Precise about trust
 
 Self-hosting is fully functional. CB coordinates existing runtimes; it does not pool VRAM or split a model itself. Optional or credential-required E2EE protects job payloads, **not coordination metadata**. Configurable policies are not all enabled by default. Ambiguous execution is not silently retried.
 
