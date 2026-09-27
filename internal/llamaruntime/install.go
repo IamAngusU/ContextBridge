@@ -101,7 +101,9 @@ func Install(ctx context.Context, directory string, progress Progress) (string, 
 		return "", err
 	}
 	if runtime.GOOS != "windows" {
-		_ = os.Chmod(executable, 0700)
+		if err := os.Chmod(executable, 0700); err != nil {
+			return "", fmt.Errorf("make llama.cpp executable: %w", err)
+		}
 	}
 	_ = os.RemoveAll(versionDir)
 	if err := os.Rename(temporary, versionDir); err != nil {
@@ -113,15 +115,30 @@ func Install(ctx context.Context, directory string, progress Progress) (string, 
 	if err != nil {
 		return "", err
 	}
-	pointer := filepath.Join(directory, "current.txt")
-	_ = os.WriteFile(pointer, []byte(final+"\n"), 0600)
+	if err := writeCurrentPointer(directory, final); err != nil {
+		return "", fmt.Errorf("activate llama.cpp runtime: %w", err)
+	}
 	progress("Installed llama.cpp "+release.Tag, asset.Size, asset.Size)
 	return final, nil
 }
 
 func Current(directory string) string {
-	pointer, err := os.Open(filepath.Join(directory, "current.txt"))
+	root, err := os.OpenRoot(directory)
 	if err != nil {
+		return ""
+	}
+	defer root.Close()
+	info, err := root.Lstat("current.txt")
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	pointer, err := root.Open("current.txt")
+	if err != nil {
+		return ""
+	}
+	openedInfo, statErr := pointer.Stat()
+	if statErr != nil || !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
+		_ = pointer.Close()
 		return ""
 	}
 	raw, readErr := io.ReadAll(io.LimitReader(pointer, 4097))
@@ -130,12 +147,12 @@ func Current(directory string) string {
 		return ""
 	}
 	path := strings.TrimSpace(string(raw))
-	root, rootErr := filepath.EvalSymlinks(directory)
+	runtimeRoot, rootErr := filepath.EvalSymlinks(directory)
 	resolved, pathErr := filepath.EvalSymlinks(path)
 	if rootErr != nil || pathErr != nil {
 		return ""
 	}
-	relative, relErr := filepath.Rel(root, resolved)
+	relative, relErr := filepath.Rel(runtimeRoot, resolved)
 	if relErr != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
 		return ""
 	}
@@ -143,6 +160,48 @@ func Current(directory string) string {
 		return resolved
 	}
 	return ""
+}
+
+func writeCurrentPointer(directory, executable string) error {
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	if info, statErr := root.Lstat("current.txt"); statErr == nil {
+		if !info.Mode().IsRegular() {
+			return errors.New("current runtime pointer is not a regular file")
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return statErr
+	}
+
+	temporary, err := os.CreateTemp(directory, ".contextbridge-current-*.tmp")
+	if err != nil {
+		return err
+	}
+	temporaryName := filepath.Base(temporary.Name())
+	committed := false
+	defer func() {
+		if !committed {
+			_ = temporary.Close()
+			_ = root.Remove(temporaryName)
+		}
+	}()
+	if _, err := io.WriteString(temporary, executable+"\n"); err != nil {
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := root.Rename(temporaryName, "current.txt"); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 func latest(ctx context.Context) (Release, error) {
