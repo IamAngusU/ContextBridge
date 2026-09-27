@@ -44,3 +44,8 @@ For an E2EE failure, the relay receives only a bounded stable failure code and
 a generic failure label. Provider and local-runtime diagnostic text stays at
 the worker/operator boundary because it can reflect decrypted payload content.
 Plaintext jobs retain their existing relay-visible diagnostic text.
+
+The repository's automated security gates and their limits are documented in
+[Security verification](security-verification.md). Scanner output is evidence
+for an exact commit, not a certification or a replacement for the operator's
+deployment review.

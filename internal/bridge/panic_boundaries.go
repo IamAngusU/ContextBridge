@@ -14,9 +14,9 @@ func (s *Server) recoverSchedulePanic(id, runID string) {
 	if recover() == nil {
 		return
 	}
-	s.logger.Printf("schedule %s recovered an internal panic:\n%s", id, debug.Stack())
+	s.logger.Printf("schedule %s recovered an internal panic:\n%s", quotedLogValue(id), debug.Stack())
 	if err := s.schedules.finish(id, runID, "failed", internalWorkItemPanic); err != nil {
-		s.logger.Printf("schedule %s panic checkpoint could not be stored: %v", id, err)
+		s.logger.Printf("schedule %s panic checkpoint could not be stored: %s", quotedLogValue(id), quotedLogError(err))
 	}
 	s.store.AddActivity("scheduled", "Scheduled job failed", runID)
 }
@@ -25,14 +25,14 @@ func (s *Server) recoverInboxPanic(path string) {
 	if recover() == nil {
 		return
 	}
-	s.logger.Printf("inbox job %s recovered an internal panic:\n%s", filepath.Base(path), debug.Stack())
+	s.logger.Printf("inbox job %s recovered an internal panic:\n%s", quotedLogValue(filepath.Base(path)), debug.Stack())
 	resultPath := strings.TrimSuffix(path, ".processing.json") + ".result.json"
 	result, _ := json.MarshalIndent(Output{Mode: "text", Error: internalWorkItemPanic}, "", "  ")
 	if err := writeInboxResult(resultPath, append(result, '\n')); err != nil {
-		s.logger.Printf("panic result %s could not be stored safely: %v", filepath.Base(resultPath), err)
+		s.logger.Printf("panic result %s could not be stored safely: %s", quotedLogValue(filepath.Base(resultPath)), quotedLogError(err))
 		return
 	}
 	if err := os.Remove(path); err != nil {
-		s.logger.Printf("panic-marked inbox job %s could not be removed: %v", filepath.Base(path), err)
+		s.logger.Printf("panic-marked inbox job %s could not be removed: %s", quotedLogValue(filepath.Base(path)), quotedLogError(err))
 	}
 }

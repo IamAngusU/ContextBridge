@@ -54,6 +54,31 @@ func TestLocalStoreSeparatesTenantsAndPersists(t *testing.T) {
 	}
 }
 
+func TestLocalSearchCapsCallerControlledLimit(t *testing.T) {
+	directory := t.TempDir()
+	store, err := NewLocal(directory, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	space := testEmbeddingSpace(t, 2, "embed-a")
+	documents := make([]Document, 60)
+	vectors := make([][]float32, 60)
+	for index := range documents {
+		documents[index] = Document{ID: fmt.Sprintf("doc-%02d", index), Text: "bounded"}
+		vectors[index] = []float32{1, 0}
+	}
+	if err := store.Upsert(context.Background(), "tenant", space, documents, vectors); err != nil {
+		t.Fatal(err)
+	}
+	matches, err := store.Search(context.Background(), "tenant", space, []float32{1, 0}, math.MaxInt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != maximumSearchResults {
+		t.Fatalf("search returned %d results, want capped %d", len(matches), maximumSearchResults)
+	}
+}
+
 func TestLocalStoreRejectsOversizedPersistentState(t *testing.T) {
 	directory := t.TempDir()
 	if err := os.WriteFile(filepath.Join(directory, "vectors.json"), make([]byte, maximumLocalVectorStoreBytes+1), 0600); err != nil {

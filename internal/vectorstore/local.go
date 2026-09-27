@@ -13,7 +13,10 @@ import (
 	"sync"
 )
 
-const maximumLocalVectorStoreBytes int64 = 256 << 20
+const (
+	maximumLocalVectorStoreBytes int64 = 256 << 20
+	maximumSearchResults               = 50
+)
 
 type Local struct {
 	path string
@@ -151,12 +154,16 @@ func (s *Local) Search(ctx context.Context, tenant string, space EmbeddingSpace,
 	if limit <= 0 {
 		limit = 5
 	}
-	if limit > 50 {
-		limit = 50
+	if limit > maximumSearchResults {
+		limit = maximumSearchResults
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	matches := make([]Match, 0, limit)
+	// Keep the allocation independent of the caller-provided value. The search
+	// contract already caps returned results at maximumSearchResults; allocating
+	// that small fixed capacity also keeps static analysis and future refactors
+	// from accidentally turning limit into an allocation primitive.
+	matches := make([]Match, 0, maximumSearchResults)
 	for _, item := range s.data[tenant] {
 		if err := ctx.Err(); err != nil {
 			return nil, err

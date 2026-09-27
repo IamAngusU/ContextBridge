@@ -1,13 +1,11 @@
 name: Publish public proof badge
 
-on:
+on: # zizmor: ignore[dangerous-triggers] only same-repository main pushes pass the job guard below
   workflow_run:
     workflows: ["CI"]
     types: [completed]
 
-permissions:
-  actions: read
-  contents: write
+permissions: {}
 
 concurrency:
   group: public-proof-badge
@@ -17,11 +15,15 @@ jobs:
   publish:
     # The public proof is intentionally produced only by the separate mirror
     # account. Upstream keeps this workflow inert even when its own CI finishes.
-    if: ${{ github.repository == 'angusu-de/ContextBridge' && github.event.workflow_run.head_branch == 'main' }}
+    if: ${{ github.repository == 'angusu-de/ContextBridge' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.head_branch == 'main' }}
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write # zizmor: ignore[excessive-permissions] this sole job publishes the generated ci-proof branch
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Render proof badge from the completed CI run
@@ -38,6 +40,7 @@ jobs:
 
       - name: Publish the tiny proof branch
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PROOF_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
@@ -54,4 +57,7 @@ jobs:
           cp "$proof_dir/public-proof.json" proof/public-proof.json
           git add proof
           git commit -m "Update public CI proof for ${PROOF_HEAD_SHA:0:7} [skip ci]"
+          auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
+          git config --local http.https://github.com/.extraheader "AUTHORIZATION: basic $auth"
           git push --force origin HEAD:ci-proof
+          git config --local --unset-all http.https://github.com/.extraheader

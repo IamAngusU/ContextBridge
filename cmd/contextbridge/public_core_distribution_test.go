@@ -24,6 +24,7 @@ func TestPublicCoreDistributionSurfaceIsExplicit(t *testing.T) {
 		".git":              true,
 		".github":           true,
 		".tmp-metrics":      true, // local ignored benchmark output
+		".tmp":              true, // local ignored CI/build scratch output
 		"assets":            true,
 		"cmd":               true,
 		"deploy":            true,
@@ -37,6 +38,7 @@ func TestPublicCoreDistributionSurfaceIsExplicit(t *testing.T) {
 	allowedFiles := map[string]bool{
 		".editorconfig":            true,
 		".gitattributes":           true,
+		".gitleaks.toml":           true,
 		".gitignore":               true,
 		".markdownlint-cli2.jsonc": true,
 		"CHANGELOG.md":             true,

@@ -721,7 +721,7 @@ func (s *Server) executeSchedule(ctx context.Context, id string, job Job) {
 	}
 	outcome, detail := s.runScheduleSteps(withScheduledExecution(ctx), id, job, item.Steps)
 	if err := s.schedules.finish(id, job.ID, outcome, detail); err != nil {
-		s.logger.Printf("schedule %s terminal checkpoint could not be stored: %v", id, err)
+		s.logger.Printf("schedule %s terminal checkpoint could not be stored: %s", quotedLogValue(id), quotedLogError(err))
 		s.store.AddActivity("scheduled", "Scheduled job terminal checkpoint failed", job.ID)
 		return
 	}

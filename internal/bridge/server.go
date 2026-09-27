@@ -272,7 +272,7 @@ func (s *Server) Process(ctx context.Context, job Job) (Output, error) {
 	}
 	output := s.processJob(ctx, job)
 	if err := s.store.SaveOutput(job.ID, output); err != nil {
-		s.logger.Printf("output %s could not be stored: %v", job.ID, err)
+		s.logger.Printf("output %s could not be stored: %s", quotedLogValue(job.ID), quotedLogError(err))
 		return output, fmt.Errorf("persist output %s: %w", job.ID, err)
 	}
 	s.store.RecordCompleted(job, output)
@@ -308,7 +308,7 @@ func (s *Server) ProcessIncremental(ctx context.Context, job Job, emit func(stri
 	}
 	output := s.processor.ProcessIncremental(ctx, job, emit)
 	if err := s.store.SaveOutput(job.ID, output); err != nil {
-		s.logger.Printf("output %s could not be stored: %v", job.ID, err)
+		s.logger.Printf("output %s could not be stored: %s", quotedLogValue(job.ID), quotedLogError(err))
 		return output, fmt.Errorf("persist output %s: %w", job.ID, err)
 	}
 	s.store.RecordCompleted(job, output)
@@ -727,7 +727,7 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "job identifier is temporarily unavailable"})
 		return
 	}
-	s.logger.Printf("received job %s from %s via route %s", job.ID, job.Source, job.Route)
+	s.logger.Printf("received job %s from %s via route %s", quotedLogValue(job.ID), quotedLogValue(job.Source), quotedLogValue(job.Route))
 	s.store.AddActivity("received", "Job received from "+job.Source, job.ID)
 	output, err := s.Process(r.Context(), job)
 	if err != nil {
@@ -747,7 +747,7 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	submission := Submission{Job: response, Status: "completed", ContextBridgeAdapterEndpointID: output.ContextBridgeAdapterEndpointID, ContextBridgeEphemeralAdapterEndpoint: output.ContextBridgeEphemeralAdapterEndpoint}
 	if output.Mode == "decision" && output.Decision != nil {
 		submission.Decision = output.Decision
-		s.logger.Printf("completed job %s: %s via %s", job.ID, output.Decision.Verdict, output.Decision.Provider)
+		s.logger.Printf("completed job %s: %s via %s", quotedLogValue(job.ID), quotedLogValue(output.Decision.Verdict), quotedLogValue(output.Decision.Provider))
 		s.store.AddActivity("decision", "Decision: "+output.Decision.Verdict+" via "+output.Decision.Provider, job.ID)
 	} else {
 		submission.Output = &output
@@ -756,7 +756,7 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 			status = output.Error
 		}
 		files, references := artifactCounts(output.Artifacts)
-		s.logger.Printf("completed job %s: %s via %s [%d file(s), %d reference(s)]", job.ID, status, output.Provider, files, references)
+		s.logger.Printf("completed job %s: %s via %s [%d file(s), %d reference(s)]", quotedLogValue(job.ID), quotedLogValue(status), quotedLogValue(output.Provider), files, references)
 		s.store.AddActivity("output", "Output: "+status+" via "+output.Provider, job.ID)
 	}
 	writeJSON(w, http.StatusOK, submission)
@@ -1071,7 +1071,7 @@ func (s *Server) handleAdapterJobAction(w http.ResponseWriter, r *http.Request) 
 		status = output.Error
 	}
 	files, references := artifactCounts(output.Artifacts)
-	s.logger.Printf("adapter completed job %s: %s [%d file(s), %d reference(s)]", parts[0], status, files, references)
+	s.logger.Printf("adapter completed job %s: %s [%d file(s), %d reference(s)]", quotedLogValue(parts[0]), quotedLogValue(status), files, references)
 	writeJSON(w, http.StatusOK, output)
 }
 
@@ -1375,7 +1375,7 @@ func (s *Server) processInboxFile(ctx context.Context, path string) {
 	}
 	result, _ := json.MarshalIndent(payload, "", "  ")
 	if err := writeInboxResult(resultPath, append(result, '\n')); err != nil {
-		s.logger.Printf("inbox result %s could not be stored safely: %v", filepath.Base(resultPath), err)
+		s.logger.Printf("inbox result %s could not be stored safely: %s", quotedLogValue(filepath.Base(resultPath)), quotedLogError(err))
 		return
 	}
 	if err := os.Remove(path); err != nil {

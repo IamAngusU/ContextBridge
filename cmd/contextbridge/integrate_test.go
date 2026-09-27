@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -16,6 +17,16 @@ import (
 	"github.com/IamAngusU/ContextBridge/internal/config"
 	"gopkg.in/yaml.v3"
 )
+
+func TestExplicitIntegrationSecretWriterIsOptInAndExact(t *testing.T) {
+	var output bytes.Buffer
+	if err := writeExplicitIntegrationSecret(&output, "API key   ", "secret-without-redaction"); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := output.String(), "API key   secret-without-redaction\n"; got != want {
+		t.Fatalf("explicit secret output = %q, want %q", got, want)
+	}
+}
 
 type integrationRoundTripper func(*http.Request) (*http.Response, error)
 
