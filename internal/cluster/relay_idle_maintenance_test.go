@@ -349,7 +349,7 @@ func populateLargeTerminalHistory(tb testing.TB, relay *Relay, count int) {
 	tb.Helper()
 	result := json.RawMessage(`{"artifact":"` + string(bytes.Repeat([]byte{'x'}, 1<<20)) + `"}`)
 	for index := 0; index < count; index++ {
-		job := Job{ID: randomID("terminal"), Status: JobCompleted, Result: result, CreatedAt: time.Now().UTC().Add(-time.Hour)}
+		job := Job{ID: testRandomID(tb, "terminal"), Status: JobCompleted, Result: result, CreatedAt: time.Now().UTC().Add(-time.Hour)}
 		if err := relay.store.SaveJob(job); err != nil {
 			tb.Fatal(err)
 		}

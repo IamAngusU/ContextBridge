@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base32"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -26,6 +28,7 @@ var (
 	bucketJobs                = []byte("jobs")
 	bucketJobIndex            = []byte("job_index")
 	bucketJobOwnerIndex       = []byte("job_owner_index_v1")
+	bucketJobOwnerLookup      = []byte("job_owner_lookup_v1")
 	bucketStoreMeta           = []byte("store_meta")
 	bucketQueue               = []byte("queue")
 	bucketQueueJobIndex       = []byte("queue_job_index_v1")
@@ -39,6 +42,7 @@ var (
 	bucketJobEvents           = []byte("job_events_v1")
 	bucketPipelineEvents      = []byte("pipeline_events_v1")
 	bucketPipelineRuns        = []byte("pipeline_runs")
+	bucketPipelineOwnerLookup = []byte("pipeline_owner_lookup_v1")
 	bucketSessionPlacements   = []byte("session_placements_v1")
 	bucketAdapterSessionLocks = []byte("adapter_session_locks_v1")
 	bucketJobIdempotency      = []byte("job_idempotency_v1")
@@ -46,6 +50,8 @@ var (
 	bucketProducerRateWindows = []byte("producer_rate_windows_v1")
 	keyJobOwnerIndexVersion   = []byte("job_owner_index_version")
 	jobOwnerIndexVersion      = []byte("1")
+	keyOwnerLookupVersion     = []byte("execution_owner_lookup_version")
+	ownerLookupVersion        = []byte("1")
 	keyJobContractVersion     = []byte("job_contract_version")
 	jobContractVersion        = []byte("1")
 	keyQueueIndexVersion      = []byte("queue_index_version")
@@ -57,9 +63,9 @@ var (
 
 func requiredStoreBuckets() [][]byte {
 	return [][]byte{
-		bucketJobs, bucketJobIndex, bucketJobOwnerIndex, bucketStoreMeta,
+		bucketJobs, bucketJobIndex, bucketJobOwnerIndex, bucketJobOwnerLookup, bucketStoreMeta,
 		bucketQueue, bucketQueueJobIndex, bucketQueueCounts, bucketNodes, bucketTokens, bucketPairings, bucketPairCodes,
-		bucketAssignments, bucketEvents, bucketJobEvents, bucketPipelineEvents, bucketPipelineRuns, bucketSessionPlacements,
+		bucketAssignments, bucketEvents, bucketJobEvents, bucketPipelineEvents, bucketPipelineRuns, bucketPipelineOwnerLookup, bucketSessionPlacements,
 		bucketAdapterSessionLocks, bucketJobIdempotency, bucketJobIdempotencyByJob, bucketProducerRateWindows,
 		bucketHistoricalTotals,
 	}
@@ -203,6 +209,9 @@ func OpenStore(path string) (*Store, error) {
 		if err := ensureJobOwnerIndex(tx); err != nil {
 			return err
 		}
+		if err := ensureExecutionOwnerLookups(tx); err != nil {
+			return err
+		}
 		if err := ensureJobContractVersion(tx); err != nil {
 			return err
 		}
@@ -343,7 +352,11 @@ func (s *Store) CreateTokenWithLimits(role, subject string, groups []string, lif
 	if err != nil {
 		return "", TokenRecord{}, err
 	}
-	record := TokenRecord{ID: randomID("tok"), Role: role, Subject: cleanLabel(subject, 120), Groups: cleanList(groups, 32, 80), ProducerLimits: normalizeProducerLimits(limits), CreatedAt: time.Now().UTC()}
+	recordID, err := randomID("tok")
+	if err != nil {
+		return "", TokenRecord{}, err
+	}
+	record := TokenRecord{ID: recordID, Role: role, Subject: cleanLabel(subject, 120), Groups: cleanList(groups, 32, 80), ProducerLimits: normalizeProducerLimits(limits), CreatedAt: time.Now().UTC()}
 	if lifetime > 0 {
 		record.ExpiresAt = record.CreatedAt.Add(lifetime)
 	}
@@ -414,13 +427,17 @@ func (s *Store) EnsureToken(token, role, subject string, groups []string) error 
 	if err := validateTokenIdentity(role, subject, groups); err != nil {
 		return err
 	}
-	record := TokenRecord{ID: randomID("tok"), Role: role, Subject: cleanLabel(subject, 120), Groups: cleanList(groups, 32, 80), CreatedAt: time.Now().UTC()}
 	return s.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(bucketTokens)
 		key := tokenHash(token)
 		if bucket.Get([]byte(key)) != nil {
 			return nil
 		}
+		recordID, err := randomID("tok")
+		if err != nil {
+			return err
+		}
+		record := TokenRecord{ID: recordID, Role: role, Subject: cleanLabel(subject, 120), Groups: cleanList(groups, 32, 80), CreatedAt: time.Now().UTC()}
 		return putJSON(bucket, key, record)
 	})
 }
@@ -477,7 +494,11 @@ func (s *Store) EnsureBootstrapAdminToken(token string) error {
 				return errors.New("configured bootstrap admin secret collides with another or retired credential; choose a new secret")
 			}
 		} else {
-			record := TokenRecord{ID: randomID("tok"), Role: "admin", Subject: "relay-admin", CreatedAt: now}
+			recordID, err := randomID("tok")
+			if err != nil {
+				return err
+			}
+			record := TokenRecord{ID: recordID, Role: "admin", Subject: "relay-admin", CreatedAt: now}
 			if err := putJSON(tokens, currentHash, record); err != nil {
 				return err
 			}
@@ -722,9 +743,17 @@ func (s *Store) DecidePairing(userCode string, approve bool) (Pairing, error) {
 			return tokenErr
 		}
 		result.Approved = true
-		result.NodeID = randomID("node")
+		nodeID, idErr := randomID("node")
+		if idErr != nil {
+			return idErr
+		}
+		tokenID, idErr := randomID("tok")
+		if idErr != nil {
+			return idErr
+		}
+		result.NodeID = nodeID
 		result.PendingToken = token
-		record := TokenRecord{ID: randomID("tok"), Role: "node", Subject: result.NodeID, Groups: result.Groups, CreatedAt: time.Now().UTC()}
+		record := TokenRecord{ID: tokenID, Role: "node", Subject: result.NodeID, Groups: result.Groups, CreatedAt: time.Now().UTC()}
 		if err := putJSON(tx.Bucket(bucketTokens), tokenHash(token), record); err != nil {
 			return err
 		}
@@ -1148,7 +1177,10 @@ func prepareJob(request SubmitRequest, idempotencyKey, requestHash string, now t
 		Pipeline: cleanLabel(request.Pipeline, 128), Step: cleanLabel(request.Step, 128), ParentID: cleanLabel(request.ParentID, 128),
 	}
 	if job.ID == "" {
-		job.ID = randomID("job")
+		job.ID, err = randomID("job")
+		if err != nil {
+			return Job{}, err
+		}
 	} else if !validJobID(job.ID) {
 		return Job{}, errors.New("job id must use 1-128 safe ASCII characters and must not contain '..'")
 	}
@@ -1214,6 +1246,9 @@ func (s *Store) admitPreparedJobTx(tx *bolt.Tx, job *Job, maxQueued int, limits 
 		return false, err
 	}
 	if err := putJSON(tx.Bucket(bucketJobs), job.ID, *job); err != nil {
+		return false, err
+	}
+	if err := putOwnerLookup(tx.Bucket(bucketJobOwnerLookup), job.ID, job.OwnerSubject); err != nil {
 		return false, err
 	}
 	if err := tx.Bucket(bucketJobIndex).Put(jobIndexKey(*job), []byte(job.ID)); err != nil {
@@ -1775,6 +1810,9 @@ func (s *Store) consumeReservationAdmitted(id, secret, requestedJobID string, se
 		if err := putJSON(tx.Bucket(bucketJobs), job.ID, job); err != nil {
 			return err
 		}
+		if err := putOwnerLookup(tx.Bucket(bucketJobOwnerLookup), job.ID, job.OwnerSubject); err != nil {
+			return err
+		}
 		if err := tx.Bucket(bucketJobIndex).Put(jobIndexKey(job), []byte(job.ID)); err != nil {
 			return err
 		}
@@ -1894,6 +1932,20 @@ func queueCounts(tx *bolt.Tx, owner string) (total, owned int, err error) {
 func (s *Store) GetJob(id string) (Job, error) {
 	var job Job
 	err := s.db.View(func(tx *bolt.Tx) error { return getJSON(tx.Bucket(bucketJobs), id, &job) })
+	return job, err
+}
+
+// GetJobForOwner authorizes a producer against a fixed-size owner digest before
+// decoding the authoritative job record. Foreign and missing IDs therefore
+// avoid body-size-dependent JSON work and both fail closed as not found.
+func (s *Store) GetJobForOwner(id, owner string) (Job, error) {
+	var job Job
+	err := s.db.View(func(tx *bolt.Tx) error {
+		if !ownerLookupMatches(tx.Bucket(bucketJobOwnerLookup), id, owner) {
+			return os.ErrNotExist
+		}
+		return getJSON(tx.Bucket(bucketJobs), id, &job)
+	})
 	return job, err
 }
 
@@ -2238,6 +2290,9 @@ func (s *Store) SaveJob(job Job) error {
 		if err := putJSON(tx.Bucket(bucketJobs), job.ID, job); err != nil {
 			return err
 		}
+		if err := putOwnerLookup(tx.Bucket(bucketJobOwnerLookup), job.ID, job.OwnerSubject); err != nil {
+			return err
+		}
 		if previousExists && !bytes.Equal(jobIndexKey(previous), jobIndexKey(job)) {
 			if err := tx.Bucket(bucketJobIndex).Delete(jobIndexKey(previous)); err != nil {
 				return err
@@ -2423,7 +2478,11 @@ func (s *Store) assignJobAuthorized(id, nodeID, credentialHash string, adapter *
 			decisionCopy.SelectedNodeID = nodeID
 			decisionCopy.Requirements = job.Requirements
 			if decisionCopy.ID == "" {
-				decisionCopy.ID = randomID("route")
+				decisionID, err := randomID("route")
+				if err != nil {
+					return err
+				}
+				decisionCopy.ID = decisionID
 			}
 			if decisionCopy.CreatedAt.IsZero() {
 				decisionCopy.CreatedAt = job.AssignedAt
@@ -3529,7 +3588,11 @@ func (s *Store) EstimateVRAM(requirements Requirements) uint64 {
 
 func (s *Store) AddEvent(event Event) error {
 	if event.ID == "" {
-		event.ID = randomID("event")
+		var err error
+		event.ID, err = randomID("event")
+		if err != nil {
+			return err
+		}
 	}
 	if event.Time.IsZero() {
 		event.Time = time.Now().UTC()
@@ -3859,6 +3922,9 @@ func (s *Store) SavePipelineRun(run PipelineRun) error {
 		if err := putJSON(bucket, run.ID, run); err != nil {
 			return err
 		}
+		if err := putOwnerLookup(tx.Bucket(bucketPipelineOwnerLookup), run.ID, run.OwnerSubject); err != nil {
+			return err
+		}
 		if !existed && run.Status == "running" {
 			return appendPipelineEventTx(tx, s, run, "pipeline.started")
 		}
@@ -3907,6 +3973,9 @@ func (s *Store) CreatePipelineRunAdmitted(run PipelineRun, maxGlobal, maxOwner i
 			return ErrOwnerPipelineCapacity
 		}
 		if err := putJSON(bucket, run.ID, run); err != nil {
+			return err
+		}
+		if err := putOwnerLookup(tx.Bucket(bucketPipelineOwnerLookup), run.ID, run.OwnerSubject); err != nil {
 			return err
 		}
 		return appendPipelineEventTx(tx, s, run, "pipeline.started")
@@ -4045,6 +4114,20 @@ func (s *Store) GetPipelineRun(id string) (PipelineRun, error) {
 	return run, err
 }
 
+// GetPipelineRunForOwner is the pipeline equivalent of GetJobForOwner. The
+// producer boundary is checked without decoding another producer's input or
+// graph state.
+func (s *Store) GetPipelineRunForOwner(id, owner string) (PipelineRun, error) {
+	var run PipelineRun
+	err := s.db.View(func(tx *bolt.Tx) error {
+		if !ownerLookupMatches(tx.Bucket(bucketPipelineOwnerLookup), id, owner) {
+			return os.ErrNotExist
+		}
+		return getJSON(tx.Bucket(bucketPipelineRuns), id, &run)
+	})
+	return run, err
+}
+
 func (s *Store) ListPipelineRuns(limit int) ([]PipelineRun, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 50
@@ -4096,12 +4179,16 @@ func randomToken(prefix string) (string, error) {
 	return prefix + encode(raw), nil
 }
 
-func randomID(prefix string) string {
+func randomID(prefix string) (string, error) {
+	return randomIDFromReader(prefix, rand.Reader)
+}
+
+func randomIDFromReader(prefix string, reader io.Reader) (string, error) {
 	raw := make([]byte, 16)
-	if _, err := rand.Read(raw); err != nil {
-		return fmt.Sprintf("%s_%d", prefix, time.Now().UnixNano())
+	if _, err := io.ReadFull(reader, raw); err != nil {
+		return "", fmt.Errorf("generate secure %s id: %w", prefix, err)
 	}
-	return prefix + "_" + hex.EncodeToString(raw)
+	return prefix + "_" + hex.EncodeToString(raw), nil
 }
 
 func randomUserCode() (string, error) {
@@ -4191,6 +4278,28 @@ func deleteJobOwnerIndex(bucket *bolt.Bucket, job Job) error {
 	return nil
 }
 
+func putOwnerLookup(bucket *bolt.Bucket, id, owner string) error {
+	if bucket == nil || id == "" {
+		return errors.New("execution owner lookup is unavailable")
+	}
+	digest := sha256.Sum256([]byte(owner))
+	return bucket.Put([]byte(id), digest[:])
+}
+
+func ownerLookupMatches(bucket *bolt.Bucket, id, owner string) bool {
+	expected := sha256.Sum256([]byte(owner))
+	var actual [sha256.Size]byte
+	raw := []byte(nil)
+	if bucket != nil {
+		raw = bucket.Get([]byte(id))
+	}
+	if len(raw) == sha256.Size {
+		copy(actual[:], raw)
+	}
+	matched := subtle.ConstantTimeCompare(expected[:], actual[:]) == 1
+	return len(raw) == sha256.Size && matched
+}
+
 func prefixUpperBound(prefix []byte) []byte {
 	upper := append([]byte(nil), prefix...)
 	for index := len(upper) - 1; index >= 0; index-- {
@@ -4227,6 +4336,48 @@ func ensureJobOwnerIndex(tx *bolt.Tx) error {
 		return err
 	}
 	return meta.Put(keyJobOwnerIndexVersion, jobOwnerIndexVersion)
+}
+
+func ensureExecutionOwnerLookups(tx *bolt.Tx) error {
+	meta := tx.Bucket(bucketStoreMeta)
+	if bytes.Equal(meta.Get(keyOwnerLookupVersion), ownerLookupVersion) {
+		return nil
+	}
+	for _, name := range [][]byte{bucketJobOwnerLookup, bucketPipelineOwnerLookup} {
+		if err := tx.DeleteBucket(name); err != nil && !errors.Is(err, bolt.ErrBucketNotFound) {
+			return err
+		}
+		if _, err := tx.CreateBucket(name); err != nil {
+			return err
+		}
+	}
+	jobOwners := tx.Bucket(bucketJobOwnerLookup)
+	if err := tx.Bucket(bucketJobs).ForEach(func(key, value []byte) error {
+		var job Job
+		if err := json.Unmarshal(value, &job); err != nil {
+			return fmt.Errorf("migrate job owner lookup for %q: %w", key, err)
+		}
+		if job.ID != string(key) {
+			return fmt.Errorf("migrate job owner lookup: record key %q does not match id %q", key, job.ID)
+		}
+		return putOwnerLookup(jobOwners, job.ID, job.OwnerSubject)
+	}); err != nil {
+		return err
+	}
+	pipelineOwners := tx.Bucket(bucketPipelineOwnerLookup)
+	if err := tx.Bucket(bucketPipelineRuns).ForEach(func(key, value []byte) error {
+		var run PipelineRun
+		if err := json.Unmarshal(value, &run); err != nil {
+			return fmt.Errorf("migrate pipeline owner lookup for %q: %w", key, err)
+		}
+		if run.ID != string(key) {
+			return fmt.Errorf("migrate pipeline owner lookup: record key %q does not match id %q", key, run.ID)
+		}
+		return putOwnerLookup(pipelineOwners, run.ID, run.OwnerSubject)
+	}); err != nil {
+		return err
+	}
+	return meta.Put(keyOwnerLookupVersion, ownerLookupVersion)
 }
 
 func queueKey(job Job) []byte {
