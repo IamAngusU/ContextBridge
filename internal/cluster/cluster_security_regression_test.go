@@ -651,6 +651,19 @@ func TestRelayDispatchRotatesPastLargeIncompatibleQueuePrefix(t *testing.T) {
 	if _, err := relay.store.CreateJob(SubmitRequest{ID: routeableID, OwnerSubject: "owner-0", Priority: 10, Requirements: Requirements{Provider: "ollama", Task: "generation", Model: "available"}, Payload: json.RawMessage(`{}`)}); err != nil {
 		t.Fatal(err)
 	}
+	// Creating the durable prefix deliberately performs 201 separate Bolt
+	// transactions. That can exceed NodeFreshnessWindow on a contended Windows
+	// runner even though a real worker would keep sending heartbeats. Refresh the
+	// test worker and wait for the relay to persist that evidence so this test
+	// measures queue-window rotation, not stale-worker rejection.
+	heartbeatAt := time.Now().UTC()
+	if err := connection.Write(context.Background(), websocket.MessageText, mustJSON(WireMessage{Version: ProtocolVersion, Type: "heartbeat", Capabilities: &node.Capabilities})); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 5*time.Second, func() bool {
+		saved, loadErr := relay.store.GetNode(nodeID)
+		return loadErr == nil && saved.Connected && !saved.LastSeen.Before(heartbeatAt)
+	}, "worker heartbeat was not persisted after queue setup")
 
 	relay.dispatch()
 	queued, err := relay.store.GetJob(routeableID)
