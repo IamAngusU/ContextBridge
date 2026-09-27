@@ -57,6 +57,24 @@ func TestCompletionScriptsExposeGuidedPairing(t *testing.T) {
 	}
 }
 
+func TestCompletionScriptsExposeGuidedClusterSubmission(t *testing.T) {
+	cases := map[string]struct {
+		script string
+		want   string
+	}{
+		"powershell": {powershellCompletionScript(), "'cluster submit' = @('--config','--file','--token','--wait','--e2ee','--stream','--artifacts','--idempotency-key','--interactive')"},
+		"bash":       {bashCompletionScript(), `"cluster submit") candidates="--config --file --token --wait --e2ee --stream --artifacts --idempotency-key --interactive"`},
+		"zsh":        {zshCompletionScript(), "--interactive[Guide unresolved submission values in a real terminal]"},
+	}
+	for name, test := range cases {
+		t.Run(name, func(t *testing.T) {
+			if !strings.Contains(test.script, test.want) {
+				t.Fatal("completion does not expose guided cluster submission")
+			}
+		})
+	}
+}
+
 func TestPowerShellTabExpansionTracksTrailingSpaceAndOptionPosition(t *testing.T) {
 	shell := powerShellForTest(t)
 	tests := []struct {
