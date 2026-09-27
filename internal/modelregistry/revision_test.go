@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -49,6 +50,46 @@ func TestPullResolvesAndDownloadsImmutableRevision(t *testing.T) {
 	}
 	if len(entries) != 1 || entries[0].Revision != revision || entries[0].SHA256 != fileDigest || downloadedPath == "" {
 		t.Fatalf("pull was not bound to registry revision and digest: %#v path=%q", entries, downloadedPath)
+	}
+	listed := List(cfg)
+	if len(listed) != 1 || listed[0].Revision != revision || listed[0].SHA256 != fileDigest || listed[0].Evidence != "verified_download_manifest" {
+		t.Fatalf("verified download identity did not survive process-local pull state: %#v", listed)
+	}
+	if err := os.WriteFile(listed[0].Path, append(data, '!'), 0600); err != nil {
+		t.Fatal(err)
+	}
+	listed = List(cfg)
+	if len(listed) != 1 || listed[0].Evidence != "" || listed[0].Revision != "" || listed[0].SHA256 != "" {
+		t.Fatalf("size-changed model retained verified installation evidence: %#v", listed)
+	}
+}
+
+func TestInstallationManifestCannotOverridePinnedConfiguration(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, "fixture")
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("fixture")
+	digest := sha256.Sum256(data)
+	fileDigest := hex.EncodeToString(digest[:])
+	if err := os.WriteFile(filepath.Join(directory, "model.gguf"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	manifest := installationManifest{
+		Schema: installationManifestSchema, Alias: "fixture", Repository: "owner/repo",
+		Revision: strings.Repeat("b", 40),
+		Files:    map[string]installationManifestFile{"model.gguf": {SHA256: fileDigest, Size: int64(len(data))}},
+	}
+	if err := writeInstallationManifest(filepath.Join(directory, installationManifestName), manifest); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{Storage: config.Storage{Models: root}, Models: map[string]config.Model{
+		"fixture": {Repository: "owner/repo", File: "model.gguf", Revision: strings.Repeat("a", 40), SHA256: fileDigest},
+	}}
+	listed := List(cfg)
+	if len(listed) != 1 || listed[0].Revision != strings.Repeat("a", 40) || listed[0].Evidence != "operator_config" {
+		t.Fatalf("conflicting manifest overrode pinned operator configuration: %#v", listed)
 	}
 }
 

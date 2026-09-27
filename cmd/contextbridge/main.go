@@ -1088,9 +1088,26 @@ func modelsCommand(args []string) error {
 		if model.Installed {
 			state = formatInt64Bytes(model.Size)
 		}
-		fmt.Printf("%-24s %-14s %s\n", model.Name, state, model.Repository+"/"+model.File)
+		identity := model.Repository + "/" + model.File
+		if model.Revision != "" {
+			identity += " @ " + shortIdentity(model.Revision)
+		}
+		if model.SHA256 != "" {
+			identity += " · sha256:" + shortIdentity(strings.TrimPrefix(model.SHA256, "sha256:"))
+		}
+		if model.Evidence != "" {
+			identity += " · " + model.Evidence
+		}
+		fmt.Printf("%-24s %-14s %s\n", model.Name, state, identity)
 	}
 	return nil
+}
+
+func shortIdentity(value string) string {
+	if len(value) > 12 {
+		return value[:12]
+	}
+	return value
 }
 
 func resourcesCommand(args []string) error {
