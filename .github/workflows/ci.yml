@@ -72,7 +72,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Audit workflows with zizmor
-        uses: zizmorcore/zizmor-action@5ca5fc7a4779c5263a3ffa0e1f693009994446d1 # v0.1.2
+        uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
         with:
           advanced-security: false
           online-audits: false
