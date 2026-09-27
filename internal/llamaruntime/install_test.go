@@ -1,8 +1,10 @@
 package llamaruntime
 
 import (
+	"archive/tar"
 	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"math"
 	"os"
@@ -96,6 +98,142 @@ func TestExtractZipRejectsDuplicatePaths(t *testing.T) {
 	}
 	if err := extractZip(archive, t.TempDir()); err == nil {
 		t.Fatal("expected duplicate archive path to be rejected")
+	}
+}
+
+func TestRuntimeExtractorsDoNotFollowTargetSymlinks(t *testing.T) {
+	tests := []struct {
+		name    string
+		archive string
+		write   func(*testing.T, string)
+		extract func(string, string) error
+	}{
+		{name: "zip", archive: "runtime.zip", write: writeRuntimeZipFixture, extract: extractZip},
+		{name: "tar-gzip", archive: "runtime.tar.gz", write: writeRuntimeTarGzFixture, extract: extractTarGz},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			archive := filepath.Join(t.TempDir(), test.archive)
+			test.write(t, archive)
+			target := t.TempDir()
+			outside := t.TempDir()
+			if err := os.Symlink(outside, filepath.Join(target, "bin")); err != nil {
+				t.Skipf("symlink unavailable: %v", err)
+			}
+			if err := test.extract(archive, target); err == nil {
+				t.Fatal("runtime extraction followed a target-directory symlink")
+			}
+			if _, err := os.Stat(filepath.Join(outside, "llama-server")); !os.IsNotExist(err) {
+				t.Fatalf("runtime extraction escaped its target: %v", err)
+			}
+		})
+	}
+}
+
+func TestRuntimeExtractorsPreserveSafeNestedFiles(t *testing.T) {
+	tests := []struct {
+		name    string
+		archive string
+		write   func(*testing.T, string)
+		extract func(string, string) error
+	}{
+		{name: "zip", archive: "runtime.zip", write: writeRuntimeZipFixture, extract: extractZip},
+		{name: "tar-gzip", archive: "runtime.tar.gz", write: writeRuntimeTarGzFixture, extract: extractTarGz},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			archive := filepath.Join(t.TempDir(), test.archive)
+			test.write(t, archive)
+			target := t.TempDir()
+			if err := test.extract(archive, target); err != nil {
+				t.Fatal(err)
+			}
+			content, err := os.ReadFile(filepath.Join(target, "bin", "llama-server"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(content) != "runtime" {
+				t.Fatalf("extracted runtime = %q", content)
+			}
+		})
+	}
+}
+
+func TestRuntimeExtractorsRejectSymlinkTargets(t *testing.T) {
+	tests := []struct {
+		name    string
+		archive string
+		write   func(*testing.T, string)
+		extract func(string, string) error
+	}{
+		{name: "zip", archive: "runtime.zip", write: writeRuntimeZipFixture, extract: extractZip},
+		{name: "tar-gzip", archive: "runtime.tar.gz", write: writeRuntimeTarGzFixture, extract: extractTarGz},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			archive := filepath.Join(t.TempDir(), test.archive)
+			test.write(t, archive)
+			parent := t.TempDir()
+			outside := t.TempDir()
+			target := filepath.Join(parent, "runtime.partial")
+			if err := os.Symlink(outside, target); err != nil {
+				t.Skipf("symlink unavailable: %v", err)
+			}
+			if err := test.extract(archive, target); err == nil {
+				t.Fatal("runtime extraction accepted a symlink target")
+			}
+			if _, err := os.Stat(filepath.Join(outside, "bin", "llama-server")); !os.IsNotExist(err) {
+				t.Fatalf("runtime extraction escaped through its target: %v", err)
+			}
+		})
+	}
+}
+
+func writeRuntimeZipFixture(t *testing.T, path string) {
+	t.Helper()
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := zip.NewWriter(file)
+	item, err := writer.Create("bin/llama-server")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := item.Write([]byte("runtime")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeRuntimeTarGzFixture(t *testing.T, path string) {
+	t.Helper()
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gzipWriter := gzip.NewWriter(file)
+	writer := tar.NewWriter(gzipWriter)
+	content := []byte("runtime")
+	if err := writer.WriteHeader(&tar.Header{Name: "bin/llama-server", Mode: 0700, Size: int64(len(content)), Typeflag: tar.TypeReg}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
