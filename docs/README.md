@@ -8,6 +8,8 @@ described as vendor integrations here.
 
 - [Architecture](architecture.md): trust boundaries and data flow.
 - [Security](security.md): threat model, defaults, and limitations.
+- [Security verification](security-verification.md): static, dependency,
+  secret, workflow, and real-process black-box gates.
 - [Operations](operations.md): the shortest path from install to a local job,
   a worker pool, and repeatable health checks.
 - [Pools and placement](pools-and-placement.md): topologies, capacity,

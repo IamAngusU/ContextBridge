@@ -1,0 +1,17 @@
+title = "ContextBridge secret scanning"
+
+[extend]
+useDefault = true
+
+# These exact strings are deliberately conspicuous canaries used to prove that
+# sealed/provider-controlled bytes never cross a trust boundary. Broad test-file
+# exclusions would also hide a real credential accidentally committed to a test.
+[allowlist]
+description = "Known non-secret regression canaries"
+regexTarget = "match"
+regexes = [
+  '''test_012345678901234567890123456789''',
+  '''measure_idle_012345678901234567890123456789''',
+  '''DECRYPTED-PROMPT-MARKER-9f3d''',
+  '''c2Vuc2l0aXZlLWFydGlmYWN0LWJ5dGVz'''
+]
