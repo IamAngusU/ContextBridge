@@ -170,7 +170,9 @@ func integrateCommand(args []string) error {
 		fmt.Printf("Base URL  %s\n", info.BaseURL)
 		fmt.Printf("Model     %s\n", info.Model)
 		if info.APIKey != "" {
-			fmt.Printf("API key   %s\n", info.APIKey)
+			if err := writeExplicitIntegrationSecret(os.Stdout, "API key   ", info.APIKey); err != nil {
+				return err
+			}
 		} else {
 			fmt.Println("API key   configured · hidden")
 		}
@@ -323,6 +325,14 @@ func integrateCommand(args []string) error {
 	default:
 		return fmt.Errorf("unsupported integration %q; use openai, litellm, mcp, relay, or ui", target)
 	}
+}
+
+// writeExplicitIntegrationSecret is deliberately not a logging operation.
+// Its only caller is the explicit --show-token path, which is documented as
+// placing the configured secret on stdout for the invoking user.
+func writeExplicitIntegrationSecret(writer io.Writer, prefix, secret string) error {
+	_, err := io.WriteString(writer, prefix+secret+"\n")
+	return err
 }
 
 func createRelayIntegrationBundle(ctx context.Context, cfg config.Config, path, subject string, groups []string, lifetimeHours int) (relayIntegrationInfo, error) {
