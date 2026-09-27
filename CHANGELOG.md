@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Added opt-in, TTY-only guided cluster submission. `cluster submit
+  --interactive` asks only for a missing prepared job-contract file, displays
+  a redacted relay/credential/E2EE/wait/artifact summary, and sends no network
+  request before confirmation. Cancellation and non-TTY use remain
+  side-effect-free, while fully specified automation keeps its existing
+  deterministic contract.
 - Made producer execution IDs relay-assigned and normalized point lookups so a
   producer cannot reserve another integration's predictable job ID or learn
   whether a guessed ID belongs to a different producer. Producer idempotency

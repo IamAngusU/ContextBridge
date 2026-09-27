@@ -2290,6 +2290,10 @@ func formatUptime(seconds uint64) string {
 }
 
 func clusterSubmitCommand(args []string) error {
+	return clusterSubmitCommandWithIO(args, os.Stdin, os.Stdout, interactiveFiles(os.Stdin, os.Stdout))
+}
+
+func clusterSubmitCommandWithIO(args []string, stdin io.Reader, output io.Writer, terminal bool) error {
 	flags := flag.NewFlagSet("cluster submit", flag.ContinueOnError)
 	path := flags.String("config", defaultConfigPath(), "config path")
 	file := flags.String("file", "", "cluster job JSON file")
@@ -2299,12 +2303,15 @@ func clusterSubmitCommand(args []string) error {
 	artifactDir := flags.String("artifacts", "", "save returned images and files in this directory")
 	sealed := flags.Bool("e2ee", false, "encrypt payload for the selected worker")
 	idempotencyKey := flags.String("idempotency-key", "", "deduplicate an exact producer submission retry")
+	interactive := flags.Bool("interactive", false, "guide unresolved submission values in a real terminal")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	if *file == "" {
-		return errors.New("--file is required")
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected cluster submit argument %q", flags.Arg(0))
 	}
+	provided := map[string]bool{}
+	flags.Visit(func(option *flag.Flag) { provided[option.Name] = true })
 	if *idempotencyKey != "" {
 		if err := cluster.ValidateIdempotencyKey(*idempotencyKey); err != nil {
 			return err
@@ -2319,6 +2326,28 @@ func clusterSubmitCommand(args []string) error {
 	}
 	if *token == "" {
 		*token = clusterClientToken(cfg, "")
+	}
+	if *interactive {
+		if !terminal {
+			return errors.New("guided cluster submission requires an interactive terminal; use explicit flags for scripts, pipes, CI, MCP, or services")
+		}
+		credentialSource := "config"
+		if provided["token"] {
+			credentialSource = "flag"
+		} else if strings.TrimSpace(os.Getenv("CONTEXTBRIDGE_CLUSTER_TOKEN")) != "" {
+			credentialSource = "environment"
+		}
+		apply, guideErr := guideClusterSubmission(stdin, output, cfg, file, *wait, *sealed, *stream, *artifactDir, *idempotencyKey, credentialSource, *token != "", provided)
+		if guideErr != nil {
+			return guideErr
+		}
+		if !apply {
+			_, _ = fmt.Fprintln(output, "Cancelled. No job was submitted.")
+			return nil
+		}
+	}
+	if strings.TrimSpace(*file) == "" {
+		return errors.New("--file is required (or use --interactive in a real terminal)")
 	}
 	const maximumClusterSubmissionFileBytes = ((cluster.MaximumJobPayloadBytes+16)*4+2)/3 + (64 << 10)
 	raw, err := readRegularFileBounded(*file, maximumClusterSubmissionFileBytes)
@@ -2365,9 +2394,9 @@ func clusterSubmitCommand(args []string) error {
 		}
 	}
 	if responseHeaders.Get("Idempotency-Replayed") == "true" {
-		fmt.Println("Queued:", job.ID, "(existing; duplicate submission suppressed)")
+		fmt.Fprintln(output, "Queued:", job.ID, "(existing; duplicate submission suppressed)")
 	} else {
-		fmt.Println("Queued:", job.ID)
+		fmt.Fprintln(output, "Queued:", job.ID)
 	}
 	if !*wait {
 		return nil

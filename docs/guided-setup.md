@@ -91,6 +91,21 @@ and creates no identity. If the selected identity file already exists, the
 summary says so explicitly; it is replaced only after the relay approves the
 new pairing.
 
+Submitting a prepared pool job has the same opt-in safety boundary:
+
+```sh
+contextbridge cluster submit --interactive
+```
+
+The guide asks only for a missing job-contract file, then shows the redacted
+relay origin, wait/E2EE/progress behavior, artifact destination, and whether a
+retry key and credential are present. It never prints the credential or asks
+the user to compose arbitrary job JSON at the prompt. No reservation or
+network request is created until the final confirmation. Cancellation sends no
+job, and redirected input/output, CI, MCP, and other non-TTY callers still fail
+deterministically instead of waiting for input. Fully specified automation
+continues to use the existing non-interactive command unchanged.
+
 The short pairing code is displayed as `XXXX-XXXX`, but input is tolerant of
 case, spaces, and common Unicode dash characters. The response also contains a
 `verification_uri_complete` fragment URL for browsers and clients that render
