@@ -105,8 +105,8 @@ path. Choose **Create a new pool** when this machine should coordinate other
 devices; CB then asks separately whether it should also run work. Execution
 resources such as Ollama or managed llama.cpp are requested only for devices
 that will actually execute jobs. You can change participation later; joining a
-different pool needs approval, and moving pool authority is a separate
-protected operation.
+different pool needs approval. Changing the pool coordinator is not an ordinary
+role change.
 
 For **Join an existing pool**, choose either a trusted LAN join bundle for a
 private LAN/VLAN/VPN path or the pool owner's HTTPS relay URL. A join bundle

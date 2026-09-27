@@ -198,7 +198,7 @@ func promptGuidedMode(reader *bufio.Reader, output io.Writer, fallback string) (
 		"     Keep execution local; no other machine is required.",
 		"  5) Advanced setup",
 		"     Choose the technical relay, worker, and client roles yourself.",
-		"You can change how this device participates later. Joining another pool requires approval; moving pool authority is a separate protected operation.",
+		"You can change how this device participates later. Joining another pool requires approval. Changing the pool coordinator is not an ordinary role change.",
 	}
 	for _, line := range lines {
 		if _, err := fmt.Fprintln(output, line); err != nil {

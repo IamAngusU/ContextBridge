@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/tls"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,6 +17,73 @@ import (
 	"github.com/IamAngusU/ContextBridge/internal/cluster"
 	"github.com/IamAngusU/ContextBridge/internal/config"
 )
+
+func TestClusterLANPrivateNetworkPolicyAcceptsSharedOverlayAndRejectsPublicIP(t *testing.T) {
+	directory := t.TempDir()
+	configPath := filepath.Join(directory, "config.yml")
+	if err := config.Default(configPath); err != nil {
+		t.Fatal(err)
+	}
+	bundlePath := filepath.Join(directory, "overlay-join.json")
+	if err := clusterLANInitCommand([]string{"--config", configPath, "--advertise-host", "100.100.42.8", "--out", bundlePath}); err != nil {
+		t.Fatalf("shared overlay address was rejected: %v", err)
+	}
+	bundle, err := cluster.LoadLANJoinBundle(bundlePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := string(mustReadCLIFile(t, bundlePath))
+	if bundle.RelayURL != "https://100.100.42.8:32151" || bundle.Trust.SPKISHA256 == "" || strings.Contains(raw, "PRIVATE KEY") {
+		t.Fatalf("overlay join bundle is not safely trust-pinned: %#v", bundle)
+	}
+
+	publicConfig := filepath.Join(directory, "public.yml")
+	if err := config.Default(publicConfig); err != nil {
+		t.Fatal(err)
+	}
+	err = clusterLANInitCommand([]string{"--config", publicConfig, "--advertise-host", "8.8.8.8", "--out", filepath.Join(directory, "public.json")})
+	if err == nil || !strings.Contains(err.Error(), "shared overlay/CGNAT") {
+		t.Fatalf("ordinary public address rejection = %v", err)
+	}
+}
+
+func TestClusterLANRelocateAcceptsSharedOverlayWithSameIdentity(t *testing.T) {
+	directory := t.TempDir()
+	configPath := filepath.Join(directory, "config.yml")
+	if err := config.Default(configPath); err != nil {
+		t.Fatal(err)
+	}
+	oldBundlePath := filepath.Join(directory, "old.json")
+	if err := clusterLANInitCommand([]string{"--config", configPath, "--listen", "127.0.0.1:32151", "--advertise-host", "127.0.0.1", "--out", oldBundlePath}); err != nil {
+		t.Fatal(err)
+	}
+	oldBundle, err := cluster.LoadLANJoinBundle(oldBundlePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newBundlePath := filepath.Join(directory, "overlay.json")
+	if err := clusterLANRelocateCommand([]string{"--config", configPath, "--advertise-host", "100.115.10.20", "--out", newBundlePath}); err != nil {
+		t.Fatalf("shared overlay relocation was rejected: %v", err)
+	}
+	newBundle, err := cluster.LoadLANJoinBundle(newBundlePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newBundle.RelayURL != "https://100.115.10.20:32151" || newBundle.Trust.SPKISHA256 != oldBundle.Trust.SPKISHA256 {
+		t.Fatalf("overlay relocation did not retain relay identity: old=%#v new=%#v", oldBundle, newBundle)
+	}
+}
+
+func TestPreferredLANAddressUsesPrivateNetworkPolicy(t *testing.T) {
+	address, err := preferredLANAddressFromIPs([]net.IP{
+		net.ParseIP("8.8.8.8"),
+		net.ParseIP("127.0.0.1"),
+		net.ParseIP("100.100.42.8"),
+	})
+	if err != nil || address != "100.100.42.8" {
+		t.Fatalf("preferred overlay address = %q, %v", address, err)
+	}
+}
 
 func TestClusterLANInitCreatesReusablePublicBundleAndPrivateIdentity(t *testing.T) {
 	directory := t.TempDir()
