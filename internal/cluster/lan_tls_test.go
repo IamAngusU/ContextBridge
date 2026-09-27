@@ -355,8 +355,9 @@ func TestLANRelayPairsAndConnectsWithPinnedTLS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	loopback := freeTestAddress(t)
-	lan := freeTestAddress(t)
+	addresses := freeTestAddresses(t, 2)
+	loopback := addresses[0]
+	lan := addresses[1]
 	relay, err := NewRelay(RelayConfig{
 		Version: "test", Listen: loopback, PublicURL: "http://" + loopback,
 		LANListen: lan, LANPublicURL: "https://" + lan, LANTLSCertificate: certificatePath, LANTLSPrivateKey: privateKeyPath,
@@ -438,15 +439,27 @@ func TestLANRelayPairsAndConnectsWithPinnedTLS(t *testing.T) {
 	}
 }
 
-func freeTestAddress(t *testing.T) string {
+func freeTestAddresses(t *testing.T, count int) []string {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	listeners := make([]net.Listener, 0, count)
+	addresses := make([]string, 0, count)
+	for range count {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			for _, open := range listeners {
+				_ = open.Close()
+			}
+			t.Fatal(err)
+		}
+		listeners = append(listeners, listener)
+		addresses = append(addresses, listener.Addr().String())
 	}
-	address := listener.Addr().String()
-	listener.Close()
-	return address
+	for _, listener := range listeners {
+		if err := listener.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return addresses
 }
 
 func waitForLANTest(t *testing.T, timeout time.Duration, ready func() bool) {
