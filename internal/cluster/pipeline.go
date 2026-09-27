@@ -91,13 +91,18 @@ func (r *Relay) handlePipelineRun(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("pipeline input must be valid JSON"))
 		return
 	}
-	run := PipelineRun{ID: randomID("run"), Pipeline: name, TenantID: pipeline.TenantID, ProducerLimits: r.producerLimits(record), Status: "running", Input: input, CreatedAt: time.Now().UTC()}
+	runID, err := randomID("run")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	run := PipelineRun{ID: runID, Pipeline: name, TenantID: pipeline.TenantID, ProducerLimits: r.producerLimits(record), Status: "running", Input: input, CreatedAt: time.Now().UTC()}
 	run.OwnerSubject = record.Subject
 	if !r.beginAdmission() {
 		writeError(w, http.StatusServiceUnavailable, errors.New("relay is stopping"))
 		return
 	}
-	err := r.store.CreatePipelineRunAdmitted(run, maxActivePipelineRuns, maxActivePipelineRunsPerOwner)
+	err = r.store.CreatePipelineRunAdmitted(run, maxActivePipelineRuns, maxActivePipelineRunsPerOwner)
 	r.endAdmission()
 	if err != nil {
 		status := http.StatusInternalServerError

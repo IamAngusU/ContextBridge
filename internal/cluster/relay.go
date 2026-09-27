@@ -957,7 +957,11 @@ func (r *Relay) handleRouteExplain(w http.ResponseWriter, req *http.Request) {
 	}
 	routingRequirements, requiredSessionNode := r.withSessionAffinity(input.Requirements, record.Subject)
 	_, decision := rankWithDecisionForOwnerPolicy(nodes, routingRequirements, r.store.EstimateVRAM(input.Requirements), record.Subject, time.Now().UTC(), r.cfg.Placement)
-	decision.ID = randomID("route_preview")
+	decision.ID, err = randomID("route_preview")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	decision.Preview = true
 	decision.PolicyDecision = &policyDecision
 	applyRoutingNodeConstraints(&decision, requiredSessionNode, "")
@@ -1282,8 +1286,18 @@ func (r *Relay) handleReserve(w http.ResponseWriter, req *http.Request) {
 		assignedRequirements.AdapterEndpointID = selectedAdapterEndpointBinding(routingRequirements, session)
 		assignedRequirements.AdapterPrincipal = session.Principal
 	}
+	assignmentID, err := randomID("assignment")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	jobID, err := randomID("job")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	assignment := Assignment{
-		ID: randomID("assignment"), JobID: randomID("job"), NodeID: node.ID, NodeName: node.Name,
+		ID: assignmentID, JobID: jobID, NodeID: node.ID, NodeName: node.Name,
 		PublicKey: node.PublicKey, Attempt: 1, OwnerSubject: record.Subject, TenantID: input.TenantID,
 		ExpiresAt: time.Now().UTC().Add(r.cfg.AssignmentTTL), Requirements: assignedRequirements,
 		PolicyDecision: policyDecision,
@@ -2517,30 +2531,29 @@ func scopeTenantID(tenantID *string, record TokenRecord) error {
 	return nil
 }
 
-func canReadJob(ctx context.Context, job Job) bool {
-	record, ok := tokenRecord(ctx)
-	return !ok || record.Role != "producer" || job.OwnerSubject == record.Subject
-}
-
 // visibleJob deliberately collapses a missing job and a foreign producer's
 // job into the same result. Producer credentials must not gain an existence
 // oracle for another producer's execution IDs; aggregate operators retain the
 // existing global view.
 func (r *Relay) visibleJob(ctx context.Context, id string) (Job, error) {
+	record, ok := tokenRecord(ctx)
+	if ok && record.Role == "producer" {
+		return r.store.GetJobForOwner(id, record.Subject)
+	}
 	job, err := r.store.GetJob(id)
-	if err != nil || !canReadJob(ctx, job) {
+	if err != nil {
 		return Job{}, os.ErrNotExist
 	}
 	return job, nil
 }
 
 func (r *Relay) visiblePipelineRun(ctx context.Context, id string) (PipelineRun, error) {
+	record, ok := tokenRecord(ctx)
+	if ok && record.Role == "producer" {
+		return r.store.GetPipelineRunForOwner(id, record.Subject)
+	}
 	run, err := r.store.GetPipelineRun(id)
 	if err != nil {
-		return PipelineRun{}, os.ErrNotExist
-	}
-	record, ok := tokenRecord(ctx)
-	if ok && record.Role == "producer" && run.OwnerSubject != record.Subject {
 		return PipelineRun{}, os.ErrNotExist
 	}
 	return run, nil

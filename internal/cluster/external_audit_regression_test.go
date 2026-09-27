@@ -79,7 +79,7 @@ func TestRateLimiterRejectsUnknownKeysAtHardCapacity(t *testing.T) {
 	relay := &Relay{rate: make(map[string]*rateWindow)}
 	now := time.Now()
 	for index := 0; index < maximumRateLimitBuckets; index++ {
-		relay.rate["198.51.100."+randomID("")] = &rateWindow{started: now}
+		relay.rate["198.51.100."+testRandomID(t, "")] = &rateWindow{started: now}
 	}
 	handler := relay.rateLimit(1, time.Minute, func(http.ResponseWriter, *http.Request) {
 		t.Fatal("capacity-exhausted limiter called the protected handler")
@@ -120,7 +120,7 @@ func TestPairingCapacityAndFingerprintAreBounded(t *testing.T) {
 	if err := store.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(bucketPairings)
 		for index := bucket.Stats().KeyN; index < maximumPendingPairings; index++ {
-			pairing := Pairing{DeviceCodeHash: randomID("pair"), UserCode: randomID("code"), NodeName: "flood", PublicKey: publicKey, ExpiresAt: time.Now().Add(time.Minute)}
+			pairing := Pairing{DeviceCodeHash: testRandomID(t, "pair"), UserCode: testRandomID(t, "code"), NodeName: "flood", PublicKey: publicKey, ExpiresAt: time.Now().Add(time.Minute)}
 			if err := putJSON(bucket, pairing.DeviceCodeHash, pairing); err != nil {
 				return err
 			}

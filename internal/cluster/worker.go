@@ -410,7 +410,10 @@ func BootstrapWorkerIdentity(database, relayURL, name, identityFile string, grou
 	if err != nil {
 		return err
 	}
-	nodeID := randomID("node")
+	nodeID, err := randomID("node")
+	if err != nil {
+		return err
+	}
 	token, _, err := store.CreateToken("node", nodeID, groups, 0)
 	if err != nil {
 		return err

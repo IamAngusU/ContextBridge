@@ -376,6 +376,11 @@ func prunePipelineRuns(tx *bolt.Tx, cutoff time.Time, limit int) (int, error) {
 		if err := cursor.Delete(); err != nil {
 			return removed, err
 		}
+		if owners := tx.Bucket(bucketPipelineOwnerLookup); owners != nil {
+			if err := owners.Delete([]byte(run.ID)); err != nil {
+				return removed, err
+			}
+		}
 		if events := tx.Bucket(bucketPipelineEvents); events != nil && events.Bucket([]byte(run.ID)) != nil {
 			if err := events.DeleteBucket([]byte(run.ID)); err != nil {
 				return removed, err
@@ -433,6 +438,11 @@ func deleteJobIndexes(tx *bolt.Tx, job Job) error {
 	}
 	if err := deleteJobOwnerIndex(tx.Bucket(bucketJobOwnerIndex), job); err != nil {
 		return err
+	}
+	if owners := tx.Bucket(bucketJobOwnerLookup); owners != nil {
+		if err := owners.Delete([]byte(job.ID)); err != nil {
+			return err
+		}
 	}
 	if reverse := tx.Bucket(bucketJobIdempotencyByJob); reverse != nil {
 		if raw := reverse.Get([]byte(job.ID)); raw != nil {
