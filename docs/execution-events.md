@@ -135,6 +135,8 @@ Pipeline streams use these relay-authored authoritative types:
 
 - `pipeline.started`
 - `pipeline.step.queued`
+- `pipeline.step.ready`
+- `pipeline.step.blocked`
 - `pipeline.step.started`
 - `pipeline.step.completed`
 - `pipeline.step.failed`
@@ -144,11 +146,14 @@ Pipeline streams use these relay-authored authoritative types:
 - `pipeline.failed`
 - `pipeline.cancelled`
 
-Every step event carries the durable pipeline `run_id`, configured `step_id`
-and actual child `job_id`. The event is committed in the same transaction as
-the corresponding run or child-job state. This lets an application reconnect
-without inventing progress from presentation logs or losing the relationship
-between a pipeline step and the job that executed it.
+Every step event carries the durable pipeline `run_id` and configured
+`step_id`. Execution events also carry the actual child `job_id`;
+`pipeline.step.ready` and `pipeline.step.blocked` intentionally have no child
+job because they are graph checkpoints before admission. Each event is
+committed in the same transaction as the corresponding run or child-job state.
+This lets an application reconnect without inventing progress from
+presentation logs or losing the relationship between a pipeline step and the
+job that executed it.
 
 `source=relay` and `authority=authoritative` mean CB owns and persisted that
 orchestration transition. They do not mean that CB can prove arbitrary claims

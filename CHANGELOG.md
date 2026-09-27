@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Added retry-safe DAG terminal checkpoint reconciliation without enabling DAG
+  execution. An already-terminal child snapshot, its graph node, newly ready
+  dependants, recursively blocked descendants, and authoritative ready/blocked
+  events now commit atomically. Failed, cancelled, or ambiguous predecessors
+  block descendants while already active siblings remain untouched; event
+  failures roll back the checkpoint and successful retries are idempotent.
 - Added content-free workload normalization for advisory runtime estimates.
   Each node/route retains at most 16 opaque ETA-only profiles derived from
   coarse payload-byte, image-count, image-byte and assignment-load classes;

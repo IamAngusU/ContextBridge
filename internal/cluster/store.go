@@ -1305,6 +1305,167 @@ func (s *Store) CreateDAGChildJobAdmittedGoverned(runID, step string, request Su
 	return updated, job, err
 }
 
+// ReconcileDAGChildTerminal atomically checkpoints one already-terminal child
+// and derives the next ready/blocked graph states. It never creates work. A
+// caller may safely retry after a storage/event failure because the terminal
+// job remains the evidence source and unchanged node states emit no duplicate
+// events.
+func (s *Store) ReconcileDAGChildTerminal(runID, jobID string) (PipelineRun, error) {
+	runID = strings.TrimSpace(runID)
+	jobID = strings.TrimSpace(jobID)
+	if !validJobID(runID) || !validJobID(jobID) {
+		return PipelineRun{}, errors.New("DAG run and child job IDs are required")
+	}
+	var updated PipelineRun
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		var run PipelineRun
+		if err := getJSON(tx.Bucket(bucketPipelineRuns), runID, &run); err != nil {
+			return err
+		}
+		if run.Status != "running" || run.Graph == nil {
+			return errors.New("DAG run is not active")
+		}
+		if err := validatePipelineRunGraphState(run); err != nil {
+			return err
+		}
+		var job Job
+		if err := getJSON(tx.Bucket(bucketJobs), jobID, &job); err != nil {
+			return err
+		}
+		if job.ParentID != run.ID || job.Pipeline != run.Pipeline || job.OwnerSubject != run.OwnerSubject || job.TenantID != run.TenantID || strings.TrimSpace(job.Step) == "" {
+			return errors.New("DAG child job context does not match its run")
+		}
+		targetState, err := dagNodeStateForTerminalJob(job)
+		if err != nil {
+			return err
+		}
+
+		updated = run
+		updated.NodeStates = clonePipelineNodeCheckpoints(run.NodeStates)
+		updated.Steps = append([]Job(nil), run.Steps...)
+		nodeIndex := -1
+		for index := range updated.NodeStates {
+			if updated.NodeStates[index].Step == job.Step {
+				nodeIndex = index
+				break
+			}
+		}
+		if nodeIndex < 0 || updated.NodeStates[nodeIndex].JobID != job.ID {
+			return errors.New("DAG child job is not bound to its step")
+		}
+		before := updated.NodeStates[nodeIndex]
+		if before.State != PipelineNodeQueued && before.State != PipelineNodeRunning && before.State != targetState {
+			return fmt.Errorf("DAG step %s cannot reconcile terminal child from %s", before.Step, before.State)
+		}
+		checkpointAt := time.Now().UTC()
+		if job.UpdatedAt.After(checkpointAt) {
+			checkpointAt = job.UpdatedAt
+		}
+		if checkpointAt.Before(before.UpdatedAt) {
+			checkpointAt = before.UpdatedAt
+		}
+		if before.State != targetState {
+			updated.NodeStates[nodeIndex].State = targetState
+			updated.NodeStates[nodeIndex].UpdatedAt = checkpointAt
+		}
+		stepSnapshotFound := false
+		for index := range updated.Steps {
+			if updated.Steps[index].ID == job.ID {
+				updated.Steps[index] = job
+				stepSnapshotFound = true
+				break
+			}
+		}
+		if !stepSnapshotFound {
+			return errors.New("DAG child job is missing from its run checkpoint")
+		}
+
+		changed := make([]int, 0, len(updated.NodeStates))
+		stateByStep := make(map[string]string, len(updated.NodeStates))
+		indexByStep := make(map[string]int, len(updated.NodeStates))
+		for index, node := range updated.NodeStates {
+			stateByStep[node.Step] = node.State
+			indexByStep[node.Step] = index
+		}
+		for _, step := range updated.Graph.Order {
+			index, exists := indexByStep[step]
+			if !exists {
+				return errors.New("DAG graph order references an unavailable checkpoint")
+			}
+			node := &updated.NodeStates[index]
+			if node.State != PipelineNodeNotReady && node.State != PipelineNodeReady {
+				stateByStep[node.Step] = node.State
+				continue
+			}
+			allCompleted := true
+			blocked := false
+			for _, dependency := range node.DependsOn {
+				state := stateByStep[dependency]
+				if state != PipelineNodeCompleted {
+					allCompleted = false
+				}
+				if pipelineNodeBlocksDescendants(state) {
+					blocked = true
+				}
+			}
+			nextState := node.State
+			if blocked {
+				nextState = PipelineNodeBlockedByDependency
+			} else if allCompleted && node.State == PipelineNodeNotReady {
+				nextState = PipelineNodeReady
+			}
+			if nextState != node.State {
+				node.State = nextState
+				node.UpdatedAt = checkpointAt
+				changed = append(changed, index)
+			}
+			stateByStep[node.Step] = node.State
+		}
+		if err := validatePipelineRunGraphState(updated); err != nil {
+			return err
+		}
+		if err := validatePipelineRunGraphTransition(run, updated); err != nil {
+			return err
+		}
+		for _, index := range changed {
+			eventType := "pipeline.step.ready"
+			if updated.NodeStates[index].State == PipelineNodeBlockedByDependency {
+				eventType = "pipeline.step.blocked"
+			}
+			if err := appendPipelineNodeCheckpointEventTx(tx, s, updated, updated.NodeStates[index], eventType); err != nil {
+				return err
+			}
+		}
+		return putJSON(tx.Bucket(bucketPipelineRuns), updated.ID, updated)
+	})
+	return updated, err
+}
+
+func dagNodeStateForTerminalJob(job Job) (string, error) {
+	switch job.Status {
+	case JobCompleted:
+		return PipelineNodeCompleted, nil
+	case JobCancelled:
+		return PipelineNodeCancelled, nil
+	case JobFailed:
+		if job.FailureCode == FailureExecutionStateAmbiguous || job.FailureCode == FailureExecutionTimeoutAmbiguous {
+			return PipelineNodeAmbiguous, nil
+		}
+		return PipelineNodeFailed, nil
+	default:
+		return "", errors.New("DAG child job is not terminal")
+	}
+}
+
+func pipelineNodeBlocksDescendants(state string) bool {
+	switch state {
+	case PipelineNodeFailed, PipelineNodeCancelled, PipelineNodeAmbiguous, PipelineNodeBlockedByDependency:
+		return true
+	default:
+		return false
+	}
+}
+
 func clonePipelineNodeCheckpoints(nodes []PipelineNodeCheckpoint) []PipelineNodeCheckpoint {
 	cloned := append([]PipelineNodeCheckpoint(nil), nodes...)
 	for index := range cloned {
@@ -3481,6 +3642,19 @@ func appendPipelineStepEventTx(tx *bolt.Tx, store *Store, job Job, eventType str
 		Attempt: job.Attempt, NodeID: job.AssignedNode, StepID: job.Step,
 	}
 	return appendExecutionEventTx(tx, store, bucketPipelineEvents, job.ParentID, event)
+}
+
+func appendPipelineNodeCheckpointEventTx(tx *bolt.Tx, store *Store, run PipelineRun, node PipelineNodeCheckpoint, eventType string) error {
+	switch eventType {
+	case "pipeline.step.ready", "pipeline.step.blocked":
+	default:
+		return fmt.Errorf("unsupported authoritative pipeline checkpoint event %q", eventType)
+	}
+	event := JobEvent{
+		Schema: JobEventSchemaV1, RunID: run.ID, Type: eventType,
+		Source: "relay", Authority: "authoritative", Time: node.UpdatedAt, StepID: node.Step,
+	}
+	return appendExecutionEventTx(tx, store, bucketPipelineEvents, run.ID, event)
 }
 
 func appendExecutionEventTx(tx *bolt.Tx, store *Store, rootName []byte, scopeID string, event JobEvent) error {
