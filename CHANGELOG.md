@@ -282,8 +282,8 @@
 - Added public operational guides for pooling, placement, schedules, bounded
   agents, integrations, portable resource packs, and explicit limits.
 - Added distribution regression tests that require the brand and core guides
-  while preventing private out-of-tree adapter names from entering public text
-  surfaces.
+  while preventing implementation-specific adapter identifiers from entering
+  public text surfaces.
 - Defined accurate, versioned compatibility statements for producers, relays,
   workers, resource packs, and out-of-tree adapters, backed by the existing
   protocol manifest and no-inference conformance commands.
