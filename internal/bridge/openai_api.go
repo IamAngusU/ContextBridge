@@ -134,7 +134,10 @@ func (s *Server) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	job := Job{Source: "openai-compatible-api", Route: route, Prompt: prompt, Text: history, Images: images, Output: OutputSpec{Mode: mode, MaxTokens: maxTokens}}
-	prepareJob(&job)
+	if err := prepareJob(&job); err != nil {
+		writeOpenAIError(w, http.StatusInternalServerError, "job identifier is temporarily unavailable", "internal_error")
+		return
+	}
 	job.SessionID = "openai-" + job.ID
 	job.Metadata = map[string]interface{}{"contextbridge_new_session": true, "contextbridge_close_endpoint_after_job": true}
 	if routeTask := strings.TrimSpace(s.cfg.Route(job.Route).Task); routeTask != "" {

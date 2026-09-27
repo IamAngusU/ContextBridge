@@ -259,7 +259,9 @@ func (s *Server) Process(ctx context.Context, job Job) (Output, error) {
 		return Output{}, err
 	}
 	defer releaseAccounting()
-	prepareJob(&job)
+	if err := prepareJob(&job); err != nil {
+		return Output{}, err
+	}
 	job.routeProvider = s.cfg.Route(job.Route).Provider
 	if routeTask := strings.TrimSpace(s.cfg.Route(job.Route).Task); routeTask != "" {
 		job.Task = routeTask
@@ -290,7 +292,9 @@ func (s *Server) ProcessIncremental(ctx context.Context, job Job, emit func(stri
 		return Output{}, err
 	}
 	defer releaseAccounting()
-	prepareJob(&job)
+	if err := prepareJob(&job); err != nil {
+		return Output{}, err
+	}
 	job.routeProvider = s.cfg.Route(job.Route).Provider
 	if routeTask := strings.TrimSpace(s.cfg.Route(job.Route).Task); routeTask != "" {
 		job.Task = routeTask
@@ -719,7 +723,10 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 		return
 	}
-	prepareJob(&job)
+	if err := prepareJob(&job); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "job identifier is temporarily unavailable"})
+		return
+	}
 	s.logger.Printf("received job %s from %s via route %s", job.ID, job.Source, job.Route)
 	s.store.AddActivity("received", "Job received from "+job.Source, job.ID)
 	output, err := s.Process(r.Context(), job)
@@ -1428,10 +1435,22 @@ func writeInboxResult(path string, value []byte) error {
 	return nil
 }
 
-func prepareJob(job *Job) {
+func prepareJob(job *Job) error {
+	return prepareJobWithReader(job, rand.Reader)
+}
+
+func prepareJobWithReader(job *Job, random io.Reader) error {
+	if job == nil {
+		return errors.New("job is required")
+	}
 	if job.ID == "" {
 		buf := make([]byte, 16)
-		rand.Read(buf)
+		if random == nil {
+			return errors.New("job identifier randomness is unavailable")
+		}
+		if _, err := io.ReadFull(random, buf); err != nil {
+			return fmt.Errorf("generate job identifier: %w", err)
+		}
 		job.ID = hex.EncodeToString(buf)
 	}
 	if job.Source == "" {
@@ -1443,6 +1462,7 @@ func prepareJob(job *Job) {
 	if job.CreatedAt.IsZero() {
 		job.CreatedAt = time.Now().UTC()
 	}
+	return nil
 }
 
 func validateJob(job Job) error {
