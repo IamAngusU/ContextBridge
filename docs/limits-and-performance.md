@@ -56,7 +56,75 @@ the benchmark process, fresh-database allocation growth, and fixed typed
 heartbeat payloads. It creates temporary databases and loopback listeners,
 removes them afterward, sends no model request, and contacts no Internet host.
 
-## Dated Windows/amd64 development snapshot
+## Dated Windows/amd64 current desktop snapshot
+
+This snapshot was measured on 2026-09-28 from source commit
+`0c5812f25b872b14dd58e3e0d3e4ac4847340754`. The binary was built with Go
+1.27.1 for Windows/amd64 using `-trimpath -buildvcs=true -ldflags "-s -w -X
+main.version=v0.7.0-dev"`. The host was an Acer Predator PO7-640 desktop with
+an Intel Core i9-12900K (16 physical cores and 24 logical CPUs), 32 GiB of
+DDR5 memory configured at 4000 MT/s, an NVIDIA GeForce RTX 3080, and Windows
+11 Home build 26200. The active power scheme was `High performance`.
+
+Five sequential reports used 128 measured samples, eight warmups, concurrency
+1/4/16/64, 1,000 cancelled jobs for database growth, and a ten-second idle
+window. The first three were the planned set; two diagnostic repeats were
+added after run 2 showed a visible durable-queue outlier. Run 3 is shown below
+because it had the smallest summed normalized deviation from the five-run
+median across every operation/concurrency p50, p95, p99, and throughput value.
+The [complete reports and selection details](benchmarks/2026-09-28-windows-i9-12900k/)
+are published together.
+
+Normal workstation background services remained active. No process was
+stopped to improve the result, and host load was not controlled. The benchmark
+performs no model inference and does not use the GPU. This is one workstation
+observation, not an SLA or an isolated comparison with an older snapshot.
+
+### Durable relay submit/read/cancel
+
+| Clients | p50 | p95 | p99 | Throughput |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 3.075 ms | 4.468 ms | 5.247 ms | 315.3 ops/s |
+| 4 | 10.893 ms | 13.410 ms | 14.771 ms | 369.3 ops/s |
+| 16 | 48.381 ms | 50.971 ms | 51.243 ms | 330.1 ops/s |
+| 64 | 180.682 ms | 194.423 ms | 197.553 ms | 339.7 ops/s |
+
+### Small E2EE job and result
+
+| Clients | p50 | p95 | p99 | Throughput |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.127 ms | 0.192 ms | 0.223 ms | 7,796.0 ops/s |
+| 4 | 0.128 ms | 0.194 ms | 0.230 ms | 28,804.2 ops/s |
+| 16 | 0.291 ms | 0.545 ms | 0.673 ms | 49,753.5 ops/s |
+| 64 | 0.815 ms | 1.971 ms | 2.285 ms | 50,062.7 ops/s |
+
+### Verify one 64 KiB artifact
+
+| Clients | p50 | p95 | p99 | Throughput |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.089 ms | 0.195 ms | 0.405 ms | 11,240.4 ops/s |
+| 4 | 0.096 ms | 0.193 ms | 0.556 ms | 34,508.6 ops/s |
+| 16 | 0.268 ms | 0.399 ms | 0.513 ms | 55,349.4 ops/s |
+| 64 | 0.790 ms | 1.439 ms | 1.857 ms | 65,436.3 ops/s |
+
+### Resource footprint
+
+| Measurement | Observation | Scope |
+| --- | ---: | --- |
+| Stripped core binary | 13.3 MiB | Built executable only |
+| Idle benchmark process + relay RSS | 15.3 MiB | Current Windows working set after warmup |
+| Go heap allocated / runtime reserved | 1.4 MiB / 15.8 MiB | Same process and sample window |
+| Idle CPU | below sampling resolution | No process CPU tick recorded during the 10 s window; not claimed as literal zero |
+| Fresh Bolt allocation growth | 8.0 MiB / 1,000 jobs | 1,000 small jobs created and cancelled; allocated file growth, not device writes |
+| Generic adapter status payload | 245 B / heartbeat; 172.3 KiB/hour | One idle endpoint at 5 s; application JSON only |
+| Worker heartbeat payload | 728 B / heartbeat; 511.9 KiB/hour | One GPU and one model at 5 s; WebSocket JSON only |
+
+Across runs 1 through 5, concurrency-1 durable queue throughput was
+297.9/173.3/315.3/318.2/302.4 ops/s and idle RSS was
+15.4/15.3/15.3/15.3/15.3 MiB. All five runs completed without a benchmark
+warning. The outlier is retained rather than silently averaged away.
+
+## Dated Windows/amd64 historical development snapshot
 
 This snapshot was measured on 2026-09-20 from source commit
 `a54ff6f9c8ce69a993a5960a73c51698ffdec330`, before documentation-only changes
@@ -175,7 +243,7 @@ ops/s and idle RSS was 15.1/15.3/15.1 MiB. All runs completed without a
 benchmark warning. The same heartbeat, Bolt allocation, and exclusion caveats
 as the other snapshots apply.
 
-### Bounded history and control traffic
+## Bounded history and control traffic
 
 The relay job-list endpoint is a bounded summary index: at most 200 records
 per request, without request bodies, result bodies, sealed envelopes, progress
