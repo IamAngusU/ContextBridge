@@ -203,7 +203,10 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var id Job
-		prepareJob(&id)
+		if err := prepareJob(&id); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "schedule identifier is temporarily unavailable"})
+			return
+		}
 		enabled := true
 		if input.Enabled != nil {
 			enabled = *input.Enabled
