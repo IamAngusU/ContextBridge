@@ -1,7 +1,6 @@
 package resourcepacks
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +12,8 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+
+	"github.com/IamAngusU/ContextBridge/internal/strictjson"
 )
 
 const (
@@ -313,10 +314,12 @@ func readManifest(marker string) (Manifest, bool) {
 		return Manifest{}, false
 	}
 	defer file.Close()
-	decoder := json.NewDecoder(io.LimitReader(file, maximumManifestBytes+1))
-	decoder.DisallowUnknownFields()
+	raw, err := io.ReadAll(io.LimitReader(file, maximumManifestBytes+1))
+	if err != nil || len(raw) == 0 || int64(len(raw)) > maximumManifestBytes {
+		return Manifest{}, false
+	}
 	var manifest Manifest
-	if decoder.Decode(&manifest) != nil || decoder.Decode(&struct{}{}) != io.EOF || validateManifest(manifest) != nil {
+	if strictjson.Decode(raw, &manifest) != nil || validateManifest(manifest) != nil {
 		return Manifest{}, false
 	}
 	return manifest, true

@@ -162,6 +162,16 @@ func TestStrictJSONRejectsDuplicateProperties(t *testing.T) {
 	}
 }
 
+func TestStrictJSONRejectsCaseAliasedStructProperties(t *testing.T) {
+	var target struct {
+		Priority int `json:"priority"`
+	}
+	err := decodeJSON(strings.NewReader(`{"priority":1,"Priority":2}`), &target, 4096)
+	if err == nil {
+		t.Fatalf("case-aliased priority was accepted as %d", target.Priority)
+	}
+}
+
 func TestOpenSharedRejectsWrongNonceLengthWithoutPanic(t *testing.T) {
 	envelope := &SealedEnvelope{Algorithm: sealedAlgorithm, Nonce: encode([]byte{1}), Ciphertext: encode([]byte("invalid"))}
 	if _, err := openShared(make([]byte, 32), envelope, nil, "test"); err == nil || !strings.Contains(err.Error(), "nonce") {

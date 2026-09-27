@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -150,6 +151,29 @@ func TestLANJoinBundleIsStrictAndHostBound(t *testing.T) {
 	}
 	if _, err := LoadLANJoinBundle(path); err == nil {
 		t.Fatal("multiple JSON values were accepted")
+	}
+}
+
+func TestLANJoinBundleRejectsDuplicateTrustFields(t *testing.T) {
+	now := time.Date(2026, time.September, 27, 9, 0, 0, 0, time.UTC)
+	directory := t.TempDir()
+	trust, err := EnsureLANTLSIdentity(filepath.Join(directory, "cert.pem"), filepath.Join(directory, "key.pem"), "127.0.0.2", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle := LANJoinBundle{Version: LANJoinBundleVersion, RelayURL: "https://127.0.0.2:32151", Trust: trust, CreatedAt: now}
+	raw, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicate := bytes.Replace(raw,
+		[]byte(`"relay_url":"https://127.0.0.2:32151"`),
+		[]byte(`"relay_url":"https://127.0.0.1:32151","relay_url":"https://127.0.0.2:32151"`), 1)
+	if bytes.Equal(duplicate, raw) {
+		t.Fatal("test fixture did not add a duplicate relay_url")
+	}
+	if parsed, err := parseLANJoinBundle(duplicate, now); err == nil {
+		t.Fatalf("duplicate relay_url was accepted as %q", parsed.RelayURL)
 	}
 }
 

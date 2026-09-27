@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,7 +8,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"math"
 	"net/url"
 	"os"
@@ -24,6 +22,7 @@ import (
 	"github.com/IamAngusU/ContextBridge/internal/bridge"
 	"github.com/IamAngusU/ContextBridge/internal/cluster"
 	"github.com/IamAngusU/ContextBridge/internal/config"
+	"github.com/IamAngusU/ContextBridge/internal/strictjson"
 )
 
 const (
@@ -838,18 +837,7 @@ func decodeAgentPlan(raw []byte) (agentPlan, error) {
 }
 
 func decodeAgentJSON(raw []byte, target interface{}) error {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return err
-	}
-	var extra interface{}
-	if err := decoder.Decode(&extra); err == nil {
-		return errors.New("multiple JSON values are not allowed")
-	} else if !errors.Is(err, io.EOF) {
-		return err
-	}
-	return nil
+	return strictjson.Decode(raw, target)
 }
 
 func validateAgentPlan(plan agentPlan) error {

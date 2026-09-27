@@ -19,6 +19,7 @@ import (
 	"github.com/IamAngusU/ContextBridge/internal/bridge"
 	"github.com/IamAngusU/ContextBridge/internal/cluster"
 	"github.com/IamAngusU/ContextBridge/internal/config"
+	"github.com/IamAngusU/ContextBridge/internal/strictjson"
 )
 
 const (
@@ -774,12 +775,7 @@ func decodeMCPObject(raw json.RawMessage, target interface{}) error {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		raw = json.RawMessage(`{}`)
 	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return err
-	}
-	return ensureJSONEOF(decoder)
+	return strictjson.Decode(raw, target)
 }
 
 func ensureJSONEOF(decoder *json.Decoder) error {
