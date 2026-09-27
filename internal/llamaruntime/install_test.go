@@ -2,10 +2,12 @@ package llamaruntime
 
 import (
 	"archive/zip"
+	"bytes"
 	"encoding/json"
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -138,5 +140,84 @@ func TestCurrentRuntimeStaysInsideManagedDirectory(t *testing.T) {
 	}
 	if current := Current(directory); current != "" {
 		t.Fatalf("accepted unmanaged runtime %q", current)
+	}
+}
+
+func TestWriteCurrentPointerReplacesRegularFileDurably(t *testing.T) {
+	directory := t.TempDir()
+	versionDirectory := filepath.Join(directory, "b2")
+	if err := os.MkdirAll(versionDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	executable := filepath.Join(versionDirectory, "llama-server")
+	if err := os.WriteFile(executable, []byte("runtime"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "current.txt"), []byte("stale\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCurrentPointer(directory, executable); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(directory, "current.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw, []byte(executable+"\n")) {
+		t.Fatalf("current pointer = %q", raw)
+	}
+	want, err := filepath.EvalSymlinks(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := Current(directory); got != want {
+		t.Fatalf("activated runtime = %q, want %q", got, want)
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".contextbridge-current-") {
+			t.Fatalf("activation left temporary file %q", entry.Name())
+		}
+	}
+}
+
+func TestWriteCurrentPointerRejectsNonRegularDestination(t *testing.T) {
+	directory := t.TempDir()
+	pointer := filepath.Join(directory, "current.txt")
+	if err := os.Mkdir(pointer, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCurrentPointer(directory, filepath.Join(directory, "runtime")); err == nil {
+		t.Fatal("runtime activation replaced a non-regular current pointer")
+	}
+	if info, err := os.Stat(pointer); err != nil || !info.IsDir() {
+		t.Fatalf("non-regular pointer was changed: info=%v err=%v", info, err)
+	}
+}
+
+func TestRuntimePointerSymlinkCannotBeReadOrOverwritten(t *testing.T) {
+	directory := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outside, []byte("do-not-change"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(directory, "current.txt")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if got := Current(directory); got != "" {
+		t.Fatalf("runtime pointer symlink resolved to %q", got)
+	}
+	if err := writeCurrentPointer(directory, filepath.Join(directory, "runtime")); err == nil {
+		t.Fatal("runtime activation accepted a pointer symlink")
+	}
+	raw, err := os.ReadFile(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != "do-not-change" {
+		t.Fatalf("runtime activation overwrote symlink target: %q", raw)
 	}
 }
