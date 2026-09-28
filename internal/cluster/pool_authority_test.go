@@ -61,7 +61,8 @@ func TestPoolAuthorityBindsWorkerAndExactEncryptedJob(t *testing.T) {
 		t.Fatal("authorization remained valid at its exclusive expiry")
 	}
 
-	worker := Worker{identity: WorkerIdentity{NodeID: context.NodeID, PrivateKey: privateKey, PublicKey: publicKey, PoolCertificate: certificate}}
+	identityPath := filepath.Join(t.TempDir(), "worker-identity.json")
+	worker := Worker{cfg: WorkerConfig{IdentityFile: identityPath}, identity: WorkerIdentity{NodeID: context.NodeID, PrivateKey: privateKey, PublicKey: publicKey, PoolCertificate: certificate}}
 	job := Job{ID: context.JobID, AssignedNode: context.NodeID, Attempt: context.Attempt, OwnerSubject: context.OwnerSubject, TenantID: context.TenantID, Requirements: context.Requirements, SealedPayload: sealed, PoolAuthorization: authorization}
 	if err := worker.validatePoolJob(job, now); err != nil {
 		t.Fatal(err)
@@ -75,6 +76,51 @@ func TestPoolAuthorityBindsWorkerAndExactEncryptedJob(t *testing.T) {
 	job.PoolAuthorization = nil
 	if err := worker.validatePoolJob(job, now); err == nil {
 		t.Fatal("protected worker accepted an unsigned job")
+	}
+}
+
+func TestPoolAuthorizationReplayRemainsClaimedAfterWorkerRestart(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	authority, err := NewPoolAuthority("customer-pool", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateKey, publicKey, err := NewIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate, err := CertifyPoolWorker(authority, publicKey, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	context := EncryptionContext{JobID: "job-restart-replay", NodeID: "node-protected", Attempt: 1, OwnerSubject: "customer-producer", Requirements: Requirements{Task: "generation", Provider: "ollama"}}
+	sealed, _, err := SealFor(publicKey, []byte(`{"prompt":"private"}`), JobAAD(context))
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorization, err := SignPoolJobAuthorization(authority, context, sealed, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := Job{ID: context.JobID, AssignedNode: context.NodeID, Attempt: context.Attempt, OwnerSubject: context.OwnerSubject, Requirements: context.Requirements, SealedPayload: sealed, PoolAuthorization: authorization}
+	identity := WorkerIdentity{NodeID: context.NodeID, PrivateKey: privateKey, PublicKey: publicKey, PoolCertificate: certificate}
+	identityPath := filepath.Join(t.TempDir(), "worker-identity.json")
+
+	firstProcess := Worker{cfg: WorkerConfig{IdentityFile: identityPath}, identity: identity}
+	if err := firstProcess.claimPoolJobAuthorization(job, now); err != nil {
+		t.Fatal(err)
+	}
+	secondProcess := Worker{cfg: WorkerConfig{IdentityFile: identityPath}, identity: identity}
+	if err := secondProcess.claimPoolJobAuthorization(job, now.Add(time.Second)); err == nil {
+		t.Fatal("restarted worker accepted an already claimed customer pool authorization")
+	}
+}
+
+func TestPoolAuthorizationClaimFailsClosedWithoutDurableIdentity(t *testing.T) {
+	worker := Worker{identity: WorkerIdentity{PoolCertificate: &PoolWorkerCertificate{}}}
+	job := Job{PoolAuthorization: &PoolJobAuthorization{Signature: "signed", ExpiresAt: time.Now().UTC().Add(time.Hour)}}
+	if err := worker.claimPoolJobAuthorization(job, time.Now().UTC()); err == nil {
+		t.Fatal("protected worker accepted a claim without durable replay storage")
 	}
 }
 
