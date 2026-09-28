@@ -66,6 +66,10 @@ published schema-1 reports remain immutable evidence; their `growth_*` fields
 describe allocated-file growth and must not be interpreted as logical bytes
 retained per job.
 
+The JSON report records the measured executable's base name and byte size, not
+its absolute local path. This keeps a publishable report from disclosing a
+workstation username or checkout layout.
+
 ## Dated Windows/amd64 current desktop snapshot
 
 This snapshot was measured on 2026-09-28 from source commit

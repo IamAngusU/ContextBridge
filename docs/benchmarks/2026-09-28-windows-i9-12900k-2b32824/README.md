@@ -69,3 +69,7 @@ variation. No durability, ownership, fencing, or event evidence was removed.
 
 These observations are development snapshots, not an SLA.
 
+The reports are complete benchmark output except that `binary_path` was
+normalized to the executable base name before publication. This removes the
+workstation username and temporary checkout path without changing a measured
+field.
