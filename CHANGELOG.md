@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Published a fresh three-run schema-2 benchmark snapshot from the i7-1355U
+  Windows laptop, including complete raw reports, selection details, database
+  evidence, resource variance, and the retained prior snapshot for comparison.
 - Made machine-readable benchmark reports safe to publish by recording only
   the measured executable's base name instead of its absolute local path, and
   sanitized the published i9 raw evidence without changing measured values.
