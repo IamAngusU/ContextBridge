@@ -264,7 +264,76 @@ advertised endpoints, diagnostics, GPUs, models, capabilities, reconnects, and
 configured intervals. Bolt reuses pages and does not compact on deletion, so
 fresh-file growth is not a forecast for every retention mix.
 
-## Dated Windows/amd64 laptop snapshot
+## Dated Windows/amd64 current laptop snapshot
+
+This snapshot was measured on 2026-09-28 from exact clean source commit
+`3856f26f5366b1a93ee0ce25a81de640c8101a88`. The binary was built with Go
+1.27.1 for Windows/amd64 using `-trimpath -buildvcs=true -ldflags "-s -w -X
+main.version=v0.8.0-dev"`; embedded provenance confirmed the commit and
+`vcs.modified=false`. The host was a Samsung 750XGK laptop with an Intel Core
+i7-1355U (10 physical cores and 12 logical CPUs), 16 GB of RAM, and Windows 11
+Home build 26200. It was on AC power at 98% battery with the active `Samsung
+Mode` power scheme.
+
+Three sequential runs used 128 measured samples, eight warmups, concurrency
+1/4/16/64, 1,000 cancelled jobs, and a ten-second idle window. Run 1 is shown
+for operation timings because it had the smallest summed normalized deviation
+from the three-run median across every operation/concurrency p50, p95, p99,
+and throughput value. The [complete raw reports and selection
+details](benchmarks/2026-09-28-windows-i7-1355u-3856f26/) are published
+together.
+
+### Durable relay submit/read/cancel
+
+| Clients | p50 | p95 | p99 | Throughput |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 10.525 ms | 12.171 ms | 12.568 ms | 94.9 ops/s |
+| 4 | 39.906 ms | 42.902 ms | 45.904 ms | 99.1 ops/s |
+| 16 | 159.220 ms | 162.185 ms | 162.357 ms | 100.1 ops/s |
+| 64 | 650.943 ms | 659.167 ms | 659.988 ms | 97.6 ops/s |
+
+### Small E2EE job and result
+
+| Clients | p50 | p95 | p99 | Throughput |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.125 ms | 0.158 ms | 0.188 ms | 8,655.5 ops/s |
+| 4 | 0.189 ms | 0.344 ms | 0.375 ms | 18,942.4 ops/s |
+| 16 | 0.497 ms | 0.855 ms | 1.025 ms | 26,075.1 ops/s |
+| 64 | 1.997 ms | 4.323 ms | 4.556 ms | 25,655.6 ops/s |
+
+### Verify one 64 KiB artifact
+
+| Clients | p50 | p95 | p99 | Throughput |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.067 ms | 0.126 ms | 0.163 ms | 11,940.0 ops/s |
+| 4 | 0.125 ms | 0.209 ms | 0.220 ms | 28,311.5 ops/s |
+| 16 | 0.445 ms | 0.646 ms | 0.718 ms | 33,942.7 ops/s |
+| 64 | 1.135 ms | 2.059 ms | 2.302 ms | 46,430.0 ops/s |
+
+### Resource footprint
+
+| Measurement | Observation | Scope |
+| --- | ---: | --- |
+| Stripped core binary | 13.3 MiB | Built executable only |
+| Idle benchmark process + relay RSS | 15.1 MiB | Three-run median current Windows working set after warmup |
+| Go heap allocated / runtime reserved | 1.2 MiB / 11.6 MiB | Three-run median from the same sample window |
+| Idle CPU | below sampling resolution | No process CPU tick recorded during any 10 s window; not claimed as literal zero |
+| Bolt allocated-file growth | 8.0 MiB / 1,000 jobs | Stepwise capacity growth; deliberately not normalized per job |
+| Bolt live bucket growth | 1.60 MiB / 1,000 jobs | Branch/leaf bytes occupied by retained cancellation evidence |
+| Bolt transaction page allocation | 100.6 MiB / 1,000 jobs | Cumulative pages allocated by write transactions, not retained database size or device writes |
+| Generic adapter status payload | 245 B / heartbeat; 172.3 KiB/hour | One idle endpoint at 5 s; application JSON only |
+| Worker heartbeat payload | 728 B / heartbeat; 511.9 KiB/hour | One GPU and one model at 5 s; WebSocket JSON only |
+
+Concurrency-1 durable queue throughput across runs 1/2/3 was
+94.91/94.59/94.72 ops/s. Its median was 24.5% above the 76.09 ops/s median of
+the prior laptop snapshot. This is a cross-commit observation, not a controlled
+attribution. Idle RSS was 55.8/15.1/15.0 MiB: the timing-selection algorithm
+does not include resources, so the run-1 working-set outlier remains in the raw
+evidence while this summary reports the 15.1 MiB median. All three runs
+completed without a benchmark warning. Background activity and laptop
+thermals were not controlled; this is not an SLA.
+
+## Dated Windows/amd64 prior laptop snapshot
 
 This snapshot was measured on 2026-09-27 from source commit
 `120387fcaaa63dd597cac498f3c490af186ad60f`. The binary was built with Go
