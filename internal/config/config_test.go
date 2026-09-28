@@ -70,6 +70,51 @@ func TestPlacementConfigurationIsBounded(t *testing.T) {
 	}
 }
 
+func TestClusterAccountsAreBoundedAndResolveAuthorityPaths(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := Default(path); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Cluster.Accounts = map[string]ClusterAccount{
+		"alice": {RelayURL: "https://relay.example.test", ClientToken: "cb_" + strings.Repeat("a", 40), PoolAuthorityFile: "alice-authority.json"},
+	}
+	cfg.Cluster.ActiveAccount = "alice"
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	publicJSON, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(publicJSON, []byte(cfg.Cluster.Accounts["alice"].ClientToken)) {
+		t.Fatal("cluster account token leaked through JSON serialization")
+	}
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loaded.Cluster.Accounts["alice"].PoolAuthorityFile; got != filepath.Join(filepath.Dir(path), "alice-authority.json") {
+		t.Fatalf("relative account authority path resolved to %q", got)
+	}
+
+	loaded.Cluster.ActiveAccount = "missing"
+	if err := loaded.Validate(); err == nil || !strings.Contains(err.Error(), "active_account") {
+		t.Fatalf("missing active account was accepted: %v", err)
+	}
+	loaded.Cluster.ActiveAccount = "alice"
+	loaded.Cluster.Accounts["unsafe..name"] = loaded.Cluster.Accounts["alice"]
+	if err := loaded.Validate(); err == nil || !strings.Contains(err.Error(), "invalid name") {
+		t.Fatalf("unsafe account name was accepted: %v", err)
+	}
+}
+
 func TestRAGEmbeddingRevisionIsBoundedPrintableEvidence(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yml")
 	if err := Default(path); err != nil {

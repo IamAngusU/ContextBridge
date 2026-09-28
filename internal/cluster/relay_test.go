@@ -444,8 +444,16 @@ func TestRelayDispatchAndEncryptedRoundTrip(t *testing.T) {
 	go relay.dispatchLoop(dispatchCtx)
 	server := httptest.NewServer(relay.Handler())
 	defer server.Close()
+	poolAuthority, err := NewPoolAuthority("customer-pool", time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
 	privateKey, publicKey, _ := NewIdentity()
-	pair, err := relay.store.CreatePairing(PairRequest{NodeName: "gpu-node", PublicKey: publicKey, Groups: []string{"fast"}}, server.URL+"/#pair", time.Minute)
+	poolCertificate, err := CertifyPoolWorker(poolAuthority, publicKey, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair, err := relay.store.CreatePairing(PairRequest{NodeName: "gpu-node", PublicKey: publicKey, PoolCertificate: poolCertificate, Groups: []string{"fast"}}, server.URL+"/#pair", time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -484,7 +492,7 @@ func TestRelayDispatchAndEncryptedRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "done")
-	node := Node{ID: pairing.NodeID, Name: "gpu-node", PublicKey: publicKey, Connected: true, LastSeen: time.Now().UTC(), Capabilities: Capabilities{Tasks: []string{"generation"}, Groups: []string{"fast"}, MaxConcurrent: 1, GPUs: []GPUCapability{{MemoryTotal: 8 << 30, MemoryFree: 7 << 30}}}}
+	node := Node{ID: pairing.NodeID, Name: "gpu-node", PublicKey: publicKey, PoolCertificate: poolCertificate, Connected: true, LastSeen: time.Now().UTC(), Capabilities: Capabilities{Tasks: []string{"generation"}, Groups: []string{"fast"}, MaxConcurrent: 1, GPUs: []GPUCapability{{MemoryTotal: 8 << 30, MemoryFree: 7 << 30}}}}
 	if err := conn.Write(context.Background(), websocket.MessageText, mustJSON(WireMessage{Version: ProtocolVersion, Type: "hello", Node: &node})); err != nil {
 		t.Fatal(err)
 	}
@@ -499,6 +507,9 @@ func TestRelayDispatchAndEncryptedRoundTrip(t *testing.T) {
 	}
 	var assignment AssignmentResponse
 	assignmentRequest := AssignmentRequest{TenantID: "tenant-a", Requirements: Requirements{Task: "generation", Group: "fast"}}
+	if err := poolAuthority.BindAssignmentRequest(&assignmentRequest); err != nil {
+		t.Fatal(err)
+	}
 	postTest(t, server.URL+"/v1/cluster/assign", producer, assignmentRequest, &assignment)
 	encryptionContext, err := ValidateAssignmentResponse(assignmentRequest, assignment, time.Now().UTC())
 	if err != nil {
@@ -507,13 +518,20 @@ func TestRelayDispatchAndEncryptedRoundTrip(t *testing.T) {
 	if assignment.Assignment.OwnerSubject != "test" || assignment.Assignment.TenantID != "tenant-a" || assignment.Assignment.Attempt != 1 {
 		t.Fatalf("reservation did not bind authenticated namespace and first attempt: %#v", assignment.Assignment)
 	}
+	if err := ValidateAssignmentPoolAuthority(poolAuthority, assignment, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
 	plain := json.RawMessage(`{"prompt":"relay must not see this"}`)
 	envelope, shared, err := SealFor(assignment.Assignment.PublicKey, plain, JobAAD(encryptionContext))
 	if err != nil {
 		t.Fatal(err)
 	}
+	poolAuthorization, err := SignPoolJobAuthorization(poolAuthority, encryptionContext, envelope, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
 	var submitted Job
-	postTest(t, server.URL+"/v1/cluster/jobs", producer, SubmitRequest{TenantID: assignment.Assignment.TenantID, Requirements: assignment.Assignment.Requirements, Sealed: envelope, AssignmentID: assignment.Assignment.ID, AssignmentSecret: assignment.Secret}, &submitted)
+	postTest(t, server.URL+"/v1/cluster/jobs", producer, SubmitRequest{TenantID: assignment.Assignment.TenantID, Requirements: assignment.Assignment.Requirements, Sealed: envelope, PoolAuthorization: poolAuthorization, AssignmentID: assignment.Assignment.ID, AssignmentSecret: assignment.Secret}, &submitted)
 	if err := ValidateEncryptedJobContext(encryptionContext, submitted); err != nil {
 		t.Fatal(err)
 	}
@@ -533,6 +551,9 @@ func TestRelayDispatchAndEncryptedRoundTrip(t *testing.T) {
 	workerContext, contextErr := wire.Job.EncryptionContextForNode(node.ID)
 	if contextErr != nil || !workerContext.Equal(encryptionContext) {
 		t.Fatalf("worker received a different encryption context: %#v, %v", workerContext, contextErr)
+	}
+	if err := ValidatePoolJobAuthorization(poolCertificate.AuthorityKey, poolCertificate.PoolID, wire.Job.PoolAuthorization, workerContext, wire.Job.SealedPayload, time.Now().UTC()); err != nil {
+		t.Fatal(err)
 	}
 	decrypted, workerShared, err := OpenWith(privateKey, wire.Job.SealedPayload, JobAAD(workerContext))
 	if err != nil || !bytes.Equal(decrypted, plain) {

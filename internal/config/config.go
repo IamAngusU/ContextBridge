@@ -22,6 +22,7 @@ import (
 	"github.com/IamAngusU/ContextBridge/internal/cluster"
 	"github.com/IamAngusU/ContextBridge/internal/netpolicy"
 	"github.com/IamAngusU/ContextBridge/internal/updater"
+	"github.com/IamAngusU/ContextBridge/internal/vectorstore"
 	"gopkg.in/yaml.v3"
 )
 
@@ -202,13 +203,26 @@ type AdapterProfile struct {
 }
 
 type Cluster struct {
-	Relay       ClusterRelay                `yaml:"relay" json:"relay"`
-	Worker      ClusterWorker               `yaml:"worker" json:"worker"`
-	Placement   ClusterPlacement            `yaml:"placement" json:"placement"`
-	ClientToken string                      `yaml:"client_token,omitempty" json:"-"`
-	Policies    ClusterPolicies             `yaml:"policies" json:"policies"`
-	Pricing     cluster.Pricing             `yaml:"pricing" json:"pricing"`
-	Pipelines   map[string]cluster.Pipeline `yaml:"pipelines" json:"pipelines"`
+	Relay             ClusterRelay                `yaml:"relay" json:"relay"`
+	Worker            ClusterWorker               `yaml:"worker" json:"worker"`
+	Placement         ClusterPlacement            `yaml:"placement" json:"placement"`
+	ClientToken       string                      `yaml:"client_token,omitempty" json:"-"`
+	PoolAuthorityFile string                      `yaml:"pool_authority_file,omitempty" json:"pool_authority_file,omitempty"`
+	ActiveAccount     string                      `yaml:"active_account,omitempty" json:"active_account,omitempty"`
+	Accounts          map[string]ClusterAccount   `yaml:"accounts,omitempty" json:"accounts,omitempty"`
+	SelectedAccount   string                      `yaml:"-" json:"-"`
+	Policies          ClusterPolicies             `yaml:"policies" json:"policies"`
+	Pricing           cluster.Pricing             `yaml:"pricing" json:"pricing"`
+	Pipelines         map[string]cluster.Pipeline `yaml:"pipelines" json:"pipelines"`
+}
+
+// ClusterAccount is a producer-side login profile. Tokens are omitted from
+// JSON management surfaces, while YAML persistence remains owner-scoped like
+// the legacy cluster.client_token setting.
+type ClusterAccount struct {
+	RelayURL          string `yaml:"relay_url,omitempty" json:"relay_url,omitempty"`
+	ClientToken       string `yaml:"client_token" json:"-"`
+	PoolAuthorityFile string `yaml:"pool_authority_file,omitempty" json:"pool_authority_file,omitempty"`
 }
 
 // ClusterPlacement contains operator-tunable soft ranking behavior. None of
@@ -305,6 +319,31 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	return parseConfig(raw, filepath.Dir(path))
+}
+
+func parseConfig(raw []byte, configDirectory string) (Config, error) {
+	cfg, err := decodeConfig(raw, configDirectory)
+	if err != nil {
+		return Config{}, err
+	}
+	if err := resolveEngineSecretFiles(&cfg, configDirectory); err != nil {
+		return Config{}, err
+	}
+	if err := resolveAdapterSecretFiles(&cfg, configDirectory); err != nil {
+		return Config{}, err
+	}
+	if err := cfg.Validate(); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+// decodeConfig parses and defaults configuration without dereferencing any
+// configured filesystem paths. Callers handling untrusted proposed config can
+// therefore validate structure without accidentally turning a path field into
+// local file-read authority.
+func decodeConfig(raw []byte, configDirectory string) (Config, error) {
 	expanded := expandEnvironment(string(raw))
 	var cfg Config
 	decoder := yaml.NewDecoder(strings.NewReader(expanded))
@@ -318,16 +357,7 @@ func Load(path string) (Config, error) {
 	} else if !errors.Is(err, io.EOF) {
 		return Config{}, fmt.Errorf("parse config: %w", err)
 	}
-	applyDefaults(&cfg, filepath.Dir(path))
-	if err := resolveEngineSecretFiles(&cfg, filepath.Dir(path)); err != nil {
-		return Config{}, err
-	}
-	if err := resolveAdapterSecretFiles(&cfg, filepath.Dir(path)); err != nil {
-		return Config{}, err
-	}
-	if err := cfg.Validate(); err != nil {
-		return Config{}, err
-	}
+	applyDefaults(&cfg, configDirectory)
 	return cfg, nil
 }
 
@@ -726,6 +756,9 @@ func (c Config) Validate() error {
 		if model.Revision != "" && !huggingFaceRevisionPattern.MatchString(model.Revision) {
 			return fmt.Errorf("model %s revision must be an immutable 40- or 64-character hexadecimal commit", name)
 		}
+		if model.Dimensions < 0 || model.Dimensions > vectorstore.MaximumVectorDimensions {
+			return fmt.Errorf("model %s dimensions must be between 1 and %d when set", name, vectorstore.MaximumVectorDimensions)
+		}
 	}
 	if c.RAG.Enabled {
 		if c.RAG.Backend != "local" {
@@ -778,6 +811,33 @@ func (c Config) Validate() error {
 			if strings.TrimSpace(c.Cluster.Relay.LAN.CertificateFile) == "" || strings.TrimSpace(c.Cluster.Relay.LAN.PrivateKeyFile) == "" {
 				return errors.New("cluster.relay.lan certificate_file and private_key_file are required")
 			}
+		}
+	}
+	if len(c.Cluster.PoolAuthorityFile) > 4096 || strings.IndexFunc(c.Cluster.PoolAuthorityFile, unicode.IsControl) >= 0 {
+		return errors.New("cluster.pool_authority_file must be at most 4096 characters without control characters")
+	}
+	if len(c.Cluster.Accounts) > 64 {
+		return errors.New("cluster.accounts must contain at most 64 accounts")
+	}
+	if c.Cluster.ActiveAccount != "" {
+		if _, exists := c.Cluster.Accounts[c.Cluster.ActiveAccount]; !exists {
+			return errors.New("cluster.active_account must name a configured account")
+		}
+	}
+	for name, account := range c.Cluster.Accounts {
+		if len(name) > 80 || !safeNamePattern.MatchString(name) || strings.Contains(name, "..") {
+			return fmt.Errorf("cluster account %s has an invalid name", name)
+		}
+		if token := strings.TrimSpace(account.ClientToken); token == "" || token != account.ClientToken || len(token) > 4096 || !strings.HasPrefix(token, "cb_") || len(token) < 24 || strings.IndexFunc(token, unicode.IsSpace) >= 0 {
+			return fmt.Errorf("cluster account %s has an invalid producer token", name)
+		}
+		if account.RelayURL != "" {
+			if err := cluster.ValidateRelayURL(account.RelayURL); err != nil {
+				return fmt.Errorf("cluster account %s relay_url: %w", name, err)
+			}
+		}
+		if len(account.PoolAuthorityFile) > 4096 || strings.IndexFunc(account.PoolAuthorityFile, unicode.IsControl) >= 0 {
+			return fmt.Errorf("cluster account %s pool_authority_file must be at most 4096 characters without control characters", name)
 		}
 	}
 	if c.Cluster.Relay.MaxQueue < 0 || c.Cluster.Relay.MaxQueue > 1_000_000 {
@@ -898,6 +958,12 @@ func (c Config) Validate() error {
 			}
 			if step.MaxIterations < 0 || step.MaxIterations > globalIterations {
 				return fmt.Errorf("pipeline %s step %s max_iterations exceeds the pipeline limit", name, step.Name)
+			}
+			if err := cluster.ValidateRequirements(step.Requirements); err != nil {
+				return fmt.Errorf("pipeline %s step %s requirements: %w", name, step.Name, err)
+			}
+			if len(c.Cluster.Policies.AllowedTasks) > 0 && !containsFoldConfig(c.Cluster.Policies.AllowedTasks, step.Requirements.Task) {
+				return fmt.Errorf("pipeline %s step %s task %s is not allowed by cluster policy", name, step.Name, step.Requirements.Task)
 			}
 		}
 		if _, err := cluster.PlanPipelineGraph(pipeline); err != nil {
@@ -1256,6 +1322,15 @@ func applyDefaults(cfg *Config, base string) {
 	} else if !filepath.IsAbs(cfg.Cluster.Relay.Database) {
 		cfg.Cluster.Relay.Database = filepath.Join(base, cfg.Cluster.Relay.Database)
 	}
+	if cfg.Cluster.PoolAuthorityFile != "" && !filepath.IsAbs(cfg.Cluster.PoolAuthorityFile) {
+		cfg.Cluster.PoolAuthorityFile = filepath.Join(base, cfg.Cluster.PoolAuthorityFile)
+	}
+	for name, account := range cfg.Cluster.Accounts {
+		if account.PoolAuthorityFile != "" && !filepath.IsAbs(account.PoolAuthorityFile) {
+			account.PoolAuthorityFile = filepath.Join(base, account.PoolAuthorityFile)
+			cfg.Cluster.Accounts[name] = account
+		}
+	}
 	if cfg.Cluster.Relay.MaxQueue == 0 {
 		cfg.Cluster.Relay.MaxQueue = 10000
 	}
@@ -1605,6 +1680,11 @@ rag:
   max_documents: 10000
 
 cluster:
+  # Optional customer-held Ed25519 authority for protected E2EE worker pools.
+  pool_authority_file: ""
+  # Optional named producer logins for convenient account switching.
+  active_account: ""
+  accounts: {}
   relay:
     enabled: false
     listen: 127.0.0.1:32150

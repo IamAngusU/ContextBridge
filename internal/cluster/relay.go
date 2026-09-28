@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -57,6 +59,8 @@ type RelayConfig struct {
 	RetentionSweep       time.Duration
 	Placement            PlacementPolicy
 }
+
+var relayRequestSequence atomic.Uint64
 
 const (
 	maxActiveReservationsPerOwner = 64
@@ -508,6 +512,8 @@ func (r *Relay) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/pairings/{code}/{decision}", r.authorize("admin")(r.handlePairDecision))
 	mux.HandleFunc("GET /v1/cluster/overview", r.authorize("admin", "observer", "producer")(r.handleOverview))
 	mux.HandleFunc("GET /v1/cluster/protocol", r.authorize("admin", "observer", "producer", "node")(r.handleProtocolManifest))
+	mux.HandleFunc("GET /v1/cluster/openapi.json", r.authorize("admin", "observer", "producer", "node")(r.handleOpenAPI))
+	mux.HandleFunc("GET /v1/cluster/whoami", r.authorize("admin", "observer", "producer", "node")(r.handleWhoAmI))
 	mux.HandleFunc("GET /v1/cluster/nodes", r.authorize("admin", "observer", "producer")(r.handleNodes))
 	mux.HandleFunc("POST /v1/cluster/nodes/{id}/{action}", r.authorize("admin")(r.handleNodeAdmission))
 	mux.HandleFunc("GET /v1/cluster/events", r.authorize("admin", "observer")(r.handleEvents))
@@ -537,6 +543,30 @@ func (r *Relay) Handler() http.Handler {
 
 func (r *Relay) handleProtocolManifest(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, CurrentProtocolManifest(r.cfg.MaxJobBytes))
+}
+
+func (r *Relay) handleWhoAmI(w http.ResponseWriter, req *http.Request) {
+	record, _ := tokenRecord(req.Context())
+	permissions := map[string][]string{
+		"admin":    {"cluster:admin", "cluster:read", "events:read", "jobs:read", "jobs:write", "tokens:manage"},
+		"observer": {"cluster:read", "jobs:read", "pipelines:read"},
+		"producer": {"cluster:read", "jobs:read-own", "jobs:write-own", "pipelines:read-own", "pipelines:write-own"},
+		"node":     {"worker:connect"},
+	}
+	if record.Role == "observer" && !observerIsScoped(record) {
+		permissions["observer"] = append(permissions["observer"], "events:read")
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Schema      string         `json:"schema"`
+		ID          string         `json:"id"`
+		Role        string         `json:"role"`
+		Subject     string         `json:"subject"`
+		Groups      []string       `json:"groups,omitempty"`
+		Permissions []string       `json:"permissions"`
+		Producer    ProducerLimits `json:"producer_limits,omitempty"`
+		Observer    ObserverLimits `json:"observer_limits,omitempty"`
+		ExpiresAt   time.Time      `json:"expires_at,omitempty"`
+	}{"contextbridge.identity.v1", record.ID, record.Role, record.Subject, record.Groups, permissions[record.Role], record.ProducerLimits, record.ObserverLimits, record.ExpiresAt})
 }
 
 func (r *Relay) Run(ctx context.Context) error {
@@ -822,6 +852,10 @@ func redactNodeRoutingEvidence(nodes []Node) {
 }
 
 func (r *Relay) handleEvents(w http.ResponseWriter, req *http.Request) {
+	if record, ok := tokenRecord(req.Context()); ok && observerIsScoped(record) {
+		writeErrorCode(w, http.StatusForbidden, "scope.global_events_forbidden", errors.New("scoped observers must use per-job or per-pipeline event endpoints"))
+		return
+	}
 	events, err := r.store.ListEvents(queryLimit(req, 100, 500))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -831,14 +865,27 @@ func (r *Relay) handleEvents(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Relay) handleJobs(w http.ResponseWriter, req *http.Request) {
+	if req.URL.Query().Get("page") == "1" || strings.TrimSpace(req.URL.Query().Get("cursor")) != "" {
+		r.handleJobHistoryPage(w, req)
+		return
+	}
 	limit := queryLimit(req, 100, maximumJobHistoryPage)
-	status := cleanLabel(req.URL.Query().Get("status"), 20)
+	status := strings.TrimSpace(req.URL.Query().Get("status"))
+	if status != "" && !contains([]string{JobReserved, JobQueued, JobAssigned, JobRunning, JobCompleted, JobFailed, JobCancelled}, status) {
+		writeErrorCode(w, http.StatusBadRequest, "query.invalid_status", errors.New("status is invalid"))
+		return
+	}
 	record, _ := tokenRecord(req.Context())
 	owner := ""
 	if record.Role == "producer" {
 		owner = record.Subject
 	}
-	jobs, err := r.store.ListJobSummariesForOwner(limit, status, owner)
+	allowedSubjects, allowedTenants := []string(nil), []string(nil)
+	if record.Role == "observer" {
+		allowedSubjects = record.ObserverLimits.AllowedSubjects
+		allowedTenants = record.ObserverLimits.AllowedTenants
+	}
+	jobs, _, _, _, err := r.store.ListJobSummaryPage(limit, nil, status, owner, "", allowedSubjects, allowedTenants)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -851,6 +898,110 @@ func (r *Relay) handleJobs(w http.ResponseWriter, req *http.Request) {
 	}
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(jobHistoryWriteTimeout))
 	writeJSON(w, http.StatusOK, jobs)
+}
+
+type jobHistoryCursor struct {
+	Key   string `json:"key"`
+	Scope string `json:"scope"`
+}
+
+type jobHistoryPage struct {
+	Schema     string `json:"schema"`
+	Jobs       []Job  `json:"jobs"`
+	NextCursor string `json:"next_cursor,omitempty"`
+	HasMore    bool   `json:"has_more"`
+	Scanned    int    `json:"scanned"`
+}
+
+func (r *Relay) handleJobHistoryPage(w http.ResponseWriter, req *http.Request) {
+	limit := 100
+	if raw := strings.TrimSpace(req.URL.Query().Get("limit")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 || parsed > maximumJobHistoryPage {
+			writeErrorCode(w, http.StatusBadRequest, "query.invalid_limit", fmt.Errorf("limit must be an integer from 1 to %d", maximumJobHistoryPage))
+			return
+		}
+		limit = parsed
+	}
+	status := strings.TrimSpace(req.URL.Query().Get("status"))
+	if status != "" && !contains([]string{JobReserved, JobQueued, JobAssigned, JobRunning, JobCompleted, JobFailed, JobCancelled}, status) {
+		writeErrorCode(w, http.StatusBadRequest, "query.invalid_status", errors.New("status is invalid"))
+		return
+	}
+	owner := strings.TrimSpace(req.URL.Query().Get("owner_subject"))
+	tenant := strings.TrimSpace(req.URL.Query().Get("tenant_id"))
+	if owner != "" && !validRoutingLabel(owner, 120) {
+		writeErrorCode(w, http.StatusBadRequest, "query.invalid_owner_subject", errors.New("owner_subject is invalid"))
+		return
+	}
+	if tenant != "" && validateTenantID(tenant) != nil {
+		writeErrorCode(w, http.StatusBadRequest, "query.invalid_tenant_id", errors.New("tenant_id is invalid"))
+		return
+	}
+	record, _ := tokenRecord(req.Context())
+	allowedSubjects, allowedTenants := []string(nil), []string(nil)
+	switch record.Role {
+	case "producer":
+		if owner != "" && !strings.EqualFold(owner, record.Subject) {
+			writeErrorCode(w, http.StatusForbidden, "scope.owner_forbidden", errors.New("owner_subject is outside this credential scope"))
+			return
+		}
+		owner = record.Subject
+		allowedTenants = record.ProducerLimits.AllowedTenants
+	case "observer":
+		allowedSubjects = record.ObserverLimits.AllowedSubjects
+		allowedTenants = record.ObserverLimits.AllowedTenants
+		if owner != "" && len(allowedSubjects) > 0 && !contains(allowedSubjects, owner) {
+			writeErrorCode(w, http.StatusForbidden, "scope.owner_forbidden", errors.New("owner_subject is outside this credential scope"))
+			return
+		}
+	}
+	if tenant != "" && len(allowedTenants) > 0 && !contains(allowedTenants, tenant) {
+		writeErrorCode(w, http.StatusForbidden, "scope.tenant_forbidden", errors.New("tenant_id is outside this credential scope"))
+		return
+	}
+	scope := jobHistoryScope(record, status, owner, tenant)
+	var afterKey []byte
+	if raw := strings.TrimSpace(req.URL.Query().Get("cursor")); raw != "" {
+		decoded, err := base64.RawURLEncoding.DecodeString(raw)
+		if err != nil {
+			writeErrorCode(w, http.StatusBadRequest, "query.invalid_cursor", errors.New("cursor is invalid"))
+			return
+		}
+		var cursor jobHistoryCursor
+		if strictjson.Decode(decoded, &cursor) != nil || cursor.Scope != scope {
+			writeErrorCode(w, http.StatusBadRequest, "query.invalid_cursor", errors.New("cursor does not match this credential and filter"))
+			return
+		}
+		afterKey, err = base64.RawURLEncoding.DecodeString(cursor.Key)
+		if err != nil || len(afterKey) == 0 || len(afterKey) > 512 {
+			writeErrorCode(w, http.StatusBadRequest, "query.invalid_cursor", errors.New("cursor is invalid"))
+			return
+		}
+	}
+	jobs, nextKey, hasMore, scanned, err := r.store.ListJobSummaryPage(limit, afterKey, status, owner, tenant, allowedSubjects, allowedTenants)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	for index := range jobs {
+		jobs[index] = jobHistoryResponse(jobs[index])
+	}
+	page := jobHistoryPage{Schema: "contextbridge.job-history-page.v1", Jobs: jobs, HasMore: hasMore, Scanned: scanned}
+	if hasMore && len(nextKey) > 0 {
+		encoded, _ := json.Marshal(jobHistoryCursor{Key: base64.RawURLEncoding.EncodeToString(nextKey), Scope: scope})
+		page.NextCursor = base64.RawURLEncoding.EncodeToString(encoded)
+	}
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(jobHistoryWriteTimeout))
+	writeJSON(w, http.StatusOK, page)
+}
+
+func jobHistoryScope(record TokenRecord, status, owner, tenant string) string {
+	raw := strings.Join([]string{record.ID, record.Role, record.Subject, status, owner, tenant,
+		strings.Join(record.ObserverLimits.AllowedSubjects, "\x1f"), strings.Join(record.ObserverLimits.AllowedTenants, "\x1f"),
+		strings.Join(record.ProducerLimits.AllowedTenants, "\x1f")}, "\x00")
+	digest := sha256.Sum256([]byte(raw))
+	return fmt.Sprintf("%x", digest[:])
 }
 
 func (r *Relay) handleJob(w http.ResponseWriter, req *http.Request) {
@@ -936,6 +1087,10 @@ func (r *Relay) handleRouteExplain(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, err)
 		return
 	}
+	if err := validatePoolAssignmentSelector(input.PoolID, input.PoolAuthorityKey); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err)
+		return
+	}
 	if err := scopeTenantID(&input.TenantID, record); err != nil {
 		writeErrorCode(w, http.StatusForbidden, AdmissionCodeTenantScopeForbidden, err)
 		return
@@ -955,6 +1110,7 @@ func (r *Relay) handleRouteExplain(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	nodes = nodesForPoolAssignment(nodes, input.PoolID, input.PoolAuthorityKey, time.Now().UTC())
 	routingRequirements, requiredSessionNode := r.withSessionAffinity(input.Requirements, record.Subject)
 	_, decision := rankWithDecisionForOwnerPolicy(nodes, routingRequirements, r.store.EstimateVRAM(input.Requirements), record.Subject, time.Now().UTC(), r.cfg.Placement)
 	decision.ID, err = randomID("route_preview")
@@ -1073,9 +1229,9 @@ func (r *Relay) handleSubmit(w http.ResponseWriter, req *http.Request) {
 	limits := r.producerLimits(record)
 	if input.AssignmentID != "" {
 		if idempotencyKey != "" {
-			job, replayed, err = r.store.ConsumeReservationAdmittedIdempotentGovernedWithPolicy(input.AssignmentID, input.AssignmentSecret, input.ID, input.Sealed, input.Source, input.TenantID, input.OwnerSubject, input.Priority, input.MaxAttempts, r.cfg.MaxQueuedJobs, limits, idempotencyKey, requestHash, input.PolicyDecision)
+			job, replayed, err = r.store.ConsumeReservationAdmittedIdempotentGovernedAuthorizedWithPolicy(input.AssignmentID, input.AssignmentSecret, input.ID, input.Sealed, input.PoolAuthorization, input.Source, input.TenantID, input.OwnerSubject, input.Priority, input.MaxAttempts, r.cfg.MaxQueuedJobs, limits, idempotencyKey, requestHash, input.PolicyDecision)
 		} else {
-			job, err = r.store.ConsumeReservationAdmittedGovernedWithPolicy(input.AssignmentID, input.AssignmentSecret, input.ID, input.Sealed, input.Source, input.TenantID, input.OwnerSubject, input.Priority, input.MaxAttempts, r.cfg.MaxQueuedJobs, limits, input.PolicyDecision)
+			job, err = r.store.ConsumeReservationAdmittedGovernedAuthorizedWithPolicy(input.AssignmentID, input.AssignmentSecret, input.ID, input.Sealed, input.PoolAuthorization, input.Source, input.TenantID, input.OwnerSubject, input.Priority, input.MaxAttempts, r.cfg.MaxQueuedJobs, limits, input.PolicyDecision)
 		}
 	} else {
 		if idempotencyKey != "" {
@@ -1198,6 +1354,7 @@ func jobResponse(job Job, compact bool) Job {
 	if compact {
 		job.Payload = nil
 		job.SealedPayload = nil
+		job.PoolAuthorization = nil
 	}
 	return job
 }
@@ -1205,6 +1362,7 @@ func jobResponse(job Job, compact bool) Job {
 func jobHistoryResponse(job Job) Job {
 	job.Payload = nil
 	job.SealedPayload = nil
+	job.PoolAuthorization = nil
 	job.Result = nil
 	job.SealedResult = nil
 	if job.Progress != nil {
@@ -1244,6 +1402,10 @@ func (r *Relay) handleReserve(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, err)
 		return
 	}
+	if err := validatePoolAssignmentSelector(input.PoolID, input.PoolAuthorityKey); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err)
+		return
+	}
 	if err := scopeTenantID(&input.TenantID, record); err != nil {
 		writeErrorCode(w, http.StatusForbidden, AdmissionCodeTenantScopeForbidden, err)
 		return
@@ -1263,6 +1425,7 @@ func (r *Relay) handleReserve(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	nodes = nodesForPoolAssignment(nodes, input.PoolID, input.PoolAuthorityKey, time.Now().UTC())
 	routingRequirements, requiredSessionNode := r.withSessionAffinity(input.Requirements, record.Subject)
 	candidates, _ := rankWithDecisionForOwnerPolicy(nodes, routingRequirements, r.store.EstimateVRAM(input.Requirements), record.Subject, time.Now().UTC(), r.cfg.Placement)
 	node, found := firstSessionCandidate(candidates, requiredSessionNode)
@@ -1298,7 +1461,7 @@ func (r *Relay) handleReserve(w http.ResponseWriter, req *http.Request) {
 	}
 	assignment := Assignment{
 		ID: assignmentID, JobID: jobID, NodeID: node.ID, NodeName: node.Name,
-		PublicKey: node.PublicKey, Attempt: 1, OwnerSubject: record.Subject, TenantID: input.TenantID,
+		PublicKey: node.PublicKey, PoolCertificate: node.PoolCertificate, Attempt: 1, OwnerSubject: record.Subject, TenantID: input.TenantID,
 		ExpiresAt: time.Now().UTC().Add(r.cfg.AssignmentTTL), Requirements: assignedRequirements,
 		PolicyDecision: policyDecision,
 	}
@@ -1338,6 +1501,7 @@ func (r *Relay) handleCreateToken(w http.ResponseWriter, req *http.Request) {
 		Groups         []string       `json:"groups"`
 		LifetimeHours  int            `json:"lifetime_hours"`
 		ProducerLimits ProducerLimits `json:"producer_limits"`
+		ObserverLimits ObserverLimits `json:"observer_limits"`
 	}
 	if err := decodeJSON(req.Body, &input, 32<<10); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -1350,7 +1514,7 @@ func (r *Relay) handleCreateToken(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, errors.New("lifetime_hours must be 0 to 87600"))
 		return
 	}
-	token, record, err := r.store.CreateTokenWithLimits(input.Role, input.Subject, input.Groups, time.Duration(input.LifetimeHours)*time.Hour, input.ProducerLimits)
+	token, record, err := r.store.CreateTokenWithPolicies(input.Role, input.Subject, input.Groups, time.Duration(input.LifetimeHours)*time.Hour, input.ProducerLimits, input.ObserverLimits)
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err)
 		return
@@ -1691,7 +1855,14 @@ func (r *Relay) dispatch() {
 			routingRequirements, requiredSessionNode = r.withSessionAffinity(queued.Requirements, queued.OwnerSubject)
 		}
 		estimatedVRAM := r.store.EstimateVRAM(queued.Requirements)
-		candidates, decision := rankWithDecisionForOwnerPolicy(nodes, routingRequirements, estimatedVRAM, queued.OwnerSubject, now, r.cfg.Placement)
+		jobNodes := nodes
+		if queued.PoolAuthorization == nil {
+			// Certified workers fail closed on unsigned work. Keep ordinary jobs and
+			// relay-rendered pipeline steps on ordinary workers so a mixed fleet
+			// preserves all existing functionality without noisy failed attempts.
+			jobNodes = nodesForPoolAssignment(nodes, "", "", now)
+		}
+		candidates, decision := rankWithDecisionForOwnerPolicy(jobNodes, routingRequirements, estimatedVRAM, queued.OwnerSubject, now, r.cfg.Placement)
 		if queued.PolicyDecision.Schema != "" {
 			policyDecision := queued.PolicyDecision
 			decision.PolicyDecision = &policyDecision
@@ -2096,11 +2267,22 @@ func (r *Relay) disconnectNode(id string, worker *workerConnection) {
 }
 
 func (r *Relay) validateRequirements(requirements Requirements) error {
-	if requirements.Task == "" {
-		return errors.New("requirements.task is required")
+	if err := ValidateRequirements(requirements); err != nil {
+		return err
 	}
 	if len(r.cfg.AllowedTasks) > 0 && !containsFold(r.cfg.AllowedTasks, requirements.Task) {
 		return fmt.Errorf("task %s is not allowed by relay policy", requirements.Task)
+	}
+	return nil
+}
+
+// ValidateRequirements validates the context-free, public bounds of a job's
+// routing requirements. Relay-specific allowlists are enforced separately.
+// Config validation reuses this function so a configured pipeline cannot defer
+// malformed or numerically unbounded requirements until its first execution.
+func ValidateRequirements(requirements Requirements) error {
+	if requirements.Task == "" {
+		return errors.New("requirements.task is required")
 	}
 	if len(requirements.RequiredTags) > 32 || len(requirements.PreferredNodes) > 32 {
 		return errors.New("too many routing selectors")
@@ -2169,6 +2351,9 @@ func (r *Relay) validateRequirements(requirements Requirements) error {
 	}
 	if requirements.InputImageMaxBytes < 0 || requirements.InputImageMaxBytes > 8<<20 || requirements.InputImageMaxBytes > requirements.InputImageBytes {
 		return errors.New("requirements.input_image_max_bytes must be between 0 and input_image_bytes")
+	}
+	if requirements.MinFreeVRAM > MaximumNodeHardwareBytes {
+		return fmt.Errorf("requirements.min_free_vram_bytes must not exceed %d", MaximumNodeHardwareBytes)
 	}
 	if len(requirements.InputImageMediaTypes) > 4 {
 		return errors.New("requirements.input_image_media_types accepts at most four entries")
@@ -2541,7 +2726,7 @@ func (r *Relay) visibleJob(ctx context.Context, id string) (Job, error) {
 		return r.store.GetJobForOwner(id, record.Subject)
 	}
 	job, err := r.store.GetJob(id)
-	if err != nil {
+	if err != nil || (ok && !recordCanObserve(record, job.OwnerSubject, job.TenantID)) {
 		return Job{}, os.ErrNotExist
 	}
 	return job, nil
@@ -2553,10 +2738,27 @@ func (r *Relay) visiblePipelineRun(ctx context.Context, id string) (PipelineRun,
 		return r.store.GetPipelineRunForOwner(id, record.Subject)
 	}
 	run, err := r.store.GetPipelineRun(id)
-	if err != nil {
+	if err != nil || (ok && !recordCanObserve(record, run.OwnerSubject, run.TenantID)) {
 		return PipelineRun{}, os.ErrNotExist
 	}
 	return run, nil
+}
+
+func observerIsScoped(record TokenRecord) bool {
+	return record.Role == "observer" && (len(record.ObserverLimits.AllowedSubjects) > 0 || len(record.ObserverLimits.AllowedTenants) > 0)
+}
+
+func recordCanObserve(record TokenRecord, owner, tenant string) bool {
+	if record.Role != "observer" {
+		return true
+	}
+	if len(record.ObserverLimits.AllowedSubjects) > 0 && !contains(record.ObserverLimits.AllowedSubjects, owner) {
+		return false
+	}
+	if len(record.ObserverLimits.AllowedTenants) > 0 && !contains(record.ObserverLimits.AllowedTenants, tenant) {
+		return false
+	}
+	return true
 }
 
 func intersectFold(values, allowed []string) []string {
@@ -2693,11 +2895,37 @@ func writeJSON(w http.ResponseWriter, status int, value interface{}) {
 }
 
 func writeError(w http.ResponseWriter, status int, err error) {
-	response := map[string]string{"error": err.Error()}
+	code := defaultHTTPErrorCode(status)
 	if coded, ok := err.(interface{ Code() string }); ok && coded.Code() != "" {
-		response["code"] = coded.Code()
+		code = coded.Code()
+	}
+	response := map[string]string{
+		"schema": "contextbridge.error.v1", "code": code, "error": err.Error(), "message": err.Error(),
 	}
 	writeJSON(w, status, response)
+}
+
+func defaultHTTPErrorCode(status int) string {
+	switch status {
+	case http.StatusBadRequest:
+		return "request.invalid"
+	case http.StatusUnauthorized:
+		return "auth.invalid_bearer"
+	case http.StatusForbidden:
+		return "auth.forbidden"
+	case http.StatusNotFound:
+		return "resource.not_found"
+	case http.StatusConflict:
+		return "resource.conflict"
+	case http.StatusUnprocessableEntity:
+		return "request.unprocessable"
+	case http.StatusTooManyRequests:
+		return "request.rate_limited"
+	case http.StatusServiceUnavailable:
+		return "service.unavailable"
+	default:
+		return "service.internal_error"
+	}
 }
 
 type responseCodeError struct {
@@ -2737,6 +2965,8 @@ func queryLimit(req *http.Request, fallback, maximum int) int {
 
 func secureHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		requestID := fmt.Sprintf("req_%016x%016x", uint64(time.Now().UnixNano()), relayRequestSequence.Add(1))
+		w.Header().Set("X-Request-ID", requestID)
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Referrer-Policy", "no-referrer")

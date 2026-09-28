@@ -31,6 +31,12 @@ but it does not hide coordination metadata, the ciphertext length, or content
 from the selected worker and any downstream provider the worker invokes.
 See [Privacy boundaries](privacy.md).
 
+For a hosted relay that must also be excluded from worker substitution and new
+job authorization, use
+[customer-controlled protected pools](customer-controlled-pools.md). The
+producer verifies the selected worker certificate and the worker verifies the
+customer's exact encrypted-job signature locally, with no extra round-trip.
+
 The authenticated producer subject owns jobs. `tenant_id` is otherwise a
 caller-selected logical namespace and execution-policy selector, not proof of
 customer identity. Administrators can issue a producer credential with

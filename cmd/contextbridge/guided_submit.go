@@ -47,7 +47,7 @@ func guideClusterSubmission(input io.Reader, output io.Writer, cfg config.Config
 	if _, err := fmt.Fprintf(output, "  contract   %s  [%s]\n", *file, source); err != nil {
 		return false, err
 	}
-	if _, err := fmt.Fprintf(output, "  relay      %s  [config]\n", guidedURLLabel(clusterBaseURL(cfg))); err != nil {
+	if _, err := fmt.Fprintf(output, "  relay      %s  [config]\n", guidedURLLabel(clusterClientBaseURL(cfg))); err != nil {
 		return false, err
 	}
 	if _, err := fmt.Fprintf(output, "  wait       %s\n", onOffLabel(wait)); err != nil {

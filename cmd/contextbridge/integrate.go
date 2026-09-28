@@ -91,7 +91,8 @@ func integrateCommand(args []string) error {
 	maxQueuedJobs := flags.Int("max-queued-jobs", 0, "producer queued-job limit; 0 uses the relay default")
 	maxJobsPerHour := flags.Int("max-jobs-per-hour", 0, "durable producer admission limit; 0 disables it")
 	providers := flags.String("providers", "", "comma-separated provider allowlist")
-	allowedTenants := flags.String("allowed-tenants", "", "comma-separated tenant_id allowlist bound to this producer credential")
+	allowedTenants := flags.String("allowed-tenants", "", "comma-separated tenant_id allowlist bound to a relay or read-only UI credential")
+	allowedSubjects := flags.String("allowed-subjects", "", "comma-separated owner_subject allowlist bound to a read-only UI credential")
 	egress := flags.String("egress", "", "producer egress ceiling: local_only or empty")
 	requireE2EE := flags.Bool("require-e2ee", false, "reject every cleartext job submitted with the relay producer credential")
 	if err := flags.Parse(args[1:]); err != nil {
@@ -261,6 +262,9 @@ func integrateCommand(args []string) error {
 		if strings.TrimSpace(*subject) == "" {
 			return errors.New("--subject is required for a relay application credential")
 		}
+		if strings.TrimSpace(*allowedSubjects) != "" {
+			return errors.New("--allowed-subjects applies only to a read-only UI credential")
+		}
 		if strings.TrimSpace(*writeEnv) == "" {
 			return errors.New("--write-env is required so the producer token never enters terminal output")
 		}
@@ -300,14 +304,15 @@ func integrateCommand(args []string) error {
 		if *lifetimeHours < 0 || *lifetimeHours > 10*365*24 {
 			return errors.New("--lifetime-hours must be between 0 and 87600")
 		}
-		if strings.TrimSpace(*groups) != "" || *maxQueuedJobs != 0 || *maxJobsPerHour != 0 || strings.TrimSpace(*providers) != "" || strings.TrimSpace(*egress) != "" {
-			return errors.New("producer groups, admission limits, providers, and egress do not apply to a read-only UI credential")
+		if strings.TrimSpace(*groups) != "" || *maxQueuedJobs != 0 || *maxJobsPerHour != 0 || strings.TrimSpace(*providers) != "" || strings.TrimSpace(*egress) != "" || *requireE2EE {
+			return errors.New("producer groups, admission limits, providers, egress, and E2EE requirements do not apply to a read-only UI credential")
 		}
 		path, err := filepath.Abs(*writeEnv)
 		if err != nil {
 			return err
 		}
-		info, err := createObserverIntegrationBundle(context.Background(), cfg, path, *subject, *lifetimeHours)
+		observerLimits := cluster.ObserverLimits{AllowedSubjects: splitIntegrationList(*allowedSubjects), AllowedTenants: splitIntegrationList(*allowedTenants)}
+		info, err := createObserverIntegrationBundleScoped(context.Background(), cfg, path, *subject, *lifetimeHours, observerLimits)
 		if err != nil {
 			return err
 		}
@@ -340,14 +345,18 @@ func createRelayIntegrationBundle(ctx context.Context, cfg config.Config, path, 
 }
 
 func createRelayIntegrationBundleGoverned(ctx context.Context, cfg config.Config, path, subject string, groups []string, lifetimeHours int, limits cluster.ProducerLimits) (relayIntegrationInfo, error) {
-	return createScopedRelayIntegrationBundle(ctx, cfg, path, "producer", "contextbridge-relay-producer", "CONTEXTBRIDGE_PRODUCER_TOKEN", subject, groups, lifetimeHours, limits)
+	return createScopedRelayIntegrationBundle(ctx, cfg, path, "producer", "contextbridge-relay-producer", "CONTEXTBRIDGE_PRODUCER_TOKEN", subject, groups, lifetimeHours, limits, cluster.ObserverLimits{})
 }
 
 func createObserverIntegrationBundle(ctx context.Context, cfg config.Config, path, subject string, lifetimeHours int) (relayIntegrationInfo, error) {
-	return createScopedRelayIntegrationBundle(ctx, cfg, path, "observer", "contextbridge-relay-observer", "CONTEXTBRIDGE_OBSERVER_TOKEN", subject, nil, lifetimeHours, cluster.ProducerLimits{})
+	return createObserverIntegrationBundleScoped(ctx, cfg, path, subject, lifetimeHours, cluster.ObserverLimits{})
 }
 
-func createScopedRelayIntegrationBundle(ctx context.Context, cfg config.Config, path, role, kind, environmentKey, subject string, groups []string, lifetimeHours int, limits cluster.ProducerLimits) (relayIntegrationInfo, error) {
+func createObserverIntegrationBundleScoped(ctx context.Context, cfg config.Config, path, subject string, lifetimeHours int, limits cluster.ObserverLimits) (relayIntegrationInfo, error) {
+	return createScopedRelayIntegrationBundle(ctx, cfg, path, "observer", "contextbridge-relay-observer", "CONTEXTBRIDGE_OBSERVER_TOKEN", subject, nil, lifetimeHours, cluster.ProducerLimits{}, limits)
+}
+
+func createScopedRelayIntegrationBundle(ctx context.Context, cfg config.Config, path, role, kind, environmentKey, subject string, groups []string, lifetimeHours int, producerLimits cluster.ProducerLimits, observerLimits cluster.ObserverLimits) (relayIntegrationInfo, error) {
 	if role != "producer" && role != "observer" {
 		return relayIntegrationInfo{}, errors.New("integration credential role must be producer or observer")
 	}
@@ -373,7 +382,7 @@ func createScopedRelayIntegrationBundle(ctx context.Context, cfg config.Config, 
 	}
 	relayURL := clusterBaseURL(cfg)
 	if err := clusterPOST(ctx, relayURL+"/v1/cluster/tokens", cfg.Cluster.Relay.AdminToken, map[string]interface{}{
-		"role": role, "subject": subject, "groups": groups, "lifetime_hours": lifetimeHours, "producer_limits": limits,
+		"role": role, "subject": subject, "groups": groups, "lifetime_hours": lifetimeHours, "producer_limits": producerLimits, "observer_limits": observerLimits,
 	}, &output); err != nil {
 		return relayIntegrationInfo{}, fmt.Errorf("issue scoped %s credential: %w", role, err)
 	}
