@@ -609,13 +609,13 @@ Handle `failed` and `cancelled` separately. Text output can also report `truncat
 
 | Operation | Current Windows i9 p50 / p99 | Windows i7 laptop p50 / p99 | Linux VPS p50 / p99 |
 | --- | ---: | ---: | ---: |
-| Durable submit → read → cancel | 3.075 / 5.247 ms | 13.109 / 15.510 ms | 12.165 / 36.304 ms |
-| Small E2EE job + result | 0.127 / 0.223 ms | 0.125 / 0.158 ms | 0.217 / 0.496 ms |
-| Verify a 64 KiB artifact | 0.089 / 0.405 ms | 0.065 / 0.157 ms | 0.141 / 0.446 ms |
+| Durable submit → read → cancel | 2.547 / 10.177 ms | 13.109 / 15.510 ms | 12.165 / 36.304 ms |
+| Small E2EE job + result | 0.128 / 0.244 ms | 0.125 / 0.158 ms | 0.217 / 0.496 ms |
+| Verify a 64 KiB artifact | 0.065 / 0.137 ms | 0.065 / 0.157 ms | 0.141 / 0.446 ms |
 
-Queue throughput: **315.3 ops/s** on the current Windows i9-12900K desktop snapshot, **76.1 ops/s** on the Windows i7-1355U laptop, and **73.8 ops/s** on the shared two-vCPU Linux VPS. Sampled idle benchmark-process + relay RSS: **15.3 / 15.3 / 12.7 MiB**, respectively. No models were running in these measurements.
+Queue throughput: **389.6 ops/s** on the current Windows i9-12900K desktop snapshot, **76.1 ops/s** on the Windows i7-1355U laptop, and **73.8 ops/s** on the shared two-vCPU Linux VPS. Sampled idle benchmark-process + relay RSS: **15.4 / 15.3 / 12.7 MiB**, respectively. No models were running in these measurements.
 
-These are different machines and source/toolchain snapshots, not an OS or CPU comparison or an SLA. Model execution and cross-device network latency are excluded; workstation background load, laptop thermals, and shared-VPS noisy-neighbour contention were uncontrolled. The faster 20 September i9 observation remains published as historical evidence rather than being overwritten. [Exact commits, methodology, raw reports, p95, concurrency 1/4/16/64 and limits](docs/limits-and-performance.md). Reproduce on your hardware with `contextbridge benchmark --json`.
+These are different machines and source/toolchain snapshots, not an OS or CPU comparison or an SLA. Model execution and cross-device network latency are excluded; workstation background load, laptop thermals, and shared-VPS noisy-neighbour contention were uncontrolled. The pre-fix 315.3 ops/s and faster 20 September i9 observation remain published as historical evidence rather than being overwritten. [Exact commits, methodology, raw reports, controlled A/B, p95, concurrency 1/4/16/64 and limits](docs/limits-and-performance.md). Reproduce on your hardware with `contextbridge benchmark --json`.
 
 ## Command desk
 

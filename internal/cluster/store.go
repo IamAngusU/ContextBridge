@@ -1036,6 +1036,13 @@ func routingRecoveryProbeExistsTx(tx *bolt.Tx, nodeID, jobID string) (bool, erro
 // from releasing a newer probe for the same job ID on another node. A tracked
 // failure reopens the circuit; an empty failure leaves the route in probation.
 func (s *Store) ResolveRoutingRecoveryProbe(nodeID, jobID, failureCode string) (bool, error) {
+	// A queued job has no assigned node and therefore cannot own a recovery
+	// probe. Return before opening a Bolt write transaction: even a logically
+	// empty Update advances durable metadata and forces an unnecessary sync on
+	// the common submit/read/cancel path.
+	if strings.TrimSpace(nodeID) == "" || strings.TrimSpace(jobID) == "" {
+		return false, nil
+	}
 	resolved := false
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		var err error

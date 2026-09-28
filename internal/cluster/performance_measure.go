@@ -15,6 +15,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	bolt "go.etcd.io/bbolt"
 )
 
 // BridgeMeasurementOptions controls the isolated ContextBridge-only
@@ -40,16 +42,29 @@ type BridgeOperationMetric struct {
 	ThroughputPerSec    float64 `json:"throughput_ops_per_second"`
 }
 
-// DatabaseGrowthMetric records allocated Bolt file bytes, not an estimate of
-// logical record size. Bolt reuses freed pages and does not compact on delete,
-// so this is intentionally measured from a new database every run.
+// DatabaseGrowthMetric separates coarse file allocation from live bucket
+// occupancy. Bolt grows its file in allocation steps, reuses freed pages and
+// does not compact on delete; file growth is therefore useful capacity
+// evidence but must not be presented as a linear per-job retention cost.
 type DatabaseGrowthMetric struct {
-	Jobs                  int     `json:"jobs"`
-	BaselineBytes         int64   `json:"baseline_bytes"`
-	AfterBytes            int64   `json:"after_bytes"`
-	GrowthBytes           int64   `json:"growth_bytes"`
-	GrowthPerJobBytes     float64 `json:"growth_per_job_bytes"`
-	GrowthPer1000JobBytes float64 `json:"growth_per_1000_jobs_bytes"`
+	Jobs                   int     `json:"jobs"`
+	AllocatedBaselineBytes int64   `json:"allocated_file_baseline_bytes"`
+	AllocatedAfterBytes    int64   `json:"allocated_file_after_bytes"`
+	AllocatedGrowthBytes   int64   `json:"allocated_file_growth_bytes"`
+	LiveBaselineBytes      int64   `json:"live_bucket_baseline_bytes"`
+	LiveAfterBytes         int64   `json:"live_bucket_after_bytes"`
+	LiveGrowthBytes        int64   `json:"live_bucket_growth_bytes"`
+	LiveGrowthPerJobBytes  float64 `json:"live_bucket_growth_per_job_bytes"`
+	LiveGrowthPer1000Jobs  float64 `json:"live_bucket_growth_per_1000_jobs_bytes"`
+	PageAllocBytes         int64   `json:"transaction_page_alloc_bytes"`
+	PageAllocPerJobBytes   float64 `json:"transaction_page_alloc_per_job_bytes"`
+	PageCount              int64   `json:"transaction_page_count"`
+	WriteCalls             int64   `json:"transaction_write_calls"`
+	WriteTimeNanoseconds   int64   `json:"transaction_write_time_ns"`
+}
+
+type databaseBucketUsage struct {
+	InuseBytes int64
 }
 
 // BridgeMeasurement contains only isolated relay and cryptographic work.
@@ -364,6 +379,11 @@ func measureDatabaseGrowth(ctx context.Context, jobs int) (DatabaseGrowthMetric,
 	if err := store.db.Sync(); err != nil {
 		return DatabaseGrowthMetric{}, err
 	}
+	baselineUsage, err := measureDatabaseBucketUsage(store.db)
+	if err != nil {
+		return DatabaseGrowthMetric{}, err
+	}
+	baselineStats := store.db.Stats()
 	baseline, err := os.Stat(path)
 	if err != nil {
 		return DatabaseGrowthMetric{}, err
@@ -388,14 +408,43 @@ func measureDatabaseGrowth(ctx context.Context, jobs int) (DatabaseGrowthMetric,
 	if err := store.db.Sync(); err != nil {
 		return DatabaseGrowthMetric{}, err
 	}
+	afterUsage, err := measureDatabaseBucketUsage(store.db)
+	if err != nil {
+		return DatabaseGrowthMetric{}, err
+	}
+	afterStats := store.db.Stats()
+	statsDelta := afterStats.Sub(&baselineStats)
 	after, err := os.Stat(path)
 	if err != nil {
 		return DatabaseGrowthMetric{}, err
 	}
 	growth := max(int64(0), after.Size()-baseline.Size())
-	perJob := float64(growth) / float64(jobs)
+	liveGrowth := max(int64(0), afterUsage.InuseBytes-baselineUsage.InuseBytes)
+	livePerJob := float64(liveGrowth) / float64(jobs)
+	pageAlloc := statsDelta.TxStats.GetPageAlloc()
 	return DatabaseGrowthMetric{
-		Jobs: jobs, BaselineBytes: baseline.Size(), AfterBytes: after.Size(), GrowthBytes: growth,
-		GrowthPerJobBytes: perJob, GrowthPer1000JobBytes: perJob * 1000,
+		Jobs: jobs, AllocatedBaselineBytes: baseline.Size(), AllocatedAfterBytes: after.Size(), AllocatedGrowthBytes: growth,
+		LiveBaselineBytes: baselineUsage.InuseBytes, LiveAfterBytes: afterUsage.InuseBytes,
+		LiveGrowthBytes: liveGrowth, LiveGrowthPerJobBytes: livePerJob, LiveGrowthPer1000Jobs: livePerJob * 1000,
+		PageAllocBytes: pageAlloc, PageAllocPerJobBytes: float64(pageAlloc) / float64(jobs),
+		PageCount: statsDelta.TxStats.GetPageCount(), WriteCalls: statsDelta.TxStats.GetWrite(),
+		WriteTimeNanoseconds: statsDelta.TxStats.GetWriteTime().Nanoseconds(),
 	}, nil
+}
+
+// measureDatabaseBucketUsage sums the bytes actually occupied by branch and
+// leaf records in every top-level Bolt bucket. Bucket.Stats includes nested
+// buckets, so iterating only the top level avoids double counting. This is not
+// an OS write counter; it is a stable live-data measure that does not jump when
+// Bolt merely grows the mmap/file allocation window.
+func measureDatabaseBucketUsage(db *bolt.DB) (databaseBucketUsage, error) {
+	var usage databaseBucketUsage
+	err := db.View(func(tx *bolt.Tx) error {
+		return tx.ForEach(func(_ []byte, bucket *bolt.Bucket) error {
+			stats := bucket.Stats()
+			usage.InuseBytes += int64(stats.BranchInuse) + int64(stats.LeafInuse)
+			return nil
+		})
+	})
+	return usage, err
 }
