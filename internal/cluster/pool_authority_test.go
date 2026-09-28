@@ -66,6 +66,12 @@ func TestPoolAuthorityBindsWorkerAndExactEncryptedJob(t *testing.T) {
 	if err := worker.validatePoolJob(job, now); err != nil {
 		t.Fatal(err)
 	}
+	if err := worker.claimPoolJobAuthorization(job, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.claimPoolJobAuthorization(job, now); err == nil {
+		t.Fatal("protected worker accepted a replayed job authorization")
+	}
 	job.PoolAuthorization = nil
 	if err := worker.validatePoolJob(job, now); err == nil {
 		t.Fatal("protected worker accepted an unsigned job")

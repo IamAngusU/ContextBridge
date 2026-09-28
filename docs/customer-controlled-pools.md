@@ -83,10 +83,12 @@ per-token/model-loop work. The normal model runtime remains the dominant cost.
 
 The relay can still deny service, delay or drop work, choose among workers that
 the same customer authority certified, observe coordination metadata, and
-replay the exact authorized envelope during its bounded validity. Existing
-assignment fencing, duplicate suppression and the deterministic local job ID
-limit accidental re-execution, but this is not a claim that a hostile relay is
-an availability or traffic-analysis boundary.
+try to replay the exact authorized envelope during its bounded validity. A
+protected worker keeps a bounded in-memory claim cache and rejects sequential
+replay while that worker process remains alive. Restarting the worker clears
+that cache, so an exact still-valid envelope can then be replayed; durable
+per-job disk writes are deliberately avoided. This is not a claim that a
+hostile relay is an availability or traffic-analysis boundary.
 
 ## Deliberate boundary for pipelines
 
