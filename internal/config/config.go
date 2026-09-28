@@ -208,9 +208,21 @@ type Cluster struct {
 	Placement         ClusterPlacement            `yaml:"placement" json:"placement"`
 	ClientToken       string                      `yaml:"client_token,omitempty" json:"-"`
 	PoolAuthorityFile string                      `yaml:"pool_authority_file,omitempty" json:"pool_authority_file,omitempty"`
+	ActiveAccount     string                      `yaml:"active_account,omitempty" json:"active_account,omitempty"`
+	Accounts          map[string]ClusterAccount   `yaml:"accounts,omitempty" json:"accounts,omitempty"`
+	SelectedAccount   string                      `yaml:"-" json:"-"`
 	Policies          ClusterPolicies             `yaml:"policies" json:"policies"`
 	Pricing           cluster.Pricing             `yaml:"pricing" json:"pricing"`
 	Pipelines         map[string]cluster.Pipeline `yaml:"pipelines" json:"pipelines"`
+}
+
+// ClusterAccount is a producer-side login profile. Tokens are omitted from
+// JSON management surfaces, while YAML persistence remains owner-scoped like
+// the legacy cluster.client_token setting.
+type ClusterAccount struct {
+	RelayURL          string `yaml:"relay_url,omitempty" json:"relay_url,omitempty"`
+	ClientToken       string `yaml:"client_token" json:"-"`
+	PoolAuthorityFile string `yaml:"pool_authority_file,omitempty" json:"pool_authority_file,omitempty"`
 }
 
 // ClusterPlacement contains operator-tunable soft ranking behavior. None of
@@ -792,6 +804,30 @@ func (c Config) Validate() error {
 	if len(c.Cluster.PoolAuthorityFile) > 4096 || strings.IndexFunc(c.Cluster.PoolAuthorityFile, unicode.IsControl) >= 0 {
 		return errors.New("cluster.pool_authority_file must be at most 4096 characters without control characters")
 	}
+	if len(c.Cluster.Accounts) > 64 {
+		return errors.New("cluster.accounts must contain at most 64 accounts")
+	}
+	if c.Cluster.ActiveAccount != "" {
+		if _, exists := c.Cluster.Accounts[c.Cluster.ActiveAccount]; !exists {
+			return errors.New("cluster.active_account must name a configured account")
+		}
+	}
+	for name, account := range c.Cluster.Accounts {
+		if len(name) > 80 || !safeNamePattern.MatchString(name) || strings.Contains(name, "..") {
+			return fmt.Errorf("cluster account %s has an invalid name", name)
+		}
+		if token := strings.TrimSpace(account.ClientToken); token == "" || token != account.ClientToken || len(token) > 4096 || !strings.HasPrefix(token, "cb_") || len(token) < 24 || strings.IndexFunc(token, unicode.IsSpace) >= 0 {
+			return fmt.Errorf("cluster account %s has an invalid producer token", name)
+		}
+		if account.RelayURL != "" {
+			if err := cluster.ValidateRelayURL(account.RelayURL); err != nil {
+				return fmt.Errorf("cluster account %s relay_url: %w", name, err)
+			}
+		}
+		if len(account.PoolAuthorityFile) > 4096 || strings.IndexFunc(account.PoolAuthorityFile, unicode.IsControl) >= 0 {
+			return fmt.Errorf("cluster account %s pool_authority_file must be at most 4096 characters without control characters", name)
+		}
+	}
 	if c.Cluster.Relay.MaxQueue < 0 || c.Cluster.Relay.MaxQueue > 1_000_000 {
 		return errors.New("cluster.relay.max_queue must be between 1 and 1000000 when set")
 	}
@@ -1277,6 +1313,12 @@ func applyDefaults(cfg *Config, base string) {
 	if cfg.Cluster.PoolAuthorityFile != "" && !filepath.IsAbs(cfg.Cluster.PoolAuthorityFile) {
 		cfg.Cluster.PoolAuthorityFile = filepath.Join(base, cfg.Cluster.PoolAuthorityFile)
 	}
+	for name, account := range cfg.Cluster.Accounts {
+		if account.PoolAuthorityFile != "" && !filepath.IsAbs(account.PoolAuthorityFile) {
+			account.PoolAuthorityFile = filepath.Join(base, account.PoolAuthorityFile)
+			cfg.Cluster.Accounts[name] = account
+		}
+	}
 	if cfg.Cluster.Relay.MaxQueue == 0 {
 		cfg.Cluster.Relay.MaxQueue = 10000
 	}
@@ -1628,6 +1670,9 @@ rag:
 cluster:
   # Optional customer-held Ed25519 authority for protected E2EE worker pools.
   pool_authority_file: ""
+  # Optional named producer logins for convenient account switching.
+  active_account: ""
+  accounts: {}
   relay:
     enabled: false
     listen: 127.0.0.1:32150

@@ -18,7 +18,7 @@ var completionSubcommands = map[string][]string{
 	"mcp":          {"serve"},
 	"integrate":    {"openai", "litellm", "mcp", "relay", "ui"},
 	"verification": {"verify"},
-	"cluster":      {"status", "events", "estimate", "node", "protocol", "conformance", "submit", "chat", "agent", "selftest", "route", "contract", "receipt", "login", "token", "pairing", "pool", "configure", "dashboard", "pipeline", "lan"},
+	"cluster":      {"status", "events", "estimate", "node", "protocol", "conformance", "submit", "chat", "agent", "selftest", "route", "contract", "receipt", "login", "account", "token", "pairing", "pool", "configure", "dashboard", "pipeline", "lan"},
 	"route":        {"explain"},
 	"update":       {"status", "check", "apply", "enable", "disable", "auto"},
 	"completion":   {"powershell", "bash", "zsh"},
@@ -58,7 +58,7 @@ $script:ContextBridgeSubcommands = @{
     mcp = @('serve')
     integrate = @('openai','litellm','mcp','relay','ui')
     verification = @('verify')
-	cluster = @('status','events','estimate','node','protocol','conformance','submit','chat','agent','selftest','route','contract','receipt','login','token','pairing','pool','configure','dashboard','pipeline','lan')
+	cluster = @('status','events','estimate','node','protocol','conformance','submit','chat','agent','selftest','route','contract','receipt','login','account','token','pairing','pool','configure','dashboard','pipeline','lan')
     route = @('explain')
     update = @('status','check','apply','enable','disable','auto')
     completion = @('powershell','bash','zsh')
@@ -101,11 +101,11 @@ $script:ContextBridgeOptions = @{
 	'cluster node' = @('drain','resume','--config','--token','--json')
 	'cluster protocol' = @('--config','--token','--json')
 	'cluster conformance' = @('relay','worker','resilience','--config','--token','--node','--json')
-    'cluster submit' = @('--config','--file','--token','--wait','--e2ee','--stream','--artifacts','--idempotency-key','--interactive')
-    'cluster chat' = @('--config','--token','--provider','--group','--model','--profile','--reasoning','--e2ee','--session','--prompt','--artifacts','--min-artifacts','--image','--min-images','--attach-image','--new-session','--new-session-per-job','--foreground-new-session','--egress','--max-cost-usd')
+    'cluster submit' = @('--config','--account','--file','--token','--wait','--e2ee','--stream','--artifacts','--idempotency-key','--interactive')
+    'cluster chat' = @('--config','--account','--token','--provider','--group','--model','--profile','--reasoning','--e2ee','--session','--prompt','--artifacts','--min-artifacts','--image','--min-images','--attach-image','--new-session','--new-session-per-job','--foreground-new-session','--egress','--max-cost-usd')
     'cluster agent' = @('plan','run','auto','--config','--token','--goal','--goal-file','--policy','--planner-provider','--planner-profile','--planner-model','--allow-providers','--allow-adapter-profiles','--max-steps','--step-timeout','--max-runtime','--planner-timeout','--out','--plan','--approve')
 	'cluster selftest' = @('--config','--providers','--local-model','--run','--dry-run','--image','--image-profile','--artifacts','--keep-artifacts','--timeout','--job-timeout','--poll')
-    'cluster route' = @('explain','--config','--file','--job','--token','--json')
+    'cluster route' = @('explain','--config','--account','--file','--job','--token','--json')
 	'cluster contract' = @('validate','--config','--file','--token','--json')
 	'cluster receipt' = @('show','export','verify','keygen','--config','--token','--out','--file','--signing-key','--trust-key','--offline','--private-out','--public-out','--key-id','--issuer')
     'route explain' = @('--config','--file','--job','--token','--json')
@@ -113,7 +113,8 @@ $script:ContextBridgeOptions = @{
     'cluster configure' = @('--config','--mode','--relay-url','--public-url','--name','--listen','--interactive')
     'cluster dashboard' = @('--config','--no-open')
     'cluster pipeline' = @('activity','--config','--name','--file','--token','--json')
-    'cluster login' = @('--config','--token-file')
+    'cluster login' = @('--config','--token-file','--account','--relay','--pool-authority-file','--activate')
+	'cluster account' = @('list','use','remove','--config','--json')
 	'cluster token' = @('create','list','revoke','--config','--role','--subject','--groups','--lifetime-hours','--max-queued-jobs','--max-jobs-per-hour','--providers','--allowed-tenants','--allowed-subjects','--egress','--require-e2ee')
 	'cluster token create' = @('--config','--role','--subject','--groups','--lifetime-hours','--max-queued-jobs','--max-jobs-per-hour','--providers','--allowed-tenants','--allowed-subjects','--egress','--require-e2ee')
 	'cluster token list' = @('--config','--token','--limit','--offset','--json')
@@ -135,9 +136,9 @@ $script:ContextBridgeValueOptions = @{
     '--role' = @('admin','producer','node','observer')
 }
 $script:ContextBridgeTakesValue = @(
-	'--config','--install-dir','--file','--job','--artifacts','--artifact','--attach-image','--identity','--job-dir','--token-file','--trust-key','--evidence-dir','--write-env','--write-config','--bundle','--advertise-host','--certificate-out',
+	'--config','--install-dir','--file','--job','--artifacts','--artifact','--attach-image','--identity','--job-dir','--token-file','--pool-authority-file','--trust-key','--evidence-dir','--write-env','--write-config','--bundle','--advertise-host','--certificate-out',
     '--slots','--endpoint','--relay','--name','--providers','--models','--tasks','--groups',
-    '--token','--provider','--group','--model','--profile','--reasoning','--session','--prompt',
+    '--token','--account','--provider','--group','--model','--profile','--reasoning','--session','--prompt',
 	'--min-artifacts','--min-images','--local-model','--image-profile','--timeout','--job-timeout','--poll','--after','--limit','--offset','--idempotency-key','--subject','--groups','--allowed-tenants','--allowed-subjects','--lifetime-hours',
     '--mode','--relay-url','--public-url','--listen','--role','--subject','--approve','--deny',
     '--managed-service','--samples','--warmup','--database-jobs','--idle-duration','--binary',
@@ -219,7 +220,7 @@ _contextbridge_complete() {
   fi
 
   case "$previous" in
-    --config|--file|--artifacts|--artifact|--attach-image|--identity|--job-dir|--token-file|--binary|--trust-key|--evidence-dir|--write-env|--write-config|--certificate-out|--out|--bundle)
+    --config|--file|--artifacts|--artifact|--attach-image|--identity|--job-dir|--token-file|--pool-authority-file|--binary|--trust-key|--evidence-dir|--write-env|--write-config|--certificate-out|--out|--bundle)
       if declare -F _filedir >/dev/null 2>&1; then _filedir; else COMPREPLY=( $(compgen -f -- "$current") ); fi
       return ;;
     --provider) candidates="adapter ollama nuextract jina" ;;
@@ -237,14 +238,14 @@ _contextbridge_complete() {
   if [[ "$current" == -* || ( "$boolean_previous" -eq 1 && -z "$current" ) ]]; then
     candidates=""
     case "$option_key" in
-      "cluster chat") candidates="--config --token --provider --group --model --profile --reasoning --e2ee --session --prompt --artifacts --min-artifacts --image --min-images --attach-image --new-session --new-session-per-job --foreground-new-session --egress --max-cost-usd" ;;
+      "cluster chat") candidates="--config --account --token --provider --group --model --profile --reasoning --e2ee --session --prompt --artifacts --min-artifacts --image --min-images --attach-image --new-session --new-session-per-job --foreground-new-session --egress --max-cost-usd" ;;
       "cluster agent") candidates="plan run auto --config --token --goal --goal-file --policy --planner-provider --planner-profile --planner-model --allow-providers --allow-adapter-profiles --max-steps --step-timeout --max-runtime --planner-timeout --out --plan --approve" ;;
 	  "cluster selftest") candidates="--config --providers --local-model --run --dry-run --image --image-profile --artifacts --keep-artifacts --timeout --job-timeout --poll" ;;
-      "cluster route") candidates="--config --file --job --token --json" ;;
+	  "cluster route") candidates="--config --account --file --job --token --json" ;;
 	  "cluster contract") candidates="validate --config --file --token --json" ;;
 	  "cluster receipt") candidates="show export verify keygen --config --token --out --file --signing-key --trust-key --offline --private-out --public-out --key-id --issuer" ;;
       "route explain") candidates="--config --file --job --token --json" ;;
-      "cluster submit") candidates="--config --file --token --wait --e2ee --stream --artifacts --idempotency-key --interactive" ;;
+      "cluster submit") candidates="--config --account --file --token --wait --e2ee --stream --artifacts --idempotency-key --interactive" ;;
       "cluster status") candidates="--config --json" ;;
 	  "cluster events") candidates="--config --token --after --limit --json --follow --pipeline --poll" ;;
 	  "cluster estimate") candidates="--config --token --json" ;;
@@ -254,7 +255,8 @@ _contextbridge_complete() {
       "cluster configure") candidates="--config --mode --relay-url --public-url --name --listen --interactive" ;;
       "cluster dashboard") candidates="--config --no-open" ;;
       "cluster pipeline") candidates="activity --config --name --file --token --json" ;;
-      "cluster login") candidates="--config --token-file" ;;
+      "cluster login") candidates="--config --token-file --account --relay --pool-authority-file --activate" ;;
+	  "cluster account") candidates="list use remove --config --json" ;;
 	  "cluster token") candidates="create list revoke --config --role --subject --groups --lifetime-hours --max-queued-jobs --max-jobs-per-hour --providers --allowed-tenants --allowed-subjects --egress --require-e2ee" ;;
 	  "cluster token create") candidates="--config --role --subject --groups --lifetime-hours --max-queued-jobs --max-jobs-per-hour --providers --allowed-tenants --allowed-subjects --egress --require-e2ee" ;;
 	  "cluster token list") candidates="--config --token --limit --offset --json" ;;
@@ -313,7 +315,7 @@ _contextbridge_complete() {
       mcp) candidates="serve" ;;
       integrate) candidates="openai litellm mcp relay ui" ;;
       verification) candidates="verify" ;;
-	  cluster) candidates="status events estimate node protocol conformance submit chat agent selftest route contract receipt login token pairing pool configure dashboard pipeline lan" ;;
+	  cluster) candidates="status events estimate node protocol conformance submit chat agent selftest route contract receipt login account token pairing pool configure dashboard pipeline lan" ;;
       route) candidates="explain" ;;
       update) candidates="status check apply enable disable auto" ;;
       completion) candidates="powershell bash zsh" ;;
@@ -421,7 +423,7 @@ case "$words[2]" in
     ;;
   cluster)
     if (( CURRENT == 3 )); then
-	  _values 'cluster action' status events estimate node protocol conformance submit chat agent selftest route contract receipt login token pairing pool configure dashboard pipeline lan
+	  _values 'cluster action' status events estimate node protocol conformance submit chat agent selftest route contract receipt login account token pairing pool configure dashboard pipeline lan
       return
     fi
     case "$words[3]" in
@@ -443,8 +445,8 @@ case "$words[2]" in
 		fi
 		_arguments "${config[@]}" '--token[Producer, observer, or admin token]:token:' '--node[Exact worker ID or unique worker name]:worker:' '--json[Print machine-readable conformance report]'
 		;;
-      submit) _arguments "${config[@]}" '--file[Cluster job JSON]:job file:_files' '--token[Producer token]:token:' '--wait[Wait for a final result]' '--e2ee[Encrypt payload]' '--stream[Stream adapter text]' '--artifacts[Artifact output directory]:directory:_directories' '--idempotency-key[Deduplicate an exact retry]:key:' '--interactive[Guide unresolved submission values in a real terminal]' ;;
-	  chat) _arguments "${config[@]}" '--token[Producer token]:token:' '--provider[Generation provider]:provider:(adapter ollama nuextract jina)' '--group[Worker group]:group:' '--model[Specific model]:model:' '--profile[Operator-configured adapter profile]:profile:' '--reasoning[Reasoning level]:level:(instant medium high xhigh pro max)' '--e2ee[Encrypt prompts and results]' '--session[Stable session ID]:session:' '--prompt[Send one turn and exit]:prompt:' '--artifacts[Artifact directory or auto/off]:directory:_directories' '--min-artifacts[Required verified files]:count:' '--image[Require a returned image]' '--min-images[Required verified images]:count:' '--attach-image[Attach a local image]:image file:_files' '--new-session[Open a fresh adapter session]' '--new-session-per-job[Open a fresh adapter session for every turn]' '--foreground-new-session[Ask the adapter to foreground a fresh session]' ;;
+      submit) _arguments "${config[@]}" '--account[Named cluster account]:account:' '--file[Cluster job JSON]:job file:_files' '--token[Producer token]:token:' '--wait[Wait for a final result]' '--e2ee[Encrypt payload]' '--stream[Stream adapter text]' '--artifacts[Artifact output directory]:directory:_directories' '--idempotency-key[Deduplicate an exact retry]:key:' '--interactive[Guide unresolved submission values in a real terminal]' ;;
+	  chat) _arguments "${config[@]}" '--account[Named cluster account]:account:' '--token[Producer token]:token:' '--provider[Generation provider]:provider:(adapter ollama nuextract jina)' '--group[Worker group]:group:' '--model[Specific model]:model:' '--profile[Operator-configured adapter profile]:profile:' '--reasoning[Reasoning level]:level:(instant medium high xhigh pro max)' '--e2ee[Encrypt prompts and results]' '--session[Stable session ID]:session:' '--prompt[Send one turn and exit]:prompt:' '--artifacts[Artifact directory or auto/off]:directory:_directories' '--min-artifacts[Required verified files]:count:' '--image[Require a returned image]' '--min-images[Required verified images]:count:' '--attach-image[Attach a local image]:image file:_files' '--new-session[Open a fresh adapter session]' '--new-session-per-job[Open a fresh adapter session for every turn]' '--foreground-new-session[Ask the adapter to foreground a fresh session]' ;;
       agent)
         if (( CURRENT == 4 )); then
           _values 'agent action' plan run auto
@@ -462,7 +464,7 @@ case "$words[2]" in
           _values 'route action' explain
           return
         fi
-        _arguments "${config[@]}" '--file[Cluster job JSON for a non-executing preview]:job file:_files' '--job[Assigned job ID]:job ID:' '--token[Producer token]:token:' '--json[Print machine-readable routing evidence]'
+		_arguments "${config[@]}" '--account[Named cluster account]:account:' '--file[Cluster job JSON for a non-executing preview]:job file:_files' '--job[Assigned job ID]:job ID:' '--token[Producer token]:token:' '--json[Print machine-readable routing evidence]'
         ;;
 	  contract)
 		if (( CURRENT == 4 )); then
@@ -490,7 +492,8 @@ case "$words[2]" in
           _arguments "${config[@]}" '--name[Pipeline name]:name:' '--file[Pipeline input JSON]:input file:_files'
         fi
         ;;
-      login) _arguments "${config[@]}" '--token-file[Producer token file]:token file:_files' ;;
+	  login) _arguments "${config[@]}" '--token-file[Producer token file]:token file:_files' '--account[Named cluster account]:account:' '--relay[Relay URL for the account]:URL:' '--pool-authority-file[Customer pool authority]:authority file:_files' '--activate[Make this account the default]' ;;
+	  account) _arguments "${config[@]}" '--json[Print machine-readable account metadata]' '1:account action:(list use remove)' '2:account name:' ;;
 	  token)
 		case "$words[4]" in
 		  list) _arguments "${config[@]}" '--token[Relay admin token]:token:' '--limit[Records per page]:count:' '--offset[Record offset]:count:' '--json[Print machine-readable credential metadata]' ;;

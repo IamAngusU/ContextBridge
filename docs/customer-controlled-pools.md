@@ -45,6 +45,41 @@ root key. Worker certificates deliberately do not expire, so decommissioning a
 worker requires rotating the authority and re-pairing the remaining protected
 workers. Replacing or losing the authority also requires re-pairing them.
 
+## Multiple users on one computer
+
+Named cluster accounts keep each producer token, relay URL and pool-authority
+selection together:
+
+```text
+contextbridge cluster login --account alice --token-file ./alice-token.json --pool-authority-file ./alice-authority.json
+contextbridge cluster login --account bob --token-file ./bob-token.json --pool-authority-file ./bob-authority.json --activate=false
+contextbridge cluster account list
+contextbridge cluster account use alice
+contextbridge cluster submit --account bob --file ./job.json
+```
+
+`cluster chat`, `cluster submit`, and `cluster route explain` accept
+`--account`; otherwise they use `cluster.active_account`. Selecting an ordinary
+account never inherits another account's authority. Removing an account removes
+its saved association but deliberately does not delete its authority file.
+
+Separate OS users already receive separate default configuration directories.
+Use that boundary when people on the same computer must not be able to read one
+another's bearer tokens or authority files. Named accounts under one OS login
+are safe selection profiles, not protection from another process running as
+that same OS identity. A browser UI must keep these credentials in its backend
+session and never send them to frontend JavaScript.
+
+## Hardware keys and passkeys
+
+The v1 pool contract currently loads an Ed25519 authority file; it does not
+accept a PGP key or FIDO2 assertion directly. FIDO2/passkeys fit human login,
+enrollment and key-rotation approval, but requiring user presence for every job
+would break unattended workloads. A future hardware-backed implementation can
+place PIV/PKCS#11/HSM signing or a short-lived hardware-authorized Ed25519
+delegate behind the same pool-signing boundary without adding a relay round
+trip. PGP is better reserved for offline attestations than the per-job hot path.
+
 ## What a custom UI or backend does
 
 The authenticated OpenAPI document exposes `pool_certificate` on the assignment
