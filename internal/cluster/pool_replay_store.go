@@ -2,7 +2,6 @@ package cluster
 
 import (
 	"crypto/sha256"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -71,8 +70,11 @@ func claimPoolAuthorization(path, signature string, expiresAt, now time.Time) er
 			return err
 		}
 		claimKey := sha256.Sum256([]byte(signature))
-		if encoded := bucket.Get(claimKey[:]); len(encoded) == 8 {
-			claimedUntil := time.Unix(0, int64(binary.BigEndian.Uint64(encoded))).UTC()
+		if encoded := bucket.Get(claimKey[:]); encoded != nil {
+			claimedUntil, err := time.Parse(time.RFC3339Nano, string(encoded))
+			if err != nil {
+				return errors.New("customer pool replay store contains an invalid claim")
+			}
 			if claimedUntil.After(now) {
 				return errors.New("customer pool authorization was already claimed")
 			}
@@ -84,7 +86,11 @@ func claimPoolAuthorization(path, signature string, expiresAt, now time.Time) er
 		if bucket.Stats().KeyN >= maximumPoolAuthorizationReplayEntries {
 			cursor := bucket.Cursor()
 			for key, value := cursor.First(); key != nil; key, value = cursor.Next() {
-				if len(value) != 8 || !time.Unix(0, int64(binary.BigEndian.Uint64(value))).After(now) {
+				claimedUntil, err := time.Parse(time.RFC3339Nano, string(value))
+				if err != nil {
+					return errors.New("customer pool replay store contains an invalid claim")
+				}
+				if !claimedUntil.After(now) {
 					if err := cursor.Delete(); err != nil {
 						return err
 					}
@@ -94,9 +100,7 @@ func claimPoolAuthorization(path, signature string, expiresAt, now time.Time) er
 		if bucket.Stats().KeyN >= maximumPoolAuthorizationReplayEntries {
 			return errors.New("customer pool replay store is full")
 		}
-		var encodedExpiry [8]byte
-		binary.BigEndian.PutUint64(encodedExpiry[:], uint64(expiresAt.UnixNano()))
-		return bucket.Put(claimKey[:], encodedExpiry[:])
+		return bucket.Put(claimKey[:], []byte(expiresAt.Format(time.RFC3339Nano)))
 	})
 	closeErr := database.Close()
 	if claimErr != nil {
