@@ -66,6 +66,7 @@ func CurrentProtocolManifest(configuredJobBytes int64) ProtocolManifest {
 			"performance_aware_routing_v1",
 			"prometheus_metrics_v1",
 			"credential_identity_v1",
+			"customer_controlled_pool_authority_v1",
 			"observer_scopes_v1",
 			"openapi_3_1_v1",
 			"structured_http_errors_v1",

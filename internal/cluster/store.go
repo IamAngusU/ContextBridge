@@ -137,6 +137,7 @@ type queueEntry struct {
 	PolicyDecision PolicyDecision `json:"policy_decision"`
 	AssignedNode   string         `json:"assigned_node,omitempty"`
 	Sealed         bool           `json:"sealed,omitempty"`
+	PoolAuthorized bool           `json:"pool_authorized,omitempty"`
 }
 
 type jobHistoryRecord struct {
@@ -696,13 +697,18 @@ func (s *Store) CreatePairing(request PairRequest, verificationURI string, lifet
 	}
 	pairing := Pairing{
 		DeviceCodeHash: tokenHash(deviceCode), NodeName: cleanLabel(request.NodeName, 100),
-		PublicKey: request.PublicKey, Groups: cleanList(request.Groups, 16, 80), ExpiresAt: time.Now().UTC().Add(lifetime),
+		PublicKey: request.PublicKey, PoolCertificate: request.PoolCertificate, Groups: cleanList(request.Groups, 16, 80), ExpiresAt: time.Now().UTC().Add(lifetime),
 	}
 	publicKey, err := parsePublicKey(pairing.PublicKey)
 	if err != nil {
 		return PairResponse{}, fmt.Errorf("invalid node public key: %w", err)
 	}
 	pairing.PublicKeyFingerprint = publicKeyFingerprint(publicKey.Bytes())
+	if pairing.PoolCertificate != nil {
+		if err := ValidatePoolWorkerCertificate(pairing.PoolCertificate, pairing.PoolCertificate.AuthorityKey, pairing.PoolCertificate.PoolID, pairing.PublicKey, time.Now().UTC()); err != nil {
+			return PairResponse{}, fmt.Errorf("invalid customer pool certificate: %w", err)
+		}
+	}
 	err = s.db.Update(func(tx *bolt.Tx) error {
 		if _, err := garbageCollectPairings(tx, time.Now().UTC()); err != nil {
 			return err
@@ -808,7 +814,7 @@ func (s *Store) DecidePairing(userCode string, approve bool) (Pairing, error) {
 		if err := putJSON(tx.Bucket(bucketTokens), tokenHash(token), record); err != nil {
 			return err
 		}
-		node := Node{ID: result.NodeID, Name: result.NodeName, PublicKey: result.PublicKey, State: "paired", LastSeen: time.Now().UTC()}
+		node := Node{ID: result.NodeID, Name: result.NodeName, PublicKey: result.PublicKey, PoolCertificate: result.PoolCertificate, State: "paired", LastSeen: time.Now().UTC()}
 		if err := putJSON(tx.Bucket(bucketNodes), node.ID, node); err != nil {
 			return err
 		}
@@ -944,6 +950,9 @@ func (s *Store) upsertNodePinnedAuthorized(node Node, credentialHash string) err
 		if existing.PublicKey != "" && node.PublicKey != existing.PublicKey {
 			return ErrNodePublicKeyMismatch
 		}
+		if existing.PoolCertificate != nil && node.PoolCertificate != nil && !poolWorkerCertificatesEqual(existing.PoolCertificate, node.PoolCertificate) {
+			return ErrNodePublicKeyMismatch
+		}
 		if existing.PublicKey != "" {
 			node.PublicKey = existing.PublicKey
 		}
@@ -972,6 +981,17 @@ func mergeStoredNodeState(node *Node, existing Node) {
 	if node.PublicKey == "" {
 		node.PublicKey = existing.PublicKey
 	}
+	if node.PoolCertificate == nil {
+		node.PoolCertificate = existing.PoolCertificate
+	}
+}
+
+func poolWorkerCertificatesEqual(left, right *PoolWorkerCertificate) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return left.ContractVersion == right.ContractVersion && left.PoolID == right.PoolID && left.AuthorityKey == right.AuthorityKey &&
+		left.WorkerPublicKey == right.WorkerPublicKey && left.IssuedAt.Equal(right.IssuedAt) && left.Signature == right.Signature
 }
 
 func recordNodeRoutingOutcomeTx(tx *bolt.Tx, nodeID string, requirements Requirements, ownerSubject, admittedRouteKey, jobID string, success bool, failureCode string, now time.Time) error {
@@ -1230,7 +1250,7 @@ func prepareJob(request SubmitRequest, idempotencyKey, requestHash string, now t
 	}
 	job := Job{
 		ID: request.ID, ContractVersion: contractVersion, OwnerSubject: cleanLabel(request.OwnerSubject, 120), TenantID: cleanLabel(request.TenantID, 200), Source: cleanLabel(request.Source, 120), Requirements: request.Requirements, PolicyDecision: request.PolicyDecision,
-		Payload: request.Payload, SealedPayload: request.Sealed, Status: JobQueued, Priority: request.Priority,
+		Payload: request.Payload, SealedPayload: request.Sealed, PoolAuthorization: request.PoolAuthorization, Status: JobQueued, Priority: request.Priority,
 		MaxAttempts: request.MaxAttempts, CreatedAt: now, UpdatedAt: now,
 		Pipeline: cleanLabel(request.Pipeline, 128), Step: cleanLabel(request.Step, 128), ParentID: cleanLabel(request.ParentID, 128),
 	}
@@ -1741,7 +1761,7 @@ func (s *Store) ConsumeReservationAdmitted(id, secret string, sealed *SealedEnve
 	if len(maxOwner) > 0 {
 		ownerLimit = maxOwner[0]
 	}
-	job, _, err := s.consumeReservationAdmitted(id, secret, "", sealed, source, tenant, owner, priority, attempts, maxQueued, ProducerLimits{MaxQueuedJobs: ownerLimit}, "", "", nil)
+	job, _, err := s.consumeReservationAdmitted(id, secret, "", sealed, nil, source, tenant, owner, priority, attempts, maxQueued, ProducerLimits{MaxQueuedJobs: ownerLimit}, "", "", nil)
 	return job, err
 }
 
@@ -1754,12 +1774,17 @@ func (s *Store) ConsumeReservationAdmittedWithPolicy(id, secret string, sealed *
 	if len(maxOwner) > 0 {
 		ownerLimit = maxOwner[0]
 	}
-	job, _, err := s.consumeReservationAdmitted(id, secret, "", sealed, source, tenant, owner, priority, attempts, maxQueued, ProducerLimits{MaxQueuedJobs: ownerLimit}, "", "", &policy)
+	job, _, err := s.consumeReservationAdmitted(id, secret, "", sealed, nil, source, tenant, owner, priority, attempts, maxQueued, ProducerLimits{MaxQueuedJobs: ownerLimit}, "", "", &policy)
 	return job, err
 }
 
 func (s *Store) ConsumeReservationAdmittedGovernedWithPolicy(id, secret, requestedJobID string, sealed *SealedEnvelope, source, tenant, owner string, priority, attempts, maxQueued int, limits ProducerLimits, policy PolicyDecision) (Job, error) {
-	job, _, err := s.consumeReservationAdmitted(id, secret, requestedJobID, sealed, source, tenant, owner, priority, attempts, maxQueued, limits, "", "", &policy)
+	job, _, err := s.consumeReservationAdmitted(id, secret, requestedJobID, sealed, nil, source, tenant, owner, priority, attempts, maxQueued, limits, "", "", &policy)
+	return job, err
+}
+
+func (s *Store) ConsumeReservationAdmittedGovernedAuthorizedWithPolicy(id, secret, requestedJobID string, sealed *SealedEnvelope, authorization *PoolJobAuthorization, source, tenant, owner string, priority, attempts, maxQueued int, limits ProducerLimits, policy PolicyDecision) (Job, error) {
+	job, _, err := s.consumeReservationAdmitted(id, secret, requestedJobID, sealed, authorization, source, tenant, owner, priority, attempts, maxQueued, limits, "", "", &policy)
 	return job, err
 }
 
@@ -1768,18 +1793,22 @@ func (s *Store) ConsumeReservationAdmittedGovernedWithPolicy(id, secret, request
 // consumed reservation is read, but only when the exact sealed request hash
 // matches the producer-scoped key.
 func (s *Store) ConsumeReservationAdmittedIdempotent(id, secret string, sealed *SealedEnvelope, source, tenant, owner string, priority, attempts, maxQueued, maxOwner int, idempotencyKey, requestHash string) (Job, bool, error) {
-	return s.consumeReservationAdmitted(id, secret, "", sealed, source, tenant, owner, priority, attempts, maxQueued, ProducerLimits{MaxQueuedJobs: maxOwner}, idempotencyKey, requestHash, nil)
+	return s.consumeReservationAdmitted(id, secret, "", sealed, nil, source, tenant, owner, priority, attempts, maxQueued, ProducerLimits{MaxQueuedJobs: maxOwner}, idempotencyKey, requestHash, nil)
 }
 
 func (s *Store) ConsumeReservationAdmittedIdempotentWithPolicy(id, secret string, sealed *SealedEnvelope, source, tenant, owner string, priority, attempts, maxQueued, maxOwner int, idempotencyKey, requestHash string, policy PolicyDecision) (Job, bool, error) {
-	return s.consumeReservationAdmitted(id, secret, "", sealed, source, tenant, owner, priority, attempts, maxQueued, ProducerLimits{MaxQueuedJobs: maxOwner}, idempotencyKey, requestHash, &policy)
+	return s.consumeReservationAdmitted(id, secret, "", sealed, nil, source, tenant, owner, priority, attempts, maxQueued, ProducerLimits{MaxQueuedJobs: maxOwner}, idempotencyKey, requestHash, &policy)
 }
 
 func (s *Store) ConsumeReservationAdmittedIdempotentGovernedWithPolicy(id, secret, requestedJobID string, sealed *SealedEnvelope, source, tenant, owner string, priority, attempts, maxQueued int, limits ProducerLimits, idempotencyKey, requestHash string, policy PolicyDecision) (Job, bool, error) {
-	return s.consumeReservationAdmitted(id, secret, requestedJobID, sealed, source, tenant, owner, priority, attempts, maxQueued, limits, idempotencyKey, requestHash, &policy)
+	return s.consumeReservationAdmitted(id, secret, requestedJobID, sealed, nil, source, tenant, owner, priority, attempts, maxQueued, limits, idempotencyKey, requestHash, &policy)
 }
 
-func (s *Store) consumeReservationAdmitted(id, secret, requestedJobID string, sealed *SealedEnvelope, source, tenant, owner string, priority, attempts, maxQueued int, limits ProducerLimits, idempotencyKey, requestHash string, expectedPolicy *PolicyDecision) (Job, bool, error) {
+func (s *Store) ConsumeReservationAdmittedIdempotentGovernedAuthorizedWithPolicy(id, secret, requestedJobID string, sealed *SealedEnvelope, authorization *PoolJobAuthorization, source, tenant, owner string, priority, attempts, maxQueued int, limits ProducerLimits, idempotencyKey, requestHash string, policy PolicyDecision) (Job, bool, error) {
+	return s.consumeReservationAdmitted(id, secret, requestedJobID, sealed, authorization, source, tenant, owner, priority, attempts, maxQueued, limits, idempotencyKey, requestHash, &policy)
+}
+
+func (s *Store) consumeReservationAdmitted(id, secret, requestedJobID string, sealed *SealedEnvelope, authorization *PoolJobAuthorization, source, tenant, owner string, priority, attempts, maxQueued int, limits ProducerLimits, idempotencyKey, requestHash string, expectedPolicy *PolicyDecision) (Job, bool, error) {
 	var job Job
 	replayed := false
 	owner = cleanLabel(owner, 120)
@@ -1858,7 +1887,7 @@ func (s *Store) consumeReservationAdmitted(id, secret, requestedJobID string, se
 		if err := consumeProducerRateLimitTx(tx, owner, limits.MaxJobsPerHour, now); err != nil {
 			return err
 		}
-		job = Job{ID: saved.Assignment.JobID, ContractVersion: JobContractV1, OwnerSubject: saved.Assignment.OwnerSubject, Source: cleanLabel(source, 120), TenantID: saved.Assignment.TenantID, Requirements: saved.Assignment.Requirements, PolicyDecision: saved.Assignment.PolicyDecision, SealedPayload: sealed, Status: JobQueued, AssignedNode: saved.Assignment.NodeID, Priority: priority, MaxAttempts: attempts, CreatedAt: now, UpdatedAt: now}
+		job = Job{ID: saved.Assignment.JobID, ContractVersion: JobContractV1, OwnerSubject: saved.Assignment.OwnerSubject, Source: cleanLabel(source, 120), TenantID: saved.Assignment.TenantID, Requirements: saved.Assignment.Requirements, PolicyDecision: saved.Assignment.PolicyDecision, SealedPayload: sealed, PoolAuthorization: authorization, Status: JobQueued, AssignedNode: saved.Assignment.NodeID, Priority: priority, MaxAttempts: attempts, CreatedAt: now, UpdatedAt: now}
 		if job.MaxAttempts <= 0 {
 			job.MaxAttempts = 1
 		}
@@ -3419,6 +3448,9 @@ func collectFairQueueWindow(tx *bolt.Tx, cursor *bolt.Cursor, key, value []byte,
 		if entry.Sealed {
 			projection.SealedPayload = &SealedEnvelope{}
 		}
+		if entry.PoolAuthorized {
+			projection.PoolAuthorization = &PoolJobAuthorization{}
+		}
 		window = append(window, fairQueueItem{key: append([]byte(nil), key...), job: projection})
 		key, value = cursor.Next()
 		if key == nil && !wrapped {
@@ -4527,7 +4559,7 @@ func putQueueEntry(tx *bolt.Tx, job Job) error {
 	index := tx.Bucket(bucketQueueJobIndex)
 	counts := tx.Bucket(bucketQueueCounts)
 	key := queueKey(job)
-	value, err := json.Marshal(queueEntry{JobID: job.ID, OwnerSubject: job.OwnerSubject, Priority: job.Priority, Requirements: job.Requirements, PolicyDecision: job.PolicyDecision, AssignedNode: job.AssignedNode, Sealed: job.SealedPayload != nil})
+	value, err := json.Marshal(queueEntry{JobID: job.ID, OwnerSubject: job.OwnerSubject, Priority: job.Priority, Requirements: job.Requirements, PolicyDecision: job.PolicyDecision, AssignedNode: job.AssignedNode, Sealed: job.SealedPayload != nil, PoolAuthorized: job.PoolAuthorization != nil})
 	if err != nil {
 		return err
 	}
@@ -4592,19 +4624,20 @@ func queueEntryFromValue(jobs *bolt.Bucket, value []byte) (queueEntry, error) {
 
 func queueEntryFromJob(raw []byte) (queueEntry, string, error) {
 	var projection struct {
-		ID             string         `json:"id"`
-		OwnerSubject   string         `json:"owner_subject"`
-		Priority       int            `json:"priority"`
-		Requirements   Requirements   `json:"requirements"`
-		PolicyDecision PolicyDecision `json:"policy_decision"`
-		AssignedNode   string         `json:"assigned_node"`
-		SealedPayload  *struct{}      `json:"sealed_payload"`
-		Status         string         `json:"status"`
+		ID                string         `json:"id"`
+		OwnerSubject      string         `json:"owner_subject"`
+		Priority          int            `json:"priority"`
+		Requirements      Requirements   `json:"requirements"`
+		PolicyDecision    PolicyDecision `json:"policy_decision"`
+		AssignedNode      string         `json:"assigned_node"`
+		SealedPayload     *struct{}      `json:"sealed_payload"`
+		PoolAuthorization *struct{}      `json:"pool_authorization"`
+		Status            string         `json:"status"`
 	}
 	if err := json.Unmarshal(raw, &projection); err != nil {
 		return queueEntry{}, "", err
 	}
-	return queueEntry{JobID: projection.ID, OwnerSubject: projection.OwnerSubject, Priority: projection.Priority, Requirements: projection.Requirements, PolicyDecision: projection.PolicyDecision, AssignedNode: projection.AssignedNode, Sealed: projection.SealedPayload != nil}, projection.Status, nil
+	return queueEntry{JobID: projection.ID, OwnerSubject: projection.OwnerSubject, Priority: projection.Priority, Requirements: projection.Requirements, PolicyDecision: projection.PolicyDecision, AssignedNode: projection.AssignedNode, Sealed: projection.SealedPayload != nil, PoolAuthorized: projection.PoolAuthorization != nil}, projection.Status, nil
 }
 
 func ensureQueueIndex(tx *bolt.Tx) error {

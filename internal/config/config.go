@@ -203,13 +203,14 @@ type AdapterProfile struct {
 }
 
 type Cluster struct {
-	Relay       ClusterRelay                `yaml:"relay" json:"relay"`
-	Worker      ClusterWorker               `yaml:"worker" json:"worker"`
-	Placement   ClusterPlacement            `yaml:"placement" json:"placement"`
-	ClientToken string                      `yaml:"client_token,omitempty" json:"-"`
-	Policies    ClusterPolicies             `yaml:"policies" json:"policies"`
-	Pricing     cluster.Pricing             `yaml:"pricing" json:"pricing"`
-	Pipelines   map[string]cluster.Pipeline `yaml:"pipelines" json:"pipelines"`
+	Relay             ClusterRelay                `yaml:"relay" json:"relay"`
+	Worker            ClusterWorker               `yaml:"worker" json:"worker"`
+	Placement         ClusterPlacement            `yaml:"placement" json:"placement"`
+	ClientToken       string                      `yaml:"client_token,omitempty" json:"-"`
+	PoolAuthorityFile string                      `yaml:"pool_authority_file,omitempty" json:"pool_authority_file,omitempty"`
+	Policies          ClusterPolicies             `yaml:"policies" json:"policies"`
+	Pricing           cluster.Pricing             `yaml:"pricing" json:"pricing"`
+	Pipelines         map[string]cluster.Pipeline `yaml:"pipelines" json:"pipelines"`
 }
 
 // ClusterPlacement contains operator-tunable soft ranking behavior. None of
@@ -788,6 +789,9 @@ func (c Config) Validate() error {
 			}
 		}
 	}
+	if len(c.Cluster.PoolAuthorityFile) > 4096 || strings.IndexFunc(c.Cluster.PoolAuthorityFile, unicode.IsControl) >= 0 {
+		return errors.New("cluster.pool_authority_file must be at most 4096 characters without control characters")
+	}
 	if c.Cluster.Relay.MaxQueue < 0 || c.Cluster.Relay.MaxQueue > 1_000_000 {
 		return errors.New("cluster.relay.max_queue must be between 1 and 1000000 when set")
 	}
@@ -1270,6 +1274,9 @@ func applyDefaults(cfg *Config, base string) {
 	} else if !filepath.IsAbs(cfg.Cluster.Relay.Database) {
 		cfg.Cluster.Relay.Database = filepath.Join(base, cfg.Cluster.Relay.Database)
 	}
+	if cfg.Cluster.PoolAuthorityFile != "" && !filepath.IsAbs(cfg.Cluster.PoolAuthorityFile) {
+		cfg.Cluster.PoolAuthorityFile = filepath.Join(base, cfg.Cluster.PoolAuthorityFile)
+	}
 	if cfg.Cluster.Relay.MaxQueue == 0 {
 		cfg.Cluster.Relay.MaxQueue = 10000
 	}
@@ -1619,6 +1626,8 @@ rag:
   max_documents: 10000
 
 cluster:
+  # Optional customer-held Ed25519 authority for protected E2EE worker pools.
+  pool_authority_file: ""
   relay:
     enabled: false
     listen: 127.0.0.1:32150

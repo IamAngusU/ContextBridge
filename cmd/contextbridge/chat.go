@@ -50,6 +50,12 @@ func clusterChatCommand(args []string) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
+	e2eeExplicit := false
+	flags.Visit(func(option *flag.Flag) {
+		if option.Name == "e2ee" {
+			e2eeExplicit = true
+		}
+	})
 	if flags.NArg() > 0 {
 		extra := strings.Join(flags.Args(), " ")
 		if strings.Trim(extra, `\\`) == "" {
@@ -104,6 +110,16 @@ func clusterChatCommand(args []string) error {
 	if err != nil {
 		return err
 	}
+	poolAuthority, err := configuredPoolAuthority(cfg)
+	if err != nil {
+		return err
+	}
+	if poolAuthority != nil {
+		if e2eeExplicit && !*e2ee {
+			return errors.New("the configured customer pool authority requires E2EE; remove --e2ee=false or use a config without pool_authority_file")
+		}
+		*e2ee = true
+	}
 	*token = clusterClientToken(cfg, *token)
 	if *token == "" {
 		return errors.New("a producer token is required; pass --token, set CONTEXTBRIDGE_CLUSTER_TOKEN, or configure cluster.client_token")
@@ -121,7 +137,7 @@ func clusterChatCommand(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	state := &chatState{relayURL: clusterBaseURL(cfg), token: *token, provider: *provider, group: *group, model: *model, profile: *profile, reasoning: *reasoning, egress: *egress, maxCostUSD: *maxCostUSD, e2ee: *e2ee, sessionID: *sessionID, artifactDir: *artifactDir, minArtifacts: *minArtifacts, minImages: *minImages, requireImage: *minImages > 0, images: images, newSession: *newSession || *newSessionPerJob, newSessionPerJob: *newSessionPerJob, foregroundNewSession: *foregroundNewSession}
+	state := &chatState{relayURL: clusterBaseURL(cfg), token: *token, provider: *provider, group: *group, model: *model, profile: *profile, reasoning: *reasoning, egress: *egress, maxCostUSD: *maxCostUSD, e2ee: *e2ee, poolAuthority: poolAuthority, sessionID: *sessionID, artifactDir: *artifactDir, minArtifacts: *minArtifacts, minImages: *minImages, requireImage: *minImages > 0, images: images, newSession: *newSession || *newSessionPerJob, newSessionPerJob: *newSessionPerJob, foregroundNewSession: *foregroundNewSession}
 
 	if strings.TrimSpace(*prompt) != "" {
 		return state.turn(ctx, strings.TrimSpace(*prompt))
@@ -266,6 +282,9 @@ func (s *chatState) command(line string) (bool, string) {
 		case "on", "true", "1", "yes", "an", "ein":
 			s.e2ee = true
 		case "off", "false", "0", "no", "aus":
+			if s.poolAuthority != nil {
+				return true, "  ! customer pool authority keeps E2EE enabled"
+			}
 			s.e2ee = false
 		case "":
 		default:
@@ -314,6 +333,7 @@ type chatState struct {
 	egress               string
 	maxCostUSD           float64
 	e2ee                 bool
+	poolAuthority        *cluster.PoolAuthority
 	sessionID            string
 	artifactDir          string
 	minArtifacts         int
@@ -410,12 +430,22 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 	if s.e2ee {
 		var reservation cluster.AssignmentResponse
 		assignmentRequest := cluster.AssignmentRequest{TenantID: input.TenantID, Requirements: requirements}
+		if s.poolAuthority != nil {
+			if err := s.poolAuthority.BindAssignmentRequest(&assignmentRequest); err != nil {
+				return err
+			}
+		}
 		if err := clusterPOST(ctx, s.relayURL+"/v1/cluster/assign", s.token, assignmentRequest, &reservation); err != nil {
 			return fmt.Errorf("reserve E2EE worker: %w", err)
 		}
 		encryptionContext, err = cluster.ValidateAssignmentResponse(assignmentRequest, reservation, time.Now().UTC())
 		if err != nil {
 			return err
+		}
+		if s.poolAuthority != nil {
+			if err := cluster.ValidateAssignmentPoolAuthority(*s.poolAuthority, reservation, time.Now().UTC()); err != nil {
+				return fmt.Errorf("customer pool worker verification failed: %w", err)
+			}
 		}
 		envelope, sharedKey, err := cluster.SealFor(reservation.Assignment.PublicKey, payload, cluster.JobAAD(encryptionContext))
 		if err != nil {
@@ -427,6 +457,12 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 		input.Requirements = reservation.Assignment.Requirements
 		input.Payload = nil
 		input.Sealed = envelope
+		if s.poolAuthority != nil {
+			input.PoolAuthorization, err = cluster.SignPoolJobAuthorization(*s.poolAuthority, encryptionContext, envelope, time.Now().UTC())
+			if err != nil {
+				return err
+			}
+		}
 		input.AssignmentID = reservation.Assignment.ID
 		input.AssignmentSecret = reservation.Secret
 	}

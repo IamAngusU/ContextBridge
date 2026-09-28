@@ -289,7 +289,11 @@ func clusterLANJoinCommand(args []string) error {
 	}
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
-	if err := cluster.PairWorkerWithTrust(ctx, bundle.RelayURL, *name, cfg.Cluster.Worker.IdentityFile, cfg.Cluster.Worker.Groups, bundle.Trust, func(pair cluster.PairResponse) {
+	authority, err := configuredPoolAuthority(cfg)
+	if err != nil {
+		return err
+	}
+	if err := cluster.PairWorkerWithPoolAuthority(ctx, bundle.RelayURL, *name, cfg.Cluster.Worker.IdentityFile, cfg.Cluster.Worker.Groups, bundle.Trust, authority, func(pair cluster.PairResponse) {
 		fmt.Println("Approve this LAN worker on the relay")
 		fmt.Println("  Code:", pair.UserCode)
 		if pair.VerificationURIComplete != "" {

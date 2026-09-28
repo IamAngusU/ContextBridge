@@ -53,14 +53,15 @@ type WorkerConfig struct {
 }
 
 type WorkerIdentity struct {
-	NodeID            string      `json:"node_id"`
-	NodeToken         string      `json:"node_token"`
-	PrivateKey        string      `json:"private_key"`
-	PublicKey         string      `json:"public_key"`
-	RelayURL          string      `json:"relay_url"`
-	RelayTrust        *RelayTrust `json:"relay_trust,omitempty"`
-	ClusterID         string      `json:"cluster_id,omitempty"`
-	HighestRelayEpoch uint64      `json:"highest_relay_epoch,omitempty"`
+	NodeID            string                 `json:"node_id"`
+	NodeToken         string                 `json:"node_token"`
+	PrivateKey        string                 `json:"private_key"`
+	PublicKey         string                 `json:"public_key"`
+	PoolCertificate   *PoolWorkerCertificate `json:"pool_certificate,omitempty"`
+	RelayURL          string                 `json:"relay_url"`
+	RelayTrust        *RelayTrust            `json:"relay_trust,omitempty"`
+	ClusterID         string                 `json:"cluster_id,omitempty"`
+	HighestRelayEpoch uint64                 `json:"highest_relay_epoch,omitempty"`
 }
 
 type Worker struct {
@@ -308,10 +309,17 @@ func LoadWorker(cfg WorkerConfig) (*Worker, error) {
 }
 
 func PairWorker(ctx context.Context, relayURL, name, identityFile string, groups []string, output func(PairResponse)) error {
-	return PairWorkerWithTrust(ctx, relayURL, name, identityFile, groups, RelayTrust{}, output)
+	return PairWorkerWithPoolAuthority(ctx, relayURL, name, identityFile, groups, RelayTrust{}, nil, output)
 }
 
 func PairWorkerWithTrust(ctx context.Context, relayURL, name, identityFile string, groups []string, trust RelayTrust, output func(PairResponse)) error {
+	return PairWorkerWithPoolAuthority(ctx, relayURL, name, identityFile, groups, trust, nil, output)
+}
+
+// PairWorkerWithPoolAuthority adds a customer-signed pool certificate without
+// disclosing the authority private key to the relay or persisting it in the
+// worker identity.
+func PairWorkerWithPoolAuthority(ctx context.Context, relayURL, name, identityFile string, groups []string, trust RelayTrust, authority *PoolAuthority, output func(PairResponse)) error {
 	relayURL = strings.TrimSpace(relayURL)
 	if err := ValidateRelayURL(relayURL); err != nil {
 		return fmt.Errorf("worker relay URL: %w", err)
@@ -339,7 +347,14 @@ func PairWorkerWithTrust(ctx context.Context, relayURL, name, identityFile strin
 	if err != nil {
 		return err
 	}
-	request := PairRequest{NodeName: name, PublicKey: publicKey, Groups: groups}
+	var certificate *PoolWorkerCertificate
+	if authority != nil {
+		certificate, err = CertifyPoolWorker(*authority, publicKey, time.Now().UTC())
+		if err != nil {
+			return fmt.Errorf("certify worker for customer pool: %w", err)
+		}
+	}
+	request := PairRequest{NodeName: name, PublicKey: publicKey, PoolCertificate: certificate, Groups: groups}
 	var response PairResponse
 	if err := postJSON(ctx, client, endpoint(relayURL, "/v1/pair/request"), "", request, &response); err != nil {
 		return err
@@ -383,7 +398,7 @@ func PairWorkerWithTrust(ctx context.Context, relayURL, name, identityFile strin
 			case "authorization_pending":
 				continue
 			case "approved":
-				identity := WorkerIdentity{NodeID: poll.NodeID, NodeToken: poll.NodeToken, PrivateKey: privateKey, PublicKey: publicKey, RelayURL: relayURL}
+				identity := WorkerIdentity{NodeID: poll.NodeID, NodeToken: poll.NodeToken, PrivateKey: privateKey, PublicKey: publicKey, PoolCertificate: certificate, RelayURL: relayURL}
 				if trust.SPKISHA256 != "" || trust.CertificatePEM != "" {
 					identity.RelayTrust = &trust
 				}
@@ -401,6 +416,10 @@ func PairWorkerWithTrust(ctx context.Context, relayURL, name, identityFile strin
 }
 
 func BootstrapWorkerIdentity(database, relayURL, name, identityFile string, groups []string) error {
+	return BootstrapWorkerIdentityWithPoolAuthority(database, relayURL, name, identityFile, groups, nil)
+}
+
+func BootstrapWorkerIdentityWithPoolAuthority(database, relayURL, name, identityFile string, groups []string, authority *PoolAuthority) error {
 	store, err := OpenStore(database)
 	if err != nil {
 		return err
@@ -418,10 +437,17 @@ func BootstrapWorkerIdentity(database, relayURL, name, identityFile string, grou
 	if err != nil {
 		return err
 	}
-	if err := store.UpsertNode(Node{ID: nodeID, Name: cleanLabel(name, 100), PublicKey: publicKey, State: "paired", LastSeen: time.Now().UTC()}); err != nil {
+	var certificate *PoolWorkerCertificate
+	if authority != nil {
+		certificate, err = CertifyPoolWorker(*authority, publicKey, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+	}
+	if err := store.UpsertNode(Node{ID: nodeID, Name: cleanLabel(name, 100), PublicKey: publicKey, PoolCertificate: certificate, State: "paired", LastSeen: time.Now().UTC()}); err != nil {
 		return err
 	}
-	return saveIdentity(identityFile, WorkerIdentity{NodeID: nodeID, NodeToken: token, PrivateKey: privateKey, PublicKey: publicKey, RelayURL: relayURL})
+	return saveIdentity(identityFile, WorkerIdentity{NodeID: nodeID, NodeToken: token, PrivateKey: privateKey, PublicKey: publicKey, PoolCertificate: certificate, RelayURL: relayURL})
 }
 
 func (w *Worker) Run(ctx context.Context, logger func(string, ...interface{})) error {
@@ -495,7 +521,7 @@ func randomDurationBelow(maximum time.Duration) time.Duration {
 
 func (w *Worker) connect(ctx context.Context, report WorkerReporter) error {
 	capabilities := w.capabilities(ctx)
-	node := Node{ID: w.identity.NodeID, Name: w.cfg.Name, PublicKey: w.identity.PublicKey, Capabilities: capabilities, State: "online", Connected: true, LastSeen: time.Now().UTC()}
+	node := Node{ID: w.identity.NodeID, Name: w.cfg.Name, PublicKey: w.identity.PublicKey, PoolCertificate: w.identity.PoolCertificate, Capabilities: capabilities, State: "online", Connected: true, LastSeen: time.Now().UTC()}
 	target, err := websocketURL(endpoint(w.cfg.RelayURL, "/v1/cluster/workers/connect"))
 	if err != nil {
 		return err
@@ -603,6 +629,11 @@ func (w *Worker) connect(ctx context.Context, report WorkerReporter) error {
 		job := *message.Job
 		if err := w.validateJobFence(job); err != nil {
 			return err
+		}
+		if err := w.validatePoolJob(job, time.Now().UTC()); err != nil {
+			_ = write(WireMessage{Type: "result", JobID: job.ID, Attempt: job.Attempt, Fence: job.AssignmentFence, Error: "customer pool authorization rejected", FailureCode: FailurePoolAuthorization})
+			report(WorkerEvent{Kind: WorkerJobFailed, NodeName: node.Name, JobID: job.ID, Task: job.Requirements.Task, Error: err.Error()})
+			continue
 		}
 		select {
 		case w.sem <- struct{}{}:
@@ -830,6 +861,21 @@ func (w *Worker) execute(ctx context.Context, job Job, emitProgress func(JobProg
 		return nil, sealed, usage, execution, sealErr
 	}
 	return json.RawMessage(raw), nil, usage, execution, nil
+}
+
+func (w *Worker) validatePoolJob(job Job, now time.Time) error {
+	certificate := w.identity.PoolCertificate
+	if certificate == nil {
+		return nil
+	}
+	context, err := job.EncryptionContextForNode(w.identity.NodeID)
+	if err != nil {
+		return fmt.Errorf("customer pool requires an authenticated encrypted context: %w", err)
+	}
+	if err := ValidatePoolJobAuthorization(certificate.AuthorityKey, certificate.PoolID, job.PoolAuthorization, context, job.SealedPayload, now); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (w *Worker) resolveLocalPrimaryRoute(parent context.Context, requirements Requirements) (string, error) {
@@ -1706,6 +1752,11 @@ func validateWorkerIdentity(identity WorkerIdentity) error {
 		publicRaw, decodeErr := decode(identity.PublicKey)
 		if decodeErr != nil || len(publicRaw) != 32 || !bytes.Equal(publicRaw, privateKey.PublicKey().Bytes()) {
 			return errors.New("public key does not match private key")
+		}
+	}
+	if identity.PoolCertificate != nil {
+		if err := ValidatePoolWorkerCertificate(identity.PoolCertificate, identity.PoolCertificate.AuthorityKey, identity.PoolCertificate.PoolID, identity.PublicKey, time.Now().UTC()); err != nil {
+			return fmt.Errorf("pool certificate: %w", err)
 		}
 	}
 	if identity.RelayURL != "" {
