@@ -36,6 +36,7 @@ import (
 
 type Server struct {
 	cfg                 config.Config
+	configPath          string
 	startedAt           time.Time
 	store               *Store
 	schedules           *scheduleStore
@@ -70,6 +71,7 @@ const (
 )
 
 var errServiceStopping = errors.New("service is stopping")
+var bridgeRequestSequence atomic.Uint64
 
 // Idle reports whether replacing this process would interrupt local work.
 func (s *Server) Idle() bool {
@@ -115,6 +117,21 @@ func (s *Server) lifecycleStopAccepted() bool {
 
 func (s *Server) SetUpdater(manager *updater.Manager) {
 	s.updates = manager
+}
+
+// SetConfigPath enables the local-only management API. It is separate from
+// NewServer so embedders and tests that construct an in-memory service do not
+// accidentally expose an arbitrary file for mutation.
+func (s *Server) SetConfigPath(path string) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		s.configPath = ""
+		return
+	}
+	if absolute, err := filepath.Abs(path); err == nil {
+		path = absolute
+	}
+	s.configPath = filepath.Clean(path)
 }
 
 func NewServer(cfg config.Config, logger *log.Logger) (*Server, error) {
@@ -170,6 +187,8 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/v1/status", s.auth(s.handleStatus))
+	mux.HandleFunc("/v1/config", s.localOnly(s.auth(s.handleConfig)))
+	mux.HandleFunc("/v1/config/schema", s.localOnly(s.auth(s.handleConfigSchema)))
 	mux.HandleFunc("/v1/system/stop", s.localOnly(s.auth(s.handleSystemStop)))
 	mux.HandleFunc("/v1/jobs", s.auth(s.handleJobs))
 	mux.HandleFunc("/v1/jobs/", s.auth(s.handleJobResult))
@@ -1241,6 +1260,7 @@ func (s *Server) localOnly(next http.HandlerFunc) http.HandlerFunc {
 
 func (s *Server) cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Request-ID", fmt.Sprintf("req_%016x%016x", uint64(time.Now().UnixNano()), bridgeRequestSequence.Add(1)))
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		w.Header().Set("Referrer-Policy", "no-referrer")

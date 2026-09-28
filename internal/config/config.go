@@ -22,6 +22,7 @@ import (
 	"github.com/IamAngusU/ContextBridge/internal/cluster"
 	"github.com/IamAngusU/ContextBridge/internal/netpolicy"
 	"github.com/IamAngusU/ContextBridge/internal/updater"
+	"github.com/IamAngusU/ContextBridge/internal/vectorstore"
 	"gopkg.in/yaml.v3"
 )
 
@@ -305,6 +306,10 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	return parseConfig(raw, filepath.Dir(path))
+}
+
+func parseConfig(raw []byte, configDirectory string) (Config, error) {
 	expanded := expandEnvironment(string(raw))
 	var cfg Config
 	decoder := yaml.NewDecoder(strings.NewReader(expanded))
@@ -318,11 +323,11 @@ func Load(path string) (Config, error) {
 	} else if !errors.Is(err, io.EOF) {
 		return Config{}, fmt.Errorf("parse config: %w", err)
 	}
-	applyDefaults(&cfg, filepath.Dir(path))
-	if err := resolveEngineSecretFiles(&cfg, filepath.Dir(path)); err != nil {
+	applyDefaults(&cfg, configDirectory)
+	if err := resolveEngineSecretFiles(&cfg, configDirectory); err != nil {
 		return Config{}, err
 	}
-	if err := resolveAdapterSecretFiles(&cfg, filepath.Dir(path)); err != nil {
+	if err := resolveAdapterSecretFiles(&cfg, configDirectory); err != nil {
 		return Config{}, err
 	}
 	if err := cfg.Validate(); err != nil {
@@ -726,6 +731,9 @@ func (c Config) Validate() error {
 		if model.Revision != "" && !huggingFaceRevisionPattern.MatchString(model.Revision) {
 			return fmt.Errorf("model %s revision must be an immutable 40- or 64-character hexadecimal commit", name)
 		}
+		if model.Dimensions < 0 || model.Dimensions > vectorstore.MaximumVectorDimensions {
+			return fmt.Errorf("model %s dimensions must be between 1 and %d when set", name, vectorstore.MaximumVectorDimensions)
+		}
 	}
 	if c.RAG.Enabled {
 		if c.RAG.Backend != "local" {
@@ -898,6 +906,12 @@ func (c Config) Validate() error {
 			}
 			if step.MaxIterations < 0 || step.MaxIterations > globalIterations {
 				return fmt.Errorf("pipeline %s step %s max_iterations exceeds the pipeline limit", name, step.Name)
+			}
+			if err := cluster.ValidateRequirements(step.Requirements); err != nil {
+				return fmt.Errorf("pipeline %s step %s requirements: %w", name, step.Name, err)
+			}
+			if len(c.Cluster.Policies.AllowedTasks) > 0 && !containsFoldConfig(c.Cluster.Policies.AllowedTasks, step.Requirements.Task) {
+				return fmt.Errorf("pipeline %s step %s task %s is not allowed by cluster policy", name, step.Name, step.Requirements.Task)
 			}
 		}
 		if _, err := cluster.PlanPipelineGraph(pipeline); err != nil {

@@ -310,6 +310,8 @@ environment file on the relay host without printing the token:
 ```sh
 contextbridge integrate ui \
   --subject my-dashboard \
+  --allowed-subjects website-api,batch-worker \
+  --allowed-tenants production \
   --lifetime-hours 720 \
   --write-env ./contextbridge-ui.env
 ```
@@ -321,6 +323,12 @@ issue another token. Keep it in a server-side environment or trusted desktop
 secret store. Do not place it in a public browser bundle, mobile binary,
 repository, URL, log, or screenshot. A public web interface should call its
 own authenticated backend; that backend owns the observer token.
+
+The optional subject and tenant allowlists are enforced by the relay on list,
+point, event, and stream reads. If both are set, an execution must match both.
+See the [Management API](management-api.md) for scope semantics, cursor
+pagination, OpenAPI discovery, stream helpers, and safe local configuration
+editing with machine-readable ranges.
 
 The dependency-free reference client is
 [`examples/server-app/contextbridge-ui-client.mjs`](../examples/server-app/contextbridge-ui-client.mjs).
@@ -336,17 +344,22 @@ methods expose the same stable native resources without a presentation layer:
 
 ```text
 GET /v1/cluster/protocol
+GET /v1/cluster/openapi.json
+GET /v1/cluster/whoami
 GET /v1/cluster/overview
 GET /v1/cluster/nodes
 GET /v1/cluster/events?limit=100
 GET /v1/cluster/jobs?limit=50&status=running
+GET /v1/cluster/jobs?page=1&limit=50&status=running&tenant_id=production
 GET /v1/cluster/jobs/JOB_ID
 GET /v1/cluster/jobs/JOB_ID/events?after=SEQUENCE&limit=100
+GET /v1/cluster/jobs/JOB_ID/events/stream?after=SEQUENCE
 GET /v1/cluster/jobs/JOB_ID/estimate
 GET /v1/cluster/pipelines
 GET /v1/cluster/pipeline-runs/RUN_ID
 GET /v1/cluster/pipeline-runs/RUN_ID/activity
 GET /v1/cluster/pipeline-runs/RUN_ID/events?after=SEQUENCE&limit=100
+GET /v1/cluster/pipeline-runs/RUN_ID/events/stream?after=SEQUENCE
 ```
 
 Every response is JSON. The protocol manifest advertises feature and limit
