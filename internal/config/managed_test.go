@@ -106,6 +106,47 @@ func TestManagedConfigRejectsMissingSecretAndUnknownFields(t *testing.T) {
 	}
 }
 
+func TestManagedConfigCannotRedirectFileBackedCredentials(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "config.yml")
+	if err := Default(path); err != nil {
+		t.Fatal(err)
+	}
+	secretsDirectory := filepath.Join(directory, "secrets")
+	if err := os.MkdirAll(secretsDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(secretsDirectory, "provider.key"), []byte("trusted-provider-secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Engines["remote"] = Engine{
+		Type: "openai_compatible", URL: "https://api.example.test", Model: "example-model",
+		APIKeyFile: filepath.Join("secrets", "provider.key"), Remote: true, Capabilities: []string{"text"},
+	}
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	managed, err := ReadManagedConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ValidateManagedConfig(path, []byte(managed.YAML), managed.Revision); err != nil {
+		t.Fatalf("unchanged file-backed credential did not validate: %v", err)
+	}
+	redirected := strings.Replace(managed.YAML, filepath.ToSlash(filepath.Join("secrets", "provider.key")), "missing-or-sensitive.key", 1)
+	if redirected == managed.YAML {
+		redirected = strings.Replace(managed.YAML, filepath.Join("secrets", "provider.key"), "missing-or-sensitive.key", 1)
+	}
+	if _, err := ValidateManagedConfig(path, []byte(redirected), managed.Revision); err == nil || !strings.Contains(err.Error(), "cannot be changed through the managed API") {
+		t.Fatalf("managed API accepted a redirected credential file: %v", err)
+	}
+}
+
 func TestConfigRejectsOutOfRangeModelDimensions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yml")
 	if err := Default(path); err != nil {

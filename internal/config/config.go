@@ -323,6 +323,27 @@ func Load(path string) (Config, error) {
 }
 
 func parseConfig(raw []byte, configDirectory string) (Config, error) {
+	cfg, err := decodeConfig(raw, configDirectory)
+	if err != nil {
+		return Config{}, err
+	}
+	if err := resolveEngineSecretFiles(&cfg, configDirectory); err != nil {
+		return Config{}, err
+	}
+	if err := resolveAdapterSecretFiles(&cfg, configDirectory); err != nil {
+		return Config{}, err
+	}
+	if err := cfg.Validate(); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+// decodeConfig parses and defaults configuration without dereferencing any
+// configured filesystem paths. Callers handling untrusted proposed config can
+// therefore validate structure without accidentally turning a path field into
+// local file-read authority.
+func decodeConfig(raw []byte, configDirectory string) (Config, error) {
 	expanded := expandEnvironment(string(raw))
 	var cfg Config
 	decoder := yaml.NewDecoder(strings.NewReader(expanded))
@@ -337,15 +358,6 @@ func parseConfig(raw []byte, configDirectory string) (Config, error) {
 		return Config{}, fmt.Errorf("parse config: %w", err)
 	}
 	applyDefaults(&cfg, configDirectory)
-	if err := resolveEngineSecretFiles(&cfg, configDirectory); err != nil {
-		return Config{}, err
-	}
-	if err := resolveAdapterSecretFiles(&cfg, configDirectory); err != nil {
-		return Config{}, err
-	}
-	if err := cfg.Validate(); err != nil {
-		return Config{}, err
-	}
 	return cfg, nil
 }
 

@@ -73,6 +73,7 @@ func ManagedConfigConstraints() []map[string]interface{} {
 		constraint("adapter_profiles.*.options", "object", "max_properties", 64),
 		constraint("engines.*.type", "string", "enum", []string{"ollama", "llama_cpp", "adapter", "openai_compatible"}),
 		constraint("engines.*.api_key", "secret", "write_only", true),
+		constraint("engines.*.api_key_file", "string", "read_only", true, "change_via", "local-config-file"),
 		constraint("engines.*.timeout_seconds", "integer", "minimum_when_set", 1, "maximum", 86400, "zero_means_default", true),
 		constraint("engines.*.max_output_tokens", "integer", "minimum_when_set", 1, "maximum", 1000000, "zero_means_default", true),
 		constraint("engines.*.context_window_tokens", "integer", "minimum_when_set", 1, "maximum", 10000000, "zero_means_default", true),
@@ -96,6 +97,7 @@ func ManagedConfigConstraints() []map[string]interface{} {
 		constraint("providers.adapter.auth_mode", "string", "enum", []string{"", "scoped", "dual"}),
 		constraint("providers.adapter.principals", "object", "max_properties", 32),
 		constraint("providers.adapter.principals.*.token", "secret", "min_length", 32, "write_only", true),
+		constraint("providers.adapter.principals.*.token_file", "string", "read_only", true, "change_via", "local-config-file"),
 		constraint("providers.adapter.principals.*.allowed_profiles", "array", "min_items", 1, "max_items", 32),
 		constraint("tunnel.local_port", "integer", "minimum_when_set", 1, "maximum", 65535, "zero_means_default", true),
 		constraint("tunnel.remote_port", "integer", "minimum_when_set", 1, "maximum", 65535, "zero_means_default", true),
@@ -260,10 +262,50 @@ func prepareManagedConfig(path string, proposed []byte, baseRevision string) ([]
 	if int64(len(materialized)) > maximumConfigBytes {
 		return nil, nil, nil, fmt.Errorf("config exceeds %d bytes", maximumConfigBytes)
 	}
-	if _, err := parseConfig(materialized, filepath.Dir(path)); err != nil {
+	if err := validateManagedMaterializedConfig(current, materialized, filepath.Dir(path)); err != nil {
 		return nil, nil, nil, err
 	}
 	return current, materialized, managedChangedSections(currentNode, proposedNode), nil
+}
+
+// validateManagedMaterializedConfig deliberately separates HTTP-managed YAML
+// from filesystem secret resolution. Existing file-backed credential paths are
+// allowed, but this API cannot add, remove, or redirect them; those changes
+// require direct local access to the configuration file. The already trusted
+// current config supplies the resolved values needed for complete validation.
+func validateManagedMaterializedConfig(current, proposed []byte, configDirectory string) error {
+	trusted, err := parseConfig(current, configDirectory)
+	if err != nil {
+		return fmt.Errorf("parse current config: %w", err)
+	}
+	candidate, err := decodeConfig(proposed, configDirectory)
+	if err != nil {
+		return err
+	}
+	for name, engine := range candidate.Engines {
+		trustedEngine := trusted.Engines[name]
+		if strings.TrimSpace(engine.APIKeyFile) != strings.TrimSpace(trustedEngine.APIKeyFile) {
+			return fmt.Errorf("engine %s api_key_file cannot be changed through the managed API; edit the local config file directly", name)
+		}
+		if strings.TrimSpace(engine.APIKeyFile) != "" {
+			engine.ResolvedAPIKey = trustedEngine.ResolvedAPIKey
+			candidate.Engines[name] = engine
+		}
+	}
+	for id, principal := range candidate.Providers.Adapter.Principals {
+		trustedPrincipal := trusted.Providers.Adapter.Principals[id]
+		if strings.TrimSpace(principal.TokenFile) != strings.TrimSpace(trustedPrincipal.TokenFile) {
+			return fmt.Errorf("adapter principal %s token_file cannot be changed through the managed API; edit the local config file directly", id)
+		}
+		if strings.TrimSpace(principal.TokenFile) != "" {
+			principal.ResolvedToken = trustedPrincipal.ResolvedToken
+			candidate.Providers.Adapter.Principals[id] = principal
+		}
+	}
+	if err := candidate.Validate(); err != nil {
+		return err
+	}
+	return nil
 }
 
 var ErrManagedConfigConflict = errors.New("config revision changed; reload before applying")
