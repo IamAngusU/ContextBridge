@@ -32,10 +32,14 @@ self-hosted core.
 - Bounded queue, request, artifact, and cost controls.
 - Optional E2EE for prompt and result payloads between a producer and a
   reserved worker.
+- Optional [customer-controlled protected pools](customer-controlled-pools.md)
+  for sensitive direct jobs, so the hosted relay cannot mint a replacement
+  decryption worker or authorize new protected work.
 - Durable leases, receipts, cancellation, and fail-closed ambiguous execution.
 
 E2EE does not hide the coordination metadata needed to authenticate, schedule,
-meter, and complete work. The project does not claim zero knowledge.
+meter, and complete work. The project does not claim zero knowledge. Protected
+pool mode makes the narrower, testable promise documented above.
 
 ## Production multi-tenant gates
 

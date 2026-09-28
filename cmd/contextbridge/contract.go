@@ -47,7 +47,7 @@ func clusterContractCommand(args []string) error {
 		return errors.New("cluster contract validation requires a producer or admin token")
 	}
 	var result cluster.ContractValidation
-	if err := clusterPOST(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/contracts/validate", *token, input, &result); err != nil {
+	if err := clusterPOST(context.Background(), clusterClientBaseURL(cfg)+"/v1/cluster/contracts/validate", *token, input, &result); err != nil {
 		return err
 	}
 	if *asJSON {

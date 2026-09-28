@@ -152,6 +152,34 @@ func BenchmarkContextBridgeE2EE8MiBPayload(b *testing.B) {
 	}
 }
 
+func BenchmarkPoolAuthorizationVerify(b *testing.B) {
+	now := time.Now().UTC()
+	authority, err := NewPoolAuthority("benchmark-pool", now)
+	if err != nil {
+		b.Fatal(err)
+	}
+	_, publicKey, err := NewIdentity()
+	if err != nil {
+		b.Fatal(err)
+	}
+	context := EncryptionContext{JobID: "job-benchmark", NodeID: "node-benchmark", Attempt: 1, OwnerSubject: "producer-benchmark", Requirements: Requirements{Task: "generation", Provider: "ollama"}}
+	sealed, _, err := SealFor(publicKey, []byte(`{"prompt":"benchmark"}`), JobAAD(context))
+	if err != nil {
+		b.Fatal(err)
+	}
+	authorization, err := SignPoolJobAuthorization(authority, context, sealed, now)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for index := 0; index < b.N; index++ {
+		if err := ValidatePoolJobAuthorization(authority.PublicKey, authority.PoolID, authorization, context, sealed, now); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func benchmarkJSONRequest(b *testing.B, client *http.Client, method, url, token string, body []byte, wantStatus int, target interface{}) {
 	b.Helper()
 	req, err := http.NewRequestWithContext(context.Background(), method, url, bytes.NewReader(body))

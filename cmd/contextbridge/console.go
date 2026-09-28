@@ -65,7 +65,7 @@ func consoleCommand(args []string) error {
 	session.EnableCommands()
 	actionToken, actionSource := consoleActionCredential(cfg, *token)
 	if actionToken != "" && session.EnableWorkActions() {
-		actionClient := newClusterAPIClient(clusterBaseURL(cfg), actionToken)
+		actionClient := newClusterAPIClient(clusterClientBaseURL(cfg), actionToken)
 		limitCtx, cancelLimits := context.WithTimeout(ctx, 2*time.Second)
 		session.ConfigureCommandLimits(consoleCommandLimits(limitCtx, actionClient, cfg))
 		cancelLimits()

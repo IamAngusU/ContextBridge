@@ -164,7 +164,7 @@ POOL AND ROUTING
   contextbridge cluster status|events|estimate|node|submit|chat|route|pipeline
                                                Inspect or use a connected pool
   contextbridge cluster agent auto|plan|run   Run bounded agent workflows
-  contextbridge cluster pairing|token|login   Manage scoped cluster access
+  contextbridge cluster pairing|token|login|account   Manage scoped cluster access
   contextbridge cluster lan init|relocate|join|status
                                                Build an explicitly trusted offline LAN pool
   contextbridge selftest                      Check local + pool readiness without AI work
@@ -232,7 +232,7 @@ func writeCommandGroupHelp(out io.Writer, path []string) bool {
 
 Observe:  status, events, estimate, node, dashboard, protocol
 Run:      submit, chat, pipeline, agent, selftest, route
-Trust:    pairing, token, login, lan
+Trust:    pairing, token, login, account, lan
 Verify:   contract, receipt, conformance
 Setup:    configure
 
@@ -288,6 +288,7 @@ func serveCommand(args []string) error {
 	if err != nil {
 		return err
 	}
+	server.SetConfigPath(*path)
 	updateManager, err := updater.New(cfg.Updates, cfg.Storage.Directory, version)
 	if err != nil {
 		return err
@@ -339,6 +340,7 @@ func runCommand(args []string) error {
 	if err != nil {
 		return err
 	}
+	local.SetConfigPath(*path)
 	updateManager, err := updater.New(cfg.Updates, cfg.Storage.Directory, version)
 	if err != nil {
 		return err
@@ -1349,7 +1351,11 @@ func pairCommandWithIO(args []string, input io.Reader, output io.Writer, termina
 		return errors.New("--name must be a printable name of at most 100 characters")
 	}
 	if cfg.Cluster.Relay.Enabled && *relayURL == "http://"+cfg.Cluster.Relay.Listen {
-		if err := cluster.BootstrapWorkerIdentity(cfg.Cluster.Relay.Database, *relayURL, *name, *identityFile, cfg.Cluster.Worker.Groups); err != nil {
+		authority, err := configuredPoolAuthority(cfg)
+		if err != nil {
+			return err
+		}
+		if err := cluster.BootstrapWorkerIdentityWithPoolAuthority(cfg.Cluster.Relay.Database, *relayURL, *name, *identityFile, cfg.Cluster.Worker.Groups, authority); err != nil {
 			return err
 		}
 		_, _ = fmt.Fprintln(output, "Local worker paired directly with the relay database.")
@@ -1357,7 +1363,11 @@ func pairCommandWithIO(args []string, input io.Reader, output io.Writer, termina
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return cluster.PairWorker(ctx, *relayURL, *name, *identityFile, cfg.Cluster.Worker.Groups, func(pair cluster.PairResponse) {
+	authority, err := configuredPoolAuthority(cfg)
+	if err != nil {
+		return err
+	}
+	return cluster.PairWorkerWithPoolAuthority(ctx, *relayURL, *name, *identityFile, cfg.Cluster.Worker.Groups, cluster.RelayTrust{}, authority, func(pair cluster.PairResponse) {
 		_, _ = fmt.Fprintln(output, "Pair this worker")
 		_, _ = fmt.Fprintln(output, "  Code:", pair.UserCode)
 		verificationURL := pair.VerificationURIComplete
@@ -1540,6 +1550,45 @@ func configuredWorker(cfg config.Config) (*cluster.Worker, error) {
 	return cluster.LoadWorker(cluster.WorkerConfig{RelayURL: cfg.Cluster.Worker.RelayURL, IdentityFile: cfg.Cluster.Worker.IdentityFile, Name: name, Groups: cfg.Cluster.Worker.Groups, Tags: cfg.Cluster.Worker.Tags, MaxConcurrent: cfg.Cluster.Worker.MaxConcurrent, LocalURL: cfg.Cluster.Worker.LocalURL, LocalToken: cfg.Cluster.Worker.LocalToken, HeartbeatEvery: time.Duration(cfg.Cluster.Worker.HeartbeatSeconds) * time.Second, AllowedTasks: allowedTasks, AllowedProviders: cfg.Cluster.Worker.AllowedProviders, AllowedModels: cfg.Cluster.Worker.AllowedModels, Version: version})
 }
 
+func configuredPoolAuthority(cfg config.Config) (*cluster.PoolAuthority, error) {
+	path := strings.TrimSpace(cfg.Cluster.PoolAuthorityFile)
+	if _, account, ok := selectedClusterAccount(cfg); ok {
+		path = strings.TrimSpace(account.PoolAuthorityFile)
+	}
+	if path == "" {
+		return nil, nil
+	}
+	authority, err := cluster.LoadPoolAuthority(path)
+	if err != nil {
+		return nil, fmt.Errorf("load cluster.pool_authority_file: %w", err)
+	}
+	return &authority, nil
+}
+
+func selectedClusterAccount(cfg config.Config) (string, config.ClusterAccount, bool) {
+	name := strings.TrimSpace(cfg.Cluster.SelectedAccount)
+	if name == "" {
+		name = strings.TrimSpace(cfg.Cluster.ActiveAccount)
+	}
+	if name == "" {
+		return "", config.ClusterAccount{}, false
+	}
+	account, ok := cfg.Cluster.Accounts[name]
+	return name, account, ok
+}
+
+func selectClusterAccount(cfg *config.Config, requested string) error {
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		return nil
+	}
+	if _, exists := cfg.Cluster.Accounts[requested]; !exists {
+		return fmt.Errorf("cluster account %q is not configured; run `contextbridge cluster account list`", requested)
+	}
+	cfg.Cluster.SelectedAccount = requested
+	return nil
+}
+
 func enabledLabel(enabled bool, label string) string {
 	if enabled {
 		return label
@@ -1558,7 +1607,7 @@ func freeLocalAddress() (string, error) {
 
 func clusterCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: contextbridge cluster status|events|estimate|node|protocol|conformance|submit|chat|agent|selftest|route|contract|receipt|login|token|pairing|lan")
+		return errors.New("usage: contextbridge cluster status|events|estimate|node|protocol|conformance|submit|chat|agent|selftest|route|contract|receipt|login|account|token|pairing|pool|lan")
 	}
 	switch args[0] {
 	case "status":
@@ -1589,10 +1638,14 @@ func clusterCommand(args []string) error {
 		return clusterReceiptCommand(args[1:])
 	case "login":
 		return clusterLoginCommand(args[1:])
+	case "account":
+		return clusterAccountCommand(args[1:])
 	case "token":
 		return clusterTokenCommand(args[1:])
 	case "pairing":
 		return clusterPairingCommand(args[1:])
+	case "pool":
+		return clusterPoolCommand(args[1:])
 	case "configure":
 		return clusterConfigureCommand(args[1:])
 	case "dashboard":
@@ -1604,6 +1657,30 @@ func clusterCommand(args []string) error {
 	default:
 		return fmt.Errorf("unknown cluster command %s", args[0])
 	}
+}
+
+func clusterPoolCommand(args []string) error {
+	if len(args) == 0 || args[0] != "init" {
+		return errors.New("usage: contextbridge cluster pool init --id POOL_ID --out AUTHORITY_FILE")
+	}
+	flags := flag.NewFlagSet("cluster pool init", flag.ContinueOnError)
+	poolID := flags.String("id", "", "stable customer pool ID")
+	output := flags.String("out", "", "new owner-only authority file")
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || strings.TrimSpace(*poolID) == "" || strings.TrimSpace(*output) == "" {
+		return errors.New("usage: contextbridge cluster pool init --id POOL_ID --out AUTHORITY_FILE")
+	}
+	authority, err := cluster.CreatePoolAuthorityFile(*output, *poolID, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	fmt.Println("Customer pool authority created:", *output)
+	fmt.Println("Pool ID:", authority.PoolID)
+	fmt.Println("Set cluster.pool_authority_file to this path on customer-controlled producer and pairing systems.")
+	fmt.Println("Do not copy the authority file to the hosted relay.")
+	return nil
 }
 
 func clusterEstimateCommand(args []string) error {
@@ -1625,7 +1702,7 @@ func clusterEstimateCommand(args []string) error {
 		*token = clusterClientToken(cfg, "")
 	}
 	var estimate cluster.HistoricalRuntimeEstimate
-	target := clusterBaseURL(cfg) + "/v1/cluster/jobs/" + url.PathEscape(strings.TrimSpace(flags.Arg(0))) + "/estimate"
+	target := clusterClientBaseURL(cfg) + "/v1/cluster/jobs/" + url.PathEscape(strings.TrimSpace(flags.Arg(0))) + "/estimate"
 	if err := clusterGET(context.Background(), target, *token, &estimate); err != nil {
 		return err
 	}
@@ -1703,7 +1780,7 @@ func clusterEventsCommand(args []string) error {
 		if *pipeline {
 			kind = "pipeline-runs"
 		}
-		target := fmt.Sprintf("%s/v1/cluster/%s/%s/events?after=%d&limit=%d", clusterBaseURL(cfg), kind, url.PathEscape(jobID), cursor, *limit)
+		target := fmt.Sprintf("%s/v1/cluster/%s/%s/events?after=%d&limit=%d", clusterClientBaseURL(cfg), kind, url.PathEscape(jobID), cursor, *limit)
 		if err := clusterGET(context.Background(), target, *token, &page); err != nil {
 			return err
 		}
@@ -1760,6 +1837,7 @@ func clusterRouteCommand(args []string) error {
 	}
 	flags := flag.NewFlagSet("cluster route explain", flag.ContinueOnError)
 	path := flags.String("config", defaultConfigPath(), "config path")
+	account := flags.String("account", "", "named cluster account; defaults to cluster.active_account")
 	file := flags.String("file", "", "cluster job JSON file for a non-executing preview")
 	jobID := flags.String("job", "", "assigned job ID with a durable routing decision")
 	token := flags.String("token", "", "producer token; defaults to local admin token")
@@ -1771,6 +1849,13 @@ func clusterRouteCommand(args []string) error {
 		return errors.New("exactly one of --file or --job is required")
 	}
 	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	if err := selectClusterAccount(&cfg, *account); err != nil {
+		return err
+	}
+	poolAuthority, err := configuredPoolAuthority(cfg)
 	if err != nil {
 		return err
 	}
@@ -1789,11 +1874,16 @@ func clusterRouteCommand(args []string) error {
 			return err
 		}
 		request := cluster.AssignmentRequest{TenantID: input.TenantID, Requirements: input.Requirements}
-		if err := clusterPOST(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/routes/explain", *token, request, &decision); err != nil {
+		if poolAuthority != nil {
+			if err := poolAuthority.BindAssignmentRequest(&request); err != nil {
+				return err
+			}
+		}
+		if err := clusterPOST(context.Background(), clusterClientBaseURL(cfg)+"/v1/cluster/routes/explain", *token, request, &decision); err != nil {
 			return err
 		}
 	} else {
-		if err := clusterGET(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/jobs/"+url.PathEscape(*jobID)+"/route", *token, &decision); err != nil {
+		if err := clusterGET(context.Background(), clusterClientBaseURL(cfg)+"/v1/cluster/jobs/"+url.PathEscape(*jobID)+"/route", *token, &decision); err != nil {
 			return err
 		}
 	}
@@ -2068,7 +2158,7 @@ func clusterPipelineActivityCommand(args []string) error {
 		*token = clusterClientToken(cfg, "")
 	}
 	var projection cluster.ActivityProjection
-	target := clusterBaseURL(cfg) + "/v1/cluster/pipeline-runs/" + url.PathEscape(strings.TrimSpace(flags.Arg(0))) + "/activity"
+	target := clusterClientBaseURL(cfg) + "/v1/cluster/pipeline-runs/" + url.PathEscape(strings.TrimSpace(flags.Arg(0))) + "/activity"
 	if err := clusterGET(context.Background(), target, *token, &projection); err != nil {
 		return err
 	}
@@ -2148,12 +2238,12 @@ func clusterStatusCommand(args []string) error {
 	token := clusterClientToken(cfg, "")
 	var overview cluster.Overview
 	clockRequestStarted := time.Now()
-	if err := clusterGET(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/overview", token, &overview); err != nil {
+	if err := clusterGET(context.Background(), clusterClientBaseURL(cfg)+"/v1/cluster/overview", token, &overview); err != nil {
 		return err
 	}
 	clockRequestEnded := time.Now()
 	var nodes []cluster.Node
-	if err := clusterGET(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/nodes", token, &nodes); err != nil {
+	if err := clusterGET(context.Background(), clusterClientBaseURL(cfg)+"/v1/cluster/nodes", token, &nodes); err != nil {
 		return err
 	}
 	if *asJSON {
@@ -2313,6 +2403,7 @@ func clusterSubmitCommand(args []string) error {
 func clusterSubmitCommandWithIO(args []string, stdin io.Reader, output io.Writer, terminal bool) error {
 	flags := flag.NewFlagSet("cluster submit", flag.ContinueOnError)
 	path := flags.String("config", defaultConfigPath(), "config path")
+	account := flags.String("account", "", "named cluster account; defaults to cluster.active_account")
 	file := flags.String("file", "", "cluster job JSON file")
 	token := flags.String("token", "", "producer token; defaults to local admin token")
 	wait := flags.Bool("wait", true, "wait for a final result")
@@ -2340,6 +2431,22 @@ func clusterSubmitCommandWithIO(args []string, stdin io.Reader, output io.Writer
 	cfg, err := config.Load(*path)
 	if err != nil {
 		return err
+	}
+	if err := selectClusterAccount(&cfg, *account); err != nil {
+		return err
+	}
+	poolAuthority, err := configuredPoolAuthority(cfg)
+	if err != nil {
+		return err
+	}
+	if poolAuthority != nil {
+		if provided["e2ee"] && !*sealed {
+			return errors.New("the configured customer pool authority requires E2EE; remove --e2ee=false or use a config without pool_authority_file")
+		}
+		if *idempotencyKey != "" {
+			return errors.New("customer pool submission uses a fresh signed reservation and cannot be combined with --idempotency-key")
+		}
+		*sealed = true
 	}
 	if *token == "" {
 		*token = clusterClientToken(cfg, "")
@@ -2380,12 +2487,22 @@ func clusterSubmitCommandWithIO(args []string, stdin io.Reader, output io.Writer
 	if *sealed {
 		var reservation cluster.AssignmentResponse
 		assignmentRequest := cluster.AssignmentRequest{TenantID: input.TenantID, Requirements: input.Requirements}
-		if err := clusterPOST(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/assign", *token, assignmentRequest, &reservation); err != nil {
+		if poolAuthority != nil {
+			if err := poolAuthority.BindAssignmentRequest(&assignmentRequest); err != nil {
+				return err
+			}
+		}
+		if err := clusterPOST(context.Background(), clusterClientBaseURL(cfg)+"/v1/cluster/assign", *token, assignmentRequest, &reservation); err != nil {
 			return err
 		}
 		encryptionContext, err = cluster.ValidateAssignmentResponse(assignmentRequest, reservation, time.Now().UTC())
 		if err != nil {
 			return err
+		}
+		if poolAuthority != nil {
+			if err := cluster.ValidateAssignmentPoolAuthority(*poolAuthority, reservation, time.Now().UTC()); err != nil {
+				return fmt.Errorf("customer pool worker verification failed: %w", err)
+			}
 		}
 		envelope, sharedKey, err := cluster.SealFor(reservation.Assignment.PublicKey, input.Payload, cluster.JobAAD(encryptionContext))
 		if err != nil {
@@ -2397,10 +2514,16 @@ func clusterSubmitCommandWithIO(args []string, stdin io.Reader, output io.Writer
 		input.Requirements = reservation.Assignment.Requirements
 		input.Payload = nil
 		input.Sealed = envelope
+		if poolAuthority != nil {
+			input.PoolAuthorization, err = cluster.SignPoolJobAuthorization(*poolAuthority, encryptionContext, envelope, time.Now().UTC())
+			if err != nil {
+				return err
+			}
+		}
 		input.AssignmentID = reservation.Assignment.ID
 		input.AssignmentSecret = reservation.Secret
 	}
-	client := newClusterAPIClient(clusterBaseURL(cfg), *token)
+	client := newClusterAPIClient(clusterClientBaseURL(cfg), *token)
 	job, responseHeaders, err := client.SubmitWithMetadata(context.Background(), input, *idempotencyKey)
 	if err != nil {
 		return err
@@ -2512,7 +2635,8 @@ func clusterTokenCreateCommand(args []string) error {
 	maxQueuedJobs := flags.Int("max-queued-jobs", 0, "producer queued-job limit; 0 uses the relay default")
 	maxJobsPerHour := flags.Int("max-jobs-per-hour", 0, "durable producer admission limit; 0 disables it")
 	providers := flags.String("providers", "", "comma-separated provider allowlist")
-	allowedTenants := flags.String("allowed-tenants", "", "comma-separated tenant_id allowlist bound to this producer credential")
+	allowedTenants := flags.String("allowed-tenants", "", "comma-separated tenant_id allowlist bound to this producer or observer credential")
+	allowedSubjects := flags.String("allowed-subjects", "", "comma-separated owner_subject allowlist bound to this observer credential")
 	egress := flags.String("egress", "", "producer egress ceiling: local_only or empty")
 	requireE2EE := flags.Bool("require-e2ee", false, "reject every cleartext job submitted with this producer credential")
 	if err := parseInterspersedFlags(flags, args); err != nil {
@@ -2525,10 +2649,17 @@ func clusterTokenCreateCommand(args []string) error {
 	if err != nil {
 		return err
 	}
+	producerTenants := splitWorkerList(*allowedTenants)
+	observerTenants := []string(nil)
+	if strings.EqualFold(strings.TrimSpace(*role), "observer") {
+		observerTenants = producerTenants
+		producerTenants = nil
+	}
 	var output map[string]interface{}
 	request := map[string]interface{}{
 		"role": *role, "subject": *subject, "groups": splitWorkerList(*groups), "lifetime_hours": *lifetimeHours,
-		"producer_limits": cluster.ProducerLimits{MaxQueuedJobs: *maxQueuedJobs, MaxJobsPerHour: *maxJobsPerHour, Providers: splitWorkerList(*providers), AllowedTenants: splitWorkerList(*allowedTenants), Egress: strings.TrimSpace(*egress), RequireE2EE: *requireE2EE},
+		"producer_limits": cluster.ProducerLimits{MaxQueuedJobs: *maxQueuedJobs, MaxJobsPerHour: *maxJobsPerHour, Providers: splitWorkerList(*providers), AllowedTenants: producerTenants, Egress: strings.TrimSpace(*egress), RequireE2EE: *requireE2EE},
+		"observer_limits": cluster.ObserverLimits{AllowedSubjects: splitWorkerList(*allowedSubjects), AllowedTenants: observerTenants},
 	}
 	if err := clusterPOST(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/tokens", cfg.Cluster.Relay.AdminToken, request, &output); err != nil {
 		return err
@@ -2635,8 +2766,15 @@ func clusterLoginCommand(args []string) error {
 	flags := flag.NewFlagSet("cluster login", flag.ContinueOnError)
 	path := flags.String("config", defaultConfigPath(), "config path")
 	tokenFile := flags.String("token-file", "", "file containing a producer token or token JSON")
+	accountName := flags.String("account", "", "save as a named cluster account")
+	relayURL := flags.String("relay", "", "relay URL for the named account; defaults to the configured relay")
+	poolAuthorityFile := flags.String("pool-authority-file", "", "customer pool authority file for the named account")
+	activate := flags.Bool("activate", true, "make the named account the default for subsequent commands")
 	if err := flags.Parse(args); err != nil {
 		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected cluster login argument %q", flags.Arg(0))
 	}
 	if *tokenFile == "" {
 		return errors.New("--token-file is required so credentials do not enter shell history")
@@ -2659,12 +2797,153 @@ func clusterLoginCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	cfg.Cluster.ClientToken = token
+	name := strings.TrimSpace(*accountName)
+	if name == "" {
+		if strings.TrimSpace(*relayURL) != "" || strings.TrimSpace(*poolAuthorityFile) != "" || !*activate {
+			return errors.New("--relay, --pool-authority-file and --activate require --account")
+		}
+		cfg.Cluster.ClientToken = token
+	} else {
+		accountRelayURL := strings.TrimRight(strings.TrimSpace(*relayURL), "/")
+		if accountRelayURL == "" {
+			baseConfig := cfg
+			baseConfig.Cluster.ActiveAccount = ""
+			baseConfig.Cluster.SelectedAccount = ""
+			accountRelayURL = clusterBaseURL(baseConfig)
+		}
+		if err := cluster.ValidateRelayURL(accountRelayURL); err != nil {
+			return fmt.Errorf("account relay URL: %w", err)
+		}
+		storedAuthorityPath := strings.TrimSpace(*poolAuthorityFile)
+		if storedAuthorityPath != "" {
+			validationPath := storedAuthorityPath
+			if !filepath.IsAbs(validationPath) {
+				validationPath = filepath.Join(filepath.Dir(*path), validationPath)
+			}
+			if _, err := cluster.LoadPoolAuthority(validationPath); err != nil {
+				return fmt.Errorf("account pool authority: %w", err)
+			}
+		}
+		if cfg.Cluster.Accounts == nil {
+			cfg.Cluster.Accounts = make(map[string]config.ClusterAccount)
+		}
+		cfg.Cluster.Accounts[name] = config.ClusterAccount{RelayURL: accountRelayURL, ClientToken: token, PoolAuthorityFile: storedAuthorityPath}
+		if *activate {
+			cfg.Cluster.ActiveAccount = name
+		}
+	}
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
 	if err := config.Save(*path, cfg); err != nil {
 		return err
 	}
-	fmt.Println("Producer credential saved. cluster chat and cluster submit are ready.")
+	if name == "" {
+		fmt.Println("Producer credential saved. cluster chat and cluster submit are ready.")
+	} else {
+		fmt.Printf("Cluster account %s saved", name)
+		if *activate {
+			fmt.Print(" and activated")
+		}
+		fmt.Println(". Use --account to select it without changing the default.")
+	}
 	return nil
+}
+
+func clusterAccountCommand(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: contextbridge cluster account list|use|remove")
+	}
+	flags := flag.NewFlagSet("cluster account "+args[0], flag.ContinueOnError)
+	path := flags.String("config", defaultConfigPath(), "config path")
+	asJSON := flags.Bool("json", false, "print machine-readable account metadata")
+	if err := parseInterspersedFlags(flags, args[1:]); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	switch args[0] {
+	case "list":
+		if flags.NArg() != 0 {
+			return errors.New("usage: contextbridge cluster account list [--config path] [--json]")
+		}
+		type accountMetadata struct {
+			Name                    string `json:"name"`
+			Active                  bool   `json:"active"`
+			RelayURL                string `json:"relay_url"`
+			PoolAuthorityConfigured bool   `json:"pool_authority_configured"`
+		}
+		names := make([]string, 0, len(cfg.Cluster.Accounts))
+		for name := range cfg.Cluster.Accounts {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		items := make([]accountMetadata, 0, len(names))
+		for _, name := range names {
+			account := cfg.Cluster.Accounts[name]
+			items = append(items, accountMetadata{Name: name, Active: name == cfg.Cluster.ActiveAccount, RelayURL: account.RelayURL, PoolAuthorityConfigured: account.PoolAuthorityFile != ""})
+		}
+		if *asJSON {
+			return json.NewEncoder(os.Stdout).Encode(items)
+		}
+		if len(items) == 0 {
+			fmt.Println("No named cluster accounts configured.")
+			return nil
+		}
+		for _, item := range items {
+			marker := " "
+			if item.Active {
+				marker = "*"
+			}
+			pool := "ordinary"
+			if item.PoolAuthorityConfigured {
+				pool = "protected pool"
+			}
+			fmt.Printf("%s %-20s  %-16s  %s\n", marker, item.Name, pool, item.RelayURL)
+		}
+		return nil
+	case "use":
+		if *asJSON || flags.NArg() != 1 {
+			return errors.New("usage: contextbridge cluster account use NAME [--config path]")
+		}
+		name := strings.TrimSpace(flags.Arg(0))
+		if _, exists := cfg.Cluster.Accounts[name]; !exists {
+			return fmt.Errorf("cluster account %q is not configured", name)
+		}
+		cfg.Cluster.ActiveAccount = name
+		if err := cfg.Validate(); err != nil {
+			return err
+		}
+		if err := config.Save(*path, cfg); err != nil {
+			return err
+		}
+		fmt.Println("Active cluster account:", name)
+		return nil
+	case "remove":
+		if *asJSON || flags.NArg() != 1 {
+			return errors.New("usage: contextbridge cluster account remove NAME [--config path]")
+		}
+		name := strings.TrimSpace(flags.Arg(0))
+		if _, exists := cfg.Cluster.Accounts[name]; !exists {
+			return fmt.Errorf("cluster account %q is not configured", name)
+		}
+		delete(cfg.Cluster.Accounts, name)
+		if cfg.Cluster.ActiveAccount == name {
+			cfg.Cluster.ActiveAccount = ""
+		}
+		if err := cfg.Validate(); err != nil {
+			return err
+		}
+		if err := config.Save(*path, cfg); err != nil {
+			return err
+		}
+		fmt.Printf("Removed cluster account %s. Authority files were not deleted.\n", name)
+		return nil
+	default:
+		return errors.New("usage: contextbridge cluster account list|use|remove")
+	}
 }
 
 func clusterPairingCommand(args []string) error {
@@ -2708,6 +2987,15 @@ func clusterBaseURL(cfg config.Config) string {
 	}
 	registerClusterTrust(cfg, target)
 	return target
+}
+
+func clusterClientBaseURL(cfg config.Config) string {
+	if _, account, ok := selectedClusterAccount(cfg); ok && strings.TrimSpace(account.RelayURL) != "" {
+		target := strings.TrimRight(account.RelayURL, "/")
+		registerClusterTrust(cfg, target)
+		return target
+	}
+	return clusterBaseURL(cfg)
 }
 
 func clusterGET(ctx context.Context, target, token string, output interface{}) error {

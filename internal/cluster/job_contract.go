@@ -162,6 +162,9 @@ func (r *Relay) prepareAdmission(input SubmitRequest, record TokenRecord, mode a
 	if input.Sealed != nil && input.AssignmentID == "" {
 		return SubmitRequest{}, ContractValidation{}, rejectAdmission(http.StatusUnprocessableEntity, AdmissionCodeReservationRequired, errors.New("sealed_payload requires a one-time assignment reservation"))
 	}
+	if input.PoolAuthorization != nil && (input.Sealed == nil || input.AssignmentID == "") {
+		return SubmitRequest{}, ContractValidation{}, rejectAdmission(http.StatusUnprocessableEntity, AdmissionCodeReservationRequired, errors.New("pool_authorization requires a reserved sealed payload"))
+	}
 	if (input.AssignmentID != "" && (input.AssignmentSecret == "" || input.Sealed == nil)) || (input.AssignmentID == "" && input.AssignmentSecret != "") {
 		return SubmitRequest{}, ContractValidation{}, rejectAdmission(http.StatusUnprocessableEntity, AdmissionCodeReservationInvalid, errors.New("assignment_id, assignment_secret, and sealed_payload must be supplied together"))
 	}

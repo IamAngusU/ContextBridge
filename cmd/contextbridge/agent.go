@@ -297,7 +297,7 @@ func clusterAgentPlanOrAutoCommand(args []string, automatic bool) error {
 		fmt.Fprintf(os.Stderr, "/%s", profile)
 	}
 	fmt.Fprintln(os.Stderr, " · output is untrusted until local validation")
-	job, submission, err := submitAndWaitAgentJob(ctx, clusterBaseURL(cfg), *token, cluster.SubmitRequest{
+	job, submission, err := submitAndWaitAgentJob(ctx, clusterClientBaseURL(cfg), *token, cluster.SubmitRequest{
 		Source: "agent-planner", TenantID: policy.TenantID, Requirements: requirements, Payload: payload, MaxAttempts: 1,
 	})
 	if err != nil {
@@ -349,7 +349,7 @@ func clusterAgentPlanOrAutoCommand(args []string, automatic bool) error {
 		}
 	}
 	printAgentPlan(plan, digest)
-	previewAgentRoutes(context.Background(), clusterBaseURL(cfg), *token, cfg, plan)
+	previewAgentRoutes(context.Background(), clusterClientBaseURL(cfg), *token, cfg, plan)
 	if automatic {
 		freshConfig, err := config.Load(*path)
 		if err != nil {
@@ -482,7 +482,7 @@ func executeAgentPlan(plan agentPlan, digest string, cfg config.Config, token st
 			requirements.AdapterFreshSession = true
 			requirements.AdapterEphemeralSession = true
 		}
-		job, submission, err := submitAndWaitAgentJob(stepCtx, clusterBaseURL(cfg), token, cluster.SubmitRequest{
+		job, submission, err := submitAndWaitAgentJob(stepCtx, clusterClientBaseURL(cfg), token, cluster.SubmitRequest{
 			Source: "agent:" + strings.TrimPrefix(digest, "sha256:")[:12], TenantID: plan.Policy.TenantID, Requirements: requirements, Payload: payload, MaxAttempts: 1,
 		})
 		stepCancel()
@@ -1062,7 +1062,7 @@ func agentBindingForConfig(cfg config.Config) (agentExecutionBinding, error) {
 			return agentExecutionBinding{}, fmt.Errorf("encode agent %s component: %w", component.name, err)
 		}
 	}
-	relayURL := strings.TrimRight(clusterBaseURL(cfg), "/")
+	relayURL := strings.TrimRight(clusterClientBaseURL(cfg), "/")
 	executionDigest, err := agentBindingDigest(struct {
 		Version    int                          `json:"version"`
 		RelayURL   string                       `json:"relay_url"`

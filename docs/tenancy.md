@@ -19,6 +19,12 @@ its namespace from the authenticated producer plus the logical tenant, so two
 producer credentials do not gain shared RAG access merely by choosing the same
 tenant label.
 
+Native named cluster accounts are producer-side credential selectors, not new
+relay identities. Each account carries its own producer token, relay URL and
+optional protected-pool authority. The relay continues to authorize the token's
+subject and scopes. Separate OS accounts or a backend session boundary are
+required when local users must not be able to inspect one another's secrets.
+
 ## Bind a credential to one tenant
 
 For a customer- or project-specific credential, bind the allowed label when

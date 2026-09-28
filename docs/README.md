@@ -47,11 +47,17 @@ described as vendor integrations here.
   and operator-owned authority envelopes.
 - [Application integrations](integrations.md): native jobs, OpenAI-compatible
   input, one-command connection settings, MCP, PHP, and the folder inbox.
+- [Management API](management-api.md): scoped dashboard credentials, identity,
+  OpenAPI discovery, cursor history, live event streams, and safe local
+  configuration editing with machine-readable limits.
 - [Provider-neutral adapters](adapters.md): out-of-tree endpoint contract.
 - [Hosted Relay readiness](hosted-relay.md): what is and is not ready for a
   managed coordination service.
 - [Privacy boundaries](privacy.md): cleartext, optional E2EE,
   credential-required E2EE, and the coordination metadata a relay still needs.
+- [Customer-controlled protected pools](customer-controlled-pools.md): keep a
+  hosted relay from injecting a decryption worker or authorizing new protected
+  direct jobs, without an extra network round-trip.
 - [Producer identity and tenant labels](tenancy.md): caller-selected tenant
   labels, optional credential-bound scopes, and the hosted-isolation boundary.
 - [Job Contract v1 schema](schemas/job-contract-v1.schema.json): reusable

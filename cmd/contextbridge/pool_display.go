@@ -21,7 +21,7 @@ func readPoolDisplay(ctx context.Context, cfg config.Config) ([]terminalui.PoolN
 	requestCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
 	defer cancel()
 	var nodes []cluster.Node
-	if err := clusterGET(requestCtx, clusterBaseURL(cfg)+"/v1/cluster/nodes", token, &nodes); err != nil {
+	if err := clusterGET(requestCtx, clusterClientBaseURL(cfg)+"/v1/cluster/nodes", token, &nodes); err != nil {
 		return nil, err
 	}
 	result := make([]terminalui.PoolNode, 0, len(nodes))
@@ -37,7 +37,7 @@ func watchPoolDisplay(ctx context.Context, cfg config.Config, session *terminalu
 	if !cfg.Cluster.Relay.Enabled && !cfg.Cluster.Worker.Enabled {
 		return
 	}
-	session.SetRelayTarget(clusterBaseURL(cfg))
+	session.SetRelayTarget(clusterClientBaseURL(cfg))
 	refresh := func() {
 		nodes, err := readPoolDisplay(ctx, cfg)
 		if ctx.Err() == nil {

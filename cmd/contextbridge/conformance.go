@@ -65,7 +65,7 @@ func clusterConformanceCommand(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	report, err := runRelayConformance(ctx, clusterBaseURL(cfg), *token)
+	report, err := runRelayConformance(ctx, clusterClientBaseURL(cfg), *token)
 	if err != nil {
 		return err
 	}
