@@ -90,7 +90,7 @@ func TestMeasureIdleRelayReturnsResourceShapeWithoutThresholds(t *testing.T) {
 func TestPerformanceReportHasMachineReadableScopeAndTable(t *testing.T) {
 	value := 0.5
 	report := performanceReport{
-		SchemaVersion: 1,
+		SchemaVersion: 2,
 		Version:       "v0.test",
 		Environment:   performanceEnvironment{GOOS: "test", GOARCH: "test", CPUs: 1},
 		Operations: []cluster.BridgeOperationMetric{{
@@ -103,7 +103,10 @@ func TestPerformanceReportHasMachineReadableScopeAndTable(t *testing.T) {
 				DurationMilliseconds: 1000, CPUCorePercent: &value, CPUHostPercent: &value,
 				GoHeapAllocBytes: 1, GoMemorySysBytes: 2,
 			},
-			Database: cluster.DatabaseGrowthMetric{Jobs: 1000, GrowthBytes: 4096, GrowthPer1000JobBytes: 4096},
+			Database: cluster.DatabaseGrowthMetric{
+				Jobs: 1000, AllocatedBaselineBytes: 32768, AllocatedAfterBytes: 65536, AllocatedGrowthBytes: 32768,
+				LiveGrowthBytes: 4096, LiveGrowthPer1000Jobs: 4096, PageAllocBytes: 8192, PageAllocPerJobBytes: 8, PageCount: 2,
+			},
 		},
 		Excludes:    []string{"model and provider inference"},
 		Unavailable: []performanceUnavailableMetric{{Name: "ram_per_active_inference_job", Reason: "no inference is started"}},
@@ -112,7 +115,7 @@ func TestPerformanceReportHasMachineReadableScopeAndTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(raw, []byte(`"schema_version":1`)) || !bytes.Contains(raw, []byte(`"excludes"`)) || !bytes.Contains(raw, []byte(`"unavailable_metrics"`)) {
+	if !bytes.Contains(raw, []byte(`"schema_version":2`)) || !bytes.Contains(raw, []byte(`"excludes"`)) || !bytes.Contains(raw, []byte(`"unavailable_metrics"`)) {
 		t.Fatalf("JSON omitted audit scope: %s", raw)
 	}
 	var output bytes.Buffer

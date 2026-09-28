@@ -1,0 +1,208 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-27T23:20:43.4365728Z",
+  "contextbridge_version": "v0.7.0-dev",
+  "environment": {
+    "goos": "windows",
+    "goarch": "amd64",
+    "go_version": "go1.27.1",
+    "logical_cpus": 24
+  },
+  "settings": {
+    "samples_per_concurrency": 128,
+    "warmup_per_operation": 8,
+    "concurrencies": [
+      1,
+      4,
+      16,
+      64
+    ],
+    "database_jobs": 1000,
+    "idle_duration_ns": 10000000000
+  },
+  "operations": [
+    {
+      "name": "relay_queue_submit_read_cancel",
+      "concurrency": 1,
+      "samples": 128,
+      "operations_per_sample": 1,
+      "p50_us": 3076.5,
+      "p95_us": 4481.9,
+      "p99_us": 5594.8,
+      "throughput_ops_per_second": 318.21283715333755
+    },
+    {
+      "name": "e2ee_small_job_and_result",
+      "concurrency": 1,
+      "samples": 128,
+      "operations_per_sample": 16,
+      "p50_us": 124.581,
+      "p95_us": 215.962,
+      "p99_us": 631.893,
+      "throughput_ops_per_second": 7837.827390987034
+    },
+    {
+      "name": "relay_queue_submit_read_cancel",
+      "concurrency": 4,
+      "samples": 128,
+      "operations_per_sample": 1,
+      "p50_us": 10809.6,
+      "p95_us": 13204.2,
+      "p99_us": 15128.6,
+      "throughput_ops_per_second": 364.04249854880715
+    },
+    {
+      "name": "e2ee_small_job_and_result",
+      "concurrency": 4,
+      "samples": 128,
+      "operations_per_sample": 16,
+      "p50_us": 157.387,
+      "p95_us": 292.7,
+      "p99_us": 327.95,
+      "throughput_ops_per_second": 22963.013626440654
+    },
+    {
+      "name": "relay_queue_submit_read_cancel",
+      "concurrency": 16,
+      "samples": 128,
+      "operations_per_sample": 1,
+      "p50_us": 44668.3,
+      "p95_us": 53552.4,
+      "p99_us": 55521.7,
+      "throughput_ops_per_second": 349.40877578356964
+    },
+    {
+      "name": "e2ee_small_job_and_result",
+      "concurrency": 16,
+      "samples": 128,
+      "operations_per_sample": 16,
+      "p50_us": 260.612,
+      "p95_us": 559.643,
+      "p99_us": 654.868,
+      "throughput_ops_per_second": 47678.46832920493
+    },
+    {
+      "name": "relay_queue_submit_read_cancel",
+      "concurrency": 64,
+      "samples": 128,
+      "operations_per_sample": 1,
+      "p50_us": 201695.5,
+      "p95_us": 204255.7,
+      "p99_us": 205018.4,
+      "throughput_ops_per_second": 314.55141895865296
+    },
+    {
+      "name": "e2ee_small_job_and_result",
+      "concurrency": 64,
+      "samples": 128,
+      "operations_per_sample": 16,
+      "p50_us": 899.906,
+      "p95_us": 2060.45,
+      "p99_us": 2193.381,
+      "throughput_ops_per_second": 49475.88895948437
+    },
+    {
+      "name": "artifact_verification_64kib",
+      "concurrency": 1,
+      "samples": 128,
+      "operations_per_sample": 16,
+      "p50_us": 67.206,
+      "p95_us": 122.7,
+      "p99_us": 144.231,
+      "throughput_ops_per_second": 13595.299531400295
+    },
+    {
+      "name": "artifact_verification_64kib",
+      "concurrency": 4,
+      "samples": 128,
+      "operations_per_sample": 16,
+      "p50_us": 95.181,
+      "p95_us": 126.368,
+      "p99_us": 139.268,
+      "throughput_ops_per_second": 42905.59721113618
+    },
+    {
+      "name": "artifact_verification_64kib",
+      "concurrency": 16,
+      "samples": 128,
+      "operations_per_sample": 16,
+      "p50_us": 291.818,
+      "p95_us": 388.343,
+      "p99_us": 426.056,
+      "throughput_ops_per_second": 51570.404429817165
+    },
+    {
+      "name": "artifact_verification_64kib",
+      "concurrency": 64,
+      "samples": 128,
+      "operations_per_sample": 16,
+      "p50_us": 792.081,
+      "p95_us": 1407.668,
+      "p99_us": 1622.281,
+      "throughput_ops_per_second": 67837.48153349807
+    }
+  ],
+  "resources": {
+    "files": {
+      "binary_path": "contextbridge-benchmark.exe",
+      "binary_bytes": 13902336
+    },
+    "idle_relay": {
+      "duration_ms": 10000,
+      "process_cpu_time_ms": 93.75,
+      "cpu_core_percent": 0.9374710133962658,
+      "cpu_host_percent": 0.03906129222484441,
+      "resident_bytes": 15986688,
+      "resident_kind": "current_working_set",
+      "go_heap_alloc_bytes": 1508312,
+      "go_heap_in_use_bytes": 2777088,
+      "go_memory_sys_bytes": 12414976
+    },
+    "representative_heartbeats": [
+      {
+        "name": "adapter_one_idle_endpoint",
+        "payload_bytes": 245,
+        "interval_ms": 5000,
+        "payload_bytes_per_minute": 2940,
+        "payload_bytes_per_hour": 176400,
+        "scope": "representative JSON body; actual size scales with advertised endpoints and bounded diagnostics"
+      },
+      {
+        "name": "worker_one_gpu_one_model",
+        "payload_bytes": 728,
+        "interval_ms": 5000,
+        "payload_bytes_per_minute": 8736,
+        "payload_bytes_per_hour": 524160,
+        "scope": "representative WebSocket JSON message; actual size scales with capabilities"
+      }
+    ],
+    "database": {
+      "jobs": 1000,
+      "baseline_bytes": 32768,
+      "after_bytes": 8388608,
+      "growth_bytes": 8355840,
+      "growth_per_job_bytes": 8355.84,
+      "growth_per_1000_jobs_bytes": 8355840
+    }
+  },
+  "unavailable_metrics": [
+    {
+      "name": "ram_per_active_inference_job",
+      "reason": "the benchmark deliberately starts no provider, adapter, or model inference; process-wide adapter/model memory cannot be attributed honestly to one ContextBridge job"
+    },
+    {
+      "name": "os_disk_write_bytes_per_job",
+      "reason": "fresh Bolt allocated-file growth is reported instead; filesystem cache, journaling, write amplification, and device counters are platform-specific"
+    },
+    {
+      "name": "wire_network_bytes_per_job",
+      "reason": "job payloads and responses are caller-dependent and transport framing depends on HTTP/WebSocket/TLS; fixed typed heartbeat JSON is reported separately"
+    }
+  ],
+  "excludes": [
+    "model and provider inference",
+    "adapter rendering and website latency",
+    "Internet and cross-device network latency",
+    "TLS, TCP, HTTP, and WebSocket framing from heartbeat byte estimates"
+  ]
+}

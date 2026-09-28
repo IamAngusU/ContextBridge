@@ -11,7 +11,18 @@ if ($manifest.schema -ne "contextbridge.release-readme-compatibility.v1" -or
     throw "Invalid release compatibility manifest."
 }
 
-$release = Invoke-RestMethod -Uri "https://api.github.com/repos/IamAngusU/ContextBridge/releases/latest" -Headers @{ Accept = "application/vnd.github+json" }
+$apiHeaders = @{
+    Accept = "application/vnd.github+json"
+    "X-GitHub-Api-Version" = "2022-11-28"
+}
+$githubToken = [Environment]::GetEnvironmentVariable("GITHUB_TOKEN")
+if (-not [string]::IsNullOrWhiteSpace($githubToken)) {
+    # CI receives GitHub's short-lived, contents:read workflow token. Local
+    # executions remain valid without credentials, while parallel hosted
+    # runners do not share the very small anonymous API quota of one egress IP.
+    $apiHeaders.Authorization = "Bearer $githubToken"
+}
+$release = Invoke-RestMethod -Uri "https://api.github.com/repos/IamAngusU/ContextBridge/releases/latest" -Headers $apiHeaders
 if ($release.tag_name -ne $manifest.latest_release) {
     throw "docs/release-compatibility.json tracks $($manifest.latest_release), but GitHub latest is $($release.tag_name). Update the release contract and remove labels for commands that now ship."
 }

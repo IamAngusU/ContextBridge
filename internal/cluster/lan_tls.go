@@ -23,6 +23,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/IamAngusU/ContextBridge/internal/strictjson"
 )
 
 const (
@@ -311,16 +313,7 @@ func parseLANJoinBundle(raw []byte, now time.Time) (LANJoinBundle, error) {
 		return LANJoinBundle{}, errors.New("LAN join bundle is empty or exceeds its size limit")
 	}
 	var bundle LANJoinBundle
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&bundle); err != nil {
-		return LANJoinBundle{}, fmt.Errorf("parse LAN join bundle: %w", err)
-	}
-	var extra interface{}
-	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return LANJoinBundle{}, errors.New("LAN join bundle contains multiple JSON values")
-		}
+	if err := strictjson.Decode(raw, &bundle); err != nil {
 		return LANJoinBundle{}, fmt.Errorf("parse LAN join bundle: %w", err)
 	}
 	if err := ValidateLANJoinBundle(bundle, now); err != nil {

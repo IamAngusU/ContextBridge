@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Removed an unnecessary durable write from the common queued-job cancellation
+  path. Jobs without an assigned node cannot own a route-recovery probe, so the
+  relay now returns before opening a Bolt write transaction instead of forcing
+  a third sync for every submit/read/cancel cycle.
+- Replaced the misleading normalized Bolt file-growth benchmark with schema-2
+  database evidence. Reports now separate stepwise allocated-file capacity,
+  live branch/leaf bucket occupancy, and cumulative transaction page
+  allocation; only live occupancy is normalized per job.
 - Added retry-safe DAG terminal checkpoint reconciliation without enabling DAG
   execution. An already-terminal child snapshot, its graph node, newly ready
   dependants, recursively blocked descendants, and authoritative ready/blocked
@@ -282,8 +290,8 @@
 - Added public operational guides for pooling, placement, schedules, bounded
   agents, integrations, portable resource packs, and explicit limits.
 - Added distribution regression tests that require the brand and core guides
-  while preventing private out-of-tree adapter names from entering public text
-  surfaces.
+  while preventing implementation-specific adapter identifiers from entering
+  public text surfaces.
 - Defined accurate, versioned compatibility statements for producers, relays,
   workers, resource packs, and out-of-tree adapters, backed by the existing
   protocol manifest and no-inference conformance commands.

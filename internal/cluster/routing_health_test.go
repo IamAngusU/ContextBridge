@@ -300,6 +300,25 @@ func TestCancelledRoutingRecoveryProbeWaitsForExecutionEnd(t *testing.T) {
 	}
 }
 
+func TestEmptyRoutingRecoveryProbeSkipsDurableWrite(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "cluster.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	beforeStats := store.db.Stats()
+	before := beforeStats.TxStats.GetWrite()
+	resolved, err := store.ResolveRoutingRecoveryProbe("", "queued-job", "")
+	if err != nil || resolved {
+		t.Fatalf("empty-node recovery result = (%v, %v), want (false, nil)", resolved, err)
+	}
+	afterStats := store.db.Stats()
+	after := afterStats.TxStats.GetWrite()
+	if after != before {
+		t.Fatalf("empty-node recovery wrote durable state: before=%d after=%d", before, after)
+	}
+}
+
 func TestOldNodeEvidenceCannotReleaseNewNodeProbeForSameJob(t *testing.T) {
 	store, err := OpenStore(filepath.Join(t.TempDir(), "cluster.db"))
 	if err != nil {

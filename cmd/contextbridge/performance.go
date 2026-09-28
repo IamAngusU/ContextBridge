@@ -122,7 +122,7 @@ func performanceCommand(args []string) error {
 	defer stop()
 	concurrencies := effectivePerformanceConcurrencies(*samples)
 	report := performanceReport{
-		SchemaVersion: 1,
+		SchemaVersion: 2,
 		GeneratedAt:   time.Now().UTC(),
 		Version:       version,
 		Environment: performanceEnvironment{
@@ -140,7 +140,7 @@ func performanceCommand(args []string) error {
 		},
 		Unavailable: []performanceUnavailableMetric{
 			{Name: "ram_per_active_inference_job", Reason: "the benchmark deliberately starts no provider, adapter, or model inference; process-wide adapter/model memory cannot be attributed honestly to one ContextBridge job"},
-			{Name: "os_disk_write_bytes_per_job", Reason: "fresh Bolt allocated-file growth is reported instead; filesystem cache, journaling, write amplification, and device counters are platform-specific"},
+			{Name: "os_disk_write_bytes_per_job", Reason: "Bolt live-bucket occupancy, transaction page allocation, and stepwise file allocation are reported separately; filesystem cache, journaling, write amplification, and device counters are platform-specific"},
 			{Name: "wire_network_bytes_per_job", Reason: "job payloads and responses are caller-dependent and transport framing depends on HTTP/WebSocket/TLS; fixed typed heartbeat JSON is reported separately"},
 		},
 	}
@@ -404,8 +404,12 @@ func printPerformanceReport(output io.Writer, report performanceReport) {
 	}
 	fmt.Fprintf(output, "  benchmark + idle relay heap/sys %s / %s\n", formatBytes(idle.GoHeapAllocBytes), formatBytes(idle.GoMemorySysBytes))
 	database := report.Resources.Database
-	fmt.Fprintf(output, "  fresh Bolt growth               %s for %d cancelled jobs · normalized %s/1000\n",
-		formatInt64Bytes(database.GrowthBytes), database.Jobs, formatFloat64Bytes(database.GrowthPer1000JobBytes))
+	fmt.Fprintf(output, "  Bolt allocated file             %s -> %s · +%s (stepwise capacity, not per-job cost)\n",
+		formatInt64Bytes(database.AllocatedBaselineBytes), formatInt64Bytes(database.AllocatedAfterBytes), formatInt64Bytes(database.AllocatedGrowthBytes))
+	fmt.Fprintf(output, "  Bolt live bucket growth         %s for %d cancelled jobs · %s/1000\n",
+		formatInt64Bytes(database.LiveGrowthBytes), database.Jobs, formatFloat64Bytes(database.LiveGrowthPer1000Jobs))
+	fmt.Fprintf(output, "  Bolt transaction page alloc     %s total · %s/job · %d page allocations\n",
+		formatInt64Bytes(database.PageAllocBytes), formatFloat64Bytes(database.PageAllocPerJobBytes), database.PageCount)
 	for _, heartbeat := range report.Resources.Heartbeat {
 		fmt.Fprintf(output, "  %-30s %d B/heartbeat · %d B/min · %s/hour at %.0fs\n",
 			heartbeat.Name, heartbeat.PayloadBytes, heartbeat.PayloadBytesPerMinute,

@@ -3,11 +3,9 @@ package main
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"os"
@@ -19,6 +17,7 @@ import (
 	"time"
 
 	"github.com/IamAngusU/ContextBridge/internal/config"
+	"github.com/IamAngusU/ContextBridge/internal/strictjson"
 )
 
 type uninstallPlan struct {
@@ -184,14 +183,9 @@ func addInstallOwnershipManifestPaths(plan uninstallPlan) (uninstallPlan, error)
 	if err != nil {
 		return uninstallPlan{}, fmt.Errorf("read installer ownership manifest: %w", err)
 	}
-	decoder := json.NewDecoder(strings.NewReader(string(raw)))
-	decoder.DisallowUnknownFields()
 	manifest := installOwnershipManifest{}
-	if err := decoder.Decode(&manifest); err != nil {
+	if err := strictjson.Decode(raw, &manifest); err != nil {
 		return uninstallPlan{}, fmt.Errorf("parse installer ownership manifest: %w", err)
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return uninstallPlan{}, errors.New("installer ownership manifest contains trailing data")
 	}
 	if manifest.SchemaVersion != 1 || manifest.Product != "ContextBridge" {
 		return uninstallPlan{}, errors.New("installer ownership manifest has an unsupported identity or schema")
