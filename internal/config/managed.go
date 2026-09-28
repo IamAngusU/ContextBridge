@@ -100,6 +100,7 @@ func ManagedConfigConstraints() []map[string]interface{} {
 		constraint("tunnel.local_port", "integer", "minimum_when_set", 1, "maximum", 65535, "zero_means_default", true),
 		constraint("tunnel.remote_port", "integer", "minimum_when_set", 1, "maximum", 65535, "zero_means_default", true),
 		constraint("cluster.client_token", "secret", "write_only", true),
+		constraint("cluster.pool_authority_file", "string", "max_length", 4096, "format", "local-regular-file"),
 		constraint("cluster.relay.admin_token", "secret", "min_length", 32, "write_only", true),
 		constraint("cluster.relay.max_queue", "integer", "minimum_when_set", 1, "maximum", 1000000, "zero_means_default", true),
 		constraint("cluster.relay.max_job_bytes", "integer", "minimum", 0, "maximum", cluster.MaximumJobPayloadBytes),

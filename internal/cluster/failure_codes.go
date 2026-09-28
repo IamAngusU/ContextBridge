@@ -24,6 +24,7 @@ const (
 	FailureExecutionTimeoutAmbiguous   = "execution_timeout_ambiguous"
 	FailureEncryptedReservationExpired = "encrypted_reservation_expired"
 	FailurePipelineParentTerminal      = "pipeline_parent_terminal"
+	FailurePoolAuthorization           = "pool_authorization_rejected"
 )
 
 var stableFailureCodeList = []string{
@@ -37,6 +38,7 @@ var stableFailureCodeList = []string{
 	FailureExecutionStateAmbiguous,
 	FailureExecutionTimeoutAmbiguous,
 	FailurePipelineParentTerminal,
+	FailurePoolAuthorization,
 	FailureProviderRouteUnavailable,
 	FailureWorkerCapacity,
 	FailureWorkerExecutionCancelled,

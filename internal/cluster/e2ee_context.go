@@ -14,8 +14,10 @@ const e2eeAADScheme = "contextbridge.cluster.e2ee.v2"
 // must be fixed before an E2EE payload is encrypted. The relay supplies the
 // authenticated owner subject in the returned Assignment.
 type AssignmentRequest struct {
-	TenantID     string       `json:"tenant_id,omitempty"`
-	Requirements Requirements `json:"requirements"`
+	TenantID         string       `json:"tenant_id,omitempty"`
+	PoolID           string       `json:"pool_id,omitempty"`
+	PoolAuthorityKey string       `json:"pool_authority_public_key,omitempty"`
+	Requirements     Requirements `json:"requirements"`
 }
 
 // EncryptionContext is public metadata authenticated by the sealed job and

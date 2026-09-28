@@ -18,7 +18,7 @@ var completionSubcommands = map[string][]string{
 	"mcp":          {"serve"},
 	"integrate":    {"openai", "litellm", "mcp", "relay", "ui"},
 	"verification": {"verify"},
-	"cluster":      {"status", "events", "estimate", "node", "protocol", "conformance", "submit", "chat", "agent", "selftest", "route", "contract", "receipt", "login", "token", "pairing", "configure", "dashboard", "pipeline", "lan"},
+	"cluster":      {"status", "events", "estimate", "node", "protocol", "conformance", "submit", "chat", "agent", "selftest", "route", "contract", "receipt", "login", "token", "pairing", "pool", "configure", "dashboard", "pipeline", "lan"},
 	"route":        {"explain"},
 	"update":       {"status", "check", "apply", "enable", "disable", "auto"},
 	"completion":   {"powershell", "bash", "zsh"},
@@ -58,7 +58,7 @@ $script:ContextBridgeSubcommands = @{
     mcp = @('serve')
     integrate = @('openai','litellm','mcp','relay','ui')
     verification = @('verify')
-	cluster = @('status','events','estimate','node','protocol','conformance','submit','chat','agent','selftest','route','contract','receipt','login','token','pairing','configure','dashboard','pipeline','lan')
+	cluster = @('status','events','estimate','node','protocol','conformance','submit','chat','agent','selftest','route','contract','receipt','login','token','pairing','pool','configure','dashboard','pipeline','lan')
     route = @('explain')
     update = @('status','check','apply','enable','disable','auto')
     completion = @('powershell','bash','zsh')
@@ -119,6 +119,7 @@ $script:ContextBridgeOptions = @{
 	'cluster token list' = @('--config','--token','--limit','--offset','--json')
 	'cluster token revoke' = @('--config','--token','--json')
 	'cluster pairing' = @('--config','--approve','--deny')
+	'cluster pool' = @('init','--id','--out')
 	'cluster lan' = @('init','relocate','join','status','--config','--listen','--advertise-host','--certificate-out','--out','--bundle','--name')
 	'cluster lan init' = @('--config','--listen','--advertise-host','--out')
 	'cluster lan relocate' = @('--config','--listen','--advertise-host','--certificate-out','--out')
@@ -258,7 +259,8 @@ _contextbridge_complete() {
 	  "cluster token create") candidates="--config --role --subject --groups --lifetime-hours --max-queued-jobs --max-jobs-per-hour --providers --allowed-tenants --allowed-subjects --egress --require-e2ee" ;;
 	  "cluster token list") candidates="--config --token --limit --offset --json" ;;
 	  "cluster token revoke") candidates="--config --token --json" ;;
-      "cluster pairing") candidates="--config --approve --deny" ;;
+	  "cluster pairing") candidates="--config --approve --deny" ;;
+	  "cluster pool") candidates="init --id --out" ;;
 	  "cluster lan") candidates="init relocate join status --config --listen --advertise-host --certificate-out --out --bundle --name" ;;
 	  "cluster lan init") candidates="--config --listen --advertise-host --out" ;;
 	  "cluster lan relocate") candidates="--config --listen --advertise-host --certificate-out --out" ;;
@@ -311,7 +313,7 @@ _contextbridge_complete() {
       mcp) candidates="serve" ;;
       integrate) candidates="openai litellm mcp relay ui" ;;
       verification) candidates="verify" ;;
-	  cluster) candidates="status events estimate node protocol conformance submit chat agent selftest route contract receipt login token pairing configure dashboard pipeline lan" ;;
+	  cluster) candidates="status events estimate node protocol conformance submit chat agent selftest route contract receipt login token pairing pool configure dashboard pipeline lan" ;;
       route) candidates="explain" ;;
       update) candidates="status check apply enable disable auto" ;;
       completion) candidates="powershell bash zsh" ;;
@@ -419,7 +421,7 @@ case "$words[2]" in
     ;;
   cluster)
     if (( CURRENT == 3 )); then
-	  _values 'cluster action' status events estimate node protocol conformance submit chat agent selftest route contract receipt login token pairing configure dashboard pipeline lan
+	  _values 'cluster action' status events estimate node protocol conformance submit chat agent selftest route contract receipt login token pairing pool configure dashboard pipeline lan
       return
     fi
     case "$words[3]" in
@@ -497,7 +499,8 @@ case "$words[2]" in
 		  *) _arguments "${config[@]}" '1:token action:(create list revoke)' '--role[Token role]:role:(admin producer node observer)' '--subject[Token label]:label:' '--groups[Comma-separated scheduling groups]:groups:' '--lifetime-hours[Credential lifetime; 0 never expires]:hours:' '--max-queued-jobs[Producer queued-job limit]:count:' '--max-jobs-per-hour[Durable hourly admission limit]:count:' '--providers[Comma-separated provider allowlist]:providers:' '--allowed-tenants[Producer or observer tenant allowlist]:tenants:' '--allowed-subjects[Observer owner_subject allowlist]:subjects:' '--egress[Producer egress ceiling]:egress:(local_only)' '--require-e2ee[Reject cleartext jobs for this producer]' ;;
 		esac
 		;;
-      pairing) _arguments "${config[@]}" '--approve[Approve pairing code]:code:' '--deny[Deny pairing code]:code:' ;;
+	  pairing) _arguments "${config[@]}" '--approve[Approve pairing code]:code:' '--deny[Deny pairing code]:code:' ;;
+	  pool) _arguments '1:pool action:(init)' '--id[Stable customer pool ID]:ID:' '--out[New owner-only authority file]:file:_files' ;;
 	  lan)
 		if (( CURRENT == 4 )); then
 		  _values 'LAN action' init relocate join status

@@ -1087,6 +1087,10 @@ func (r *Relay) handleRouteExplain(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, err)
 		return
 	}
+	if err := validatePoolAssignmentSelector(input.PoolID, input.PoolAuthorityKey); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err)
+		return
+	}
 	if err := scopeTenantID(&input.TenantID, record); err != nil {
 		writeErrorCode(w, http.StatusForbidden, AdmissionCodeTenantScopeForbidden, err)
 		return
@@ -1106,6 +1110,7 @@ func (r *Relay) handleRouteExplain(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	nodes = nodesForPoolAssignment(nodes, input.PoolID, input.PoolAuthorityKey, time.Now().UTC())
 	routingRequirements, requiredSessionNode := r.withSessionAffinity(input.Requirements, record.Subject)
 	_, decision := rankWithDecisionForOwnerPolicy(nodes, routingRequirements, r.store.EstimateVRAM(input.Requirements), record.Subject, time.Now().UTC(), r.cfg.Placement)
 	decision.ID, err = randomID("route_preview")
@@ -1224,9 +1229,9 @@ func (r *Relay) handleSubmit(w http.ResponseWriter, req *http.Request) {
 	limits := r.producerLimits(record)
 	if input.AssignmentID != "" {
 		if idempotencyKey != "" {
-			job, replayed, err = r.store.ConsumeReservationAdmittedIdempotentGovernedWithPolicy(input.AssignmentID, input.AssignmentSecret, input.ID, input.Sealed, input.Source, input.TenantID, input.OwnerSubject, input.Priority, input.MaxAttempts, r.cfg.MaxQueuedJobs, limits, idempotencyKey, requestHash, input.PolicyDecision)
+			job, replayed, err = r.store.ConsumeReservationAdmittedIdempotentGovernedAuthorizedWithPolicy(input.AssignmentID, input.AssignmentSecret, input.ID, input.Sealed, input.PoolAuthorization, input.Source, input.TenantID, input.OwnerSubject, input.Priority, input.MaxAttempts, r.cfg.MaxQueuedJobs, limits, idempotencyKey, requestHash, input.PolicyDecision)
 		} else {
-			job, err = r.store.ConsumeReservationAdmittedGovernedWithPolicy(input.AssignmentID, input.AssignmentSecret, input.ID, input.Sealed, input.Source, input.TenantID, input.OwnerSubject, input.Priority, input.MaxAttempts, r.cfg.MaxQueuedJobs, limits, input.PolicyDecision)
+			job, err = r.store.ConsumeReservationAdmittedGovernedAuthorizedWithPolicy(input.AssignmentID, input.AssignmentSecret, input.ID, input.Sealed, input.PoolAuthorization, input.Source, input.TenantID, input.OwnerSubject, input.Priority, input.MaxAttempts, r.cfg.MaxQueuedJobs, limits, input.PolicyDecision)
 		}
 	} else {
 		if idempotencyKey != "" {
@@ -1349,6 +1354,7 @@ func jobResponse(job Job, compact bool) Job {
 	if compact {
 		job.Payload = nil
 		job.SealedPayload = nil
+		job.PoolAuthorization = nil
 	}
 	return job
 }
@@ -1356,6 +1362,7 @@ func jobResponse(job Job, compact bool) Job {
 func jobHistoryResponse(job Job) Job {
 	job.Payload = nil
 	job.SealedPayload = nil
+	job.PoolAuthorization = nil
 	job.Result = nil
 	job.SealedResult = nil
 	if job.Progress != nil {
@@ -1395,6 +1402,10 @@ func (r *Relay) handleReserve(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, err)
 		return
 	}
+	if err := validatePoolAssignmentSelector(input.PoolID, input.PoolAuthorityKey); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err)
+		return
+	}
 	if err := scopeTenantID(&input.TenantID, record); err != nil {
 		writeErrorCode(w, http.StatusForbidden, AdmissionCodeTenantScopeForbidden, err)
 		return
@@ -1414,6 +1425,7 @@ func (r *Relay) handleReserve(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	nodes = nodesForPoolAssignment(nodes, input.PoolID, input.PoolAuthorityKey, time.Now().UTC())
 	routingRequirements, requiredSessionNode := r.withSessionAffinity(input.Requirements, record.Subject)
 	candidates, _ := rankWithDecisionForOwnerPolicy(nodes, routingRequirements, r.store.EstimateVRAM(input.Requirements), record.Subject, time.Now().UTC(), r.cfg.Placement)
 	node, found := firstSessionCandidate(candidates, requiredSessionNode)
@@ -1449,7 +1461,7 @@ func (r *Relay) handleReserve(w http.ResponseWriter, req *http.Request) {
 	}
 	assignment := Assignment{
 		ID: assignmentID, JobID: jobID, NodeID: node.ID, NodeName: node.Name,
-		PublicKey: node.PublicKey, Attempt: 1, OwnerSubject: record.Subject, TenantID: input.TenantID,
+		PublicKey: node.PublicKey, PoolCertificate: node.PoolCertificate, Attempt: 1, OwnerSubject: record.Subject, TenantID: input.TenantID,
 		ExpiresAt: time.Now().UTC().Add(r.cfg.AssignmentTTL), Requirements: assignedRequirements,
 		PolicyDecision: policyDecision,
 	}
@@ -1843,7 +1855,14 @@ func (r *Relay) dispatch() {
 			routingRequirements, requiredSessionNode = r.withSessionAffinity(queued.Requirements, queued.OwnerSubject)
 		}
 		estimatedVRAM := r.store.EstimateVRAM(queued.Requirements)
-		candidates, decision := rankWithDecisionForOwnerPolicy(nodes, routingRequirements, estimatedVRAM, queued.OwnerSubject, now, r.cfg.Placement)
+		jobNodes := nodes
+		if queued.PoolAuthorization == nil {
+			// Certified workers fail closed on unsigned work. Keep ordinary jobs and
+			// relay-rendered pipeline steps on ordinary workers so a mixed fleet
+			// preserves all existing functionality without noisy failed attempts.
+			jobNodes = nodesForPoolAssignment(nodes, "", "", now)
+		}
+		candidates, decision := rankWithDecisionForOwnerPolicy(jobNodes, routingRequirements, estimatedVRAM, queued.OwnerSubject, now, r.cfg.Placement)
 		if queued.PolicyDecision.Schema != "" {
 			policyDecision := queued.PolicyDecision
 			decision.PolicyDecision = &policyDecision

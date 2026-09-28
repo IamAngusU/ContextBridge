@@ -212,12 +212,13 @@ type Capabilities struct {
 }
 
 type Node struct {
-	ID           string       `json:"id"`
-	Name         string       `json:"name"`
-	PublicKey    string       `json:"public_key,omitempty"`
-	Capabilities Capabilities `json:"capabilities"`
-	State        string       `json:"state"`
-	Connected    bool         `json:"connected"`
+	ID              string                 `json:"id"`
+	Name            string                 `json:"name"`
+	PublicKey       string                 `json:"public_key,omitempty"`
+	PoolCertificate *PoolWorkerCertificate `json:"pool_certificate,omitempty"`
+	Capabilities    Capabilities           `json:"capabilities"`
+	State           string                 `json:"state"`
+	Connected       bool                   `json:"connected"`
 	// Draining is relay-owned operator state. A draining worker stays connected
 	// and may finish work it already owns, but it is never eligible for a new
 	// assignment until an administrator resumes it.
@@ -405,26 +406,27 @@ func (fence AssignmentFence) Equal(other AssignmentFence) bool {
 }
 
 type Job struct {
-	ID              string           `json:"id"`
-	ContractVersion string           `json:"contract_version"`
-	OwnerSubject    string           `json:"owner_subject,omitempty"`
-	TenantID        string           `json:"tenant_id,omitempty"`
-	Source          string           `json:"source,omitempty"`
-	Pipeline        string           `json:"pipeline,omitempty"`
-	Step            string           `json:"step,omitempty"`
-	ParentID        string           `json:"parent_id,omitempty"`
-	Requirements    Requirements     `json:"requirements"`
-	PolicyDecision  PolicyDecision   `json:"policy_decision"`
-	Payload         json.RawMessage  `json:"payload,omitempty"`
-	SealedPayload   *SealedEnvelope  `json:"sealed_payload,omitempty"`
-	Result          json.RawMessage  `json:"result,omitempty"`
-	SealedResult    *SealedEnvelope  `json:"sealed_result,omitempty"`
-	Status          string           `json:"status"`
-	Priority        int              `json:"priority"`
-	Attempt         int              `json:"attempt"`
-	MaxAttempts     int              `json:"max_attempts"`
-	AssignedNode    string           `json:"assigned_node,omitempty"`
-	AssignmentFence *AssignmentFence `json:"assignment_fence,omitempty"`
+	ID                string                `json:"id"`
+	ContractVersion   string                `json:"contract_version"`
+	OwnerSubject      string                `json:"owner_subject,omitempty"`
+	TenantID          string                `json:"tenant_id,omitempty"`
+	Source            string                `json:"source,omitempty"`
+	Pipeline          string                `json:"pipeline,omitempty"`
+	Step              string                `json:"step,omitempty"`
+	ParentID          string                `json:"parent_id,omitempty"`
+	Requirements      Requirements          `json:"requirements"`
+	PolicyDecision    PolicyDecision        `json:"policy_decision"`
+	Payload           json.RawMessage       `json:"payload,omitempty"`
+	SealedPayload     *SealedEnvelope       `json:"sealed_payload,omitempty"`
+	PoolAuthorization *PoolJobAuthorization `json:"pool_authorization,omitempty"`
+	Result            json.RawMessage       `json:"result,omitempty"`
+	SealedResult      *SealedEnvelope       `json:"sealed_result,omitempty"`
+	Status            string                `json:"status"`
+	Priority          int                   `json:"priority"`
+	Attempt           int                   `json:"attempt"`
+	MaxAttempts       int                   `json:"max_attempts"`
+	AssignedNode      string                `json:"assigned_node,omitempty"`
+	AssignmentFence   *AssignmentFence      `json:"assignment_fence,omitempty"`
 	// RoutingDecision is the bounded, point-in-time evidence used for the
 	// durable assignment. It intentionally excludes full node telemetry and is
 	// absent until a queued job is actually placed.
@@ -447,19 +449,20 @@ type Job struct {
 }
 
 type SubmitRequest struct {
-	ID               string          `json:"id,omitempty"`
-	ContractVersion  string          `json:"contract_version,omitempty"`
-	TenantID         string          `json:"tenant_id,omitempty"`
-	Source           string          `json:"source,omitempty"`
-	Requirements     Requirements    `json:"requirements"`
-	Payload          json.RawMessage `json:"payload,omitempty"`
-	Sealed           *SealedEnvelope `json:"sealed_payload,omitempty"`
-	AssignmentID     string          `json:"assignment_id,omitempty"`
-	AssignmentSecret string          `json:"assignment_secret,omitempty"`
-	Priority         int             `json:"priority,omitempty"`
-	MaxAttempts      int             `json:"max_attempts,omitempty"`
-	OwnerSubject     string          `json:"-"`
-	PolicyDecision   PolicyDecision  `json:"-"`
+	ID                string                `json:"id,omitempty"`
+	ContractVersion   string                `json:"contract_version,omitempty"`
+	TenantID          string                `json:"tenant_id,omitempty"`
+	Source            string                `json:"source,omitempty"`
+	Requirements      Requirements          `json:"requirements"`
+	Payload           json.RawMessage       `json:"payload,omitempty"`
+	Sealed            *SealedEnvelope       `json:"sealed_payload,omitempty"`
+	PoolAuthorization *PoolJobAuthorization `json:"pool_authorization,omitempty"`
+	AssignmentID      string                `json:"assignment_id,omitempty"`
+	AssignmentSecret  string                `json:"assignment_secret,omitempty"`
+	Priority          int                   `json:"priority,omitempty"`
+	MaxAttempts       int                   `json:"max_attempts,omitempty"`
+	OwnerSubject      string                `json:"-"`
+	PolicyDecision    PolicyDecision        `json:"-"`
 	// Pipeline metadata is relay-internal and is persisted atomically with the
 	// queued job. Keeping it out of the producer JSON surface prevents callers
 	// from forging orchestration ownership while avoiding a post-admission
@@ -482,17 +485,18 @@ type ContractValidation struct {
 }
 
 type Assignment struct {
-	ID             string         `json:"id"`
-	JobID          string         `json:"job_id"`
-	NodeID         string         `json:"node_id"`
-	NodeName       string         `json:"node_name"`
-	PublicKey      string         `json:"public_key"`
-	Attempt        int            `json:"attempt"`
-	OwnerSubject   string         `json:"owner_subject"`
-	TenantID       string         `json:"tenant_id,omitempty"`
-	ExpiresAt      time.Time      `json:"expires_at"`
-	Requirements   Requirements   `json:"requirements"`
-	PolicyDecision PolicyDecision `json:"policy_decision"`
+	ID              string                 `json:"id"`
+	JobID           string                 `json:"job_id"`
+	NodeID          string                 `json:"node_id"`
+	NodeName        string                 `json:"node_name"`
+	PublicKey       string                 `json:"public_key"`
+	PoolCertificate *PoolWorkerCertificate `json:"pool_certificate,omitempty"`
+	Attempt         int                    `json:"attempt"`
+	OwnerSubject    string                 `json:"owner_subject"`
+	TenantID        string                 `json:"tenant_id,omitempty"`
+	ExpiresAt       time.Time              `json:"expires_at"`
+	Requirements    Requirements           `json:"requirements"`
+	PolicyDecision  PolicyDecision         `json:"policy_decision"`
 }
 
 type AssignmentResponse struct {
@@ -501,23 +505,25 @@ type AssignmentResponse struct {
 }
 
 type Pairing struct {
-	DeviceCodeHash       string    `json:"device_code_hash"`
-	UserCode             string    `json:"user_code"`
-	NodeName             string    `json:"node_name"`
-	PublicKey            string    `json:"public_key"`
-	PublicKeyFingerprint string    `json:"public_key_fingerprint,omitempty"`
-	Groups               []string  `json:"groups,omitempty"`
-	ExpiresAt            time.Time `json:"expires_at"`
-	Approved             bool      `json:"approved"`
-	Denied               bool      `json:"denied"`
-	NodeID               string    `json:"node_id,omitempty"`
-	PendingToken         string    `json:"pending_token,omitempty"`
+	DeviceCodeHash       string                 `json:"device_code_hash"`
+	UserCode             string                 `json:"user_code"`
+	NodeName             string                 `json:"node_name"`
+	PublicKey            string                 `json:"public_key"`
+	PoolCertificate      *PoolWorkerCertificate `json:"pool_certificate,omitempty"`
+	PublicKeyFingerprint string                 `json:"public_key_fingerprint,omitempty"`
+	Groups               []string               `json:"groups,omitempty"`
+	ExpiresAt            time.Time              `json:"expires_at"`
+	Approved             bool                   `json:"approved"`
+	Denied               bool                   `json:"denied"`
+	NodeID               string                 `json:"node_id,omitempty"`
+	PendingToken         string                 `json:"pending_token,omitempty"`
 }
 
 type PairRequest struct {
-	NodeName  string   `json:"node_name"`
-	PublicKey string   `json:"public_key"`
-	Groups    []string `json:"groups,omitempty"`
+	NodeName        string                 `json:"node_name"`
+	PublicKey       string                 `json:"public_key"`
+	PoolCertificate *PoolWorkerCertificate `json:"pool_certificate,omitempty"`
+	Groups          []string               `json:"groups,omitempty"`
 }
 
 type PairResponse struct {

@@ -1,7 +1,8 @@
 # Privacy boundaries
 
-ContextBridge supports payload confidentiality. It does not currently claim
-that a relay is zero knowledge.
+ContextBridge supports payload confidentiality. It does not claim that the
+entire relay is zero knowledge; protected-pool mode makes the narrower
+cryptographic promise documented below.
 
 ## Modes
 
@@ -10,6 +11,7 @@ that a relay is zero knowledge.
 | Cleartext | ordinary Job Contract v1 submission | yes | not applicable |
 | Per-job E2EE | `cluster chat --e2ee` or `cluster submit --e2ee` | no | the job/result encryption context authenticates the assigned execution |
 | Credential-required E2EE | issue the producer token with `--require-e2ee` and use an E2EE-capable client | no | relay rejects cleartext admission with `privacy.e2ee_required` |
+| Customer-controlled protected pool | configure `cluster.pool_authority_file`, re-pair workers, and use a compatible E2EE producer | no | producer authenticates the worker key and worker authenticates the exact customer-signed job; see [protected pools](customer-controlled-pools.md) |
 
 Create a native-client credential whose jobs must be sealed:
 

@@ -61,6 +61,9 @@ func relayOpenAPI() map[string]interface{} {
 	}
 	jobSubmitOperation := operation("Submit a job", []string{"admin", "producer"}, "Object", "202")
 	jobSubmitOperation["responses"].(map[string]interface{})["200"] = jsonResponse("Idempotent replay", "Object")
+	jobSubmitOperation["requestBody"] = map[string]interface{}{"required": true, "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]string{"$ref": "#/components/schemas/SubmitRequest"}}}}
+	assignmentOperation := operation("Reserve an E2EE worker assignment", []string{"admin", "producer"}, "AssignmentResponse", "201")
+	assignmentOperation["requestBody"] = map[string]interface{}{"required": true, "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"type": "object", "required": []string{"requirements"}, "properties": map[string]interface{}{"tenant_id": map[string]string{"type": "string"}, "pool_id": map[string]string{"type": "string"}, "pool_authority_public_key": map[string]string{"type": "string"}, "requirements": map[string]string{"type": "object"}}}}}}
 	tokenCreationOperation := operation("Create a scoped credential; bearer is returned once", []string{"admin"}, "TokenCreation", "201")
 	tokenCreationOperation["requestBody"] = map[string]interface{}{
 		"required": true,
@@ -86,7 +89,7 @@ func relayOpenAPI() map[string]interface{} {
 		"/v1/cluster/jobs/{id}/route":         pathItem("id", map[string]interface{}{"get": operation("Get the durable routing decision", []string{"admin", "observer", "producer"}, "Object")}),
 		"/v1/cluster/jobs/{id}/estimate":      pathItem("id", map[string]interface{}{"get": operation("Get a historical runtime estimate", []string{"admin", "observer", "producer"}, "Object")}),
 		"/v1/cluster/contracts/validate":      map[string]interface{}{"post": operation("Validate a job contract without admission", []string{"admin", "producer"}, "Object")},
-		"/v1/cluster/assign":                  map[string]interface{}{"post": operation("Reserve an E2EE worker assignment", []string{"admin", "producer"}, "Object", "201")},
+		"/v1/cluster/assign":                  map[string]interface{}{"post": assignmentOperation},
 		"/v1/cluster/routes/explain":          map[string]interface{}{"post": operation("Explain placement without admission", []string{"admin", "producer"}, "Object")},
 		"/v1/cluster/tokens": map[string]interface{}{
 			"get":  operation("List credential metadata without bearer values", []string{"admin"}, "Object"),
@@ -128,6 +131,21 @@ func relayOpenAPI() map[string]interface{} {
 					"properties": map[string]interface{}{"schema": map[string]interface{}{"type": "string", "const": "contextbridge.job-history-page.v1"}, "jobs": map[string]interface{}{"type": "array", "items": map[string]string{"type": "object"}}, "next_cursor": map[string]string{"type": "string"}, "has_more": map[string]string{"type": "boolean"}, "scanned": map[string]string{"type": "integer"}},
 				},
 				"JobHistoryResponse": map[string]interface{}{"oneOf": []map[string]string{{"$ref": "#/components/schemas/Array"}, {"$ref": "#/components/schemas/JobHistoryPage"}}},
+				"PoolWorkerCertificate": map[string]interface{}{
+					"type": "object", "additionalProperties": false, "required": []string{"contract_version", "pool_id", "authority_public_key", "worker_public_key", "issued_at", "signature"},
+					"properties": map[string]interface{}{"contract_version": map[string]interface{}{"type": "string", "const": PoolWorkerCertificateV1}, "pool_id": map[string]string{"type": "string"}, "authority_public_key": map[string]string{"type": "string"}, "worker_public_key": map[string]string{"type": "string"}, "issued_at": map[string]interface{}{"type": "string", "format": "date-time"}, "signature": map[string]string{"type": "string"}},
+				},
+				"PoolJobAuthorization": map[string]interface{}{
+					"type": "object", "additionalProperties": false, "required": []string{"contract_version", "pool_id", "expires_at", "signature"},
+					"properties": map[string]interface{}{"contract_version": map[string]interface{}{"type": "string", "const": PoolJobAuthorizationV1}, "pool_id": map[string]string{"type": "string"}, "expires_at": map[string]interface{}{"type": "string", "format": "date-time"}, "signature": map[string]string{"type": "string"}},
+				},
+				"AssignmentResponse": map[string]interface{}{
+					"type": "object", "required": []string{"assignment", "assignment_secret"},
+					"properties": map[string]interface{}{"assignment": map[string]interface{}{"type": "object", "properties": map[string]interface{}{"id": map[string]string{"type": "string"}, "job_id": map[string]string{"type": "string"}, "node_id": map[string]string{"type": "string"}, "public_key": map[string]string{"type": "string"}, "pool_certificate": map[string]string{"$ref": "#/components/schemas/PoolWorkerCertificate"}}}, "assignment_secret": map[string]interface{}{"type": "string", "writeOnly": true}},
+				},
+				"SubmitRequest": map[string]interface{}{
+					"type": "object", "properties": map[string]interface{}{"id": map[string]string{"type": "string"}, "tenant_id": map[string]string{"type": "string"}, "source": map[string]string{"type": "string"}, "requirements": map[string]string{"type": "object"}, "payload": map[string]interface{}{}, "sealed_payload": map[string]string{"type": "object"}, "pool_authorization": map[string]string{"$ref": "#/components/schemas/PoolJobAuthorization"}, "assignment_id": map[string]string{"type": "string"}, "assignment_secret": map[string]interface{}{"type": "string", "writeOnly": true}, "priority": map[string]interface{}{"type": "integer", "minimum": -100, "maximum": 100}, "max_attempts": map[string]interface{}{"type": "integer", "minimum": 0, "maximum": 10}},
+				},
 				"ObserverLimits": map[string]interface{}{
 					"type": "object", "additionalProperties": false,
 					"properties": map[string]interface{}{
