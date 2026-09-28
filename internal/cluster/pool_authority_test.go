@@ -1,12 +1,15 @@
 package cluster
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	bolt "go.etcd.io/bbolt"
 )
 
 func TestPoolAuthorityBindsWorkerAndExactEncryptedJob(t *testing.T) {
@@ -113,6 +116,34 @@ func TestPoolAuthorizationReplayRemainsClaimedAfterWorkerRestart(t *testing.T) {
 	secondProcess := Worker{cfg: WorkerConfig{IdentityFile: identityPath}, identity: identity}
 	if err := secondProcess.claimPoolJobAuthorization(job, now.Add(time.Second)); err == nil {
 		t.Fatal("restarted worker accepted an already claimed customer pool authorization")
+	}
+}
+
+func TestPoolAuthorizationClaimFailsClosedForCorruptReplayState(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	path := filepath.Join(t.TempDir(), "worker-identity.json.pool-replay.db")
+	signature := "signed-authorization"
+	if err := claimPoolAuthorization(path, signature, now.Add(time.Hour), now); err != nil {
+		t.Fatal(err)
+	}
+
+	database, err := bolt.Open(path, 0o600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimKey := sha256.Sum256([]byte(signature))
+	if err := database.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(poolAuthorizationClaimsBucket).Put(claimKey[:], []byte("not-a-time"))
+	}); err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := claimPoolAuthorization(path, signature, now.Add(time.Hour), now.Add(time.Second)); err == nil || !strings.Contains(err.Error(), "invalid claim") {
+		t.Fatalf("corrupt replay state did not fail closed: %v", err)
 	}
 }
 
