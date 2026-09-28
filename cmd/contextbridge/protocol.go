@@ -33,7 +33,7 @@ func clusterProtocolCommand(args []string) error {
 		return errors.New("cluster protocol requires a producer, observer, or admin token")
 	}
 	var manifest cluster.ProtocolManifest
-	if err := clusterGET(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/protocol", *token, &manifest); err != nil {
+	if err := clusterGET(context.Background(), clusterClientBaseURL(cfg)+"/v1/cluster/protocol", *token, &manifest); err != nil {
 		return err
 	}
 	if *asJSON {

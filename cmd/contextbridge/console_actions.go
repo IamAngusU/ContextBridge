@@ -32,6 +32,9 @@ func consoleActionCredential(cfg config.Config, explicit string) (token, source 
 	if value := strings.TrimSpace(explicit); value != "" {
 		return value, "--token"
 	}
+	if name, account, ok := selectedClusterAccount(cfg); ok {
+		return strings.TrimSpace(account.ClientToken), "cluster.accounts." + name
+	}
 	if value := strings.TrimSpace(os.Getenv("CONTEXTBRIDGE_CLUSTER_TOKEN")); value != "" {
 		return value, "CONTEXTBRIDGE_CLUSTER_TOKEN"
 	}

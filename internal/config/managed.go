@@ -101,6 +101,11 @@ func ManagedConfigConstraints() []map[string]interface{} {
 		constraint("tunnel.remote_port", "integer", "minimum_when_set", 1, "maximum", 65535, "zero_means_default", true),
 		constraint("cluster.client_token", "secret", "write_only", true),
 		constraint("cluster.pool_authority_file", "string", "max_length", 4096, "format", "local-regular-file"),
+		constraint("cluster.active_account", "string", "references", "cluster.accounts"),
+		constraint("cluster.accounts", "object", "max_properties", 64),
+		constraint("cluster.accounts.*.relay_url", "string", "format", "relay-url"),
+		constraint("cluster.accounts.*.client_token", "secret", "write_only", true),
+		constraint("cluster.accounts.*.pool_authority_file", "string", "max_length", 4096, "format", "local-regular-file"),
 		constraint("cluster.relay.admin_token", "secret", "min_length", 32, "write_only", true),
 		constraint("cluster.relay.max_queue", "integer", "minimum_when_set", 1, "maximum", 1000000, "zero_means_default", true),
 		constraint("cluster.relay.max_job_bytes", "integer", "minimum", 0, "maximum", cluster.MaximumJobPayloadBytes),
@@ -333,6 +338,7 @@ func managedSecretPath(path []string) bool {
 		return true
 	}
 	return len(path) == 3 && path[0] == "engines" && path[2] == "api_key" ||
+		len(path) == 4 && path[0] == "cluster" && path[1] == "accounts" && path[3] == "client_token" ||
 		len(path) == 5 && path[0] == "providers" && path[1] == "adapter" && path[2] == "principals" && path[4] == "token"
 }
 

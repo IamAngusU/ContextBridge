@@ -27,6 +27,7 @@ import (
 func clusterChatCommand(args []string) error {
 	flags := flag.NewFlagSet("cluster chat", flag.ContinueOnError)
 	path := flags.String("config", defaultConfigPath(), "config path")
+	account := flags.String("account", "", "named cluster account; defaults to cluster.active_account")
 	token := flags.String("token", "", "producer token; defaults to client_token, environment, or local admin token")
 	provider := flags.String("provider", "adapter", "adapter or another generation provider")
 	group := flags.String("group", "", "worker group")
@@ -110,6 +111,9 @@ func clusterChatCommand(args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := selectClusterAccount(&cfg, *account); err != nil {
+		return err
+	}
 	poolAuthority, err := configuredPoolAuthority(cfg)
 	if err != nil {
 		return err
@@ -137,7 +141,7 @@ func clusterChatCommand(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	state := &chatState{relayURL: clusterBaseURL(cfg), token: *token, provider: *provider, group: *group, model: *model, profile: *profile, reasoning: *reasoning, egress: *egress, maxCostUSD: *maxCostUSD, e2ee: *e2ee, poolAuthority: poolAuthority, sessionID: *sessionID, artifactDir: *artifactDir, minArtifacts: *minArtifacts, minImages: *minImages, requireImage: *minImages > 0, images: images, newSession: *newSession || *newSessionPerJob, newSessionPerJob: *newSessionPerJob, foregroundNewSession: *foregroundNewSession}
+	state := &chatState{relayURL: clusterClientBaseURL(cfg), token: *token, provider: *provider, group: *group, model: *model, profile: *profile, reasoning: *reasoning, egress: *egress, maxCostUSD: *maxCostUSD, e2ee: *e2ee, poolAuthority: poolAuthority, sessionID: *sessionID, artifactDir: *artifactDir, minArtifacts: *minArtifacts, minImages: *minImages, requireImage: *minImages > 0, images: images, newSession: *newSession || *newSessionPerJob, newSessionPerJob: *newSessionPerJob, foregroundNewSession: *foregroundNewSession}
 
 	if strings.TrimSpace(*prompt) != "" {
 		return state.turn(ctx, strings.TrimSpace(*prompt))
@@ -183,7 +187,7 @@ func looksLikePastedChatFlag(line string) bool {
 	if strings.Trim(first[0], `\\`) == "" {
 		return true
 	}
-	for _, name := range []string{"--config", "--token", "--provider", "--group", "--model", "--profile", "--reasoning",
+	for _, name := range []string{"--config", "--account", "--token", "--provider", "--group", "--model", "--profile", "--reasoning",
 		"--e2ee", "--session", "--prompt", "--artifacts", "--min-artifacts", "--image", "--min-images",
 		"--attach-image", "--new-session", "--new-session-per-job", "--foreground-new-session", "--egress", "--max-cost-usd"} {
 		if first[0] == name || strings.HasPrefix(first[0], name+"=") {
@@ -618,7 +622,13 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 }
 
 func clusterClientToken(cfg config.Config, explicit string) string {
-	for _, value := range []string{explicit, os.Getenv("CONTEXTBRIDGE_CLUSTER_TOKEN"), cfg.Cluster.ClientToken, cfg.Cluster.Relay.AdminToken} {
+	if strings.TrimSpace(explicit) != "" {
+		return strings.TrimSpace(explicit)
+	}
+	if _, account, ok := selectedClusterAccount(cfg); ok {
+		return strings.TrimSpace(account.ClientToken)
+	}
+	for _, value := range []string{os.Getenv("CONTEXTBRIDGE_CLUSTER_TOKEN"), cfg.Cluster.ClientToken, cfg.Cluster.Relay.AdminToken} {
 		if strings.TrimSpace(value) != "" {
 			return strings.TrimSpace(value)
 		}

@@ -345,7 +345,7 @@ func waitForSelftestPlan(ctx context.Context, cfg config.Config, token string, p
 	for {
 		requestCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
 		var nodes []cluster.Node
-		err := clusterGET(requestCtx, clusterBaseURL(cfg)+"/v1/cluster/nodes", token, &nodes)
+		err := clusterGET(requestCtx, clusterClientBaseURL(cfg)+"/v1/cluster/nodes", token, &nodes)
 		cancel()
 		if ctx.Err() != nil {
 			clearInteractive()
@@ -639,7 +639,7 @@ func runSelftestJob(ctx context.Context, cfg config.Config, token string, target
 		return nil, cluster.Job{}, err
 	}
 	var job cluster.Job
-	if err := clusterPOST(ctx, clusterBaseURL(cfg)+"/v1/cluster/jobs?compact=1", token, request, &job); err != nil {
+	if err := clusterPOST(ctx, clusterClientBaseURL(cfg)+"/v1/cluster/jobs?compact=1", token, request, &job); err != nil {
 		return nil, job, err
 	}
 	terminal := false
@@ -647,7 +647,7 @@ func runSelftestJob(ctx context.Context, cfg config.Config, token string, target
 		if terminal || job.ID == "" {
 			return
 		}
-		if err := cancelSelftestJob(clusterBaseURL(cfg), token, job.ID); err != nil {
+		if err := cancelSelftestJob(clusterClientBaseURL(cfg), token, job.ID); err != nil {
 			fmt.Fprintf(os.Stderr, "  ! could not cancel unfinished self-test job %s: %v\n", shortChatID(job.ID), err)
 		}
 	}()
@@ -659,7 +659,7 @@ func runSelftestJob(ctx context.Context, cfg config.Config, token string, target
 			return nil, job, ctx.Err()
 		case <-ticker.C:
 		}
-		if err := clusterGET(ctx, clusterBaseURL(cfg)+"/v1/cluster/jobs/"+url.PathEscape(job.ID)+"?compact=1", token, &job); err != nil {
+		if err := clusterGET(ctx, clusterClientBaseURL(cfg)+"/v1/cluster/jobs/"+url.PathEscape(job.ID)+"?compact=1", token, &job); err != nil {
 			return nil, job, err
 		}
 		switch job.Status {

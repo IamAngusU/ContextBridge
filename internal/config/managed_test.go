@@ -20,11 +20,16 @@ func TestManagedConfigRedactsValidatesAndAtomicallyApplies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	before.Cluster.Accounts = map[string]ClusterAccount{"alice": {RelayURL: "https://relay.example.test", ClientToken: "cb_" + strings.Repeat("a", 40)}}
+	before.Cluster.ActiveAccount = "alice"
+	if err := Save(path, before); err != nil {
+		t.Fatal(err)
+	}
 	managed, err := ReadManagedConfig(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(managed.YAML, before.Server.Token) || strings.Contains(managed.YAML, before.Cluster.Relay.AdminToken) {
+	if strings.Contains(managed.YAML, before.Server.Token) || strings.Contains(managed.YAML, before.Cluster.Relay.AdminToken) || strings.Contains(managed.YAML, before.Cluster.Accounts["alice"].ClientToken) {
 		t.Fatal("managed config leaked a credential")
 	}
 	if strings.Count(managed.YAML, ManagedSecretMarker) < 2 {
@@ -53,7 +58,7 @@ func TestManagedConfigRedactsValidatesAndAtomicallyApplies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.Terminal.Style != "classic" || after.Server.Token != before.Server.Token || after.Cluster.Relay.AdminToken != before.Cluster.Relay.AdminToken {
+	if after.Terminal.Style != "classic" || after.Server.Token != before.Server.Token || after.Cluster.Relay.AdminToken != before.Cluster.Relay.AdminToken || after.Cluster.Accounts["alice"].ClientToken != before.Cluster.Accounts["alice"].ClientToken {
 		t.Fatalf("apply did not preserve credentials and update style: %#v", after)
 	}
 	if _, err := ApplyManagedConfig(path, []byte(proposed), managed.Revision); !errors.Is(err, ErrManagedConfigConflict) {
@@ -166,6 +171,9 @@ providers:
         token: adapter-secret-value
 cluster:
   client_token: client-secret-value
+  accounts:
+    alice:
+      client_token: account-secret-value
   relay:
     admin_token: admin-secret-value
   worker:
@@ -178,12 +186,12 @@ cluster:
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, secret := range []string{"local-secret-value", "engine-secret-value", "adapter-secret-value", "client-secret-value", "admin-secret-value", "worker-secret-value"} {
+	for _, secret := range []string{"local-secret-value", "engine-secret-value", "adapter-secret-value", "client-secret-value", "account-secret-value", "admin-secret-value", "worker-secret-value"} {
 		if strings.Contains(managed.YAML, secret) {
 			t.Fatalf("managed config leaked %q: %s", secret, managed.YAML)
 		}
 	}
-	if strings.Count(managed.YAML, ManagedSecretMarker) != 6 {
+	if strings.Count(managed.YAML, ManagedSecretMarker) != 7 {
 		t.Fatalf("unexpected redaction coverage: %s", managed.YAML)
 	}
 }

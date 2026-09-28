@@ -341,7 +341,7 @@ func fetchExecutionReceipt(ctx context.Context, configPath, token, jobID string)
 		return executionReceiptEnvelope{}, errors.New("cluster receipt requires a producer, observer, or admin token")
 	}
 	var job cluster.Job
-	target := clusterBaseURL(cfg) + "/v1/cluster/jobs/" + url.PathEscape(jobID)
+	target := clusterClientBaseURL(cfg) + "/v1/cluster/jobs/" + url.PathEscape(jobID)
 	if err := clusterGET(ctx, target, token, &job); err != nil {
 		return executionReceiptEnvelope{}, err
 	}

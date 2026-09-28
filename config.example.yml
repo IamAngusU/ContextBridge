@@ -133,6 +133,10 @@ cluster:
   # Optional customer-held Ed25519 authority. When configured, native E2EE
   # clients certify workers and sign exact jobs; the relay never receives it.
   pool_authority_file: ""
+  # Optional named producer logins. Separate OS accounts are still required
+  # when local users must not be able to read one another's credentials.
+  active_account: ""
+  accounts: {}
   relay:
     enabled: false
     listen: 127.0.0.1:32150

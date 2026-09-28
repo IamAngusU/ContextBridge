@@ -394,6 +394,21 @@ contextbridge cluster chat --provider ollama --model auto --artifacts off --prom
 
 The client submits work without joining as a worker. Login stores the token in its private config; remove the temporary token file when no longer needed. Use `--role observer` when issuing a read-only monitoring credential.
 
+Several people or projects can use separate named accounts on one client:
+
+```sh
+contextbridge cluster login --account alice --token-file ./alice-token.json --pool-authority-file ./alice-authority.json
+contextbridge cluster login --account bob --token-file ./bob-token.json --activate=false
+contextbridge cluster account list
+contextbridge cluster chat --account alice --provider ollama --prompt "Private pool turn"
+```
+
+`cluster account use NAME` changes the default; `--account` selects one account
+for a single chat, submission, or route preview. Distinct OS logins already get
+distinct default configuration directories and are required when local users
+must be unable to read one another's credentials. Named accounts inside one OS
+login prevent accidental pool/token mixing but are not a local-user sandbox.
+
 ### 4. Change a device's role later
 
 Roles are reversible. Stop the managed process before changing the role so a

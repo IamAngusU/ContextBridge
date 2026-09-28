@@ -62,14 +62,26 @@ func TestCompletionScriptsExposeGuidedClusterSubmission(t *testing.T) {
 		script string
 		want   string
 	}{
-		"powershell": {powershellCompletionScript(), "'cluster submit' = @('--config','--file','--token','--wait','--e2ee','--stream','--artifacts','--idempotency-key','--interactive')"},
-		"bash":       {bashCompletionScript(), `"cluster submit") candidates="--config --file --token --wait --e2ee --stream --artifacts --idempotency-key --interactive"`},
+		"powershell": {powershellCompletionScript(), "'cluster submit' = @('--config','--account','--file','--token','--wait','--e2ee','--stream','--artifacts','--idempotency-key','--interactive')"},
+		"bash":       {bashCompletionScript(), `"cluster submit") candidates="--config --account --file --token --wait --e2ee --stream --artifacts --idempotency-key --interactive"`},
 		"zsh":        {zshCompletionScript(), "--interactive[Guide unresolved submission values in a real terminal]"},
 	}
 	for name, test := range cases {
 		t.Run(name, func(t *testing.T) {
 			if !strings.Contains(test.script, test.want) {
 				t.Fatal("completion does not expose guided cluster submission")
+			}
+		})
+	}
+}
+
+func TestCompletionScriptsExposeClusterAccounts(t *testing.T) {
+	for name, script := range map[string]string{"powershell": powershellCompletionScript(), "bash": bashCompletionScript(), "zsh": zshCompletionScript()} {
+		t.Run(name, func(t *testing.T) {
+			for _, wanted := range []string{"account", "--pool-authority-file", "--activate"} {
+				if !strings.Contains(script, wanted) {
+					t.Fatalf("completion does not expose %s", wanted)
+				}
 			}
 		})
 	}

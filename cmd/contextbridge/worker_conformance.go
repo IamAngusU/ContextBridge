@@ -76,7 +76,7 @@ func clusterWorkerConformanceCommand(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	report, err := runWorkerConformance(ctx, clusterBaseURL(cfg), *token, strings.TrimSpace(*node))
+	report, err := runWorkerConformance(ctx, clusterClientBaseURL(cfg), *token, strings.TrimSpace(*node))
 	if err != nil {
 		return err
 	}
