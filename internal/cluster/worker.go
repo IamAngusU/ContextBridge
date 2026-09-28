@@ -65,20 +65,22 @@ type WorkerIdentity struct {
 }
 
 type Worker struct {
-	cfg         WorkerConfig
-	identity    WorkerIdentity
-	client      *http.Client
-	relayClient *http.Client
-	sem         chan struct{}
-	mu          sync.Mutex
-	running     int
-	quiescing   bool
-	hardwareMu  sync.Mutex
-	hardware    systeminfo.Snapshot
-	hardwareAt  time.Time
-	authorityMu sync.Mutex
-	clusterID   string
-	relayEpoch  uint64
+	cfg                     WorkerConfig
+	identity                WorkerIdentity
+	client                  *http.Client
+	relayClient             *http.Client
+	sem                     chan struct{}
+	mu                      sync.Mutex
+	running                 int
+	quiescing               bool
+	hardwareMu              sync.Mutex
+	hardware                systeminfo.Snapshot
+	hardwareAt              time.Time
+	authorityMu             sync.Mutex
+	clusterID               string
+	relayEpoch              uint64
+	poolReplayMu            sync.Mutex
+	poolAuthorizationClaims map[string]time.Time
 }
 
 type activeWorkerJob struct {
@@ -94,6 +96,8 @@ type pendingWorkerCancel struct {
 }
 
 var errWorkerExecutionPanicked = errors.New("worker execution panicked; execution state is ambiguous; explicit resubmission required")
+
+const maximumPoolAuthorizationReplayEntries = 100_000
 
 type workerExecutionFunc func() (json.RawMessage, *SealedEnvelope, Usage, *ExecutionMetadata, error)
 
@@ -663,6 +667,17 @@ func (w *Worker) connect(ctx context.Context, report WorkerReporter) error {
 			_ = write(WireMessage{Type: "result", JobID: job.ID, Attempt: job.Attempt, Fence: job.AssignmentFence, Error: "worker is stopping", FailureCode: FailureWorkerStopping})
 			continue
 		}
+		if err := w.claimPoolJobAuthorization(job, time.Now().UTC()); err != nil {
+			cancelJob()
+			activeMu.Lock()
+			delete(activeJobs, job.ID)
+			activeMu.Unlock()
+			<-w.sem
+			w.changeRunning(-1)
+			_ = write(WireMessage{Type: "result", JobID: job.ID, Attempt: job.Attempt, Fence: job.AssignmentFence, Error: "customer pool authorization rejected", FailureCode: FailurePoolAuthorization})
+			report(WorkerEvent{Kind: WorkerJobFailed, NodeName: node.Name, JobID: job.ID, Task: job.Requirements.Task, Error: err.Error()})
+			continue
+		}
 		if cancelledBeforeDispatch {
 			cancelJob()
 		}
@@ -875,6 +890,41 @@ func (w *Worker) validatePoolJob(job Job, now time.Time) error {
 	if err := ValidatePoolJobAuthorization(certificate.AuthorityKey, certificate.PoolID, job.PoolAuthorization, context, job.SealedPayload, now); err != nil {
 		return err
 	}
+	return nil
+}
+
+// claimPoolJobAuthorization rejects sequential replay of a valid protected job
+// for the lifetime of the worker process. Entries expire with the signed
+// authorization. The bounded fail-closed map avoids both unbounded memory use
+// and per-job disk I/O in the latency-sensitive dispatch path.
+func (w *Worker) claimPoolJobAuthorization(job Job, now time.Time) error {
+	if w.identity.PoolCertificate == nil {
+		return nil
+	}
+	if job.PoolAuthorization == nil || job.PoolAuthorization.Signature == "" {
+		return errors.New("customer pool authorization is required")
+	}
+	now = now.UTC()
+	w.poolReplayMu.Lock()
+	defer w.poolReplayMu.Unlock()
+	if w.poolAuthorizationClaims == nil {
+		w.poolAuthorizationClaims = make(map[string]time.Time)
+	}
+	signature := job.PoolAuthorization.Signature
+	if expiresAt, exists := w.poolAuthorizationClaims[signature]; exists && expiresAt.After(now) {
+		return errors.New("customer pool authorization was already claimed")
+	}
+	if len(w.poolAuthorizationClaims) >= maximumPoolAuthorizationReplayEntries {
+		for claimedSignature, expiresAt := range w.poolAuthorizationClaims {
+			if !expiresAt.After(now) {
+				delete(w.poolAuthorizationClaims, claimedSignature)
+			}
+		}
+	}
+	if len(w.poolAuthorizationClaims) >= maximumPoolAuthorizationReplayEntries {
+		return errors.New("customer pool replay cache is full")
+	}
+	w.poolAuthorizationClaims[signature] = job.PoolAuthorization.ExpiresAt.UTC()
 	return nil
 }
 
