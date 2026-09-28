@@ -52,9 +52,19 @@ operations, not AI slots. Durable Bolt writes serialize by design, so the
 64-client row is a stress observation rather than a promise of linear scaling.
 
 The command also measures the running executable, a fresh relay hosted inside
-the benchmark process, fresh-database allocation growth, and fixed typed
-heartbeat payloads. It creates temporary databases and loopback listeners,
-removes them afterward, sends no model request, and contacts no Internet host.
+the benchmark process, and fixed typed heartbeat payloads. Database reporting
+separates three different quantities: Bolt's stepwise allocated file size,
+live bytes occupied by branch/leaf bucket records, and cumulative transaction
+page allocation. Only live bucket growth is normalized per job; a 4 MiB to
+8 MiB file-allocation jump is capacity evidence, not proof that each record
+doubled. It creates temporary databases and loopback listeners, removes them
+afterward, sends no model request, and contacts no Internet host.
+
+JSON benchmark schema 2 introduced the explicit
+`allocated_file_*`, `live_bucket_*`, and `transaction_page_*` fields. Older
+published schema-1 reports remain immutable evidence; their `growth_*` fields
+describe allocated-file growth and must not be interpreted as logical bytes
+retained per job.
 
 ## Dated Windows/amd64 current desktop snapshot
 

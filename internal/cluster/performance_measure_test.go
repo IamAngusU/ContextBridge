@@ -64,10 +64,16 @@ func TestMeasureBridgeOnlyProducesAuditableShape(t *testing.T) {
 			t.Errorf("unrepresentable measured throughput: %#v", operation)
 		}
 	}
-	if report.Database.Jobs != 10 || report.Database.AfterBytes < report.Database.BaselineBytes || report.Database.GrowthBytes < 0 {
+	if report.Database.Jobs != 10 || report.Database.AllocatedAfterBytes < report.Database.AllocatedBaselineBytes || report.Database.AllocatedGrowthBytes < 0 {
 		t.Fatalf("invalid database growth shape: %#v", report.Database)
 	}
-	if report.Database.GrowthPer1000JobBytes != report.Database.GrowthPerJobBytes*1000 {
+	if report.Database.LiveAfterBytes < report.Database.LiveBaselineBytes || report.Database.LiveGrowthBytes <= 0 {
+		t.Fatalf("invalid live database occupancy: %#v", report.Database)
+	}
+	if report.Database.LiveGrowthPer1000Jobs != report.Database.LiveGrowthPerJobBytes*1000 {
 		t.Fatalf("database normalization is inconsistent: %#v", report.Database)
+	}
+	if report.Database.PageAllocBytes <= 0 || report.Database.PageAllocPerJobBytes <= 0 || report.Database.PageCount <= 0 || report.Database.WriteCalls <= 0 {
+		t.Fatalf("database transaction diagnostics are missing: %#v", report.Database)
 	}
 }
