@@ -122,8 +122,14 @@ marker restores the exact current scalar only while applying the proposal. A
 marker for a secret that does not already exist is rejected. A UI may submit a
 new secret, but it will be redacted on the next read.
 
+File-backed credential references (`api_key_file` and adapter `token_file`)
+are visible but read-only on this API. Existing references are validated using
+their already trusted local values; adding, removing, or redirecting a secret
+file requires direct local access to the configuration file. Consequently,
+HTTP-managed YAML is never used as local file-read authority.
+
 Every proposal uses the same strict parser, known-field check, defaults,
-secret-file checks, cross-field validation, finite-number checks, numeric
+existing secret-file checks, cross-field validation, finite-number checks, numeric
 bounds, and URL/path policy as startup. Multiple YAML documents and aliases
 are rejected on this editing surface. `base_revision` is mandatory; stale
 writes return `409 config.revision_conflict`. Successful changes are written
