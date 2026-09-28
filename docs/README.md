@@ -47,6 +47,9 @@ described as vendor integrations here.
   and operator-owned authority envelopes.
 - [Application integrations](integrations.md): native jobs, OpenAI-compatible
   input, one-command connection settings, MCP, PHP, and the folder inbox.
+- [Management API](management-api.md): scoped dashboard credentials, identity,
+  OpenAPI discovery, cursor history, live event streams, and safe local
+  configuration editing with machine-readable limits.
 - [Provider-neutral adapters](adapters.md): out-of-tree endpoint contract.
 - [Hosted Relay readiness](hosted-relay.md): what is and is not ready for a
   managed coordination service.

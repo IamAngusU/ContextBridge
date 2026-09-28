@@ -27,6 +27,9 @@ without sending an inference request.
 | Producer job input | `contextbridge.job.v1` | Published JSON Schema plus relay dry-run validation |
 | Producer execution identity | `relay_assigned_producer_job_ids_v1`, `job_id.relay_assigned` | Ordinary producer IDs are relay-generated; retry reconciliation uses a producer-scoped `Idempotency-Key`; a sealed submission may echo only its one-time reservation ID |
 | Relay behavior | `contextbridge.protocol-manifest.v1`, current wire version | Machine-readable protocol manifest and Relay Conformance v1 report |
+| Relay management API | OpenAPI 3.1 at `GET /v1/cluster/openapi.json`, `credential_identity_v1`, `observer_scopes_v1`, `cursor_job_history_v1` | Authenticated contract discovery, effective credential identity, credential-bound subject/tenant visibility, and filter-bound pagination |
+| Local configuration management | `contextbridge.config-management-schema.v1`, `contextbridge.managed-config.v1` | Loopback plus bearer authorization, machine-readable ranges/enums, redacted editable YAML, strict dry-run, revision conflict protection, atomic replace, and explicit restart result |
+| Live operator timelines | `bounded_execution_event_sse_v1`, `authoritative_job_events_v1`, `authoritative_pipeline_events_v1` | Authenticated bounded SSE, durable event sequence, retention-gap control, periodic reconnect, and point-visibility enforcement |
 | Relay proxy probes | `relay_role_health_v1` | Separate `/livez`, `/readyz`, and `/leaderz`; current mode is explicitly `standalone` |
 | Assignment authority | `assignment_fencing_v1`, wire v3 | Stable cluster identity, monotonic relay epoch, and exact per-assignment generation echoed by workers |
 | Worker advertisement | `contextbridge.worker-conformance.v1` | Worker Conformance v1 report over live bounded evidence |

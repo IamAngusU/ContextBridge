@@ -250,6 +250,7 @@ func TestUIIntegrationCreatesReadOnlyObserverBundle(t *testing.T) {
 		Role           string                 `json:"role"`
 		Subject        string                 `json:"subject"`
 		ProducerLimits cluster.ProducerLimits `json:"producer_limits"`
+		ObserverLimits cluster.ObserverLimits `json:"observer_limits"`
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/v1/cluster/tokens" || request.Header.Get("Authorization") != "Bearer "+admin {
@@ -265,12 +266,16 @@ func TestUIIntegrationCreatesReadOnlyObserverBundle(t *testing.T) {
 	t.Cleanup(server.Close)
 	cfg := config.Config{Cluster: config.Cluster{Relay: config.ClusterRelay{PublicURL: server.URL, AdminToken: admin}}}
 	path := filepath.Join(t.TempDir(), "ui.env")
-	info, err := createObserverIntegrationBundle(context.Background(), cfg, path, "custom-dashboard", 720)
+	limits := cluster.ObserverLimits{AllowedSubjects: []string{"website-api"}, AllowedTenants: []string{"production"}}
+	info, err := createObserverIntegrationBundleScoped(context.Background(), cfg, path, "custom-dashboard", 720, limits)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if issued.Role != "observer" || issued.Subject != "custom-dashboard" || issued.ProducerLimits.MaxQueuedJobs != 0 || issued.ProducerLimits.MaxJobsPerHour != 0 || len(issued.ProducerLimits.Providers) != 0 || len(issued.ProducerLimits.AllowedTenants) != 0 || issued.ProducerLimits.Egress != "" {
 		t.Fatalf("UI integration did not request a plain observer identity: %#v", issued)
+	}
+	if len(issued.ObserverLimits.AllowedSubjects) != 1 || issued.ObserverLimits.AllowedSubjects[0] != "website-api" || len(issued.ObserverLimits.AllowedTenants) != 1 || issued.ObserverLimits.AllowedTenants[0] != "production" {
+		t.Fatalf("UI integration did not send observer scope: %#v", issued.ObserverLimits)
 	}
 	if info.Kind != "contextbridge-relay-observer" || info.Role != "observer" || info.TokenID != "tok_ui" {
 		t.Fatalf("unexpected UI integration metadata: %#v", info)

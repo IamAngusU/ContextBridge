@@ -8,6 +8,14 @@
 - Made machine-readable benchmark reports safe to publish by recording only
   the measured executable's base name instead of its absolute local path, and
   sanitized the published i9 raw evidence without changing measured values.
+- Added a safe management surface for custom backends and operator UIs:
+  credential identity, observer subject/tenant scopes, cursor-bound filtered
+  job history, authenticated authoritative job/pipeline SSE helpers, an
+  authenticated OpenAPI 3.1 contract, stable structured HTTP errors, and
+  response request IDs. Added a separate loopback-only local config API with a
+  machine-readable constraint catalog, secret-preserving redaction, strict
+  dry-run validation, optimistic revisions, atomic replace, and explicit
+  restart semantics.
 - Removed an unnecessary durable write from the common queued-job cancellation
   path. Jobs without an assigned node cannot own a route-recovery probe, so the
   relay now returns before opening a Bolt write transaction instead of forcing

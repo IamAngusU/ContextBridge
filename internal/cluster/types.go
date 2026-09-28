@@ -548,12 +548,21 @@ type ProducerLimits struct {
 	RequireE2EE bool `json:"require_e2ee,omitempty"`
 }
 
+// ObserverLimits bind a read-only credential to an explicit slice of relay
+// history. Empty lists retain the historical cluster-wide observer behavior.
+// When both lists are set, a record must satisfy both boundaries.
+type ObserverLimits struct {
+	AllowedSubjects []string `json:"allowed_subjects,omitempty"`
+	AllowedTenants  []string `json:"allowed_tenants,omitempty"`
+}
+
 type TokenRecord struct {
 	ID             string         `json:"id"`
 	Role           string         `json:"role"`
 	Subject        string         `json:"subject"`
 	Groups         []string       `json:"groups,omitempty"`
 	ProducerLimits ProducerLimits `json:"producer_limits,omitempty"`
+	ObserverLimits ObserverLimits `json:"observer_limits,omitempty"`
 	CreatedAt      time.Time      `json:"created_at"`
 	ExpiresAt      time.Time      `json:"expires_at,omitempty"`
 	Revoked        bool           `json:"revoked"`

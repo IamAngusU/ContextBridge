@@ -332,17 +332,24 @@ func ensureJobContractVersion(tx *bolt.Tx) error {
 }
 
 func (s *Store) CreateToken(role, subject string, groups []string, lifetime time.Duration) (string, TokenRecord, error) {
-	return s.CreateTokenWithLimits(role, subject, groups, lifetime, ProducerLimits{})
+	return s.CreateTokenWithPolicies(role, subject, groups, lifetime, ProducerLimits{}, ObserverLimits{})
 }
 
 func (s *Store) CreateTokenWithLimits(role, subject string, groups []string, lifetime time.Duration, limits ProducerLimits) (string, TokenRecord, error) {
+	return s.CreateTokenWithPolicies(role, subject, groups, lifetime, limits, ObserverLimits{})
+}
+
+func (s *Store) CreateTokenWithPolicies(role, subject string, groups []string, lifetime time.Duration, producerLimits ProducerLimits, observerLimits ObserverLimits) (string, TokenRecord, error) {
 	if role != "admin" && role != "producer" && role != "node" && role != "observer" {
 		return "", TokenRecord{}, fmt.Errorf("unsupported token role %s", role)
 	}
 	if err := validateTokenIdentity(role, subject, groups); err != nil {
 		return "", TokenRecord{}, err
 	}
-	if err := validateProducerLimits(role, limits); err != nil {
+	if err := validateProducerLimits(role, producerLimits); err != nil {
+		return "", TokenRecord{}, err
+	}
+	if err := validateObserverLimits(role, observerLimits); err != nil {
 		return "", TokenRecord{}, err
 	}
 	if lifetime < 0 || lifetime > 10*365*24*time.Hour {
@@ -356,7 +363,10 @@ func (s *Store) CreateTokenWithLimits(role, subject string, groups []string, lif
 	if err != nil {
 		return "", TokenRecord{}, err
 	}
-	record := TokenRecord{ID: recordID, Role: role, Subject: cleanLabel(subject, 120), Groups: cleanList(groups, 32, 80), ProducerLimits: normalizeProducerLimits(limits), CreatedAt: time.Now().UTC()}
+	record := TokenRecord{
+		ID: recordID, Role: role, Subject: cleanLabel(subject, 120), Groups: cleanList(groups, 32, 80),
+		ProducerLimits: normalizeProducerLimits(producerLimits), ObserverLimits: normalizeObserverLimits(observerLimits), CreatedAt: time.Now().UTC(),
+	}
 	if lifetime > 0 {
 		record.ExpiresAt = record.CreatedAt.Add(lifetime)
 	}
@@ -364,6 +374,47 @@ func (s *Store) CreateTokenWithLimits(role, subject string, groups []string, lif
 		return putJSON(tx.Bucket(bucketTokens), tokenHash(token), record)
 	})
 	return token, record, err
+}
+
+func validateObserverLimits(role string, limits ObserverLimits) error {
+	if role != "observer" && (len(limits.AllowedSubjects) != 0 || len(limits.AllowedTenants) != 0) {
+		return errors.New("observer limits may only be assigned to observer tokens")
+	}
+	if len(limits.AllowedSubjects) > 32 {
+		return errors.New("observer_limits.allowed_subjects accepts at most 32 subjects")
+	}
+	seen := map[string]struct{}{}
+	for _, subject := range limits.AllowedSubjects {
+		if !validRoutingLabel(subject, 120) {
+			return errors.New("observer_limits.allowed_subjects contains an invalid subject")
+		}
+		key := strings.ToLower(subject)
+		if _, exists := seen[key]; exists {
+			return errors.New("observer_limits.allowed_subjects contains a case-insensitive duplicate subject")
+		}
+		seen[key] = struct{}{}
+	}
+	if len(limits.AllowedTenants) > 32 {
+		return errors.New("observer_limits.allowed_tenants accepts at most 32 tenant IDs")
+	}
+	seen = map[string]struct{}{}
+	for _, tenant := range limits.AllowedTenants {
+		if tenant == "" || validateTenantID(tenant) != nil {
+			return errors.New("observer_limits.allowed_tenants contains an invalid tenant ID")
+		}
+		key := strings.ToLower(tenant)
+		if _, exists := seen[key]; exists {
+			return errors.New("observer_limits.allowed_tenants contains a case-insensitive duplicate tenant ID")
+		}
+		seen[key] = struct{}{}
+	}
+	return nil
+}
+
+func normalizeObserverLimits(limits ObserverLimits) ObserverLimits {
+	limits.AllowedSubjects = cleanList(limits.AllowedSubjects, 32, 120)
+	limits.AllowedTenants = cleanList(limits.AllowedTenants, 32, 200)
+	return limits
 }
 
 func validateProducerLimits(role string, limits ProducerLimits) error {
@@ -3547,6 +3598,86 @@ func (s *Store) ListJobSummariesForOwner(limit int, status, owner string) ([]Job
 		return nil
 	})
 	return jobs, err
+}
+
+// ListJobSummaryPage walks a bounded portion of the durable history index and
+// returns only metadata projections. afterKey is exclusive and is deliberately
+// kept opaque by the HTTP layer. A scan cap prevents sparse filters from
+// turning one request into an unbounded database walk.
+func (s *Store) ListJobSummaryPage(limit int, afterKey []byte, status, owner, tenant string, allowedSubjects, allowedTenants []string) ([]Job, []byte, bool, int, error) {
+	if limit <= 0 || limit > maximumJobHistoryPage {
+		limit = 100
+	}
+	owner = cleanLabel(owner, 120)
+	tenant = cleanLabel(tenant, 200)
+	jobs := []Job{}
+	var lastScanned []byte
+	hasMore := false
+	scanned := 0
+	const maximumScannedJobHistoryRecords = 5000
+	err := s.db.View(func(tx *bolt.Tx) error {
+		index := tx.Bucket(bucketJobIndex)
+		var prefix []byte
+		if owner != "" {
+			index = tx.Bucket(bucketJobOwnerIndex)
+			prefix = jobOwnerIndexPrefix(owner)
+		}
+		cursor := index.Cursor()
+		var key, id []byte
+		if len(afterKey) > 0 {
+			key, id = cursor.Seek(afterKey)
+			if key == nil {
+				key, id = cursor.Last()
+			} else {
+				key, id = cursor.Prev()
+			}
+		} else if len(prefix) > 0 {
+			upper := prefixUpperBound(prefix)
+			if upper != nil {
+				key, id = cursor.Seek(upper)
+				if key == nil {
+					key, id = cursor.Last()
+				} else {
+					key, id = cursor.Prev()
+				}
+			} else {
+				key, id = cursor.Last()
+			}
+		} else {
+			key, id = cursor.Last()
+		}
+		for key != nil && len(jobs) < limit && scanned < maximumScannedJobHistoryRecords {
+			if len(prefix) > 0 && !bytes.HasPrefix(key, prefix) {
+				break
+			}
+			raw := tx.Bucket(bucketJobs).Get(id)
+			if raw == nil {
+				return os.ErrNotExist
+			}
+			var record jobHistoryRecord
+			if err := json.Unmarshal(raw, &record); err != nil {
+				return err
+			}
+			job := record.Job()
+			if owner != "" && (job.OwnerSubject != owner || !bytes.Equal(key, jobOwnerIndexKey(job))) {
+				return errors.New("job owner index does not match its authoritative record")
+			}
+			scanned++
+			lastScanned = append(lastScanned[:0], key...)
+			if (status == "" || job.Status == status) &&
+				(tenant == "" || job.TenantID == tenant) &&
+				(len(allowedSubjects) == 0 || contains(allowedSubjects, job.OwnerSubject)) &&
+				(len(allowedTenants) == 0 || contains(allowedTenants, job.TenantID)) {
+				jobs = append(jobs, job)
+			}
+			key, id = cursor.Prev()
+		}
+		if key != nil && (len(prefix) == 0 || bytes.HasPrefix(key, prefix)) {
+			hasMore = true
+		}
+		return nil
+	})
+	return jobs, lastScanned, hasMore, scanned, err
 }
 
 func (s *Store) CountJobs(status string) (int, error) {

@@ -22,6 +22,29 @@ for (const id of [".", "..", "_job", "-job", "job..child", "job/child", "job\\ch
 }
 assert.throws(() => client.jobs({ limit: 201 }), /between 1 and 200/u);
 
+const streamRequests = [];
+const streamClient = new ContextBridgeUIClient({
+  relayURL: "https://relay.example.test",
+  token: "observer-token",
+  fetchImpl: async (url, options) => {
+    streamRequests.push({ url, options });
+    return new Response('retry: 1000\r\n\r\nid: 7\r\nevent: job.completed\r\ndata: {"schema":"contextbridge.event.v1","sequence":7}\r\n\r\n', {
+      status: 200,
+      headers: { "content-type": "text/event-stream", "x-contextbridge-event-stream": "authoritative-events-v1" },
+    });
+  },
+});
+const streamed = [];
+for await (const event of streamClient.jobEventStream("job-stream", { after: "6" })) streamed.push(event);
+assert.equal(streamed.length, 1);
+assert.equal(streamed[0].event, "job.completed");
+assert.equal(streamed[0].id, "7");
+assert.match(streamRequests[0].url, /after=6$/u);
+assert.equal(streamRequests[0].options.headers["Last-Event-ID"], "6");
+await assert.rejects(async () => {
+  for await (const event of streamClient.jobEventStream("job-stream", { after: -1 })) void event;
+}, /unsigned 64-bit/u);
+
 const oversized = new ContextBridgeUIClient({
   relayURL: "https://relay.example.test",
   token: "observer-token",
