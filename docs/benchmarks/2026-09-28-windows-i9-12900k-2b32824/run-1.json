@@ -1,0 +1,216 @@
+{
+  "schema_version": 2,
+  "generated_at": "2026-09-28T03:09:27.6889674Z",
+  "contextbridge_version": "v0.7.0-dev",
+  "environment": {
+    "goos": "windows",
+    "goarch": "amd64",
+    "go_version": "go1.27.0",
+    "logical_cpus": 24
+  },
+  "settings": {
+    "samples_per_concurrency": 128,
+    "warmup_per_operation": 8,
+    "concurrencies": [
+      1,
+      4,
+      16,
+      64
+    ],
+    "database_jobs": 1000,
+    "idle_duration_ns": 10000000000
+  },
+  "operations": [
+    {
+      "name": "relay_queue_submit_read_cancel",
+      "concurrency": 1,
+      "samples": 128,
+      "operations_per_sample": 1,
+      "p50_us": 2547.4,
+      "p95_us": 5071,
+      "p99_us": 10177.3,
+      "throughput_ops_per_second": 389.5817322690853
+    },
+    {
+      "name": "e2ee_small_job_and_result",
+      "concurrency": 1,
+      "samples": 128,
+      "operations_per_sample": 16,
+      "p50_us": 127.818,
+      "p95_us": 181.112,
+      "p99_us": 244.406,
+      "throughput_ops_per_second": 8047.1702487314315
+    },
+    {
+      "name": "relay_queue_submit_read_cancel",
+      "concurrency": 4,
+      "samples": 128,
+      "operations_per_sample": 1,
+      "p50_us": 8766.9,
+      "p95_us": 10660.8,
+      "p99_us": 11615.6,
+      "throughput_ops_per_second": 464.06908828551855
+    },
+    {
+      "name": "e2ee_small_job_and_result",
+      "concurrency": 4,
+      "samples": 128,
+      "operations_per_sample": 16,
+      "p50_us": 125.343,
+      "p95_us": 217.787,
+      "p99_us": 445.668,
+      "throughput_ops_per_second": 28272.804957680524
+    },
+    {
+      "name": "relay_queue_submit_read_cancel",
+      "concurrency": 16,
+      "samples": 128,
+      "operations_per_sample": 1,
+      "p50_us": 38956.2,
+      "p95_us": 44760.5,
+      "p99_us": 47643.4,
+      "throughput_ops_per_second": 407.3564760609647
+    },
+    {
+      "name": "e2ee_small_job_and_result",
+      "concurrency": 16,
+      "samples": 128,
+      "operations_per_sample": 16,
+      "p50_us": 220.956,
+      "p95_us": 647.762,
+      "p99_us": 904.35,
+      "throughput_ops_per_second": 46982.17521965544
+    },
+    {
+      "name": "relay_queue_submit_read_cancel",
+      "concurrency": 64,
+      "samples": 128,
+      "operations_per_sample": 1,
+      "p50_us": 144467.4,
+      "p95_us": 147381.8,
+      "p99_us": 149465.5,
+      "throughput_ops_per_second": 435.45131637273136
+    },
+    {
+      "name": "e2ee_small_job_and_result",
+      "concurrency": 64,
+      "samples": 128,
+      "operations_per_sample": 16,
+      "p50_us": 990.218,
+      "p95_us": 2308.031,
+      "p99_us": 2441.356,
+      "throughput_ops_per_second": 46511.2053851255
+    },
+    {
+      "name": "artifact_verification_64kib",
+      "concurrency": 1,
+      "samples": 128,
+      "operations_per_sample": 16,
+      "p50_us": 64.868,
+      "p95_us": 131.125,
+      "p99_us": 137.025,
+      "throughput_ops_per_second": 13736.27294940182
+    },
+    {
+      "name": "artifact_verification_64kib",
+      "concurrency": 4,
+      "samples": 128,
+      "operations_per_sample": 16,
+      "p50_us": 95.268,
+      "p95_us": 136.381,
+      "p99_us": 162.231,
+      "throughput_ops_per_second": 43698.870401270004
+    },
+    {
+      "name": "artifact_verification_64kib",
+      "concurrency": 16,
+      "samples": 128,
+      "operations_per_sample": 16,
+      "p50_us": 239.293,
+      "p95_us": 372,
+      "p99_us": 398.193,
+      "throughput_ops_per_second": 62842.32651620921
+    },
+    {
+      "name": "artifact_verification_64kib",
+      "concurrency": 64,
+      "samples": 128,
+      "operations_per_sample": 16,
+      "p50_us": 631.875,
+      "p95_us": 1333.443,
+      "p99_us": 1459.1,
+      "throughput_ops_per_second": 81190.90566710936
+    }
+  ],
+  "resources": {
+    "files": {
+      "binary_path": "C:\\Users\\Angus Velsmann\\.codex\\tmp\\cb-bench-2b32824\\contextbridge.exe",
+      "binary_bytes": 13910016
+    },
+    "idle_relay": {
+      "duration_ms": 10000,
+      "cpu_core_percent": 0,
+      "cpu_host_percent": 0,
+      "resident_bytes": 16117760,
+      "resident_kind": "current_working_set",
+      "go_heap_alloc_bytes": 1512080,
+      "go_heap_in_use_bytes": 2826240,
+      "go_memory_sys_bytes": 12406784
+    },
+    "representative_heartbeats": [
+      {
+        "name": "adapter_one_idle_endpoint",
+        "payload_bytes": 245,
+        "interval_ms": 5000,
+        "payload_bytes_per_minute": 2940,
+        "payload_bytes_per_hour": 176400,
+        "scope": "representative JSON body; actual size scales with advertised endpoints and bounded diagnostics"
+      },
+      {
+        "name": "worker_one_gpu_one_model",
+        "payload_bytes": 728,
+        "interval_ms": 5000,
+        "payload_bytes_per_minute": 8736,
+        "payload_bytes_per_hour": 524160,
+        "scope": "representative WebSocket JSON message; actual size scales with capabilities"
+      }
+    ],
+    "database": {
+      "jobs": 1000,
+      "allocated_file_baseline_bytes": 32768,
+      "allocated_file_after_bytes": 8388608,
+      "allocated_file_growth_bytes": 8355840,
+      "live_bucket_baseline_bytes": 0,
+      "live_bucket_after_bytes": 1681381,
+      "live_bucket_growth_bytes": 1681381,
+      "live_bucket_growth_per_job_bytes": 1681.381,
+      "live_bucket_growth_per_1000_jobs_bytes": 1681381,
+      "transaction_page_alloc_bytes": 105508864,
+      "transaction_page_alloc_per_job_bytes": 105508.864,
+      "transaction_page_count": 25759,
+      "transaction_write_calls": 27759,
+      "transaction_write_time_ns": 1035424600
+    }
+  },
+  "unavailable_metrics": [
+    {
+      "name": "ram_per_active_inference_job",
+      "reason": "the benchmark deliberately starts no provider, adapter, or model inference; process-wide adapter/model memory cannot be attributed honestly to one ContextBridge job"
+    },
+    {
+      "name": "os_disk_write_bytes_per_job",
+      "reason": "Bolt live-bucket occupancy, transaction page allocation, and stepwise file allocation are reported separately; filesystem cache, journaling, write amplification, and device counters are platform-specific"
+    },
+    {
+      "name": "wire_network_bytes_per_job",
+      "reason": "job payloads and responses are caller-dependent and transport framing depends on HTTP/WebSocket/TLS; fixed typed heartbeat JSON is reported separately"
+    }
+  ],
+  "excludes": [
+    "model and provider inference",
+    "adapter rendering and website latency",
+    "Internet and cross-device network latency",
+    "TLS, TCP, HTTP, and WebSocket framing from heartbeat byte estimates"
+  ]
+}
+

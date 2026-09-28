@@ -69,6 +69,76 @@ retained per job.
 ## Dated Windows/amd64 current desktop snapshot
 
 This snapshot was measured on 2026-09-28 from source commit
+`2b32824c3ba570e756bcd0504edeb8a9e0472a33`, after removing an unnecessary
+empty durable transaction from queued-job cancellation. The binary was built
+with Go 1.27.0 for Windows/amd64 using `-trimpath -buildvcs=true -ldflags "-s
+-w -X main.version=v0.7.0-dev"`. The host was an Acer Predator PO7-640 with
+an Intel Core i9-12900K (16 physical cores and 24 logical CPUs), 32 GiB of
+RAM, and the Windows High performance power scheme.
+
+Five sequential reports used 128 measured samples, eight warmups, concurrency
+1/4/16/64, 1,000 cancelled jobs, and a ten-second idle window. Run 1 is shown
+because it had the smallest summed normalized deviation from the five-run
+median across every operation/concurrency p50, p95, p99, and throughput value.
+The [complete reports, selection details, schema-2 database evidence, and
+same-toolchain alternating A/B](benchmarks/2026-09-28-windows-i9-12900k-2b32824/)
+are published together.
+
+Normal workstation background activity remained enabled. The benchmark uses
+no model/provider inference and no GPU. This is one workstation observation,
+not an SLA.
+
+### Durable relay submit/read/cancel
+
+| Clients | p50 | p95 | p99 | Throughput |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 2.547 ms | 5.071 ms | 10.177 ms | 389.6 ops/s |
+| 4 | 8.767 ms | 10.661 ms | 11.616 ms | 464.1 ops/s |
+| 16 | 38.956 ms | 44.761 ms | 47.643 ms | 407.4 ops/s |
+| 64 | 144.467 ms | 147.382 ms | 149.466 ms | 435.5 ops/s |
+
+### Small E2EE job and result
+
+| Clients | p50 | p95 | p99 | Throughput |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.128 ms | 0.181 ms | 0.244 ms | 8,047.2 ops/s |
+| 4 | 0.125 ms | 0.218 ms | 0.446 ms | 28,272.8 ops/s |
+| 16 | 0.221 ms | 0.648 ms | 0.904 ms | 46,982.2 ops/s |
+| 64 | 0.990 ms | 2.308 ms | 2.441 ms | 46,511.2 ops/s |
+
+### Verify one 64 KiB artifact
+
+| Clients | p50 | p95 | p99 | Throughput |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.065 ms | 0.131 ms | 0.137 ms | 13,736.3 ops/s |
+| 4 | 0.095 ms | 0.136 ms | 0.162 ms | 43,698.9 ops/s |
+| 16 | 0.239 ms | 0.372 ms | 0.398 ms | 62,842.3 ops/s |
+| 64 | 0.632 ms | 1.333 ms | 1.459 ms | 81,190.9 ops/s |
+
+### Resource footprint
+
+| Measurement | Observation | Scope |
+| --- | ---: | --- |
+| Stripped core binary | 13.3 MiB | Built executable only |
+| Idle benchmark process + relay RSS | 15.4 MiB | Current Windows working set after warmup |
+| Go heap allocated / runtime reserved | 1.4 MiB / 11.8 MiB | Same process and sample window |
+| Idle CPU | below sampling resolution | No process CPU tick recorded during the 10 s window; not claimed as literal zero |
+| Bolt allocated-file growth | 8.0 MiB / 1,000 jobs | Stepwise capacity growth; deliberately not normalized per job |
+| Bolt live bucket growth | 1.60 MiB / 1,000 jobs | Branch/leaf bytes occupied by retained cancellation evidence |
+| Generic adapter status payload | 245 B / heartbeat; 172.3 KiB/hour | One idle endpoint at 5 s; application JSON only |
+| Worker heartbeat payload | 728 B / heartbeat; 511.9 KiB/hour | One GPU and one model at 5 s; WebSocket JSON only |
+
+Concurrency-1 durable queue throughput across runs 1 through 5 was
+389.6/379.5/399.4/360.1/395.9 ops/s. A controlled prior/fixed ABBA sequence,
+using Go 1.27.0 and identical flags for both binaries, measured median
+throughput gains of 22.0% at one client and 10.9% at 64 clients. The fix skips
+a recovery-probe write transaction only when the job has no assigned node and
+therefore cannot own such a probe; no durability or recovery evidence was
+removed.
+
+## Dated Windows/amd64 pre-fix desktop snapshot
+
+This snapshot was measured on 2026-09-28 from source commit
 `0c5812f25b872b14dd58e3e0d3e4ac4847340754`. The binary was built with Go
 1.27.1 for Windows/amd64 using `-trimpath -buildvcs=true -ldflags "-s -w -X
 main.version=v0.7.0-dev"`. The host was an Acer Predator PO7-640 desktop with
