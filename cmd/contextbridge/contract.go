@@ -1,18 +1,17 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 
 	"github.com/IamAngusU/ContextBridge/internal/cluster"
 	"github.com/IamAngusU/ContextBridge/internal/config"
+	"github.com/IamAngusU/ContextBridge/internal/strictjson"
 )
 
 func clusterContractCommand(args []string) error {
@@ -59,13 +58,5 @@ func clusterContractCommand(args []string) error {
 }
 
 func decodeStrictContractJSON(raw []byte, target interface{}) error {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return err
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return errors.New("request must contain exactly one JSON value")
-	}
-	return nil
+	return strictjson.Decode(raw, target)
 }

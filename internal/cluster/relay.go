@@ -1,7 +1,6 @@
 package cluster
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -23,6 +22,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/IamAngusU/ContextBridge/internal/strictjson"
 	"github.com/coder/websocket"
 )
 
@@ -2683,85 +2683,7 @@ func decodeJSON(body io.Reader, target interface{}, limit int64) error {
 	if int64(len(raw)) > limit {
 		return fmt.Errorf("JSON body exceeds %d bytes", limit)
 	}
-	if !utf8.Valid(raw) {
-		return errors.New("JSON body must be valid UTF-8")
-	}
-	if err := rejectDuplicateJSONKeys(raw); err != nil {
-		return err
-	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return err
-	}
-	if decoder.Decode(&struct{}{}) != io.EOF {
-		return errors.New("request must contain one JSON value")
-	}
-	return nil
-}
-
-func rejectDuplicateJSONKeys(raw []byte) error {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	if err := scanUniqueJSONValue(decoder); err != nil {
-		return err
-	}
-	if _, err := decoder.Token(); err != io.EOF {
-		if err == nil {
-			return errors.New("request must contain one JSON value")
-		}
-		return err
-	}
-	return nil
-}
-
-func scanUniqueJSONValue(decoder *json.Decoder) error {
-	token, err := decoder.Token()
-	if err != nil {
-		return err
-	}
-	delimiter, ok := token.(json.Delim)
-	if !ok {
-		return nil
-	}
-	switch delimiter {
-	case '{':
-		seen := make(map[string]struct{})
-		for decoder.More() {
-			keyToken, err := decoder.Token()
-			if err != nil {
-				return err
-			}
-			key, ok := keyToken.(string)
-			if !ok {
-				return errors.New("JSON object key must be a string")
-			}
-			if _, duplicate := seen[key]; duplicate {
-				return fmt.Errorf("duplicate JSON property %q", key)
-			}
-			seen[key] = struct{}{}
-			if err := scanUniqueJSONValue(decoder); err != nil {
-				return err
-			}
-		}
-		closing, err := decoder.Token()
-		if err != nil || closing != json.Delim('}') {
-			return errors.New("invalid JSON object")
-		}
-	case '[':
-		for decoder.More() {
-			if err := scanUniqueJSONValue(decoder); err != nil {
-				return err
-			}
-		}
-		closing, err := decoder.Token()
-		if err != nil || closing != json.Delim(']') {
-			return errors.New("invalid JSON array")
-		}
-	default:
-		return errors.New("invalid JSON delimiter")
-	}
-	return nil
+	return strictjson.Decode(raw, target)
 }
 
 func writeJSON(w http.ResponseWriter, status int, value interface{}) {

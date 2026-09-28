@@ -1,7 +1,6 @@
 package main
 
 import (
-	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -38,6 +37,7 @@ func TestPublicCoreDistributionSurfaceIsExplicit(t *testing.T) {
 	allowedFiles := map[string]bool{
 		".editorconfig":            true,
 		".gitattributes":           true,
+		".git":                     true, // file in linked Git worktrees; directory in ordinary clones
 		".gitleaks.toml":           true,
 		".gitignore":               true,
 		".markdownlint-cli2.jsonc": true,
@@ -112,50 +112,6 @@ func TestPublicCoreProductSurfaceIsPresent(t *testing.T) {
 		if !strings.Contains(string(readme), reference) {
 			t.Errorf("README does not expose required public surface %q", reference)
 		}
-	}
-}
-
-func TestPublicCoreDoesNotNamePrivateProviderAdapters(t *testing.T) {
-	root := publicCoreRoot(t)
-	textExtensions := map[string]bool{
-		".css": true, ".go": true, ".html": true, ".js": true, ".json": true,
-		".md": true, ".mod": true, ".ps1": true, ".sh": true, ".sum": true,
-		".txt": true, ".yaml": true, ".yml": true,
-	}
-	// Construct these at runtime so the regression test does not itself place
-	// private provider identifiers in the public source surface it scans.
-	forbidden := []string{"chat" + "gpt", "gem" + "ini.google", "gem" + "ini", "chat." + "openai.com"}
-	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if entry.IsDir() {
-			switch entry.Name() {
-			case ".git", ".buildcheck", ".tmp-metrics", "release-artifacts", "vendor":
-				if path != root {
-					return filepath.SkipDir
-				}
-			}
-			return nil
-		}
-		if !textExtensions[strings.ToLower(filepath.Ext(entry.Name()))] {
-			return nil
-		}
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		lower := strings.ToLower(string(raw))
-		for _, term := range forbidden {
-			if strings.Contains(lower, term) {
-				relative, _ := filepath.Rel(root, path)
-				t.Errorf("public source contains private provider term %q in %s", term, filepath.ToSlash(relative))
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
 }
 

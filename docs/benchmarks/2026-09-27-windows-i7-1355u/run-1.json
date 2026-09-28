@@ -1,0 +1,207 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-27T16:42:46.9401049Z",
+  "contextbridge_version": "v0.7.0-dev",
+  "environment": {
+    "goos": "windows",
+    "goarch": "amd64",
+    "go_version": "go1.27.1",
+    "logical_cpus": 12
+  },
+  "settings": {
+    "samples_per_concurrency": 128,
+    "warmup_per_operation": 8,
+    "concurrencies": [
+      1,
+      4,
+      16,
+      64
+    ],
+    "database_jobs": 1000,
+    "idle_duration_ns": 10000000000
+  },
+  "operations": [
+    {
+      "name": "relay_queue_submit_read_cancel",
+      "concurrency": 1,
+      "samples": 128,
+      "operations_per_sample": 1,
+      "p50_us": 13051.3,
+      "p95_us": 14699.5,
+      "p99_us": 19114,
+      "throughput_ops_per_second": 75.84488535867817
+    },
+    {
+      "name": "e2ee_small_job_and_result",
+      "concurrency": 1,
+      "samples": 128,
+      "operations_per_sample": 16,
+      "p50_us": 124.981,
+      "p95_us": 158.056,
+      "p99_us": 187.743,
+      "throughput_ops_per_second": 8421.412757782406
+    },
+    {
+      "name": "relay_queue_submit_read_cancel",
+      "concurrency": 4,
+      "samples": 128,
+      "operations_per_sample": 1,
+      "p50_us": 49674.9,
+      "p95_us": 51978.1,
+      "p99_us": 53936.7,
+      "throughput_ops_per_second": 80.20038567613594
+    },
+    {
+      "name": "e2ee_small_job_and_result",
+      "concurrency": 4,
+      "samples": 128,
+      "operations_per_sample": 16,
+      "p50_us": 187.512,
+      "p95_us": 376.106,
+      "p99_us": 415.156,
+      "throughput_ops_per_second": 18894.156742160263
+    },
+    {
+      "name": "relay_queue_submit_read_cancel",
+      "concurrency": 16,
+      "samples": 128,
+      "operations_per_sample": 1,
+      "p50_us": 199088,
+      "p95_us": 207704.9,
+      "p99_us": 208486.5,
+      "throughput_ops_per_second": 79.53721767006284
+    },
+    {
+      "name": "e2ee_small_job_and_result",
+      "concurrency": 16,
+      "samples": 128,
+      "operations_per_sample": 16,
+      "p50_us": 531.925,
+      "p95_us": 1071.681,
+      "p99_us": 1379.081,
+      "throughput_ops_per_second": 25442.76372020911
+    },
+    {
+      "name": "relay_queue_submit_read_cancel",
+      "concurrency": 64,
+      "samples": 128,
+      "operations_per_sample": 1,
+      "p50_us": 792641.8,
+      "p95_us": 796066.7,
+      "p99_us": 803234,
+      "throughput_ops_per_second": 79.97457308417005
+    },
+    {
+      "name": "e2ee_small_job_and_result",
+      "concurrency": 64,
+      "samples": 128,
+      "operations_per_sample": 16,
+      "p50_us": 990.968,
+      "p95_us": 4335.075,
+      "p99_us": 4611.156,
+      "throughput_ops_per_second": 26143.590607710827
+    },
+    {
+      "name": "artifact_verification_64kib",
+      "concurrency": 1,
+      "samples": 128,
+      "operations_per_sample": 16,
+      "p50_us": 66.093,
+      "p95_us": 125.037,
+      "p99_us": 130.506,
+      "throughput_ops_per_second": 12529.250722664912
+    },
+    {
+      "name": "artifact_verification_64kib",
+      "concurrency": 4,
+      "samples": 128,
+      "operations_per_sample": 16,
+      "p50_us": 125.056,
+      "p95_us": 188.156,
+      "p99_us": 219.337,
+      "throughput_ops_per_second": 28885.428655247895
+    },
+    {
+      "name": "artifact_verification_64kib",
+      "concurrency": 16,
+      "samples": 128,
+      "operations_per_sample": 16,
+      "p50_us": 432.893,
+      "p95_us": 633.106,
+      "p99_us": 698.481,
+      "throughput_ops_per_second": 34238.159163973694
+    },
+    {
+      "name": "artifact_verification_64kib",
+      "concurrency": 64,
+      "samples": 128,
+      "operations_per_sample": 16,
+      "p50_us": 1094.175,
+      "p95_us": 2389.718,
+      "p99_us": 2590.718,
+      "throughput_ops_per_second": 44863.186994933174
+    }
+  ],
+  "resources": {
+    "files": {
+      "binary_path": "contextbridge-benchmark.exe",
+      "binary_bytes": 13903872
+    },
+    "idle_relay": {
+      "duration_ms": 10000,
+      "cpu_core_percent": 0,
+      "cpu_host_percent": 0,
+      "resident_bytes": 15872000,
+      "resident_kind": "current_working_set",
+      "go_heap_alloc_bytes": 1264504,
+      "go_heap_in_use_bytes": 2605056,
+      "go_memory_sys_bytes": 12414976
+    },
+    "representative_heartbeats": [
+      {
+        "name": "adapter_one_idle_endpoint",
+        "payload_bytes": 245,
+        "interval_ms": 5000,
+        "payload_bytes_per_minute": 2940,
+        "payload_bytes_per_hour": 176400,
+        "scope": "representative JSON body; actual size scales with advertised endpoints and bounded diagnostics"
+      },
+      {
+        "name": "worker_one_gpu_one_model",
+        "payload_bytes": 728,
+        "interval_ms": 5000,
+        "payload_bytes_per_minute": 8736,
+        "payload_bytes_per_hour": 524160,
+        "scope": "representative WebSocket JSON message; actual size scales with capabilities"
+      }
+    ],
+    "database": {
+      "jobs": 1000,
+      "baseline_bytes": 32768,
+      "after_bytes": 8388608,
+      "growth_bytes": 8355840,
+      "growth_per_job_bytes": 8355.84,
+      "growth_per_1000_jobs_bytes": 8355840
+    }
+  },
+  "unavailable_metrics": [
+    {
+      "name": "ram_per_active_inference_job",
+      "reason": "the benchmark deliberately starts no provider, adapter, or model inference; process-wide adapter/model memory cannot be attributed honestly to one ContextBridge job"
+    },
+    {
+      "name": "os_disk_write_bytes_per_job",
+      "reason": "fresh Bolt allocated-file growth is reported instead; filesystem cache, journaling, write amplification, and device counters are platform-specific"
+    },
+    {
+      "name": "wire_network_bytes_per_job",
+      "reason": "job payloads and responses are caller-dependent and transport framing depends on HTTP/WebSocket/TLS; fixed typed heartbeat JSON is reported separately"
+    }
+  ],
+  "excludes": [
+    "model and provider inference",
+    "adapter rendering and website latency",
+    "Internet and cross-device network latency",
+    "TLS, TCP, HTTP, and WebSocket framing from heartbeat byte estimates"
+  ]
+}

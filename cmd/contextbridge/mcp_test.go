@@ -124,6 +124,20 @@ func TestMCPProtocolVersionNegotiation(t *testing.T) {
 	}
 }
 
+func TestMCPEnvelopeRejectsAmbiguousJSON(t *testing.T) {
+	server := newTestMCPServer("http://127.0.0.1:1", "token")
+	for _, raw := range []string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","method":"ping","params":{}}`,
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","Method":"ping","params":{}}`,
+		`{"jsonrpc":"2.0","id":1,"method":"ping","unexpected":true}`,
+	} {
+		response := server.handleMessage(context.Background(), []byte(raw))
+		if response == nil || response.Error == nil || response.Error.Code != -32700 {
+			t.Fatalf("ambiguous MCP envelope was accepted: raw=%s response=%#v", raw, response)
+		}
+	}
+}
+
 func TestMCPSubmitSchemaDescribesSafeNativeJobFields(t *testing.T) {
 	tools := mcpTools()
 	if len(tools) != 4 {
