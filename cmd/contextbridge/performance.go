@@ -334,7 +334,10 @@ func measurePerformanceFileSizes(requestedBinary string) (performanceFileSizes, 
 	if !info.Mode().IsRegular() {
 		return result, warnings, errors.New("--binary must name a regular file")
 	}
-	result.BinaryPath, result.BinaryBytes = binary, info.Size()
+	// Benchmark reports are intended to be publishable evidence. Retain the
+	// executable identity without embedding a workstation username or checkout
+	// location in the machine-readable output.
+	result.BinaryPath, result.BinaryBytes = filepath.Base(binary), info.Size()
 
 	return result, warnings, nil
 }
