@@ -66,7 +66,7 @@ func TestMeasurePerformanceFileSizesCountsBinary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(warnings) != 0 || files.BinaryBytes != 17 {
+	if len(warnings) != 0 || files.BinaryBytes != 17 || files.BinaryPath != filepath.Base(binary) {
 		t.Fatalf("unexpected file measurement: %#v warnings=%#v", files, warnings)
 	}
 }

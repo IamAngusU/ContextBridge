@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Published a fresh three-run schema-2 benchmark snapshot from the i7-1355U
+  Windows laptop, including complete raw reports, selection details, database
+  evidence, resource variance, and the retained prior snapshot for comparison.
+- Made machine-readable benchmark reports safe to publish by recording only
+  the measured executable's base name instead of its absolute local path, and
+  sanitized the published i9 raw evidence without changing measured values.
 - Removed an unnecessary durable write from the common queued-job cancellation
   path. Jobs without an assigned node cannot own a route-recovery probe, so the
   relay now returns before opening a Bolt write transaction instead of forcing
