@@ -144,7 +144,7 @@
   ],
   "resources": {
     "files": {
-      "binary_path": "C:\\Users\\Angus Velsmann\\.codex\\tmp\\cb-ab-bench\\contextbridge-3fe46fd.exe",
+      "binary_path": "contextbridge-3fe46fd.exe",
       "binary_bytes": 13902336
     },
     "idle_relay": {
@@ -205,4 +205,3 @@
     "TLS, TCP, HTTP, and WebSocket framing from heartbeat byte estimates"
   ]
 }
-

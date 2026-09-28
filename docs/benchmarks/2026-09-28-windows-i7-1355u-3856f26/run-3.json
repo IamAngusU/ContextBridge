@@ -1,15 +1,15 @@
 {
   "schema_version": 2,
-  "generated_at": "2026-09-28T03:11:29.8705595Z",
-  "contextbridge_version": "v0.7.0-dev",
+  "generated_at": "2026-09-28T06:16:21.1122362Z",
+  "contextbridge_version": "v0.8.0-dev",
   "environment": {
     "goos": "windows",
     "goarch": "amd64",
-    "go_version": "go1.27.0",
-    "logical_cpus": 24
+    "go_version": "go1.27.1",
+    "logical_cpus": 12
   },
   "settings": {
-    "samples_per_concurrency": 192,
+    "samples_per_concurrency": 128,
     "warmup_per_operation": 8,
     "concurrencies": [
       1,
@@ -18,144 +18,144 @@
       64
     ],
     "database_jobs": 1000,
-    "idle_duration_ns": 500000000
+    "idle_duration_ns": 10000000000
   },
   "operations": [
     {
       "name": "relay_queue_submit_read_cancel",
       "concurrency": 1,
-      "samples": 192,
+      "samples": 128,
       "operations_per_sample": 1,
-      "p50_us": 2575.8,
-      "p95_us": 3583.9,
-      "p99_us": 4604.5,
-      "throughput_ops_per_second": 388.8843091460121
+      "p50_us": 10527,
+      "p95_us": 12055.5,
+      "p99_us": 13055.2,
+      "throughput_ops_per_second": 94.71614865196351
     },
     {
       "name": "e2ee_small_job_and_result",
       "concurrency": 1,
-      "samples": 192,
+      "samples": 128,
       "operations_per_sample": 16,
-      "p50_us": 126.787,
-      "p95_us": 191.631,
-      "p99_us": 193.737,
-      "throughput_ops_per_second": 8082.611020134963
+      "p50_us": 124.987,
+      "p95_us": 156.756,
+      "p99_us": 193.593,
+      "throughput_ops_per_second": 8607.027419350094
     },
     {
       "name": "relay_queue_submit_read_cancel",
       "concurrency": 4,
-      "samples": 192,
+      "samples": 128,
       "operations_per_sample": 1,
-      "p50_us": 8809.6,
-      "p95_us": 13606,
-      "p99_us": 16459.4,
-      "throughput_ops_per_second": 442.9842371442283
+      "p50_us": 39956.9,
+      "p95_us": 52625.1,
+      "p99_us": 59333.2,
+      "throughput_ops_per_second": 96.3417966089193
     },
     {
       "name": "e2ee_small_job_and_result",
       "concurrency": 4,
-      "samples": 192,
+      "samples": 128,
       "operations_per_sample": 16,
-      "p50_us": 126.068,
-      "p95_us": 198.9,
-      "p99_us": 229.575,
-      "throughput_ops_per_second": 30013.0720997622
+      "p50_us": 187.537,
+      "p95_us": 344.112,
+      "p99_us": 375.118,
+      "throughput_ops_per_second": 19848.500120176464
     },
     {
       "name": "relay_queue_submit_read_cancel",
       "concurrency": 16,
-      "samples": 192,
+      "samples": 128,
       "operations_per_sample": 1,
-      "p50_us": 35853.9,
-      "p95_us": 37984.8,
-      "p99_us": 38550.6,
-      "throughput_ops_per_second": 444.2838029397704
+      "p50_us": 161597.3,
+      "p95_us": 167084.7,
+      "p99_us": 168207.5,
+      "throughput_ops_per_second": 98.7335722377239
     },
     {
       "name": "e2ee_small_job_and_result",
       "concurrency": 16,
-      "samples": 192,
+      "samples": 128,
       "operations_per_sample": 16,
-      "p50_us": 233.725,
-      "p95_us": 461.106,
-      "p99_us": 715.612,
-      "throughput_ops_per_second": 54027.7208638104
+      "p50_us": 491.418,
+      "p95_us": 877.293,
+      "p99_us": 1291.756,
+      "throughput_ops_per_second": 25980.41827458562
     },
     {
       "name": "relay_queue_submit_read_cancel",
       "concurrency": 64,
-      "samples": 192,
+      "samples": 128,
       "operations_per_sample": 1,
-      "p50_us": 149630.5,
-      "p95_us": 158826.8,
-      "p99_us": 162639.4,
-      "throughput_ops_per_second": 413.2246523801417
+      "p50_us": 637318.2,
+      "p95_us": 645742.6,
+      "p99_us": 651794.6,
+      "throughput_ops_per_second": 99.0502090926699
     },
     {
       "name": "e2ee_small_job_and_result",
       "concurrency": 64,
-      "samples": 192,
+      "samples": 128,
       "operations_per_sample": 16,
-      "p50_us": 836.025,
-      "p95_us": 2091.056,
-      "p99_us": 2842.962,
-      "throughput_ops_per_second": 56966.53216235462
+      "p50_us": 1365.968,
+      "p95_us": 4143.093,
+      "p99_us": 4485.993,
+      "throughput_ops_per_second": 26500.00646972814
     },
     {
       "name": "artifact_verification_64kib",
       "concurrency": 1,
-      "samples": 192,
+      "samples": 128,
       "operations_per_sample": 16,
-      "p50_us": 66.618,
-      "p95_us": 125.293,
-      "p99_us": 159.65,
-      "throughput_ops_per_second": 14025.322281087183
+      "p50_us": 62.618,
+      "p95_us": 126.337,
+      "p99_us": 156.956,
+      "throughput_ops_per_second": 12796.896752537508
     },
     {
       "name": "artifact_verification_64kib",
       "concurrency": 4,
-      "samples": 192,
+      "samples": 128,
       "operations_per_sample": 16,
-      "p50_us": 94.343,
-      "p95_us": 127.343,
-      "p99_us": 172.293,
-      "throughput_ops_per_second": 44045.28405767179
+      "p50_us": 125.075,
+      "p95_us": 187.818,
+      "p99_us": 209.962,
+      "throughput_ops_per_second": 28614.9018248986
     },
     {
       "name": "artifact_verification_64kib",
       "concurrency": 16,
-      "samples": 192,
+      "samples": 128,
       "operations_per_sample": 16,
-      "p50_us": 229.006,
-      "p95_us": 340.137,
-      "p99_us": 396.9,
-      "throughput_ops_per_second": 66016.67178840282
+      "p50_us": 491.268,
+      "p95_us": 653.012,
+      "p99_us": 715.693,
+      "throughput_ops_per_second": 31434.715406847798
     },
     {
       "name": "artifact_verification_64kib",
       "concurrency": 64,
-      "samples": 192,
+      "samples": 128,
       "operations_per_sample": 16,
-      "p50_us": 609.887,
-      "p95_us": 1137.487,
-      "p99_us": 1455.481,
-      "throughput_ops_per_second": 90251.54091579461
+      "p50_us": 1118.537,
+      "p95_us": 2276.775,
+      "p99_us": 2538.243,
+      "throughput_ops_per_second": 44565.432630687916
     }
   ],
   "resources": {
     "files": {
-      "binary_path": "contextbridge.exe",
+      "binary_path": "contextbridge-benchmark.exe",
       "binary_bytes": 13910016
     },
     "idle_relay": {
-      "duration_ms": 500,
+      "duration_ms": 10000,
       "cpu_core_percent": 0,
       "cpu_host_percent": 0,
-      "resident_bytes": 16130048,
+      "resident_bytes": 15683584,
       "resident_kind": "current_working_set",
-      "go_heap_alloc_bytes": 1488976,
-      "go_heap_in_use_bytes": 2785280,
-      "go_memory_sys_bytes": 12668928
+      "go_heap_alloc_bytes": 1269296,
+      "go_heap_in_use_bytes": 2449408,
+      "go_memory_sys_bytes": 12144640
     },
     "representative_heartbeats": [
       {
@@ -181,15 +181,15 @@
       "allocated_file_after_bytes": 8388608,
       "allocated_file_growth_bytes": 8355840,
       "live_bucket_baseline_bytes": 0,
-      "live_bucket_after_bytes": 1681471,
-      "live_bucket_growth_bytes": 1681471,
-      "live_bucket_growth_per_job_bytes": 1681.471,
-      "live_bucket_growth_per_1000_jobs_bytes": 1681471,
+      "live_bucket_after_bytes": 1681438,
+      "live_bucket_growth_bytes": 1681438,
+      "live_bucket_growth_per_job_bytes": 1681.438,
+      "live_bucket_growth_per_1000_jobs_bytes": 1681438,
       "transaction_page_alloc_bytes": 105508864,
       "transaction_page_alloc_per_job_bytes": 105508.864,
       "transaction_page_count": 25759,
       "transaction_write_calls": 27759,
-      "transaction_write_time_ns": 1057901400
+      "transaction_write_time_ns": 5022037100
     }
   },
   "unavailable_metrics": [
