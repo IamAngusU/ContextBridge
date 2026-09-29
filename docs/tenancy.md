@@ -69,8 +69,13 @@ case-insensitively ambiguous duplicates and do not silently change casing.
 
 Enforcement occurs before execution-policy lookup on normal submission,
 contract validation, route explanation, encrypted assignment reservation and
-pipeline admission. Durable job admission checks the bound scope again. An
-idempotency retry cannot change the tenant context of its original request.
+pipeline admission. Durable job admission checks the bound scope again.
+Existing job and pipeline history, point reads, event streams, route/runtime
+details, activity views, and cancellation require both the exact producer
+subject and an allowed tenant. The fixed-size authorization lookup runs before
+retained request, result, input, or graph bodies are decoded, and unauthorized
+IDs keep the same not-found response as missing IDs. An idempotency retry
+cannot change the tenant context of its original request.
 
 ## Backwards compatibility and limits
 

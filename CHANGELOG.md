@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Enforced credential-bound producer tenant scopes on existing job and
+  pipeline reads, event streams, route/runtime details, legacy history, and
+  cancellation. Fixed-size owner+tenant digests reject same-subject foreign
+  tenant access before decoding retained bodies; cancellation repeats the
+  check atomically, and pipeline activity rejects cross-tenant child state.
+- Corrected protected-pool documentation to describe the implemented durable,
+  bounded, fail-closed replay sidecar and its restart/state-loss behavior.
 - Published a fresh three-run schema-2 benchmark snapshot from the i7-1355U
   Windows laptop, including complete raw reports, selection details, database
   evidence, resource variance, and the retained prior snapshot for comparison.

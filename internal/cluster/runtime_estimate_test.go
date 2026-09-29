@@ -301,7 +301,7 @@ func TestHistoricalRuntimeEstimateEndpointScopesProducerAndMinimizesEvidence(t *
 		if err := putJSON(tx.Bucket(bucketJobs), job.ID, job); err != nil {
 			return err
 		}
-		return putOwnerLookup(tx.Bucket(bucketJobOwnerLookup), job.ID, job.OwnerSubject)
+		return putExecutionScopeLookup(tx.Bucket(bucketJobOwnerLookup), job.ID, job.OwnerSubject, job.TenantID)
 	}); err != nil {
 		t.Fatal(err)
 	}
