@@ -2039,7 +2039,13 @@ func (s *Store) GetJobForProducer(id, owner string, allowedTenants []string) (Jo
 		if !executionScopeLookupMatches(tx.Bucket(bucketJobOwnerLookup), id, owner, allowedTenants) {
 			return os.ErrNotExist
 		}
-		return getJSON(tx.Bucket(bucketJobs), id, &job)
+		if err := getJSON(tx.Bucket(bucketJobs), id, &job); err != nil {
+			return err
+		}
+		if job.OwnerSubject != owner || !tenantAllowed(job.TenantID, allowedTenants) {
+			return os.ErrNotExist
+		}
+		return nil
 	})
 	return job, err
 }
@@ -4327,7 +4333,13 @@ func (s *Store) GetPipelineRunForProducer(id, owner string, allowedTenants []str
 		if !executionScopeLookupMatches(tx.Bucket(bucketPipelineOwnerLookup), id, owner, allowedTenants) {
 			return os.ErrNotExist
 		}
-		return getJSON(tx.Bucket(bucketPipelineRuns), id, &run)
+		if err := getJSON(tx.Bucket(bucketPipelineRuns), id, &run); err != nil {
+			return err
+		}
+		if run.OwnerSubject != owner || !tenantAllowed(run.TenantID, allowedTenants) {
+			return os.ErrNotExist
+		}
+		return nil
 	})
 	return run, err
 }
