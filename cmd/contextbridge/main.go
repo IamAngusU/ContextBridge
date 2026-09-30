@@ -3005,8 +3005,18 @@ func clusterClientBaseURL(cfg config.Config) string {
 }
 
 func clusterGET(ctx context.Context, target, token string, output interface{}) error {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err := validateClusterAPITarget(target); err != nil {
+		return err
+	}
+	// #nosec G704 -- validateClusterAPITarget above enforces HTTPS for remote
+	// hosts (or actual loopback HTTP), rejects URL credentials/fragments, and
+	// the remaining path is selected by an explicit CLI operation.
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return err
+	}
 	req.Header.Set("Authorization", "Bearer "+token)
+	// #nosec G704 -- see the validated relay trust boundary above.
 	resp, err := clusterHTTPClient(target).Do(req)
 	if err != nil {
 		return err
@@ -3020,6 +3030,24 @@ func clusterGET(ctx context.Context, target, token string, output interface{}) e
 		return fmt.Errorf("relay returned %s: %s", resp.Status, strings.TrimSpace(string(raw)))
 	}
 	return json.Unmarshal(raw, output)
+}
+
+func validateClusterAPITarget(target string) error {
+	if strings.TrimSpace(target) != target {
+		return errors.New("relay API URL must not contain surrounding whitespace")
+	}
+	parsed, err := url.Parse(target)
+	if err != nil || parsed.Opaque != "" || parsed.Host == "" || parsed.Hostname() == "" {
+		return errors.New("relay API URL must be absolute")
+	}
+	if parsed.User != nil || parsed.Fragment != "" {
+		return errors.New("relay API URL must not contain credentials or a fragment")
+	}
+	origin := parsed.Scheme + "://" + parsed.Host
+	if err := cluster.ValidateRelayURL(origin); err != nil {
+		return fmt.Errorf("relay API URL: %w", err)
+	}
+	return nil
 }
 
 func clusterPOST(ctx context.Context, target, token string, input, output interface{}) error {
