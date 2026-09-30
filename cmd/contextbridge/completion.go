@@ -92,14 +92,14 @@ $script:ContextBridgeOptions = @{
     'integrate mcp' = @('--config','--json')
     'integrate relay' = @('--config','--json','--write-env','--subject','--groups','--lifetime-hours','--max-queued-jobs','--max-jobs-per-hour','--providers','--allowed-tenants','--egress','--require-e2ee')
     'integrate ui' = @('--config','--json','--write-env','--subject','--lifetime-hours','--allowed-subjects','--allowed-tenants')
-	'adapter list' = @('--config','--token','--json')
-	'adapter details' = @('--config','--token','--json')
-	'adapter doctor' = @('--config','--token','--json')
+	'adapter list' = @('--config','--account','--token','--token-file','--json')
+	'adapter details' = @('--config','--account','--token','--token-file','--json')
+	'adapter doctor' = @('--config','--account','--token','--token-file','--json')
 	'adapter setup' = @('--config','--label','--driver','--route','--task','--model','--timeout-seconds','--principal','--token-file','--create-token','--json')
-	'adapter enable' = @('--config','--token','--json')
-	'adapter disable' = @('--config','--token','--json')
-	'adapter start' = @('--config','--token','--json')
-	'adapter stop' = @('--config','--token','--json')
+	'adapter enable' = @('--config','--account','--token','--token-file','--json')
+	'adapter disable' = @('--config','--account','--token','--token-file','--json')
+	'adapter start' = @('--config','--account','--token','--token-file','--json')
+	'adapter stop' = @('--config','--account','--token','--token-file','--json')
     'benchmark' = @('--json','--samples','--warmup','--database-jobs','--idle-duration','--binary')
     'verification verify' = @('--file','--trust-key','--artifact','--require-artifact','--evidence-dir','--require-evidence','--json')
     'relay' = @('--config')
@@ -284,7 +284,7 @@ _contextbridge_complete() {
       "integrate mcp") candidates="--config --json" ;;
       "integrate relay") candidates="--config --json --write-env --subject --groups --lifetime-hours --max-queued-jobs --max-jobs-per-hour --providers --allowed-tenants --egress --require-e2ee" ;;
       "integrate ui") candidates="--config --json --write-env --subject --lifetime-hours --allowed-subjects --allowed-tenants" ;;
-	  "adapter list"|"adapter details"|"adapter doctor"|"adapter enable"|"adapter disable"|"adapter start"|"adapter stop") candidates="--config --token --json" ;;
+	  "adapter list"|"adapter details"|"adapter doctor"|"adapter enable"|"adapter disable"|"adapter start"|"adapter stop") candidates="--config --account --token --token-file --json" ;;
 	  "adapter setup") candidates="--config --label --driver --route --task --model --timeout-seconds --principal --token-file --create-token --json" ;;
       "verification verify") candidates="--file --trust-key --artifact --require-artifact --evidence-dir --require-evidence --json" ;;
       benchmark) candidates="--json --samples --warmup --database-jobs --idle-duration --binary" ;;
@@ -432,8 +432,8 @@ case "$words[2]" in
     fi
     case "$words[3]" in
       setup) _arguments "${config[@]}" '--label[Human-readable profile label]:label:' '--driver[Bounded adapter driver ID]:driver:' '--route[Local route name]:route:' '--task[Handled job task]:task:' '--model[Exact model selector]:model:' '--timeout-seconds[Route timeout]:seconds:' '--principal[Scoped principal ID]:principal:' '--token-file[Private credential file]:credential file:_files' '--create-token[Create a missing credential without overwriting]' '--json[Print redacted machine-readable setup details]' '1:profile ID:' ;;
-      list|doctor) _arguments "${config[@]}" '--token[Scoped relay credential]:token:' '--json[Print machine-readable JSON]' ;;
-      details|enable|disable|start|stop) _arguments "${config[@]}" '--token[Scoped relay credential]:token:' '--json[Print machine-readable JSON]' '1:adapter UID:' ;;
+	  list|doctor) _arguments "${config[@]}" '--account[Named cluster account]:account:' '--token[Scoped relay credential]:token:' '--token-file[Scoped credential file]:token file:_files' '--json[Print machine-readable JSON]' ;;
+	  details|enable|disable|start|stop) _arguments "${config[@]}" '--account[Named cluster account]:account:' '--token[Scoped relay credential]:token:' '--token-file[Scoped credential file]:token file:_files' '--json[Print machine-readable JSON]' '1:adapter UID:' ;;
       *) _arguments '*:argument:' ;;
     esac
     ;;

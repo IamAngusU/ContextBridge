@@ -54,6 +54,13 @@ for presence-reporting ingress adapters; they do not supervise a local v2
 process. A missing or stopped adapter can make only its own routes unavailable.
 Ordinary local, pool, and other adapter routes remain independent.
 
+Inspection and control use the active named cluster account by default. Select
+another account with `--account NAME`, or pass a scoped credential without
+putting it into shell history via `--token-file FILE`. The file may contain the
+raw `cb_...` credential or a JSON object with a `token` field. Producer
+credentials see only adapters in their own scope; durable enable/disable
+control still requires an administrator credential.
+
 ## External adapter presence
 
 Ingress and control adapters are not compute workers. An independently deployed

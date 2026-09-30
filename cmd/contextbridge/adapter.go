@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/IamAngusU/ContextBridge/internal/cluster"
 	"github.com/IamAngusU/ContextBridge/internal/config"
@@ -226,6 +227,8 @@ func appendUniqueFold(values []string, value string) []string {
 type adapterCLIOptions struct {
 	configPath string
 	token      string
+	tokenFile  string
+	account    string
 	asJSON     bool
 }
 
@@ -233,6 +236,8 @@ func parseAdapterCLIFlags(name string, args []string, jsonAllowed bool) (adapter
 	flags := flag.NewFlagSet(name, flag.ContinueOnError)
 	path := flags.String("config", defaultConfigPath(), "config path")
 	token := flags.String("token", "", "scoped relay credential; defaults to the active cluster account")
+	tokenFile := flags.String("token-file", "", "file containing a scoped relay credential")
+	account := flags.String("account", "", "named cluster account; defaults to cluster.active_account")
 	var asJSON *bool
 	if jsonAllowed {
 		asJSON = flags.Bool("json", false, "print machine-readable JSON")
@@ -240,7 +245,7 @@ func parseAdapterCLIFlags(name string, args []string, jsonAllowed bool) (adapter
 	if err := flags.Parse(args); err != nil {
 		return adapterCLIOptions{}, nil, err
 	}
-	options := adapterCLIOptions{configPath: *path, token: strings.TrimSpace(*token)}
+	options := adapterCLIOptions{configPath: *path, token: strings.TrimSpace(*token), tokenFile: strings.TrimSpace(*tokenFile), account: strings.TrimSpace(*account)}
 	if asJSON != nil {
 		options.asJSON = *asJSON
 	}
@@ -252,11 +257,42 @@ func adapterClientConfig(options adapterCLIOptions) (config.Config, string, erro
 	if err != nil {
 		return config.Config{}, "", err
 	}
-	token := clusterClientToken(cfg, options.token)
+	if err := selectClusterAccount(&cfg, options.account); err != nil {
+		return config.Config{}, "", err
+	}
+	if options.token != "" && options.tokenFile != "" {
+		return config.Config{}, "", errors.New("use only one of --token or --token-file")
+	}
+	explicit := options.token
+	if options.tokenFile != "" {
+		explicit, err = adapterCredentialFromFile(options.tokenFile)
+		if err != nil {
+			return config.Config{}, "", err
+		}
+	}
+	token := clusterClientToken(cfg, explicit)
 	if token == "" {
 		return config.Config{}, "", errors.New("a scoped cluster credential is required; use contextbridge cluster login first")
 	}
 	return cfg, token, nil
+}
+
+func adapterCredentialFromFile(path string) (string, error) {
+	raw, err := readRegularFileBounded(path, 32<<10)
+	if err != nil {
+		return "", fmt.Errorf("read adapter credential: %w", err)
+	}
+	token := strings.TrimSpace(string(raw))
+	var envelope struct {
+		Token string `json:"token"`
+	}
+	if json.Unmarshal(raw, &envelope) == nil && envelope.Token != "" {
+		token = strings.TrimSpace(envelope.Token)
+	}
+	if !strings.HasPrefix(token, "cb_") || len(token) < 24 || strings.IndexFunc(token, unicode.IsSpace) >= 0 {
+		return "", errors.New("adapter token file does not contain a valid ContextBridge credential")
+	}
+	return token, nil
 }
 
 func adapterListCommand(args []string) error {
@@ -265,7 +301,7 @@ func adapterListCommand(args []string) error {
 		return err
 	}
 	if len(positional) != 0 {
-		return errors.New("usage: contextbridge adapter list [--config PATH] [--json]")
+		return errors.New("usage: contextbridge adapter list [--config PATH] [--account NAME] [--token-file FILE] [--json]")
 	}
 	items, err := fetchAdapterPresences(options, "")
 	if err != nil {
@@ -280,7 +316,7 @@ func adapterDetailsCommand(args []string) error {
 		return err
 	}
 	if len(positional) != 1 {
-		return errors.New("usage: contextbridge adapter details [--config PATH] [--json] ADAPTER_UID")
+		return errors.New("usage: contextbridge adapter details [--config PATH] [--account NAME] [--token-file FILE] [--json] ADAPTER_UID")
 	}
 	items, err := fetchAdapterPresences(options, positional[0])
 	if err != nil {
@@ -295,7 +331,7 @@ func adapterDoctorCommand(args []string) error {
 		return err
 	}
 	if len(positional) != 0 {
-		return errors.New("usage: contextbridge adapter doctor [--config PATH] [--json]")
+		return errors.New("usage: contextbridge adapter doctor [--config PATH] [--account NAME] [--token-file FILE] [--json]")
 	}
 	items, err := fetchAdapterPresences(options, "")
 	if err != nil {
@@ -334,7 +370,7 @@ func adapterControlCommand(action string, args []string) error {
 		return err
 	}
 	if len(positional) != 1 {
-		return fmt.Errorf("usage: contextbridge adapter %s [--config PATH] [--json] ADAPTER_UID", action)
+		return fmt.Errorf("usage: contextbridge adapter %s [--config PATH] [--account NAME] [--token-file FILE] [--json] ADAPTER_UID", action)
 	}
 	cfg, token, err := adapterClientConfig(options)
 	if err != nil {
