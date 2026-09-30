@@ -877,10 +877,11 @@ func (r *Relay) handleJobs(w http.ResponseWriter, req *http.Request) {
 	}
 	record, _ := tokenRecord(req.Context())
 	owner := ""
+	allowedSubjects, allowedTenants := []string(nil), []string(nil)
 	if record.Role == "producer" {
 		owner = record.Subject
+		allowedTenants = record.ProducerLimits.AllowedTenants
 	}
-	allowedSubjects, allowedTenants := []string(nil), []string(nil)
 	if record.Role == "observer" {
 		allowedSubjects = record.ObserverLimits.AllowedSubjects
 		allowedTenants = record.ObserverLimits.AllowedTenants
@@ -1133,10 +1134,12 @@ func (r *Relay) handleCancel(w http.ResponseWriter, req *http.Request) {
 	}
 	record, _ := tokenRecord(req.Context())
 	owner := ""
+	allowedTenants := []string(nil)
 	if record.Role == "producer" {
 		owner = record.Subject
+		allowedTenants = record.ProducerLimits.AllowedTenants
 	}
-	job, err := r.store.CancelJobOwned(req.PathValue("id"), owner)
+	job, err := r.store.CancelJobForProducer(req.PathValue("id"), owner, allowedTenants)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			writeError(w, http.StatusNotFound, errors.New("job not found"))
@@ -2723,7 +2726,7 @@ func scopeTenantID(tenantID *string, record TokenRecord) error {
 func (r *Relay) visibleJob(ctx context.Context, id string) (Job, error) {
 	record, ok := tokenRecord(ctx)
 	if ok && record.Role == "producer" {
-		return r.store.GetJobForOwner(id, record.Subject)
+		return r.store.GetJobForProducer(id, record.Subject, record.ProducerLimits.AllowedTenants)
 	}
 	job, err := r.store.GetJob(id)
 	if err != nil || (ok && !recordCanObserve(record, job.OwnerSubject, job.TenantID)) {
@@ -2735,7 +2738,7 @@ func (r *Relay) visibleJob(ctx context.Context, id string) (Job, error) {
 func (r *Relay) visiblePipelineRun(ctx context.Context, id string) (PipelineRun, error) {
 	record, ok := tokenRecord(ctx)
 	if ok && record.Role == "producer" {
-		return r.store.GetPipelineRunForOwner(id, record.Subject)
+		return r.store.GetPipelineRunForProducer(id, record.Subject, record.ProducerLimits.AllowedTenants)
 	}
 	run, err := r.store.GetPipelineRun(id)
 	if err != nil || (ok && !recordCanObserve(record, run.OwnerSubject, run.TenantID)) {

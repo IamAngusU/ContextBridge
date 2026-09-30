@@ -117,13 +117,20 @@ The checks are local Ed25519 operations. They add no network round-trip and no
 per-token/model-loop work. The normal model runtime remains the dominant cost.
 
 The relay can still deny service, delay or drop work, choose among workers that
-the same customer authority certified, observe coordination metadata, and
-try to replay the exact authorized envelope during its bounded validity. A
-protected worker keeps a bounded in-memory claim cache and rejects sequential
-replay while that worker process remains alive. Restarting the worker clears
-that cache, so an exact still-valid envelope can then be replayed; durable
-per-job disk writes are deliberately avoided. This is not a claim that a
-hostile relay is an availability or traffic-analysis boundary.
+the same customer authority certified, observe coordination metadata, and try
+to replay the exact authorized envelope during its bounded validity. Before
+dispatch, a protected worker durably consumes the authorization in the bounded
+owner-only sidecar at `<identity-file>.pool-replay.db`. Normal process or
+machine restart with that worker state preserved therefore does not reopen an
+unexpired authorization. Missing, corrupt, unwritable, or full replay state
+fails closed, and expired claims are pruned before capacity is reused.
+
+Deleting or losing the sidecar is a local worker-state loss event, not normal
+restart behavior. Back up or migrate it together with the worker identity, and
+re-pair the worker instead of intentionally clearing replay state. This durable
+claim prevents reuse of one accepted authorization; it is not a general
+exactly-once guarantee and does not make a hostile relay an availability or
+traffic-analysis boundary.
 
 ## Deliberate boundary for pipelines
 

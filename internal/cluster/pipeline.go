@@ -208,7 +208,8 @@ func (r *Relay) pipelineRunCurrentSteps(run PipelineRun) (PipelineRun, bool) {
 
 func pipelineChildBelongsToRun(job Job, run PipelineRun) bool {
 	return strings.TrimSpace(job.ID) != "" && strings.TrimSpace(job.Step) != "" &&
-		job.ParentID == run.ID && job.Pipeline == run.Pipeline && job.OwnerSubject == run.OwnerSubject
+		job.ParentID == run.ID && job.Pipeline == run.Pipeline &&
+		job.OwnerSubject == run.OwnerSubject && job.TenantID == run.TenantID
 }
 
 func (r *Relay) handlePipelineRunEvents(w http.ResponseWriter, req *http.Request) {
