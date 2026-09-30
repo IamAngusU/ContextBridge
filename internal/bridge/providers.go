@@ -61,7 +61,7 @@ func (p *Processor) SupportsIncremental(job Job) bool {
 			return false
 		}
 	}
-	return validateResolvedEngineEgress(job, engine) == nil
+	return validateResolvedEngineEgress(job, engine, effectiveAdapterProfile(job, route), p.cfg.Cluster.Policies.Execution.AdapterProfileClassifications) == nil
 }
 
 // SupportsOutputTokenLimit reports whether at least one selected execution
@@ -169,7 +169,7 @@ func (p *Processor) Process(ctx context.Context, job Job) Output {
 				}
 			}
 			if err == nil {
-				err = validateResolvedEngineEgress(job, engine)
+				err = validateResolvedEngineEgress(job, engine, effectiveAdapterProfile(job, route), p.cfg.Cluster.Policies.Execution.AdapterProfileClassifications)
 			}
 			if err != nil {
 				lastProviderError = strings.TrimSpace(err.Error())
@@ -262,14 +262,26 @@ func ambiguousHTTPExecution(err error) error {
 	return &providerExecutionAmbiguousError{cause: err, message: "execution_state_ambiguous"}
 }
 
-func validateResolvedEngineEgress(job Job, engine config.Engine) error {
+func validateResolvedEngineEgress(job Job, engine config.Engine, adapterProfile string, adapterClassifications map[string]string) error {
 	classification := strings.ToLower(strings.TrimSpace(job.ContextBridgeProviderClassification))
 	localOnly := strings.EqualFold(job.ContextBridgeEgress, "local_only")
-	// Adapter execution intentionally crosses the local process boundary to an
-	// attached external provider. It has no engine URL to inspect, so bind its
-	// semantic class explicitly rather than treating an empty URL as local.
+	// An adapter has no engine URL to inspect. It remains remote by default, but
+	// an operator may classify one exact reviewed profile as local on both the
+	// relay and worker. The authenticated relay classification and worker config
+	// must agree; a generic or differently named adapter never inherits trust.
 	if engine.Type == "adapter" {
-		if localOnly || classification == "local" {
+		configured := adapterProfileExecutionClassification(adapterProfile, adapterClassifications)
+		if classification != "" && configured != "" && classification != configured {
+			return errors.New("adapter profile classification conflicts with the authenticated execution boundary")
+		}
+		if classification == "local" && configured != "local" {
+			return errors.New("adapter profile is not operator-classified as local on this worker")
+		}
+		effective := classification
+		if effective == "" {
+			effective = configured
+		}
+		if localOnly && effective != "local" {
 			return errors.New("adapter execution violates the authenticated local execution boundary")
 		}
 		return nil
@@ -292,6 +304,26 @@ func validateResolvedEngineEgress(job Job, engine config.Engine) error {
 		return errors.New("resolved endpoint is local but the authenticated provider classification is remote")
 	}
 	return nil
+}
+
+func effectiveAdapterProfile(job Job, route config.Route) string {
+	if profile := strings.TrimSpace(job.AdapterProfile); profile != "" {
+		return profile
+	}
+	return strings.TrimSpace(route.AdapterProfile)
+}
+
+func adapterProfileExecutionClassification(profile string, classifications map[string]string) string {
+	profile = strings.TrimSpace(profile)
+	if profile == "" {
+		return ""
+	}
+	for configuredProfile, classification := range classifications {
+		if strings.EqualFold(strings.TrimSpace(configuredProfile), profile) {
+			return strings.ToLower(strings.TrimSpace(classification))
+		}
+	}
+	return ""
 }
 
 func (p *Processor) ollama(parent context.Context, job Job, route config.Route, engine config.Engine, provider string) (result Output, err error) {

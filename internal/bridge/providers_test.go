@@ -22,23 +22,35 @@ func TestDecisionModelComesFromTrustedProviderConfig(t *testing.T) {
 
 func TestResolvedEngineEgressMustMatchAuthenticatedBoundary(t *testing.T) {
 	remote := config.Engine{Type: "ollama", URL: "https://203.0.113.10:11434"}
-	if err := validateResolvedEngineEgress(Job{ContextBridgeEgress: "local_only", ContextBridgeProviderClassification: "local"}, remote); err == nil {
+	if err := validateResolvedEngineEgress(Job{ContextBridgeEgress: "local_only", ContextBridgeProviderClassification: "local"}, remote, "", nil); err == nil {
 		t.Fatal("remote Ollama endpoint escaped a local-only execution boundary")
 	}
-	if err := validateResolvedEngineEgress(Job{ContextBridgeProviderClassification: "remote"}, config.Engine{Type: "ollama", URL: "http://127.0.0.1:11434"}); err == nil {
+	if err := validateResolvedEngineEgress(Job{ContextBridgeProviderClassification: "remote"}, config.Engine{Type: "ollama", URL: "http://127.0.0.1:11434"}, "", nil); err == nil {
 		t.Fatal("local endpoint was accepted as an authenticated remote provider")
 	}
-	if err := validateResolvedEngineEgress(Job{ContextBridgeEgress: "remote_allowed", ContextBridgeProviderClassification: "remote"}, remote); err != nil {
+	if err := validateResolvedEngineEgress(Job{ContextBridgeEgress: "remote_allowed", ContextBridgeProviderClassification: "remote"}, remote, "", nil); err != nil {
 		t.Fatalf("explicit remote endpoint was rejected: %v", err)
 	}
-	if err := validateResolvedEngineEgress(Job{}, config.Engine{Type: "ollama", URL: "http://198.51.100.2:11434"}); err == nil {
+	if err := validateResolvedEngineEgress(Job{}, config.Engine{Type: "ollama", URL: "http://198.51.100.2:11434"}, "", nil); err == nil {
 		t.Fatal("plaintext remote provider endpoint was accepted")
 	}
-	if err := validateResolvedEngineEgress(Job{ContextBridgeEgress: "local_only", ContextBridgeProviderClassification: "remote"}, config.Engine{Type: "adapter"}); err == nil {
+	if err := validateResolvedEngineEgress(Job{ContextBridgeEgress: "local_only", ContextBridgeProviderClassification: "remote"}, config.Engine{Type: "adapter"}, "local-speech", nil); err == nil {
 		t.Fatal("URL-less adapter escaped a local-only boundary")
 	}
-	if err := validateResolvedEngineEgress(Job{ContextBridgeProviderClassification: "local"}, config.Engine{Type: "llama_cpp", Listen: "198.51.100.3:8080"}); err == nil {
+	if err := validateResolvedEngineEgress(Job{ContextBridgeProviderClassification: "local"}, config.Engine{Type: "llama_cpp", Listen: "198.51.100.3:8080"}, "", nil); err == nil {
 		t.Fatal("llama.cpp listen fallback escaped endpoint classification")
+	}
+
+	localAdapter := config.Engine{Type: "adapter"}
+	localProfiles := map[string]string{"LOCAL-SPEECH": "LOCAL"}
+	if err := validateResolvedEngineEgress(Job{ContextBridgeEgress: "local_only", ContextBridgeProviderClassification: "local"}, localAdapter, "local-speech", localProfiles); err != nil {
+		t.Fatalf("exact operator-reviewed local adapter profile was rejected: %v", err)
+	}
+	if err := validateResolvedEngineEgress(Job{ContextBridgeEgress: "local_only", ContextBridgeProviderClassification: "local"}, localAdapter, "other-profile", localProfiles); err == nil {
+		t.Fatal("unreviewed adapter profile inherited another profile's local trust")
+	}
+	if err := validateResolvedEngineEgress(Job{ContextBridgeProviderClassification: "remote"}, localAdapter, "local-speech", localProfiles); err == nil {
+		t.Fatal("worker accepted a relay/worker adapter classification conflict")
 	}
 }
 
