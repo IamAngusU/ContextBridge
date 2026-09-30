@@ -158,7 +158,19 @@ func inspectOggOpus(data []byte) (int64, error) {
 		return 0, errors.New("incomplete Ogg/Opus stream")
 	}
 	samples := lastGranule - preSkip
-	return int64((samples*1000 + 47999) / 48000), nil
+	// Opus granules are expressed at 48 kHz, so one millisecond is exactly
+	// 48 samples. Divide before converting instead of multiplying by 1000:
+	// besides being simpler, this keeps even a hostile uint64 granule from
+	// overflowing before the duration bound above can reject it.
+	durationMS := samples / 48
+	if samples%48 != 0 {
+		durationMS++
+	}
+	const maximumInt64 = uint64(1<<63 - 1)
+	if durationMS > maximumInt64 {
+		return 0, errors.New("Opus duration exceeds integer range")
+	}
+	return int64(durationMS), nil
 }
 
 func oggCRC(page []byte) uint32 {

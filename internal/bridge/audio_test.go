@@ -61,6 +61,24 @@ func TestOggOpusDurationLimitComesFromVerifiedGranule(t *testing.T) {
 	}
 }
 
+func TestOggOpusDurationRoundsPartialMillisecondsWithoutOverflow(t *testing.T) {
+	for _, test := range []struct {
+		samples uint64
+		wantMS  int64
+	}{
+		{samples: 1, wantMS: 1},
+		{samples: 47, wantMS: 1},
+		{samples: 48, wantMS: 1},
+		{samples: 49, wantMS: 2},
+	} {
+		raw := testOggOpus(test.samples)
+		info, err := InspectAudioInput(AudioInput{MediaType: "audio/ogg", DataBase64: base64.StdEncoding.EncodeToString(raw)})
+		if err != nil || info.DurationMS != test.wantMS {
+			t.Fatalf("samples %d produced duration %d, %v; want %d", test.samples, info.DurationMS, err, test.wantMS)
+		}
+	}
+}
+
 func testOggOpus(samples uint64) []byte {
 	const preSkip = uint16(312)
 	head := make([]byte, 19)
