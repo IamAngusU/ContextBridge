@@ -9,7 +9,7 @@ import (
 var completionRootCommands = []string{
 	"init", "serve", "run", "stop", "console", "submit", "schedule", "result", "review",
 	"health", "dashboard", "status", "doctor", "guide", "hardware", "models", "resources", "uninstall",
-	"pull", "runtime", "mcp", "integrate", "benchmark", "verification", "relay", "pair", "worker", "cluster", "route", "selftest", "update", "completion", "version", "help",
+	"pull", "runtime", "mcp", "integrate", "adapter", "benchmark", "verification", "relay", "pair", "worker", "cluster", "route", "selftest", "update", "completion", "version", "help",
 }
 
 var completionSubcommands = map[string][]string{
@@ -17,6 +17,7 @@ var completionSubcommands = map[string][]string{
 	"runtime":      {"install"},
 	"mcp":          {"serve"},
 	"integrate":    {"openai", "litellm", "mcp", "relay", "ui"},
+	"adapter":      {"list", "details", "doctor", "setup", "enable", "disable", "start", "stop"},
 	"verification": {"verify"},
 	"cluster":      {"status", "events", "estimate", "node", "protocol", "conformance", "submit", "chat", "agent", "selftest", "route", "contract", "receipt", "login", "account", "token", "pairing", "pool", "configure", "dashboard", "pipeline", "lan"},
 	"route":        {"explain"},
@@ -57,6 +58,7 @@ $script:ContextBridgeSubcommands = @{
     runtime = @('install')
     mcp = @('serve')
     integrate = @('openai','litellm','mcp','relay','ui')
+	adapter = @('list','details','doctor','setup','enable','disable','start','stop')
     verification = @('verify')
 	cluster = @('status','events','estimate','node','protocol','conformance','submit','chat','agent','selftest','route','contract','receipt','login','account','token','pairing','pool','configure','dashboard','pipeline','lan')
     route = @('explain')
@@ -90,6 +92,14 @@ $script:ContextBridgeOptions = @{
     'integrate mcp' = @('--config','--json')
     'integrate relay' = @('--config','--json','--write-env','--subject','--groups','--lifetime-hours','--max-queued-jobs','--max-jobs-per-hour','--providers','--allowed-tenants','--egress','--require-e2ee')
     'integrate ui' = @('--config','--json','--write-env','--subject','--lifetime-hours','--allowed-subjects','--allowed-tenants')
+	'adapter list' = @('--config','--token','--json')
+	'adapter details' = @('--config','--token','--json')
+	'adapter doctor' = @('--config','--token','--json')
+	'adapter setup' = @('--config','--label','--driver','--route','--task','--model','--timeout-seconds','--principal','--token-file','--create-token','--json')
+	'adapter enable' = @('--config','--token','--json')
+	'adapter disable' = @('--config','--token','--json')
+	'adapter start' = @('--config','--token','--json')
+	'adapter stop' = @('--config','--token','--json')
     'benchmark' = @('--json','--samples','--warmup','--database-jobs','--idle-duration','--binary')
     'verification verify' = @('--file','--trust-key','--artifact','--require-artifact','--evidence-dir','--require-evidence','--json')
     'relay' = @('--config')
@@ -140,7 +150,7 @@ $script:ContextBridgeTakesValue = @(
     '--slots','--endpoint','--relay','--name','--providers','--models','--tasks','--groups',
     '--token','--account','--provider','--group','--model','--profile','--reasoning','--session','--prompt',
 	'--min-artifacts','--min-images','--local-model','--image-profile','--timeout','--job-timeout','--poll','--after','--limit','--offset','--idempotency-key','--subject','--groups','--allowed-tenants','--allowed-subjects','--lifetime-hours',
-    '--mode','--relay-url','--public-url','--listen','--role','--subject','--approve','--deny',
+	'--mode','--relay-url','--public-url','--listen','--role','--subject','--approve','--deny','--label','--driver','--route','--task','--model','--timeout-seconds','--principal',
     '--managed-service','--samples','--warmup','--database-jobs','--idle-duration','--binary',
     '--goal','--goal-file','--planner-provider','--planner-profile','--planner-model','--allow-providers',
     '--policy','--allow-adapter-profiles','--max-steps','--step-timeout','--max-runtime','--planner-timeout','--out','--plan','--approve'
@@ -208,7 +218,7 @@ _contextbridge_complete() {
   if (( COMP_CWORD > 2 )); then
     subcommand="${COMP_WORDS[2]:-}"
     case "$command" in
-      schedule|runtime|mcp|integrate|verification|cluster|route|update)
+      schedule|runtime|mcp|integrate|adapter|verification|cluster|route|update)
         if [[ -n "$subcommand" && "$subcommand" != -* ]]; then
           option_key="$command $subcommand"
         fi
@@ -228,7 +238,7 @@ _contextbridge_complete() {
     --reasoning) candidates="instant medium high xhigh pro max" ;;
     --mode) candidates="local client relay worker all" ;;
     --role) candidates="admin producer node observer" ;;
-    --wait|--e2ee|--require-e2ee|--stream|--json|--follow|--pipeline|--interactive|--show-token|--check|--live|--no-open|--topmost|--image|--new-session|--new-session-per-job|--foreground-new-session|--run|--dry-run|--keep-artifacts|--no-updates|--discover|--force|--relay-only|--require-artifact|--require-evidence) boolean_previous=1 ;;
+    --wait|--e2ee|--require-e2ee|--stream|--json|--follow|--pipeline|--interactive|--show-token|--check|--live|--no-open|--topmost|--image|--new-session|--new-session-per-job|--foreground-new-session|--run|--dry-run|--keep-artifacts|--no-updates|--discover|--force|--relay-only|--require-artifact|--require-evidence|--create-token) boolean_previous=1 ;;
   esac
   if [ -n "${candidates:-}" ]; then
     COMPREPLY=( $(compgen -W "$candidates" -- "$current") )
@@ -274,6 +284,8 @@ _contextbridge_complete() {
       "integrate mcp") candidates="--config --json" ;;
       "integrate relay") candidates="--config --json --write-env --subject --groups --lifetime-hours --max-queued-jobs --max-jobs-per-hour --providers --allowed-tenants --egress --require-e2ee" ;;
       "integrate ui") candidates="--config --json --write-env --subject --lifetime-hours --allowed-subjects --allowed-tenants" ;;
+	  "adapter list"|"adapter details"|"adapter doctor"|"adapter enable"|"adapter disable"|"adapter start"|"adapter stop") candidates="--config --token --json" ;;
+	  "adapter setup") candidates="--config --label --driver --route --task --model --timeout-seconds --principal --token-file --create-token --json" ;;
       "verification verify") candidates="--file --trust-key --artifact --require-artifact --evidence-dir --require-evidence --json" ;;
       benchmark) candidates="--json --samples --warmup --database-jobs --idle-duration --binary" ;;
       "schedule add") candidates="--config --file --interactive" ;;
@@ -307,13 +319,14 @@ _contextbridge_complete() {
 	elif [[ "$option_key" == "cluster lan" && "$COMP_CWORD" -eq 3 ]]; then
 	  candidates="init relocate join status"
   elif [ "$COMP_CWORD" -eq 1 ]; then
-    candidates="init serve run stop uninstall console submit schedule result review health dashboard status doctor guide hardware models resources pull runtime mcp integrate benchmark verification relay pair worker cluster route selftest update completion version help"
+    candidates="init serve run stop uninstall console submit schedule result review health dashboard status doctor guide hardware models resources pull runtime mcp integrate adapter benchmark verification relay pair worker cluster route selftest update completion version help"
   elif [ "$COMP_CWORD" -eq 2 ]; then
     case "$command" in
       schedule) candidates="add list show pause resume run delete" ;;
       runtime) candidates="install" ;;
       mcp) candidates="serve" ;;
       integrate) candidates="openai litellm mcp relay ui" ;;
+      adapter) candidates="list details doctor setup enable disable start stop" ;;
       verification) candidates="verify" ;;
 	  cluster) candidates="status events estimate node protocol conformance submit chat agent selftest route contract receipt login account token pairing pool configure dashboard pipeline lan" ;;
       route) candidates="explain" ;;
@@ -357,6 +370,7 @@ root=(
     'runtime:Manage local runtimes'
     'mcp:Expose bounded local tools over MCP stdio'
     'integrate:Generate safe application connection settings'
+	'adapter:Inspect, configure, and gate optional external adapters'
     'benchmark:Measure bridge-only overhead and resource footprint'
     'verification:Verify signed, time-bounded interoperability statements'
     'relay:Run a relay'
@@ -408,6 +422,18 @@ case "$words[2]" in
       mcp) _arguments "${config[@]}" '--json[Print the MCP client configuration as JSON]' ;;
       relay) _arguments "${config[@]}" '--json[Print redacted credential metadata]' '--write-env[Create a new private producer environment file]:environment file:_files' '--subject[Remote application identity]:identity:' '--groups[Comma-separated scheduling groups]:groups:' '--lifetime-hours[Credential lifetime; 0 never expires]:hours:' '--max-queued-jobs[Producer queued-job limit]:count:' '--max-jobs-per-hour[Durable hourly admission limit]:count:' '--providers[Comma-separated provider allowlist]:providers:' '--allowed-tenants[Comma-separated authenticated tenant_id allowlist]:tenants:' '--egress[Producer egress ceiling]:egress:(local_only)' '--require-e2ee[Reject cleartext jobs for this producer]' ;;
       ui) _arguments "${config[@]}" '--json[Print redacted credential metadata]' '--write-env[Create a new private observer environment file]:environment file:_files' '--subject[Read-only UI identity]:identity:' '--lifetime-hours[Credential lifetime; 0 never expires]:hours:' '--allowed-subjects[Comma-separated visible producer subjects]:subjects:' '--allowed-tenants[Comma-separated visible tenant IDs]:tenants:' ;;
+      *) _arguments '*:argument:' ;;
+    esac
+    ;;
+  adapter)
+    if (( CURRENT == 3 )); then
+      _values 'adapter action' list details doctor setup enable disable start stop
+      return
+    fi
+    case "$words[3]" in
+      setup) _arguments "${config[@]}" '--label[Human-readable profile label]:label:' '--driver[Bounded adapter driver ID]:driver:' '--route[Local route name]:route:' '--task[Handled job task]:task:' '--model[Exact model selector]:model:' '--timeout-seconds[Route timeout]:seconds:' '--principal[Scoped principal ID]:principal:' '--token-file[Private credential file]:credential file:_files' '--create-token[Create a missing credential without overwriting]' '--json[Print redacted machine-readable setup details]' '1:profile ID:' ;;
+      list|doctor) _arguments "${config[@]}" '--token[Scoped relay credential]:token:' '--json[Print machine-readable JSON]' ;;
+      details|enable|disable|start|stop) _arguments "${config[@]}" '--token[Scoped relay credential]:token:' '--json[Print machine-readable JSON]' '1:adapter UID:' ;;
       *) _arguments '*:argument:' ;;
     esac
     ;;

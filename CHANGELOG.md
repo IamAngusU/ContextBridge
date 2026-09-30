@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added `contextbridge adapter setup` for explicit, idempotent registration of
+  one out-of-tree local adapter profile, route, and least-privilege principal.
+  Missing credentials are created only with `--create-token`, existing secrets
+  are never displayed or rotated, and one unavailable adapter cannot disable
+  unrelated routes.
 - Added a bounded typed `speech_to_text` input contract for one complete
   Ogg/Opus recording. The core verifies base64, Ogg checksums and sequence,
   Opus headers, terminal duration and authenticated cluster routing evidence;

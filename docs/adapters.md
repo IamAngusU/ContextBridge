@@ -26,6 +26,34 @@ one endpoint appear capable.
 Adapters are separate processes and are not trusted to bypass authentication,
 policy, cost, output, or artifact validation.
 
+## Operator setup
+
+Registering a local adapter is explicit and does not install, download, start,
+or license third-party software:
+
+```console
+contextbridge adapter setup local-speech \
+  --driver speech-sidecar \
+  --task speech_to_text \
+  --route speech_local \
+  --model whisper-large-v3-turbo \
+  --token-file ./secrets/local-speech.token \
+  --create-token
+```
+
+The command adds one profile, one adapter route, and one least-privilege
+principal to the selected configuration. `--create-token` is required before
+a missing credential is created. An existing credential is reused without
+being displayed or rotated, and conflicting existing configuration is
+rejected. The adapter process is still started separately and must prove its
+own readiness through the protocol below.
+
+Use `contextbridge adapter list`, `details`, and `doctor` to inspect the
+result. `enable`/`start` and `disable`/`stop` change durable relay admission
+for presence-reporting ingress adapters; they do not supervise a local v2
+process. A missing or stopped adapter can make only its own routes unavailable.
+Ordinary local, pool, and other adapter routes remain independent.
+
 ## External adapter presence
 
 Ingress and control adapters are not compute workers. An independently deployed

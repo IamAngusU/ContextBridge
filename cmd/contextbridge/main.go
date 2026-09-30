@@ -178,7 +178,7 @@ LOCAL RESOURCES AND INTEGRATIONS
   contextbridge pull MODEL                    Download a configured model safely
   contextbridge runtime install llama.cpp     Install the supported local runtime
   contextbridge integrate openai|litellm|mcp|relay|ui Print copy-ready integration settings
-  contextbridge adapter list|details|doctor|enable|disable
+  contextbridge adapter list|details|doctor|setup|enable|disable
                                                Inspect and gate optional external adapters
   contextbridge mcp serve                     Expose the bounded MCP surface
 
@@ -224,7 +224,7 @@ func writeCommandGroupHelp(out io.Writer, path []string) bool {
 	case "integrate":
 		help = "Usage: contextbridge integrate openai|litellm|mcp|relay|ui [options]\n"
 	case "adapter":
-		help = "Usage: contextbridge adapter list|details|doctor|enable|disable|start|stop [options]\n"
+		help = "Usage: contextbridge adapter list|details|doctor|setup|enable|disable|start|stop [options]\n"
 	case "verification":
 		help = "Usage: contextbridge verification verify [options]\n"
 	case "update":
