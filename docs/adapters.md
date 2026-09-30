@@ -26,6 +26,31 @@ one endpoint appear capable.
 Adapters are separate processes and are not trusted to bypass authentication,
 policy, cost, output, or artifact validation.
 
+## External adapter presence
+
+Ingress and control adapters are not compute workers. An independently deployed
+component may use its scoped producer credential to renew a bounded
+`contextbridge.adapter-presence.v1` lease at
+`POST /v1/cluster/adapters/heartbeat`. The reusable request schema is
+[`adapter-presence-v1.schema.json`](schemas/adapter-presence-v1.schema.json).
+
+Presence contains only a provider-neutral ID, instance ID, version, state,
+bounded capacity counters, error code and descriptive capability IDs. The relay
+adds owner and tenant scope from the authenticated credential. Adapter claims
+never grant permissions. An expired lease disappears automatically.
+
+Admins can inspect and enable or disable a leased adapter. Disabling is durable
+operator intent: the process remains alive long enough to observe the disabled
+response and must stop admitting work while continuing its heartbeat. A later
+enable does not install software, supply missing secrets or prove readiness;
+the adapter must still report a fresh `ready` lease. Producers see only their
+own adapters, and scoped observers see only presence within their subject and
+tenant scope.
+
+This presence contract is independent from the pull-based execution protocol
+below. A deployment may implement either, both, or neither without changing
+ordinary ContextBridge operation.
+
 ## Local protocol v2
 
 The stable identifier is `contextbridge.adapter.v2`. Adapters connect to the

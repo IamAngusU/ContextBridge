@@ -45,6 +45,7 @@ var (
 	bucketPipelineOwnerLookup = []byte("pipeline_owner_lookup_v1")
 	bucketSessionPlacements   = []byte("session_placements_v1")
 	bucketAdapterSessionLocks = []byte("adapter_session_locks_v1")
+	bucketAdapterControls     = []byte("adapter_controls_v1")
 	bucketJobIdempotency      = []byte("job_idempotency_v1")
 	bucketJobIdempotencyByJob = []byte("job_idempotency_by_job_v1")
 	bucketProducerRateWindows = []byte("producer_rate_windows_v1")
@@ -66,7 +67,7 @@ func requiredStoreBuckets() [][]byte {
 		bucketJobs, bucketJobIndex, bucketJobOwnerIndex, bucketJobOwnerLookup, bucketStoreMeta,
 		bucketQueue, bucketQueueJobIndex, bucketQueueCounts, bucketNodes, bucketTokens, bucketPairings, bucketPairCodes,
 		bucketAssignments, bucketEvents, bucketJobEvents, bucketPipelineEvents, bucketPipelineRuns, bucketPipelineOwnerLookup, bucketSessionPlacements,
-		bucketAdapterSessionLocks, bucketJobIdempotency, bucketJobIdempotencyByJob, bucketProducerRateWindows,
+		bucketAdapterSessionLocks, bucketAdapterControls, bucketJobIdempotency, bucketJobIdempotencyByJob, bucketProducerRateWindows,
 		bucketHistoricalTotals,
 	}
 }
@@ -193,6 +194,19 @@ type adapterSessionLock struct {
 	ExpiresAt time.Time `json:"expires_at,omitempty"`
 }
 
+// AdapterControl is durable operator intent for one external adapter identity.
+// Runtime presence is deliberately leased in memory; only the explicit
+// enabled/disabled decision survives a relay restart.
+type AdapterControl struct {
+	Schema       string    `json:"schema"`
+	AdapterUID   string    `json:"adapter_uid"`
+	Enabled      bool      `json:"enabled"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	ActorSubject string    `json:"actor_subject"`
+}
+
+const AdapterControlV1 = "contextbridge.adapter-control.v1"
+
 func OpenStore(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return nil, err
@@ -243,6 +257,42 @@ func (s *Store) Ready() error {
 		}
 		return nil
 	})
+}
+
+// AdapterEnabled returns the durable desired state for an external adapter.
+// Absence means enabled so an independently deployed adapter can attach without
+// a prior privileged mutation.
+func (s *Store) AdapterEnabled(adapterUID string) (bool, error) {
+	if !validAdapterUID(adapterUID) {
+		return false, errors.New("adapter UID is invalid")
+	}
+	control := AdapterControl{}
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return getJSON(tx.Bucket(bucketAdapterControls), adapterUID, &control)
+	})
+	if errors.Is(err, os.ErrNotExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if control.Schema != AdapterControlV1 || control.AdapterUID != adapterUID || control.ActorSubject == "" || control.UpdatedAt.IsZero() {
+		return false, errors.New("adapter control record is invalid")
+	}
+	return control.Enabled, nil
+}
+
+// SetAdapterEnabled stores one explicit operator decision. The adapter still
+// needs a fresh valid lease before it can be reported as available.
+func (s *Store) SetAdapterEnabled(adapterUID string, enabled bool, actorSubject string, now time.Time) (AdapterControl, error) {
+	if !validAdapterUID(adapterUID) || !validRoutingLabel(actorSubject, 120) || now.IsZero() {
+		return AdapterControl{}, errors.New("adapter control request is invalid")
+	}
+	control := AdapterControl{Schema: AdapterControlV1, AdapterUID: adapterUID, Enabled: enabled, UpdatedAt: now.UTC(), ActorSubject: actorSubject}
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		return putJSON(tx.Bucket(bucketAdapterControls), adapterUID, control)
+	})
+	return control, err
 }
 
 // AcquireRelayAuthority returns the stable identity of this durable store and

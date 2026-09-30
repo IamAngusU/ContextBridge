@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contextbridge.dev/schemas/adapter-presence-v1.schema.json",
+  "title": "ContextBridge external adapter presence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "adapter_id", "instance_id", "display_name", "kind", "version", "state"],
+  "properties": {
+    "schema": { "const": "contextbridge.adapter-presence.v1" },
+    "adapter_id": { "$ref": "#/$defs/id64" },
+    "instance_id": { "$ref": "#/$defs/id96" },
+    "display_name": { "type": "string", "minLength": 1, "maxLength": 100 },
+    "kind": { "enum": ["ingress", "control", "hybrid"] },
+    "version": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "state": { "enum": ["setup_required", "starting", "ready", "degraded", "stopped"] },
+    "capabilities": {
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/id80" }
+    },
+    "active": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+    "capacity": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+    "queue_depth": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+    "last_error_code": { "$ref": "#/$defs/id80" },
+    "lease_seconds": { "type": "integer", "minimum": 15, "maximum": 300, "default": 60 }
+  },
+  "$defs": {
+    "id64": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._:-]{0,63}$" },
+    "id80": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._:-]{0,79}$" },
+    "id96": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._:-]{0,95}$" }
+  }
+}

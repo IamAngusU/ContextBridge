@@ -45,6 +45,7 @@ func CurrentProtocolManifest(configuredJobBytes int64) ProtocolManifest {
 		WireProtocolVersion: ProtocolVersion,
 		JobContractVersions: []string{JobContractV1},
 		Features: []string{
+			"adapter_presence_leases_v1",
 			"assignment_fencing_v1",
 			"authoritative_job_events_v1",
 			"authoritative_pipeline_events_v1",

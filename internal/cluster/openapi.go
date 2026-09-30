@@ -91,6 +91,16 @@ func relayOpenAPI() map[string]interface{} {
 		"/v1/cluster/contracts/validate":      map[string]interface{}{"post": operation("Validate a job contract without admission", []string{"admin", "producer"}, "Object")},
 		"/v1/cluster/assign":                  map[string]interface{}{"post": assignmentOperation},
 		"/v1/cluster/routes/explain":          map[string]interface{}{"post": operation("Explain placement without admission", []string{"admin", "producer"}, "Object")},
+		"/v1/cluster/adapters":                map[string]interface{}{"get": operation("List visible leased external adapters", []string{"admin", "observer", "producer"}, "AdapterPresenceList")},
+		"/v1/cluster/adapters/heartbeat":      map[string]interface{}{"post": operation("Register or renew an owned external adapter lease", []string{"producer"}, "Object")},
+		"/v1/cluster/adapters/{id}":           pathItem("id", map[string]interface{}{"get": operation("Inspect one visible leased external adapter", []string{"admin", "observer", "producer"}, "AdapterPresenceList")}),
+		"/v1/cluster/adapters/{id}/{action}": map[string]interface{}{
+			"parameters": []map[string]interface{}{
+				{"name": "id", "in": "path", "required": true, "schema": map[string]string{"type": "string"}},
+				{"name": "action", "in": "path", "required": true, "schema": map[string]interface{}{"type": "string", "enum": []string{"enable", "disable"}}},
+			},
+			"post": operation("Enable or disable one external adapter", []string{"admin"}, "Object"),
+		},
 		"/v1/cluster/tokens": map[string]interface{}{
 			"get":  operation("List credential metadata without bearer values", []string{"admin"}, "Object"),
 			"post": tokenCreationOperation,
@@ -115,6 +125,15 @@ func relayOpenAPI() map[string]interface{} {
 				"OpenAPI": map[string]string{"type": "object"},
 				"Object":  map[string]string{"type": "object"},
 				"Array":   map[string]interface{}{"type": "array", "items": map[string]string{"type": "object"}},
+				"AdapterPresenceList": map[string]interface{}{
+					"type": "object", "required": []string{"schema", "adapters", "total", "available", "setup_required", "degraded", "disabled"},
+					"properties": map[string]interface{}{
+						"schema":   map[string]interface{}{"type": "string", "const": AdapterPresenceListV1},
+						"adapters": map[string]interface{}{"type": "array", "items": map[string]string{"type": "object"}},
+						"total":    map[string]string{"type": "integer"}, "available": map[string]string{"type": "integer"},
+						"setup_required": map[string]string{"type": "integer"}, "degraded": map[string]string{"type": "integer"}, "disabled": map[string]string{"type": "integer"},
+					},
+				},
 				"Error": map[string]interface{}{
 					"type": "object", "required": []string{"schema", "code", "message"},
 					"properties": map[string]interface{}{
