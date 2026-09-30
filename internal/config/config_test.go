@@ -305,6 +305,25 @@ func TestScopedAdapterRoutesRequireProfile(t *testing.T) {
 	}
 }
 
+func TestScopedAdapterRouteAcceptsSpeechToTextTask(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := Default(path); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.AdapterProfiles["local-speech"] = AdapterProfile{Label: "Local speech", Driver: "speech"}
+	cfg.Routes["speech"] = Route{Provider: "adapter", AdapterProfile: "local-speech", Task: "speech_to_text", Model: "speech-model", TimeoutSeconds: 180}
+	cfg.Providers.Adapter.Principals = map[string]AdapterPrincipal{
+		"speech": {Token: strings.Repeat("s", 40), AllowedProfiles: []string{"local-speech"}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid speech-to-text adapter route was rejected: %v", err)
+	}
+}
+
 func TestModelRevisionMustBeImmutableCommit(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yml")
 	if err := Default(path); err != nil {

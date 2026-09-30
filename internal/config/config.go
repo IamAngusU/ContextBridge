@@ -561,7 +561,7 @@ func (c Config) Validate() error {
 				return fmt.Errorf("route %s references unsupported provider %s", name, provider)
 			}
 		}
-		if route.Task != "" && route.Task != "moderation" && route.Task != "generation" && route.Task != "extraction" && route.Task != "embedding" && route.Task != "rag_ingest" && route.Task != "rag_query" {
+		if route.Task != "" && route.Task != "moderation" && route.Task != "generation" && route.Task != "extraction" && route.Task != "embedding" && route.Task != "rag_ingest" && route.Task != "rag_query" && route.Task != "speech_to_text" {
 			return fmt.Errorf("route %s has unsupported task %s", name, route.Task)
 		}
 		if route.TimeoutSeconds < 0 || route.TimeoutSeconds > 86400 {
