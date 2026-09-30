@@ -33,14 +33,15 @@ const maximumPolicyCostUSD = 1_000_000.0
 // deliberately smaller than a general policy language: bounded exact-match
 // rules are inspectable, deterministic, and safe to include in receipts.
 type ExecutionPolicyConfig struct {
-	Enabled              bool                           `json:"enabled" yaml:"enabled"`
-	TenantMode           string                         `json:"tenant_mode,omitempty" yaml:"tenant_mode,omitempty"`
-	RequireTenant        bool                           `json:"require_tenant,omitempty" yaml:"require_tenant,omitempty"`
-	LocalProviders       []string                       `json:"local_providers,omitempty" yaml:"local_providers,omitempty"`
-	RemoteProviders      []string                       `json:"remote_providers,omitempty" yaml:"remote_providers,omitempty"`
-	CostBoundedProviders []string                       `json:"cost_bounded_providers,omitempty" yaml:"cost_bounded_providers,omitempty"`
-	Default              ExecutionPolicyRule            `json:"default,omitempty" yaml:"default,omitempty"`
-	Tenants              map[string]ExecutionPolicyRule `json:"tenants,omitempty" yaml:"tenants,omitempty"`
+	Enabled                       bool                           `json:"enabled" yaml:"enabled"`
+	TenantMode                    string                         `json:"tenant_mode,omitempty" yaml:"tenant_mode,omitempty"`
+	RequireTenant                 bool                           `json:"require_tenant,omitempty" yaml:"require_tenant,omitempty"`
+	LocalProviders                []string                       `json:"local_providers,omitempty" yaml:"local_providers,omitempty"`
+	RemoteProviders               []string                       `json:"remote_providers,omitempty" yaml:"remote_providers,omitempty"`
+	AdapterProfileClassifications map[string]string              `json:"adapter_profile_classifications,omitempty" yaml:"adapter_profile_classifications,omitempty"`
+	CostBoundedProviders          []string                       `json:"cost_bounded_providers,omitempty" yaml:"cost_bounded_providers,omitempty"`
+	Default                       ExecutionPolicyRule            `json:"default,omitempty" yaml:"default,omitempty"`
+	Tenants                       map[string]ExecutionPolicyRule `json:"tenants,omitempty" yaml:"tenants,omitempty"`
 }
 
 // ExecutionPolicyRule is merged conservatively with the default rule. Tenant
@@ -108,6 +109,25 @@ func (cfg ExecutionPolicyConfig) Validate() error {
 		}
 		if strings.EqualFold(provider, "adapter") {
 			return errors.New("execution policy cannot mark adapter as cost-bounded because adapter pricing is not enforceable before execution")
+		}
+	}
+	if len(cfg.AdapterProfileClassifications) > 128 {
+		return errors.New("cluster.policies.execution.adapter_profile_classifications cannot contain more than 128 profiles")
+	}
+	profileKeys := map[string]string{}
+	for profile, classification := range cfg.AdapterProfileClassifications {
+		if !validRoutingLabel(profile, 80) {
+			return errors.New("cluster.policies.execution adapter profile keys must be bounded routing labels")
+		}
+		folded := strings.ToLower(profile)
+		if existing, found := profileKeys[folded]; found {
+			return fmt.Errorf("cluster.policies.execution adapter profile keys %q and %q are case-insensitively ambiguous", existing, profile)
+		}
+		profileKeys[folded] = profile
+		switch strings.ToLower(strings.TrimSpace(classification)) {
+		case "local", "remote":
+		default:
+			return fmt.Errorf("cluster.policies.execution adapter profile %q classification must be local or remote", profile)
 		}
 	}
 	if err := validateExecutionPolicyRule("default", cfg.Default); err != nil {
@@ -180,7 +200,7 @@ func EvaluateExecutionPolicy(cfg ExecutionPolicyConfig, tenant string, requireme
 	decision := PolicyDecision{
 		Schema: PolicyDecisionV1, Outcome: "allow", RuleID: "default",
 		PolicyFingerprint: executionPolicyFingerprint(normalized), EvaluatedAt: now.UTC(),
-		ProviderClassification: classifyPolicyProvider(normalized, requirements.Provider),
+		ProviderClassification: classifyPolicyExecution(normalized, requirements),
 		CostBudgetUSD:          requirements.MaxCostUSD,
 	}
 	decision.EgressClass = decision.ProviderClassification
@@ -378,6 +398,17 @@ func classifyPolicyProvider(cfg ExecutionPolicyConfig, provider string) string {
 	return "unknown"
 }
 
+func classifyPolicyExecution(cfg ExecutionPolicyConfig, requirements Requirements) string {
+	provider := strings.TrimSpace(requirements.Provider)
+	profile := strings.TrimSpace(requirements.AdapterProfile)
+	if strings.EqualFold(provider, "adapter") && profile != "" {
+		if classification, found := cfg.AdapterProfileClassifications[strings.ToLower(profile)]; found {
+			return classification
+		}
+	}
+	return classifyPolicyProvider(cfg, provider)
+}
+
 func normalizeExecutionPolicyConfig(cfg ExecutionPolicyConfig) ExecutionPolicyConfig {
 	if cfg.TenantMode == "" {
 		cfg.TenantMode = "open"
@@ -385,6 +416,11 @@ func normalizeExecutionPolicyConfig(cfg ExecutionPolicyConfig) ExecutionPolicyCo
 	cfg.LocalProviders = normalizedPolicyList(cfg.LocalProviders)
 	cfg.RemoteProviders = normalizedPolicyList(cfg.RemoteProviders)
 	cfg.CostBoundedProviders = normalizedPolicyList(cfg.CostBoundedProviders)
+	normalizedProfiles := make(map[string]string, len(cfg.AdapterProfileClassifications))
+	for profile, classification := range cfg.AdapterProfileClassifications {
+		normalizedProfiles[strings.ToLower(strings.TrimSpace(profile))] = strings.ToLower(strings.TrimSpace(classification))
+	}
+	cfg.AdapterProfileClassifications = normalizedProfiles
 	cfg.Default = normalizeExecutionPolicyRule(cfg.Default)
 	normalizedTenants := make(map[string]ExecutionPolicyRule, len(cfg.Tenants))
 	for tenant, rule := range cfg.Tenants {

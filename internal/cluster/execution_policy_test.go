@@ -30,6 +30,40 @@ func TestExecutionPolicyDisabledProducesDurableDecision(t *testing.T) {
 	}
 }
 
+func TestExecutionPolicyClassifiesAdapterProfilesWithoutWeakeningAdapterDefault(t *testing.T) {
+	cfg := ExecutionPolicyConfig{
+		LocalProviders:  []string{"ollama"},
+		RemoteProviders: []string{"adapter"},
+		AdapterProfileClassifications: map[string]string{
+			"local-speech": "local",
+		},
+	}
+	local, err := EvaluateExecutionPolicy(cfg, "", Requirements{
+		Provider: "adapter", AdapterProfile: "LOCAL-SPEECH", Egress: "local_only",
+	}, time.Now())
+	if err != nil || local.ProviderClassification != "local" || local.CostEnforcement != "not_configured" {
+		t.Fatalf("profile-specific local adapter should remain locally classified with policy disabled: %+v %v", local, err)
+	}
+	remote, err := EvaluateExecutionPolicy(cfg, "", Requirements{
+		Provider: "adapter", AdapterProfile: "unreviewed-adapter",
+	}, time.Now())
+	if err != nil || remote.ProviderClassification != "remote" {
+		t.Fatalf("unreviewed adapter profile must retain the provider default: %+v %v", remote, err)
+	}
+
+	cfg.Enabled = true
+	local, err = EvaluateExecutionPolicy(cfg, "", Requirements{
+		Provider: "adapter", AdapterProfile: "local-speech", Egress: "local_only",
+	}, time.Now())
+	if err != nil || local.ProviderClassification != "local" || local.CostEnforcement != "not_requested" {
+		t.Fatalf("enabled policy should permit reviewed local adapter profile: %+v %v", local, err)
+	}
+	_, err = EvaluateExecutionPolicy(cfg, "", Requirements{
+		Provider: "adapter", AdapterProfile: "unreviewed-adapter", Egress: "local_only",
+	}, time.Now())
+	assertPolicyCode(t, err, PolicyCodeEgressDenied)
+}
+
 func TestExecutionPolicyTenantEgressProviderAndGroupBoundaries(t *testing.T) {
 	cfg := ExecutionPolicyConfig{
 		Enabled: true, TenantMode: "listed_only", RequireTenant: true,
@@ -110,8 +144,8 @@ func TestExecutionPolicyCostBudgetIsNeverUnknownZero(t *testing.T) {
 }
 
 func TestExecutionPolicyFingerprintCanonicalAndAuthorizationEquivalent(t *testing.T) {
-	first := ExecutionPolicyConfig{Enabled: true, LocalProviders: []string{"ollama", "arsenal"}, RemoteProviders: []string{"deepseek"}, CostBoundedProviders: []string{"deepseek"}}
-	second := ExecutionPolicyConfig{Enabled: true, LocalProviders: []string{"arsenal", "ollama"}, RemoteProviders: []string{"deepseek"}, CostBoundedProviders: []string{"deepseek"}}
+	first := ExecutionPolicyConfig{Enabled: true, LocalProviders: []string{"ollama", "arsenal"}, RemoteProviders: []string{"deepseek"}, AdapterProfileClassifications: map[string]string{"LOCAL-SPEECH": "LOCAL"}, CostBoundedProviders: []string{"deepseek"}}
+	second := ExecutionPolicyConfig{Enabled: true, LocalProviders: []string{"arsenal", "ollama"}, RemoteProviders: []string{"deepseek"}, AdapterProfileClassifications: map[string]string{"local-speech": "local"}, CostBoundedProviders: []string{"deepseek"}}
 	a, err := EvaluateExecutionPolicy(first, "", Requirements{Provider: "ollama"}, time.Unix(1, 0))
 	if err != nil {
 		t.Fatal(err)
@@ -136,6 +170,9 @@ func TestExecutionPolicyValidationRejectsAmbiguousOrUnenforceableConfiguration(t
 		{RemoteProviders: []string{"adapter"}, CostBoundedProviders: []string{"adapter"}},
 		{Default: ExecutionPolicyRule{MaxCostUSD: math.NaN()}},
 		{Tenants: map[string]ExecutionPolicyRule{"Support": {}, "support": {}}},
+		{AdapterProfileClassifications: map[string]string{"local-speech": "trusted"}},
+		{AdapterProfileClassifications: map[string]string{" bad-profile": "local"}},
+		{AdapterProfileClassifications: map[string]string{"Local-Speech": "local", "local-speech": "remote"}},
 	}
 	for index, cfg := range cases {
 		if err := cfg.Validate(); err == nil {

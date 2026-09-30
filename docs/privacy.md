@@ -85,9 +85,12 @@ explicit compatibility limits, not silent downgrade paths.
 ## Combining privacy and egress policy
 
 E2EE controls what the relay can read. `requirements.egress: local_only`
-controls where a job may execute only when the relay execution policy is
-enabled and the provider is operator-classified as local. They solve different
-problems and can be combined:
+controls where a job may execute when its provider is operator-classified as
+local. Out-of-tree adapters inherit the `adapter` provider classification by
+default; an operator can classify an exact reviewed profile with
+`adapter_profile_classifications`. An unlisted profile never inherits another
+profile's local trust. These controls solve different problems and can be
+combined:
 
 ```sh
 contextbridge cluster chat \

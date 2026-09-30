@@ -1748,6 +1748,9 @@ cluster:
       require_tenant: false
       local_providers: [arsenal, llama_cpp, modelkit, modelkit_vision, ollama]
       remote_providers: []
+      # Out-of-tree adapters inherit the adapter provider classification unless
+      # an operator explicitly reviews one exact profile as local or remote.
+      adapter_profile_classifications: {}
       cost_bounded_providers: []
       default:
         egress: any

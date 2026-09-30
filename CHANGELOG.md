@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added exact adapter-profile execution classifications. Operators can review
+  one out-of-tree adapter profile as local without treating every generic
+  adapter as local; unlisted profiles retain the provider default and
+  `local_only` jobs continue to fail closed.
 - Added `contextbridge adapter setup` for explicit, idempotent registration of
   one out-of-tree local adapter profile, route, and least-privilege principal.
   Missing credentials are created only with `--create-token`, existing secrets
