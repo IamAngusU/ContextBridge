@@ -61,7 +61,11 @@ type Job struct {
 	// Images is the bounded multi-image input contract. The legacy singular
 	// fields above remain accepted for existing clients, but a request must not
 	// mix both representations.
-	Images    []ImageInput           `json:"images,omitempty"`
+	Images []ImageInput `json:"images,omitempty"`
+	// Audio is the bounded inline input for speech-to-text jobs. Remote URLs
+	// are intentionally unsupported so neither the relay nor a worker performs
+	// an implicit network fetch on behalf of a producer.
+	Audio     *AudioInput            `json:"audio,omitempty"`
 	Metadata  map[string]interface{} `json:"metadata,omitempty"`
 	Output    OutputSpec             `json:"output,omitempty"`
 	CreatedAt time.Time              `json:"created_at,omitempty"`
@@ -71,12 +75,23 @@ const (
 	MaximumInputImages           = 12
 	MaximumInputImageBytes       = 8 << 20
 	MaximumInputImagesTotalBytes = 8 << 20
+	MaximumInputAudioBytes       = 8 << 20
+	MaximumInputAudioDurationMS  = 5 * 60 * 1000
 )
 
 // ImageInput carries one verified inline image. Remote URLs are deliberately
 // not accepted: producers must provide the bytes whose type is validated at
 // admission, so workers never perform an implicit network fetch.
 type ImageInput struct {
+	Name       string `json:"name,omitempty"`
+	MediaType  string `json:"media_type"`
+	DataBase64 string `json:"data_base64"`
+}
+
+// AudioInput carries one complete, verified inline audio recording. The first
+// public contract intentionally accepts only Ogg/Opus, the format used by
+// WhatsApp voice notes and a format with a bounded, inspectable container.
+type AudioInput struct {
 	Name       string `json:"name,omitempty"`
 	MediaType  string `json:"media_type"`
 	DataBase64 string `json:"data_base64"`

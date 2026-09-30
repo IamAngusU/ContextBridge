@@ -2383,6 +2383,34 @@ func ValidateRequirements(requirements Requirements) error {
 	if requirements.InputImageCount == 0 && (requirements.InputImageBytes > 0 || requirements.InputImageMaxBytes > 0 || len(requirements.InputImageMediaTypes) > 0) {
 		return errors.New("image byte and media requirements require input_image_count")
 	}
+	if requirements.InputAudioBytes < 0 || requirements.InputAudioBytes > 8<<20 {
+		return errors.New("requirements.input_audio_bytes must be between 0 and 8388608")
+	}
+	if requirements.InputAudioDurationMS < 0 || requirements.InputAudioDurationMS > 300000 {
+		return errors.New("requirements.input_audio_duration_ms must be between 0 and 300000")
+	}
+	audioMediaType := strings.ToLower(strings.TrimSpace(requirements.InputAudioMediaType))
+	if audioMediaType != "" && audioMediaType != "audio/ogg" && audioMediaType != "audio/ogg; codecs=opus" {
+		return errors.New("requirements.input_audio_media_type must be audio/ogg or audio/ogg; codecs=opus")
+	}
+	if requirements.InputAudioBytes == 0 {
+		if requirements.InputAudioDurationMS != 0 || audioMediaType != "" {
+			return errors.New("audio duration and media requirements require input_audio_bytes")
+		}
+	} else {
+		if requirements.InputAudioDurationMS == 0 || audioMediaType == "" {
+			return errors.New("input_audio_bytes requires audio duration and media type")
+		}
+		if !strings.EqualFold(requirements.Task, "speech_to_text") {
+			return errors.New("audio input requirements require task speech_to_text")
+		}
+		if requirements.InputImageCount != 0 {
+			return errors.New("speech_to_text audio cannot be combined with image input")
+		}
+	}
+	if strings.EqualFold(requirements.Task, "speech_to_text") && requirements.InputAudioBytes == 0 {
+		return errors.New("speech_to_text requires bounded audio input requirements")
+	}
 	if err := validateExecutionPolicyRequirements(requirements); err != nil {
 		return err
 	}

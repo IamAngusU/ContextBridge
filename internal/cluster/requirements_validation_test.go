@@ -79,3 +79,31 @@ func TestValidateRequirementsBoundsImageRoutingEvidence(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateRequirementsBoundsSpeechRoutingEvidence(t *testing.T) {
+	relay := &Relay{cfg: RelayConfig{AllowedTasks: []string{"speech_to_text"}}}
+	valid := Requirements{Task: "speech_to_text", Provider: "adapter", AdapterProfile: "speech-local",
+		InputAudioBytes: 4096, InputAudioDurationMS: 1250, InputAudioMediaType: "audio/ogg; codecs=opus"}
+	if err := relay.validateRequirements(valid); err != nil {
+		t.Fatalf("valid audio routing evidence rejected: %v", err)
+	}
+	for name, mutate := range map[string]func(*Requirements){
+		"bytes":        func(value *Requirements) { value.InputAudioBytes = (8 << 20) + 1 },
+		"duration":     func(value *Requirements) { value.InputAudioDurationMS = 300001 },
+		"media":        func(value *Requirements) { value.InputAudioMediaType = "audio/mpeg" },
+		"missing size": func(value *Requirements) { value.InputAudioBytes = 0 },
+		"wrong task":   func(value *Requirements) { value.Task = "generation" },
+		"with image":   func(value *Requirements) { value.InputImageCount, value.Vision = 1, true },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := valid
+			mutate(&candidate)
+			if err := ValidateRequirements(candidate); err == nil {
+				t.Fatal("invalid audio routing evidence was accepted")
+			}
+		})
+	}
+	if err := ValidateRequirements(Requirements{Task: "speech_to_text"}); err == nil {
+		t.Fatal("speech_to_text without audio routing evidence was accepted")
+	}
+}

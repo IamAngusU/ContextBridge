@@ -115,6 +115,12 @@ type Requirements struct {
 	InputImageBytes      int64    `json:"input_image_bytes,omitempty" yaml:"input_image_bytes,omitempty"`
 	InputImageMaxBytes   int64    `json:"input_image_max_bytes,omitempty" yaml:"input_image_max_bytes,omitempty"`
 	InputImageMediaTypes []string `json:"input_image_media_types,omitempty" yaml:"input_image_media_types,omitempty"`
+	// Audio metadata is derived from the inline recording by the producer SDK
+	// and authenticated with the assignment. V1 deliberately supports one
+	// bounded Ogg/Opus input for speech_to_text jobs.
+	InputAudioBytes      int64  `json:"input_audio_bytes,omitempty" yaml:"input_audio_bytes,omitempty"`
+	InputAudioDurationMS int64  `json:"input_audio_duration_ms,omitempty" yaml:"input_audio_duration_ms,omitempty"`
+	InputAudioMediaType  string `json:"input_audio_media_type,omitempty" yaml:"input_audio_media_type,omitempty"`
 	// Egress is an authenticated producer constraint. local_only fails closed
 	// unless the relay classifies the explicit provider as local;
 	// remote_allowed does not override a stricter operator policy.

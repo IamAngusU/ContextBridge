@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added a bounded typed `speech_to_text` input contract for one complete
+  Ogg/Opus recording. The core verifies base64, Ogg checksums and sequence,
+  Opus headers, terminal duration and authenticated cluster routing evidence;
+  remote audio URLs are not accepted and producer-visible responses redact the
+  embedded bytes.
 - Enforced credential-bound producer tenant scopes on existing job and
   pipeline reads, event streams, route/runtime details, legacy history, and
   cancellation. Fixed-size owner+tenant digests reject same-subject foreign

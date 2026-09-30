@@ -1002,7 +1002,7 @@ func compactLocalSubmission(raw []byte) ([]byte, error) {
 		return nil, err
 	}
 	for _, field := range []string{
-		"prompt", "text", "texts", "documents", "query", "image_base64", "images",
+		"prompt", "text", "texts", "documents", "query", "image_base64", "images", "audio",
 		"contextbridge_session_key", "contextbridge_adapter_endpoint_id", "contextbridge_adapter_principal",
 	} {
 		delete(job, field)

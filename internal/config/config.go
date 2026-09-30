@@ -1398,7 +1398,7 @@ func applyDefaults(cfg *Config, base string) {
 		cfg.Cluster.Placement.MaxLatencyPenalty = 60
 	}
 	if len(cfg.Cluster.Policies.AllowedTasks) == 0 {
-		cfg.Cluster.Policies.AllowedTasks = []string{"moderation", "generation", "extraction", "embedding", "rag_ingest", "rag_query", "vision"}
+		cfg.Cluster.Policies.AllowedTasks = []string{"moderation", "generation", "extraction", "embedding", "rag_ingest", "rag_query", "vision", "speech_to_text"}
 	}
 	if cfg.Cluster.Policies.MaxAttempts == 0 {
 		cfg.Cluster.Policies.MaxAttempts = 3

@@ -333,7 +333,24 @@ func runtimeWorkloadClass(job Job) string {
 		boundedByteClass(payloadBytes),
 		boundedImageCountClass(job.Requirements.InputImageCount),
 		boundedByteClass(job.Requirements.InputImageBytes),
+		boundedByteClass(job.Requirements.InputAudioBytes),
+		boundedDurationClass(job.Requirements.InputAudioDurationMS),
 	}, ":")
+}
+
+func boundedDurationClass(milliseconds int64) string {
+	switch {
+	case milliseconds <= 0:
+		return "0"
+	case milliseconds <= 5_000:
+		return "xs"
+	case milliseconds <= 30_000:
+		return "s"
+	case milliseconds <= 120_000:
+		return "m"
+	default:
+		return "l"
+	}
 }
 
 func boundedByteClass(value int64) string {

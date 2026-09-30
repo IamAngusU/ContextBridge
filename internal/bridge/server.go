@@ -790,6 +790,11 @@ func responseJob(job Job) Job {
 			job.Images[index].DataBase64 = ""
 		}
 	}
+	if job.Audio != nil {
+		copyAudio := *job.Audio
+		copyAudio.DataBase64 = ""
+		job.Audio = &copyAudio
+	}
 	// These values exist only between the relay, worker, and adapter. They
 	// must not become producer-visible correlation or topology metadata.
 	job.ContextBridgeSessionKey = ""
@@ -1493,7 +1498,7 @@ func validateJob(job Job) error {
 		}
 	}
 	task := jobTask(job, "")
-	if strings.TrimSpace(job.Prompt) == "" && task != "embedding" && task != "rag_ingest" && task != "rag_query" {
+	if strings.TrimSpace(job.Prompt) == "" && task != "embedding" && task != "rag_ingest" && task != "rag_query" && task != "speech_to_text" {
 		return errors.New("prompt is required")
 	}
 	if len(job.Texts) > 256 {
@@ -1580,6 +1585,16 @@ func validateJob(job Job) error {
 		if totalImageBytes > MaximumInputImagesTotalBytes {
 			return errors.New("combined image inputs exceed the 8 MiB decoded limit")
 		}
+	}
+	if job.Audio != nil {
+		if task != "speech_to_text" {
+			return errors.New("audio input currently requires task speech_to_text")
+		}
+		if err := validateAudioInput(*job.Audio); err != nil {
+			return err
+		}
+	} else if task == "speech_to_text" {
+		return errors.New("speech_to_text requires audio input")
 	}
 	mode := outputMode(job.Output)
 	if mode != "decision" && mode != "json" && mode != "text" && mode != "embedding" && mode != "rag" {

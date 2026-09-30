@@ -42,6 +42,9 @@
           "uniqueItems": true,
           "items": { "type": "string", "enum": ["image/png", "image/jpeg", "image/webp", "image/gif"] }
         },
+        "input_audio_bytes": { "type": "integer", "minimum": 0, "maximum": 8388608 },
+        "input_audio_duration_ms": { "type": "integer", "minimum": 0, "maximum": 300000 },
+        "input_audio_media_type": { "type": "string", "enum": ["audio/ogg", "audio/ogg; codecs=opus"] },
         "embedding": { "type": "boolean" },
         "egress": { "type": "string", "enum": ["local_only", "remote_allowed"] },
         "max_cost_usd": { "type": "number", "minimum": 0, "maximum": 1000000 }

@@ -9,6 +9,7 @@ The boundaries below describe what the public core accepts and verifies.
 | Boundary | Core behavior |
 | --- | --- |
 | Input images | Up to 12 PNG/JPEG/WebP/GIF inputs per job, sharing exactly 8 MiB after base64 decoding. The legacy singular field remains accepted but cannot be mixed with `images[]`. |
+| Speech input | One complete Ogg/Opus recording for a `speech_to_text` job; 8 MiB and five minutes maximum. Ogg checksums, page order, Opus headers and duration evidence are verified before dispatch. Remote audio URLs are never fetched. |
 | Response artifacts | Up to 12 verified artifacts, sharing one aggregate decoded-byte budget. |
 | Embedded artifact bytes | 12 MiB maximum in aggregate; `max_artifact_bytes` may lower it to 1 KiB–12 MiB. |
 | Text result | 64 KiB by default; callers may request 256 B–1 MiB. Oversize text is UTF-8-safely bounded and marked `truncated: true`. |
