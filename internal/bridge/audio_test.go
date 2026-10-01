@@ -24,6 +24,29 @@ func TestSpeechToTextAcceptsCompleteBoundedOggOpus(t *testing.T) {
 	}
 }
 
+func TestSpeechToTextAcceptsWhatsAppOggOpusWithoutEOSAtExactPageBoundary(t *testing.T) {
+	raw := testOggOpusWithFinalFlags(48_000, 0)
+	info, err := InspectAudioInput(AudioInput{Name: "voice-note.ogg", MediaType: "audio/ogg; codecs=opus",
+		DataBase64: base64.StdEncoding.EncodeToString(raw)})
+	if err != nil || info.Bytes != int64(len(raw)) || info.DurationMS != 1000 {
+		t.Fatalf("valid WhatsApp-style stream rejected: %+v, %v", info, err)
+	}
+	truncated := raw[:len(raw)-1]
+	if _, err := InspectAudioInput(AudioInput{Name: "voice-note.ogg", MediaType: "audio/ogg; codecs=opus",
+		DataBase64: base64.StdEncoding.EncodeToString(truncated)}); err == nil || !strings.Contains(err.Error(), "truncated") {
+		t.Fatalf("truncated no-EOS stream error = %v", err)
+	}
+}
+
+func TestSpeechToTextEOSStillRejectsTrailingPages(t *testing.T) {
+	raw := testOggOpus(48_000)
+	raw = append(raw, testOggPage(0, 48_312, 0x10203040, 3, []byte{0xf8})...)
+	if _, err := InspectAudioInput(AudioInput{Name: "voice-note.ogg", MediaType: "audio/ogg; codecs=opus",
+		DataBase64: base64.StdEncoding.EncodeToString(raw)}); err == nil || !strings.Contains(err.Error(), "trailing") {
+		t.Fatalf("trailing page after EOS error = %v", err)
+	}
+}
+
 func TestSpeechToTextAudioFailsClosed(t *testing.T) {
 	valid := testOggOpus(48_000)
 	cases := []struct {
@@ -80,6 +103,10 @@ func TestOggOpusDurationRoundsPartialMillisecondsWithoutOverflow(t *testing.T) {
 }
 
 func testOggOpus(samples uint64) []byte {
+	return testOggOpusWithFinalFlags(samples, 0x04)
+}
+
+func testOggOpusWithFinalFlags(samples uint64, finalFlags byte) []byte {
 	const preSkip = uint16(312)
 	head := make([]byte, 19)
 	copy(head, "OpusHead")
@@ -91,7 +118,7 @@ func testOggOpus(samples uint64) []byte {
 	serial := uint32(0x10203040)
 	result := testOggPage(0x02, 0, serial, 0, head)
 	result = append(result, testOggPage(0, 0, serial, 1, tags)...)
-	result = append(result, testOggPage(0x04, uint64(preSkip)+samples, serial, 2, []byte{0xf8})...)
+	result = append(result, testOggPage(finalFlags, uint64(preSkip)+samples, serial, 2, []byte{0xf8})...)
 	return result
 }
 
