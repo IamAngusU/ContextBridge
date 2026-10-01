@@ -54,6 +54,12 @@ for presence-reporting ingress adapters; they do not supervise a local v2
 process. A missing or stopped adapter can make only its own routes unavailable.
 Ordinary local, pool, and other adapter routes remain independent.
 
+`details`, `enable`/`start`, and `disable`/`stop` accept the stable `adp_...`
+UID printed by `list`. While a fresh lease exists they also accept an exact
+adapter ID or instance ID, such as `whatsapp-primary`, when it resolves to one
+visible adapter. Ambiguous friendly IDs fail closed and require the stable UID;
+the UID also remains the recovery selector after every lease has expired.
+
 Inspection and control use the active named cluster account by default. Select
 another account with `--account NAME`, or pass a scoped credential without
 putting it into shell history via `--token-file FILE`. The file may contain the

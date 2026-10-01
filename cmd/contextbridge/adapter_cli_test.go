@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/IamAngusU/ContextBridge/internal/cluster"
 	"github.com/IamAngusU/ContextBridge/internal/config"
 )
 
@@ -56,5 +57,46 @@ func TestAdapterCLIRejectsAmbiguousCredentialSources(t *testing.T) {
 	_, _, err := adapterClientConfig(adapterCLIOptions{configPath: configPath, token: "cb_" + strings.Repeat("d", 40), tokenFile: tokenPath})
 	if err == nil || !strings.Contains(err.Error(), "only one") {
 		t.Fatalf("ambiguous credentials were accepted: %v", err)
+	}
+}
+
+func TestAdapterCLIAllowsOptionsAfterFriendlySelector(t *testing.T) {
+	options, positional, err := parseAdapterCLIFlags("adapter details", []string{"whatsapp-primary", "--json", "--account", "operator"}, true)
+	if err != nil || len(positional) != 1 || positional[0] != "whatsapp-primary" || !options.asJSON || options.account != "operator" {
+		t.Fatalf("interspersed adapter flags: options=%+v positional=%v err=%v", options, positional, err)
+	}
+}
+
+func TestAdapterCLIResolvesFriendlySelectorOnlyWhenUnambiguous(t *testing.T) {
+	uidA := "adp_" + strings.Repeat("a", 32)
+	uidB := "adp_" + strings.Repeat("b", 32)
+	items := []cluster.AdapterPresence{
+		{AdapterUID: uidA, AdapterID: "whatsapp", InstanceID: "whatsapp-primary"},
+		{AdapterUID: uidA, AdapterID: "whatsapp", InstanceID: "whatsapp-secondary"},
+	}
+	for _, selector := range []string{"whatsapp", "WHATSAPP-PRIMARY"} {
+		uid, err := resolveAdapterUIDFromItems(selector, items)
+		if err != nil || uid != uidA {
+			t.Fatalf("selector %q = %q, %v", selector, uid, err)
+		}
+	}
+	if _, err := resolveAdapterUIDFromItems("missing", items); err == nil || !strings.Contains(err.Error(), "no visible leased adapter") {
+		t.Fatalf("missing selector = %v", err)
+	}
+	items = append(items, cluster.AdapterPresence{AdapterUID: uidB, AdapterID: "support", InstanceID: "whatsapp-primary"})
+	if _, err := resolveAdapterUIDFromItems("whatsapp-primary", items); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("ambiguous selector = %v", err)
+	}
+}
+
+func TestAdapterCLIAcceptsOnlyCanonicalStableUIDShape(t *testing.T) {
+	valid := "adp_" + strings.Repeat("0a", 16)
+	for value, want := range map[string]bool{
+		valid: true, "ADP_" + strings.Repeat("0a", 16): false,
+		"adp_" + strings.Repeat("z", 32): false, "adp_" + strings.Repeat("a", 31): false,
+	} {
+		if got := looksLikeAdapterUID(value); got != want {
+			t.Fatalf("looksLikeAdapterUID(%q) = %v, want %v", value, got, want)
+		}
 	}
 }

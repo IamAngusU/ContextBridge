@@ -4,6 +4,7 @@ import (
 	"context"
 	cryptorand "crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -28,7 +29,8 @@ setup registers one bounded local adapter profile and creates its independent
 credential file only when explicitly requested.
 enable/start and disable/stop change the relay's desired admission state; they
 do not install packages, invent missing credentials, or make an unhealthy
-adapter ready.`)
+adapter ready. Control accepts a stable adp_ UID or one unambiguous leased
+adapter/instance ID.`)
 		return nil
 	}
 	switch args[0] {
@@ -242,7 +244,7 @@ func parseAdapterCLIFlags(name string, args []string, jsonAllowed bool) (adapter
 	if jsonAllowed {
 		asJSON = flags.Bool("json", false, "print machine-readable JSON")
 	}
-	if err := flags.Parse(args); err != nil {
+	if err := parseInterspersedFlags(flags, args); err != nil {
 		return adapterCLIOptions{}, nil, err
 	}
 	options := adapterCLIOptions{configPath: *path, token: strings.TrimSpace(*token), tokenFile: strings.TrimSpace(*tokenFile), account: strings.TrimSpace(*account)}
@@ -316,9 +318,13 @@ func adapterDetailsCommand(args []string) error {
 		return err
 	}
 	if len(positional) != 1 {
-		return errors.New("usage: contextbridge adapter details [--config PATH] [--account NAME] [--token-file FILE] [--json] ADAPTER_UID")
+		return errors.New("usage: contextbridge adapter details [--config PATH] [--account NAME] [--token-file FILE] [--json] ADAPTER_UID_OR_ID")
 	}
-	items, err := fetchAdapterPresences(options, positional[0])
+	uid, err := resolveAdapterUID(options, positional[0])
+	if err != nil {
+		return err
+	}
+	items, err := fetchAdapterPresences(options, uid)
 	if err != nil {
 		return err
 	}
@@ -370,13 +376,16 @@ func adapterControlCommand(action string, args []string) error {
 		return err
 	}
 	if len(positional) != 1 {
-		return fmt.Errorf("usage: contextbridge adapter %s [--config PATH] [--account NAME] [--token-file FILE] [--json] ADAPTER_UID", action)
+		return fmt.Errorf("usage: contextbridge adapter %s [--config PATH] [--account NAME] [--token-file FILE] [--json] ADAPTER_UID_OR_ID", action)
 	}
 	cfg, token, err := adapterClientConfig(options)
 	if err != nil {
 		return err
 	}
-	uid := strings.TrimSpace(positional[0])
+	uid, err := resolveAdapterUIDWithClient(cfg, token, positional[0])
+	if err != nil {
+		return err
+	}
 	var control cluster.AdapterControl
 	target := clusterClientBaseURL(cfg) + "/v1/cluster/adapters/" + url.PathEscape(uid) + "/" + action
 	if err := clusterPOST(context.Background(), target, token, map[string]interface{}{}, &control); err != nil {
@@ -393,17 +402,72 @@ func adapterControlCommand(action string, args []string) error {
 	return nil
 }
 
+func resolveAdapterUID(options adapterCLIOptions, selector string) (string, error) {
+	cfg, token, err := adapterClientConfig(options)
+	if err != nil {
+		return "", err
+	}
+	return resolveAdapterUIDWithClient(cfg, token, selector)
+}
+
+func resolveAdapterUIDWithClient(cfg config.Config, token, selector string) (string, error) {
+	selector = strings.TrimSpace(selector)
+	if looksLikeAdapterUID(selector) {
+		return selector, nil
+	}
+	if selector == "" {
+		return "", errors.New("adapter selector is required")
+	}
+	items, err := fetchAdapterPresencesWithClient(cfg, token, "")
+	if err != nil {
+		return "", err
+	}
+	return resolveAdapterUIDFromItems(selector, items.Adapters)
+}
+
+func resolveAdapterUIDFromItems(selector string, items []cluster.AdapterPresence) (string, error) {
+	selector = strings.TrimSpace(selector)
+	matches := map[string]struct{}{}
+	for _, item := range items {
+		if strings.EqualFold(item.AdapterID, selector) || strings.EqualFold(item.InstanceID, selector) {
+			matches[item.AdapterUID] = struct{}{}
+		}
+	}
+	if len(matches) == 0 {
+		return "", fmt.Errorf("no visible leased adapter matches %q; run contextbridge adapter list or use its stable adp_ UID", selector)
+	}
+	if len(matches) > 1 {
+		return "", fmt.Errorf("adapter selector %q is ambiguous; use the stable adp_ UID from contextbridge adapter list", selector)
+	}
+	for uid := range matches {
+		return uid, nil
+	}
+	return "", errors.New("adapter selector resolution failed")
+}
+
+func looksLikeAdapterUID(value string) bool {
+	if len(value) != 36 || !strings.HasPrefix(value, "adp_") {
+		return false
+	}
+	_, err := hex.DecodeString(value[4:])
+	return err == nil
+}
+
 func fetchAdapterPresences(options adapterCLIOptions, uid string) (cluster.AdapterPresenceList, error) {
 	cfg, token, err := adapterClientConfig(options)
 	if err != nil {
 		return cluster.AdapterPresenceList{}, err
 	}
+	return fetchAdapterPresencesWithClient(cfg, token, uid)
+}
+
+func fetchAdapterPresencesWithClient(cfg config.Config, token, uid string) (cluster.AdapterPresenceList, error) {
 	target := clusterClientBaseURL(cfg) + "/v1/cluster/adapters"
 	if strings.TrimSpace(uid) != "" {
 		target += "/" + url.PathEscape(strings.TrimSpace(uid))
 	}
 	var result cluster.AdapterPresenceList
-	err = clusterGET(context.Background(), target, token, &result)
+	err := clusterGET(context.Background(), target, token, &result)
 	return result, err
 }
 
