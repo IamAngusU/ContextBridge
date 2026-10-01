@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Let adapter inspection and relay-admission commands accept one unambiguous
+  leased adapter or instance ID in addition to the stable `adp_...` UID. The
+  CLI now accepts flags on either side of that selector, refuses ambiguous
+  friendly names, and preserves the UID as the recovery path after leases
+  expire.
 - Added exact adapter-profile execution classifications. Operators can review
   one out-of-tree adapter profile as local without treating every generic
   adapter as local; unlisted profiles retain the provider default and
