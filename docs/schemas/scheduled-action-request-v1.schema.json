@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contextbridge.dev/schemas/scheduled-action-request-v1.schema.json",
+  "title": "ContextBridge scheduled action request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "adapter_uid", "action_kind", "destination_ref", "payload_ref", "start_at", "timezone"],
+  "properties": {
+    "schema": {
+      "const": "contextbridge.scheduled-action-request.v1"
+    },
+    "tenant_id": {
+      "type": "string",
+      "maxLength": 200
+    },
+    "adapter_uid": {
+      "type": "string",
+      "pattern": "^adp_[0-9a-f]{32}$"
+    },
+    "action_kind": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._:-]{0,79}$"
+    },
+    "destination_ref": {
+      "type": "string",
+      "pattern": "^dst_[0-9a-f]{32}$"
+    },
+    "payload_ref": {
+      "type": "string",
+      "pattern": "^ref_[0-9a-f]{32}$"
+    },
+    "start_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "timezone": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80,
+      "description": "Explicit IANA timezone. Local is rejected and the start_at offset must match this zone at that instant."
+    },
+    "repeat_every_seconds": {
+      "anyOf": [
+        { "const": 0 },
+        { "type": "integer", "minimum": 60, "maximum": 31536000 }
+      ]
+    },
+    "occurrences": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 366
+    },
+    "delivery_window_seconds": {
+      "anyOf": [
+        { "const": 0 },
+        { "type": "integer", "minimum": 30, "maximum": 86400 }
+      ]
+    },
+    "priority": {
+      "type": "integer",
+      "minimum": -100,
+      "maximum": 100
+    }
+  }
+}

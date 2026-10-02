@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -176,6 +177,67 @@ func (c *clusterAPIClient) Cancel(ctx context.Context, jobID string) (cluster.Jo
 	return job, err
 }
 
+func (c *clusterAPIClient) PreviewScheduledAction(ctx context.Context, input cluster.ScheduledActionRequest) (cluster.ScheduledAction, error) {
+	var action cluster.ScheduledAction
+	_, err := c.doJSON(ctx, http.MethodPost, "/v1/cluster/scheduled-actions/preview", input, &action, nil)
+	return action, err
+}
+
+func (c *clusterAPIClient) ConfirmScheduledAction(ctx context.Context, actionID string) (cluster.ScheduledAction, error) {
+	actionID = strings.TrimSpace(actionID)
+	if err := validateScheduledActionID(actionID); err != nil {
+		return cluster.ScheduledAction{}, err
+	}
+	var action cluster.ScheduledAction
+	_, err := c.doJSON(ctx, http.MethodPost, "/v1/cluster/scheduled-actions/"+url.PathEscape(actionID)+"/confirm", struct{}{}, &action, nil)
+	return action, err
+}
+
+func (c *clusterAPIClient) ScheduledAction(ctx context.Context, actionID string) (cluster.ScheduledAction, error) {
+	actionID = strings.TrimSpace(actionID)
+	if err := validateScheduledActionID(actionID); err != nil {
+		return cluster.ScheduledAction{}, err
+	}
+	var action cluster.ScheduledAction
+	_, err := c.doJSON(ctx, http.MethodGet, "/v1/cluster/scheduled-actions/"+url.PathEscape(actionID), nil, &action, nil)
+	return action, err
+}
+
+func (c *clusterAPIClient) ScheduledActions(ctx context.Context, status string, limit int) (cluster.ScheduledActionList, error) {
+	if limit < 1 || limit > 100 {
+		return cluster.ScheduledActionList{}, fmt.Errorf("scheduled action list limit must be between 1 and 100")
+	}
+	query := url.Values{}
+	query.Set("limit", strconv.Itoa(limit))
+	if strings.TrimSpace(status) != "" {
+		query.Set("status", strings.TrimSpace(status))
+	}
+	var list cluster.ScheduledActionList
+	_, err := c.doJSON(ctx, http.MethodGet, "/v1/cluster/scheduled-actions?"+query.Encode(), nil, &list, nil)
+	return list, err
+}
+
+func (c *clusterAPIClient) CancelScheduledAction(ctx context.Context, actionID string) (cluster.ScheduledAction, error) {
+	actionID = strings.TrimSpace(actionID)
+	if err := validateScheduledActionID(actionID); err != nil {
+		return cluster.ScheduledAction{}, err
+	}
+	var action cluster.ScheduledAction
+	_, err := c.doJSON(ctx, http.MethodDelete, "/v1/cluster/scheduled-actions/"+url.PathEscape(actionID), nil, &action, nil)
+	return action, err
+}
+
+func validateScheduledActionID(value string) error {
+	value = strings.TrimSpace(value)
+	if len(value) != len("sact_")+32 || !strings.HasPrefix(value, "sact_") || value != strings.ToLower(value) {
+		return fmt.Errorf("scheduled action ID must be sact_ followed by 32 lowercase hexadecimal characters")
+	}
+	if _, err := hex.DecodeString(value[len("sact_"):]); err != nil {
+		return fmt.Errorf("scheduled action ID must be sact_ followed by 32 lowercase hexadecimal characters")
+	}
+	return validateClusterClientID(value)
+}
+
 func validateClusterClientID(value string) error {
 	value = strings.TrimSpace(value)
 	if value == "" || len(value) > 128 || strings.Contains(value, "..") {
@@ -198,6 +260,10 @@ func (c *clusterAPIClient) doJSON(ctx context.Context, method, path string, inpu
 	if c == nil || c.baseURL == "" || c.token == "" {
 		return nil, fmt.Errorf("relay URL and scoped credential are required")
 	}
+	target := c.baseURL + path
+	if err := validateClusterAPITarget(target); err != nil {
+		return nil, err
+	}
 	var body *bytes.Reader
 	if input == nil {
 		body = bytes.NewReader(nil)
@@ -208,7 +274,9 @@ func (c *clusterAPIClient) doJSON(ctx context.Context, method, path string, inpu
 		}
 		body = bytes.NewReader(raw)
 	}
-	request, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
+	// #nosec G704 -- validateClusterAPITarget above enforces HTTPS for remote
+	// relays (or actual loopback HTTP) and rejects URL credentials/fragments.
+	request, err := http.NewRequestWithContext(ctx, method, target, body)
 	if err != nil {
 		return nil, err
 	}
@@ -221,6 +289,7 @@ func (c *clusterAPIClient) doJSON(ctx context.Context, method, path string, inpu
 			request.Header.Add(name, value)
 		}
 	}
+	// #nosec G704 -- target has passed the relay trust-boundary validation above.
 	response, err := clusterHTTPClient(c.baseURL).Do(request)
 	if err != nil {
 		return nil, err

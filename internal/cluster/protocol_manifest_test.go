@@ -79,6 +79,23 @@ func TestProtocolManifestIsDeterministicAndNamesPublicBoundaries(t *testing.T) {
 	if !containsString(first.Features, "durable_dag_checkpoint_contract_v1") {
 		t.Fatalf("durable DAG checkpoint contract is not advertised: %#v", first.Features)
 	}
+	if !containsString(first.Features, "scoped_scheduled_adapter_actions_v1") ||
+		first.Limits.MaximumScheduledActionRecords != maximumScheduledActionRecords ||
+		first.Limits.MaximumScheduledRecordsPerOwner != maximumScheduledActionRecordsPerOwner ||
+		first.Limits.MaximumScheduledActionTargets != maximumScheduledActionTargets ||
+		first.Limits.MaximumScheduledActionKinds != maximumScheduledActionKindsPerTarget ||
+		first.Limits.MaximumScheduledDestinations != maximumScheduledDestinationsPerTarget ||
+		first.Limits.MaximumScheduledActive != maximumScheduledMaxActive ||
+		first.Limits.MaximumScheduledHorizonSeconds != maximumScheduledHorizonSeconds ||
+		first.Limits.MinimumScheduledIntervalSeconds != minimumScheduledIntervalSeconds ||
+		first.Limits.MaximumScheduledOccurrences != maximumScheduledOccurrences ||
+		first.Limits.MaximumScheduledWindowSeconds != maximumScheduledDeliveryWindowSeconds {
+		t.Fatalf("scoped scheduled actions or limits are not advertised: %#v %#v", first.Features, first.Limits)
+	}
+	if !containsString(first.ScheduledActionFailureCodes, ScheduledActionFailureCredentialInactive) ||
+		!containsString(first.ScheduledActionFailureCodes, ScheduledActionFailureDeliveryTimeoutAmbiguous) {
+		t.Fatalf("scheduled-action failure codes are not advertised: %#v", first.ScheduledActionFailureCodes)
+	}
 }
 
 func containsString(values []string, wanted string) bool {

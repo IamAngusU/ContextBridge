@@ -476,6 +476,11 @@ type SubmitRequest struct {
 	Pipeline string `json:"-"`
 	Step     string `json:"-"`
 	ParentID string `json:"-"`
+	// scheduledActionInternal is an in-memory capability set only by the
+	// confirmed scheduled-action dispatcher. It is deliberately unexported so
+	// JSON clients, pipeline configuration, and out-of-package callers cannot
+	// forge the relay-owned scheduled_action task at a lower store boundary.
+	scheduledActionInternal bool
 }
 
 // ContractValidation is deliberately content-minimizing. It proves that the
@@ -562,6 +567,39 @@ type ProducerLimits struct {
 	// not a caller convention. It protects prompt/result bytes from the relay;
 	// coordination metadata remains relay-visible by design.
 	RequireE2EE bool `json:"require_e2ee,omitempty"`
+	// ScheduledActions is opt-in authority for durable external actions. A nil
+	// policy grants no scheduling authority. The relay still treats adapter
+	// presence as liveness only: every profile, action kind, and opaque
+	// destination must be authorized here by an administrator.
+	ScheduledActions *ScheduledActionLimits `json:"scheduled_actions,omitempty"`
+}
+
+// ScheduledActionLimits are credential-bound ceilings for actions that the
+// relay may turn into adapter jobs at a later time. Each target binds the
+// presence identity to one execution profile and principal so independently
+// deployed adapters cannot accidentally share execution authority merely by
+// advertising the same profile. Destination and payload references are opaque
+// identifiers issued by an adapter; raw phone numbers, addresses, message
+// text, or tool commands are deliberately outside this contract.
+type ScheduledActionLimits struct {
+	Schema                   string                  `json:"schema"`
+	Targets                  []ScheduledActionTarget `json:"targets"`
+	MaxActive                int                     `json:"max_active,omitempty"`
+	MaxHorizonSeconds        int64                   `json:"max_horizon_seconds,omitempty"`
+	MinIntervalSeconds       int64                   `json:"min_interval_seconds,omitempty"`
+	MaxOccurrences           int                     `json:"max_occurrences,omitempty"`
+	MaxDeliveryWindowSeconds int64                   `json:"max_delivery_window_seconds,omitempty"`
+}
+
+// ScheduledActionTarget is an administrator-issued execution binding. The
+// producer selects only adapter_uid; profile and principal are resolved from
+// this record by the relay and cannot be mixed across targets by the caller.
+type ScheduledActionTarget struct {
+	AdapterUID       string   `json:"adapter_uid"`
+	AdapterProfile   string   `json:"adapter_profile"`
+	AdapterPrincipal string   `json:"adapter_principal"`
+	ActionKinds      []string `json:"action_kinds"`
+	DestinationRefs  []string `json:"destination_refs"`
 }
 
 // ObserverLimits bind a read-only credential to an explicit slice of relay

@@ -363,6 +363,13 @@ contextbridge cluster token create --role producer --subject my-app --max-jobs-p
 
 This prints token JSON. Store it securely; **never give an application the relay admin token**. The optional limits are stored with the credential and enforced durably by the relay. `--max-priority 20` prevents that producer from promoting work above priority 20; explicit `0` allows normal and lower-priority work only, while omission preserves the historical ceiling of 100. `--providers ollama --egress local_only` can additionally prevent that credential from selecting a remote route. For a separate CLI client, save the returned JSON as a private **UTF-8** file named `producer-token.json` and transfer it through a secure channel. Do not commit it.
 
+An out-of-tree channel can receive narrowly scoped authority to preview,
+confirm, list and cancel future adapter actions without an admin token or a
+private timer. The opt-in policy binds a stable presence UID to one v2 profile
+and principal plus explicit action kinds and opaque destinations. See
+[scoped scheduled adapter actions](docs/scoped-scheduled-actions.md); ordinary
+producer tokens have no such authority.
+
 `tenant_id` is a caller-selected namespace and policy selector, not customer
 authentication. For a customer- or project-specific token, add
 `--allowed-tenants customer-42`; a single value is applied when omitted and a

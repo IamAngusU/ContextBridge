@@ -443,7 +443,7 @@ func adapterClientConfig(options adapterCLIOptions) (config.Config, string, erro
 	}
 	explicit := options.token
 	if options.tokenFile != "" {
-		explicit, err = adapterCredentialFromFile(options.tokenFile)
+		explicit, err = clusterCredentialFromFile(options.tokenFile)
 		if err != nil {
 			return config.Config{}, "", err
 		}
@@ -455,10 +455,10 @@ func adapterClientConfig(options adapterCLIOptions) (config.Config, string, erro
 	return cfg, token, nil
 }
 
-func adapterCredentialFromFile(path string) (string, error) {
+func clusterCredentialFromFile(path string) (string, error) {
 	raw, err := readRegularFileBounded(path, 32<<10)
 	if err != nil {
-		return "", fmt.Errorf("read adapter credential: %w", err)
+		return "", fmt.Errorf("read cluster credential: %w", err)
 	}
 	token := strings.TrimSpace(string(raw))
 	var envelope struct {
@@ -468,7 +468,7 @@ func adapterCredentialFromFile(path string) (string, error) {
 		token = strings.TrimSpace(envelope.Token)
 	}
 	if !strings.HasPrefix(token, "cb_") || len(token) < 24 || strings.IndexFunc(token, unicode.IsSpace) >= 0 {
-		return "", errors.New("adapter token file does not contain a valid ContextBridge credential")
+		return "", errors.New("credential file does not contain a valid ContextBridge credential")
 	}
 	return token, nil
 }

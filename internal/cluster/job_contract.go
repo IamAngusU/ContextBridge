@@ -15,6 +15,7 @@ type admissionMode uint8
 const (
 	admissionSubmit admissionMode = iota
 	admissionValidateOnly
+	admissionScheduledAction
 )
 
 const (
@@ -49,6 +50,7 @@ const (
 	AdmissionCodeRequestInvalidJSON    = "request.invalid_json"
 	AdmissionCodeRequirementsInvalid   = "requirements.invalid"
 	AdmissionCodeRequirementsManaged   = "requirements.relay_managed"
+	AdmissionCodeTaskReserved          = "requirements.task_reserved"
 	AdmissionCodeReservationConflict   = "reservation.conflict"
 	AdmissionCodeReservationContext    = "reservation.context_mismatch"
 	AdmissionCodeReservationInvalid    = "reservation.invalid"
@@ -92,6 +94,7 @@ var stableAdmissionErrorCodes = []string{
 	AdmissionCodeRequestInvalidJSON,
 	AdmissionCodeRequirementsInvalid,
 	AdmissionCodeRequirementsManaged,
+	AdmissionCodeTaskReserved,
 	AdmissionCodeReservationConflict,
 	AdmissionCodeReservationContext,
 	AdmissionCodeReservationInvalid,
@@ -138,12 +141,26 @@ func NormalizeJobContractVersion(version string) (string, error) {
 	return "", fmt.Errorf("unsupported job contract version %q; this relay supports %s", version, JobContractV1)
 }
 
+// IsRelayReservedTask reports tasks that may be created only by a
+// relay-owned state machine, never by normal submissions, encrypted
+// reservations, or configured pipelines.
+func IsRelayReservedTask(task string) bool {
+	return strings.EqualFold(strings.TrimSpace(task), scheduledActionTask)
+}
+
 func (r *Relay) prepareAdmission(input SubmitRequest, record TokenRecord, mode admissionMode) (SubmitRequest, ContractValidation, error) {
 	contractVersion, err := NormalizeJobContractVersion(input.ContractVersion)
 	if err != nil {
 		return SubmitRequest{}, ContractValidation{}, rejectAdmission(http.StatusUnprocessableEntity, AdmissionCodeContractUnsupported, err)
 	}
 	input.ContractVersion = contractVersion
+	reservedScheduledTask := IsRelayReservedTask(input.Requirements.Task)
+	if mode != admissionScheduledAction && (reservedScheduledTask || input.scheduledActionInternal) {
+		return SubmitRequest{}, ContractValidation{}, rejectAdmission(http.StatusForbidden, AdmissionCodeTaskReserved, ErrScheduledActionTaskReserved)
+	}
+	if mode == admissionScheduledAction && (!reservedScheduledTask || !input.scheduledActionInternal) {
+		return SubmitRequest{}, ContractValidation{}, rejectAdmission(http.StatusUnprocessableEntity, AdmissionCodeRequirementsInvalid, errors.New("internal scheduled-action admission requires task scheduled_action"))
+	}
 
 	if mode == admissionValidateOnly && (input.AssignmentID != "" || input.AssignmentSecret != "") {
 		return SubmitRequest{}, ContractValidation{}, rejectAdmission(http.StatusUnprocessableEntity, AdmissionCodeReservationSubmitOnly, errors.New("one-time encrypted reservations can only be validated by actual submission"))

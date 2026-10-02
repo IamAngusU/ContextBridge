@@ -434,17 +434,7 @@ func (r *Relay) cancelTimedOutPipelineJob(id string, timeoutErr error) (Job, err
 		// still be executing a side-effecting adapter/model request. Keep that
 		// slot reserved until its matching result or disconnect while removing it
 		// from future stale-record scans, exactly like the public cancel endpoint.
-		reservationState := r.markWorkerReservationTerminalState(cancelled.AssignedNode, cancelled.ID)
-		if reservationState == workerReservationDispatched {
-			r.cancelWorkerExecution(cancelled)
-		} else {
-			failureCode := ""
-			if reservationState == workerReservationMissing && job.Status != JobQueued {
-				failureCode = FailureExecutionStateAmbiguous
-			}
-			_, _ = r.store.ResolveRoutingRecoveryProbe(cancelled.AssignedNode, cancelled.ID, failureCode)
-			_, _ = r.store.ReleaseAdapterSessionJobLock(cancelled.ID)
-		}
+		r.finalizeCancelledJob(cancelled, job.Status != JobQueued)
 		_ = r.store.AddEvent(Event{Kind: "job.cancelled", Message: "Pipeline step timed out", JobID: id})
 		return cancelled, timeoutErr
 	}

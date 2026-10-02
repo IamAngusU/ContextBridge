@@ -103,6 +103,22 @@ This presence contract is independent from the pull-based execution protocol
 below. A deployment may implement either, both, or neither without changing
 ordinary ContextBridge operation.
 
+An adapter that supports future external side effects may additionally use the
+[scoped scheduled action contract](scoped-scheduled-actions.md). Presence is
+still only liveness: an administrator-issued producer policy binds the exact
+presence UID to one v2 execution profile and principal. At the due time the
+relay emits a normal one-attempt v2 job, and the adapter claims its lease
+immediately before the side effect. This keeps timers and execution authority
+out of channel-specific processes without coupling the public core to a
+vendor.
+
+The execution route must use the exact `scheduled_action` task. ContextBridge
+reserves that task against normal job submissions, encrypted reservations and
+pipeline steps; only the confirmed scheduler can mint its in-memory admission
+capability. The adapter must independently fail closed unless the payload is
+the expected `contextbridge.scheduled-adapter-action.v1` opaque-reference
+envelope for its profile and exact presence UID.
+
 ## Local protocol v2
 
 The stable identifier is `contextbridge.adapter.v2`. Adapters connect to the

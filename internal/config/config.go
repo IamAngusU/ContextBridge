@@ -561,7 +561,7 @@ func (c Config) Validate() error {
 				return fmt.Errorf("route %s references unsupported provider %s", name, provider)
 			}
 		}
-		if route.Task != "" && route.Task != "moderation" && route.Task != "generation" && route.Task != "extraction" && route.Task != "embedding" && route.Task != "rag_ingest" && route.Task != "rag_query" && route.Task != "speech_to_text" {
+		if route.Task != "" && route.Task != "moderation" && route.Task != "generation" && route.Task != "extraction" && route.Task != "embedding" && route.Task != "rag_ingest" && route.Task != "rag_query" && route.Task != "vision" && route.Task != "speech_to_text" && route.Task != "scheduled_action" {
 			return fmt.Errorf("route %s has unsupported task %s", name, route.Task)
 		}
 		if route.TimeoutSeconds < 0 || route.TimeoutSeconds > 86400 {
@@ -958,6 +958,9 @@ func (c Config) Validate() error {
 			}
 			if step.MaxIterations < 0 || step.MaxIterations > globalIterations {
 				return fmt.Errorf("pipeline %s step %s max_iterations exceeds the pipeline limit", name, step.Name)
+			}
+			if cluster.IsRelayReservedTask(step.Requirements.Task) {
+				return fmt.Errorf("pipeline %s step %s task %s is reserved for the confirmed scheduled-action dispatcher", name, step.Name, step.Requirements.Task)
 			}
 			if err := cluster.ValidateRequirements(step.Requirements); err != nil {
 				return fmt.Errorf("pipeline %s step %s requirements: %w", name, step.Name, err)
@@ -1398,7 +1401,7 @@ func applyDefaults(cfg *Config, base string) {
 		cfg.Cluster.Placement.MaxLatencyPenalty = 60
 	}
 	if len(cfg.Cluster.Policies.AllowedTasks) == 0 {
-		cfg.Cluster.Policies.AllowedTasks = []string{"moderation", "generation", "extraction", "embedding", "rag_ingest", "rag_query", "vision", "speech_to_text"}
+		cfg.Cluster.Policies.AllowedTasks = []string{"moderation", "generation", "extraction", "embedding", "rag_ingest", "rag_query", "vision", "speech_to_text", "scheduled_action"}
 	}
 	if cfg.Cluster.Policies.MaxAttempts == 0 {
 		cfg.Cluster.Policies.MaxAttempts = 3
@@ -1730,7 +1733,7 @@ cluster:
     latency_weight: 12
     max_latency_penalty: 60
   policies:
-    allowed_tasks: [moderation, generation, extraction, embedding, rag_ingest, rag_query, vision]
+    allowed_tasks: [moderation, generation, extraction, embedding, rag_ingest, rag_query, vision, speech_to_text, scheduled_action]
     # Assignment generations. Only proven pre-execution worker capacity or
     # shutdown refusals are retried; ambiguous execution is always terminal.
     max_attempts: 3

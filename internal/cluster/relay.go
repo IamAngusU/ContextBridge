@@ -537,6 +537,11 @@ func (r *Relay) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/cluster/adapters", r.authorize("admin", "observer", "producer")(r.handleAdapters))
 	mux.HandleFunc("GET /v1/cluster/adapters/{id}", r.authorize("admin", "observer", "producer")(r.handleAdapter))
 	mux.HandleFunc("POST /v1/cluster/adapters/{id}/{action}", r.authorize("admin")(r.handleAdapterControl))
+	mux.HandleFunc("POST /v1/cluster/scheduled-actions/preview", r.authorize("producer")(r.handleScheduledActionPreview))
+	mux.HandleFunc("GET /v1/cluster/scheduled-actions", r.authorize("producer")(r.handleScheduledActions))
+	mux.HandleFunc("GET /v1/cluster/scheduled-actions/{id}", r.authorize("producer")(r.handleScheduledAction))
+	mux.HandleFunc("POST /v1/cluster/scheduled-actions/{id}/confirm", r.authorize("producer")(r.handleScheduledActionConfirm))
+	mux.HandleFunc("DELETE /v1/cluster/scheduled-actions/{id}", r.authorize("producer")(r.handleScheduledActionCancel))
 	mux.HandleFunc("GET /v1/cluster/workers/connect", r.authorize("node")(r.handleWorker))
 	mux.HandleFunc("GET /v1/cluster/tokens", r.authorize("admin")(r.handleTokens))
 	mux.HandleFunc("POST /v1/cluster/tokens", r.authorize("admin")(r.handleCreateToken))
@@ -564,6 +569,9 @@ func (r *Relay) handleWhoAmI(w http.ResponseWriter, req *http.Request) {
 	}
 	if record.Role == "observer" && !observerIsScoped(record) {
 		permissions["observer"] = append(permissions["observer"], "events:read")
+	}
+	if record.Role == "producer" && record.ProducerLimits.ScheduledActions != nil {
+		permissions["producer"] = append(permissions["producer"], "scheduled-actions:read-own", "scheduled-actions:write-own")
 	}
 	writeJSON(w, http.StatusOK, struct {
 		Schema      string         `json:"schema"`
@@ -1157,10 +1165,16 @@ func (r *Relay) handleCancel(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusConflict, err)
 		return
 	}
-	// Cancellation makes the durable record terminal, but it does not prove a
-	// side-effecting worker execution has stopped. Retain the occupied slot
-	// until the matching result or disconnect while excluding this reservation
-	// from future stale-record scans.
+	r.finalizeCancelledJob(job, existing.Status != JobQueued)
+	writeJSON(w, http.StatusOK, job)
+}
+
+// finalizeCancelledJob reconciles the relay's live execution state after the
+// durable store has made a job terminal. A logical cancellation is not proof
+// that side-effecting provider work stopped: a dispatched reservation keeps
+// its slot until the matching result or disconnect, while a provably
+// pre-dispatch cancellation can release its durable routing/session state.
+func (r *Relay) finalizeCancelledJob(job Job, executionMayHaveStarted bool) workerReservationTerminalState {
 	reservationState := r.markWorkerReservationTerminalState(job.AssignedNode, job.ID)
 	if reservationState == workerReservationDispatched {
 		// AssignedNode can also be an E2EE queue binding that has never been
@@ -1168,18 +1182,18 @@ func (r *Relay) handleCancel(w http.ResponseWriter, req *http.Request) {
 		// to cancel; otherwise a phantom cancel could poison the worker's bounded
 		// cancel-before-dispatch cache.
 		r.cancelWorkerExecution(job)
-	} else {
-		// A pre-dispatch reservation or queued encrypted binding proves no provider
-		// action began. A missing reservation for an already assigned job does not:
-		// treat that case as ambiguous and reopen the route circuit fail-closed.
-		failureCode := ""
-		if reservationState == workerReservationMissing && existing.Status != JobQueued {
-			failureCode = FailureExecutionStateAmbiguous
-		}
-		_, _ = r.store.ResolveRoutingRecoveryProbe(job.AssignedNode, job.ID, failureCode)
-		_, _ = r.store.ReleaseAdapterSessionJobLock(job.ID)
+		return reservationState
 	}
-	writeJSON(w, http.StatusOK, job)
+	// A pre-dispatch reservation or queued encrypted binding proves no provider
+	// action began. A missing reservation for a job that may have started does
+	// not: treat that case as ambiguous and reopen the route circuit fail-closed.
+	failureCode := ""
+	if reservationState == workerReservationMissing && executionMayHaveStarted {
+		failureCode = FailureExecutionStateAmbiguous
+	}
+	_, _ = r.store.ResolveRoutingRecoveryProbe(job.AssignedNode, job.ID, failureCode)
+	_, _ = r.store.ReleaseAdapterSessionJobLock(job.ID)
+	return reservationState
 }
 
 func (r *Relay) cancelWorkerExecution(job Job) {
@@ -1398,6 +1412,10 @@ func (r *Relay) handleReserve(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	record, _ := tokenRecord(req.Context())
+	if IsRelayReservedTask(input.Requirements.Task) {
+		writeErrorCode(w, http.StatusForbidden, AdmissionCodeTaskReserved, ErrScheduledActionTaskReserved)
+		return
+	}
 	if input.Requirements.AdapterEndpointID != 0 || input.Requirements.AdapterPrincipal != "" || input.Requirements.AdapterSessionRecovery {
 		writeError(w, http.StatusUnprocessableEntity, errors.New("adapter endpoint and recovery requirements are relay-assigned"))
 		return
@@ -1835,6 +1853,7 @@ func (r *Relay) dispatchLoop(ctx context.Context) {
 
 func (r *Relay) dispatch() {
 	now := time.Now().UTC()
+	r.runScheduledActions(now)
 	if r.maintenanceDue(now) {
 		r.runMaintenance(now)
 	}
@@ -2120,8 +2139,8 @@ func (r *Relay) pruneRetentionIfDue(now time.Time) {
 		r.logger.Printf("relay history retention failed: %v", err)
 		return
 	}
-	if pruned.Jobs > 0 || pruned.Events > 0 || pruned.PipelineRuns > 0 || pruned.SessionPlacements > 0 {
-		r.logger.Printf("relay history retention removed %d terminal jobs, %d events, %d terminal pipeline runs, and %d session placements", pruned.Jobs, pruned.Events, pruned.PipelineRuns, pruned.SessionPlacements)
+	if pruned.Jobs > 0 || pruned.Events > 0 || pruned.PipelineRuns > 0 || pruned.SessionPlacements > 0 || pruned.ScheduledActions > 0 {
+		r.logger.Printf("relay history retention removed %d terminal jobs, %d events, %d terminal pipeline runs, %d session placements, and %d scheduled actions", pruned.Jobs, pruned.Events, pruned.PipelineRuns, pruned.SessionPlacements, pruned.ScheduledActions)
 	}
 }
 
