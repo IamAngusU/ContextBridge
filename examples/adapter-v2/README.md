@@ -13,6 +13,7 @@ It demonstrates:
 - profile discovery and endpoint-capability registration;
 - endpoint-pinned polling;
 - lease generation plus opaque lease capability on every action;
+- lease-authority checks before claim and before completion;
 - claim-before-side-effect semantics;
 - bounded progress and completion; and
 - no automatic retry after an HTTP response or unknown transport outcome.
@@ -54,9 +55,12 @@ node examples/adapter-v2/reference-adapter.mjs
 ```
 
 Submit one job using route `reference`. The adapter exits after completing that
-job, which keeps the example deterministic. A production adapter would maintain
-heartbeats, renew long-running leases, observe cancellation, bound provider I/O,
-and stop automatic execution after an ambiguous post-claim disconnect.
+job, which keeps the example deterministic. It checks authority before crossing
+the claim boundary and again before completion, so a cancelled job is not
+reported as successful. A production adapter would additionally maintain
+heartbeats, renew and recheck authority during long-running provider work, bound
+provider I/O, and stop automatic execution after an ambiguous post-claim
+disconnect.
 
 Run the independent client tests with:
 

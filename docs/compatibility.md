@@ -106,7 +106,8 @@ claim of network, provider or multi-relay HA validation; see
 Adapter Conformance v1 launches an explicit out-of-tree adapter against an
 isolated loopback fake core and emits no privileged credential. It probes
 terminal authentication and HTTP failures, expired-lease handling, the scoped
-lifecycle, endpoint capability renewal, claim ordering, and a deliberately
+lifecycle, endpoint capability renewal, claim ordering, cancellation
+observation, replacement generation/capability fencing, and a deliberately
 ambiguous completion:
 
 ```sh
@@ -119,8 +120,9 @@ contextbridge adapter conformance \
   --json > adapter-conformance.json
 ```
 
-The supplied job must be safe to execute twice. The harness does not sandbox
-the executable or prove model/provider quality. Its report schema is
+The supplied job must be side-effect-free and safe to execute repeatedly; the
+current suite can execute it four times. The harness does not sandbox the
+executable or prove model/provider quality. Its report schema is
 [`schemas/adapter-conformance-v1.schema.json`](schemas/adapter-conformance-v1.schema.json),
 and its full boundary is documented in [`adapters.md`](adapters.md).
 

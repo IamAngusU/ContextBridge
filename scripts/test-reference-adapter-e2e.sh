@@ -51,6 +51,8 @@ expected = {
     "scoped_lifecycle",
     "endpoint_capability_renewal",
     "claim_before_completion",
+    "cancellation_observed_before_completion",
+    "lease_generation_capability_rotation",
     "ambiguous_completion_not_retried",
 }
 assert expected <= {item["id"] for item in report["checks"]}, report
