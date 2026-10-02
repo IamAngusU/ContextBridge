@@ -41,6 +41,7 @@ func TestPublicCoreDistributionSurfaceIsExplicit(t *testing.T) {
 		".gitleaks.toml":           true,
 		".gitignore":               true,
 		".markdownlint-cli2.jsonc": true,
+		"AGENTS.md":                true,
 		"CHANGELOG.md":             true,
 		"config.example.yml":       true,
 		"CONTRIBUTING.md":          true,
