@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -19,6 +20,13 @@ import (
 	"github.com/IamAngusU/ContextBridge/internal/cluster"
 	"github.com/IamAngusU/ContextBridge/internal/config"
 )
+
+func TestClusterAPIClientRejectsUntrustedRemoteCleartextTargetBeforeNetwork(t *testing.T) {
+	client := newClusterAPIClient("http://relay.example", "producer-token")
+	if _, err := client.Protocol(context.Background()); err == nil || !strings.Contains(err.Error(), "cleartext") {
+		t.Fatalf("typed cluster client accepted remote cleartext relay: %v", err)
+	}
+}
 
 func TestReadClusterAPIResponseAcceptsExactLimitAndRejectsOneByteMore(t *testing.T) {
 	exact := bytes.Repeat([]byte{'x'}, int(maximumClusterAPIResponseBytes))

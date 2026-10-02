@@ -24,6 +24,8 @@ described as vendor integrations here.
   accepted HA architecture, replicated-state boundary, alternatives, and proof
   gates; the implementation is not yet claimed.
 - [Automation](automation.md): schedules, pipelines, and verified follow-ups.
+- [Scoped scheduled adapter actions](scoped-scheduled-actions.md): durable
+  preview/confirm scheduling for least-privilege external channels.
 - [Bounded DAG pipeline contract](dag-pipelines.md): deterministic graph
   validation and the explicit current execution boundary.
 - [Authoritative execution events](execution-events.md): atomic per-job
@@ -65,6 +67,14 @@ described as vendor integrations here.
   machine-readable submission boundary.
 - [Adapter Conformance v1 schema](schemas/adapter-conformance-v1.schema.json):
   machine-readable black-box adapter evidence.
+- [Scheduled Action Policy v1 schema](schemas/scheduled-action-policy-v1.schema.json):
+  credential-bound target, action and destination authority.
+- [Scheduled Action Request v1 schema](schemas/scheduled-action-request-v1.schema.json):
+  normalized time and opaque adapter references.
+- [Scheduled Action v1 schema](schemas/scheduled-action-v1.schema.json):
+  content-minimized durable state and receipt links.
+- [Scheduled Adapter Action v1 schema](schemas/scheduled-adapter-action-v1.schema.json):
+  exact opaque-reference envelope delivered to a bound adapter.
 - [Verification Statement v1 schema](schemas/verification-statement-v1.schema.json):
   portable signed-review envelope.
 - [Verification Trust Key v1 schema](schemas/verification-trust-key-v1.schema.json):

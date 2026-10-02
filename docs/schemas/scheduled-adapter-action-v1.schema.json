@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contextbridge.dev/schemas/scheduled-adapter-action-v1.schema.json",
+  "title": "ContextBridge scheduled adapter action v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schedule_id",
+    "adapter_uid",
+    "occurrence",
+    "action_kind",
+    "destination_ref",
+    "payload_ref",
+    "scheduled_for",
+    "expires_at"
+  ],
+  "properties": {
+    "schema": {
+      "const": "contextbridge.scheduled-adapter-action.v1"
+    },
+    "schedule_id": {
+      "type": "string",
+      "pattern": "^sact_[0-9a-f]{32}$"
+    },
+    "adapter_uid": {
+      "type": "string",
+      "pattern": "^adp_[0-9a-f]{32}$"
+    },
+    "occurrence": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 366
+    },
+    "action_kind": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._:-]{0,79}$"
+    },
+    "destination_ref": {
+      "type": "string",
+      "pattern": "^dst_[0-9a-f]{32}$"
+    },
+    "payload_ref": {
+      "type": "string",
+      "pattern": "^ref_[0-9a-f]{32}$"
+    },
+    "scheduled_for": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

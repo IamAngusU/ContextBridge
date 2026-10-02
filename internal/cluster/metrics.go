@@ -17,6 +17,11 @@ func (r *Relay) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	retainedScheduledActions, err := r.store.retainedScheduledActionMetrics()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	nodes, err := r.store.ListNodes()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -68,6 +73,10 @@ func (r *Relay) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	writeMetricHelp(&output, "contextbridge_jobs", "Retained jobs by fixed durable state.", "gauge")
 	for _, state := range []string{JobQueued, JobAssigned, JobRunning, JobCompleted, JobFailed, JobCancelled} {
 		fmt.Fprintf(&output, "contextbridge_jobs{state=\"%s\"} %d\n", state, retainedJobs[state])
+	}
+	writeMetricHelp(&output, "contextbridge_scheduled_actions", "Retained scoped scheduled adapter actions by fixed durable state.", "gauge")
+	for _, state := range []string{ScheduledActionPreview, ScheduledActionActive, ScheduledActionCompleted, ScheduledActionFailed, ScheduledActionUnknown, ScheduledActionCancelled, ScheduledActionExpired} {
+		fmt.Fprintf(&output, "contextbridge_scheduled_actions{state=\"%s\"} %d\n", state, retainedScheduledActions[state])
 	}
 	writeMetricHelp(&output, "contextbridge_routing_circuits_open", "Currently open relay-owned routing circuits.", "gauge")
 	fmt.Fprintf(&output, "contextbridge_routing_circuits_open %d\n", circuitsOpen)

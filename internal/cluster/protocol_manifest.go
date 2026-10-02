@@ -3,13 +3,14 @@ package cluster
 const ProtocolManifestV1 = "contextbridge.protocol-manifest.v1"
 
 type ProtocolManifest struct {
-	Schema              string         `json:"schema"`
-	WireProtocolVersion int            `json:"wire_protocol_version"`
-	JobContractVersions []string       `json:"job_contract_versions"`
-	Features            []string       `json:"features"`
-	AdmissionErrorCodes []string       `json:"admission_error_codes"`
-	RuntimeFailureCodes []string       `json:"runtime_failure_codes"`
-	Limits              ProtocolLimits `json:"limits"`
+	Schema                      string         `json:"schema"`
+	WireProtocolVersion         int            `json:"wire_protocol_version"`
+	JobContractVersions         []string       `json:"job_contract_versions"`
+	Features                    []string       `json:"features"`
+	AdmissionErrorCodes         []string       `json:"admission_error_codes"`
+	RuntimeFailureCodes         []string       `json:"runtime_failure_codes"`
+	ScheduledActionFailureCodes []string       `json:"scheduled_action_failure_codes"`
+	Limits                      ProtocolLimits `json:"limits"`
 }
 
 type ProtocolLimits struct {
@@ -34,6 +35,16 @@ type ProtocolLimits struct {
 	MaximumPipelineParallelism       int   `json:"maximum_pipeline_parallelism"`
 	MaximumPipelineDependencyFan     int   `json:"maximum_pipeline_dependency_fan"`
 	MaximumPipelineDependencyEdges   int   `json:"maximum_pipeline_dependency_edges"`
+	MaximumScheduledActionRecords    int   `json:"maximum_scheduled_action_records"`
+	MaximumScheduledRecordsPerOwner  int   `json:"maximum_scheduled_action_records_per_owner"`
+	MaximumScheduledActionTargets    int   `json:"maximum_scheduled_action_targets_per_credential"`
+	MaximumScheduledActionKinds      int   `json:"maximum_scheduled_action_kinds_per_target"`
+	MaximumScheduledDestinations     int   `json:"maximum_scheduled_action_destinations_per_target"`
+	MaximumScheduledActive           int   `json:"maximum_scheduled_actions_active_per_owner_tenant"`
+	MaximumScheduledHorizonSeconds   int64 `json:"maximum_scheduled_action_horizon_seconds"`
+	MinimumScheduledIntervalSeconds  int64 `json:"minimum_scheduled_action_interval_seconds"`
+	MaximumScheduledOccurrences      int   `json:"maximum_scheduled_action_occurrences"`
+	MaximumScheduledWindowSeconds    int64 `json:"maximum_scheduled_action_delivery_window_seconds"`
 }
 
 func CurrentProtocolManifest(configuredJobBytes int64) ProtocolManifest {
@@ -80,12 +91,14 @@ func CurrentProtocolManifest(configuredJobBytes int64) ProtocolManifest {
 			"relay_conformance_v1",
 			"relay_role_health_v1",
 			"routing_recovery_probation_v1",
+			"scoped_scheduled_adapter_actions_v1",
 			"secure_offline_lan_pinning_v1",
 			"stable_runtime_failure_codes",
 			"worker_conformance_report_v1",
 		},
-		AdmissionErrorCodes: StableAdmissionErrorCodes(),
-		RuntimeFailureCodes: StableRuntimeFailureCodes(),
+		AdmissionErrorCodes:         StableAdmissionErrorCodes(),
+		RuntimeFailureCodes:         StableRuntimeFailureCodes(),
+		ScheduledActionFailureCodes: StableScheduledActionFailureCodes(),
 		Limits: ProtocolLimits{
 			MaximumConfiguredJobPayloadBytes: configuredJobBytes,
 			MaximumJobPayloadBytes:           MaximumJobPayloadBytes,
@@ -108,6 +121,16 @@ func CurrentProtocolManifest(configuredJobBytes int64) ProtocolManifest {
 			MaximumPipelineParallelism:       MaximumPipelineParallelism,
 			MaximumPipelineDependencyFan:     MaximumPipelineDependencyFan,
 			MaximumPipelineDependencyEdges:   MaximumPipelineDependencyEdges,
+			MaximumScheduledActionRecords:    maximumScheduledActionRecords,
+			MaximumScheduledRecordsPerOwner:  maximumScheduledActionRecordsPerOwner,
+			MaximumScheduledActionTargets:    maximumScheduledActionTargets,
+			MaximumScheduledActionKinds:      maximumScheduledActionKindsPerTarget,
+			MaximumScheduledDestinations:     maximumScheduledDestinationsPerTarget,
+			MaximumScheduledActive:           maximumScheduledMaxActive,
+			MaximumScheduledHorizonSeconds:   maximumScheduledHorizonSeconds,
+			MinimumScheduledIntervalSeconds:  minimumScheduledIntervalSeconds,
+			MaximumScheduledOccurrences:      maximumScheduledOccurrences,
+			MaximumScheduledWindowSeconds:    maximumScheduledDeliveryWindowSeconds,
 		},
 	}
 }

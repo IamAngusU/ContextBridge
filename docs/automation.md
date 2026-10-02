@@ -3,6 +3,13 @@
 ContextBridge provides three different automation layers. Choose the smallest
 one that represents the work.
 
+For a scoped producer or messaging channel that needs to request a future
+external side effect, use the separate
+[scoped scheduled adapter action](scoped-scheduled-actions.md) contract. It
+uses preview/confirm, opaque content references, an administrator-bound target
+and the adapter v2 claim boundary; it does not grant access to the local
+operator schedule API.
+
 ## Durable schedules
 
 A schedule stores one job, timing, bounded history, pause/resume state, and

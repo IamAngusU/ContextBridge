@@ -165,6 +165,8 @@ SEND AND INSPECT WORK
 POOL AND ROUTING
   contextbridge cluster status|events|estimate|node|submit|chat|route|pipeline
                                                Inspect or use a connected pool
+  contextbridge cluster scheduled-action preview|confirm|list|show|cancel
+                                               Schedule scoped external adapter actions
   contextbridge cluster agent auto|plan|run   Run bounded agent workflows
   contextbridge cluster pairing|token|login|account   Manage scoped cluster access
   contextbridge cluster lan init|relocate|join|status
@@ -237,7 +239,7 @@ func writeCommandGroupHelp(out io.Writer, path []string) bool {
 		help = `Usage: contextbridge cluster COMMAND [options]
 
 Observe:  status, events, estimate, node, dashboard, protocol
-Run:      submit, chat, pipeline, agent, selftest, route
+Run:      submit, chat, pipeline, scheduled-action, agent, selftest, route
 Trust:    pairing, token, login, account, lan
 Verify:   contract, receipt, conformance
 Setup:    configure
@@ -256,6 +258,8 @@ Use ` + "`contextbridge cluster COMMAND --help`" + ` for exact flags.
 		help = "Usage: contextbridge cluster contract validate --file JOB.json [options]\n"
 	case "cluster receipt":
 		help = "Usage: contextbridge cluster receipt show|export|verify|keygen [options]\n"
+	case "cluster scheduled-action":
+		help = "Usage: contextbridge cluster scheduled-action preview|confirm|list|show|cancel [options]\n"
 	default:
 		return false
 	}
@@ -1613,7 +1617,7 @@ func freeLocalAddress() (string, error) {
 
 func clusterCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: contextbridge cluster status|events|estimate|node|protocol|conformance|submit|chat|agent|selftest|route|contract|receipt|login|account|token|pairing|pool|lan")
+		return errors.New("usage: contextbridge cluster status|events|estimate|node|protocol|conformance|submit|chat|scheduled-action|agent|selftest|route|contract|receipt|login|account|token|pairing|pool|lan")
 	}
 	switch args[0] {
 	case "status":
@@ -1632,6 +1636,8 @@ func clusterCommand(args []string) error {
 		return clusterSubmitCommand(args[1:])
 	case "chat":
 		return clusterChatCommand(args[1:])
+	case "scheduled-action":
+		return clusterScheduledActionCommand(args[1:])
 	case "agent":
 		return clusterAgentCommand(args[1:])
 	case "selftest":
@@ -2646,6 +2652,7 @@ func clusterTokenCreateCommand(args []string) error {
 	allowedSubjects := flags.String("allowed-subjects", "", "comma-separated owner_subject allowlist bound to this observer credential")
 	egress := flags.String("egress", "", "producer egress ceiling: local_only or empty")
 	requireE2EE := flags.Bool("require-e2ee", false, "reject every cleartext job submitted with this producer credential")
+	scheduledActionsPolicy := flags.String("scheduled-actions-policy", "", "strict JSON file granting bounded scheduled adapter actions")
 	if err := parseInterspersedFlags(flags, args); err != nil {
 		return err
 	}
@@ -2655,6 +2662,16 @@ func clusterTokenCreateCommand(args []string) error {
 	maxPriorityLimit := explicitIntFlagValue(flags, "max-priority", *maxPriority)
 	if maxPriorityLimit != nil && (*maxPriorityLimit < 0 || *maxPriorityLimit > 100) {
 		return errors.New("--max-priority must be between 0 and 100")
+	}
+	scheduledActions, err := readScheduledActionPolicy(*scheduledActionsPolicy)
+	if err != nil {
+		return err
+	}
+	if scheduledActions != nil && !strings.EqualFold(strings.TrimSpace(*role), "producer") {
+		return errors.New("--scheduled-actions-policy requires --role producer")
+	}
+	if scheduledActions != nil && *requireE2EE {
+		return errors.New("scheduled adapter actions create a cleartext reference envelope and cannot be combined with --require-e2ee")
 	}
 	cfg, err := config.Load(*path)
 	if err != nil {
@@ -2669,7 +2686,7 @@ func clusterTokenCreateCommand(args []string) error {
 	var output map[string]interface{}
 	request := map[string]interface{}{
 		"role": *role, "subject": *subject, "groups": splitWorkerList(*groups), "lifetime_hours": *lifetimeHours,
-		"producer_limits": cluster.ProducerLimits{MaxQueuedJobs: *maxQueuedJobs, MaxJobsPerHour: *maxJobsPerHour, MaxPriority: maxPriorityLimit, Providers: splitWorkerList(*providers), AllowedTenants: producerTenants, Egress: strings.TrimSpace(*egress), RequireE2EE: *requireE2EE},
+		"producer_limits": cluster.ProducerLimits{MaxQueuedJobs: *maxQueuedJobs, MaxJobsPerHour: *maxJobsPerHour, MaxPriority: maxPriorityLimit, Providers: splitWorkerList(*providers), AllowedTenants: producerTenants, Egress: strings.TrimSpace(*egress), RequireE2EE: *requireE2EE, ScheduledActions: scheduledActions},
 		"observer_limits": cluster.ObserverLimits{AllowedSubjects: splitWorkerList(*allowedSubjects), AllowedTenants: observerTenants},
 	}
 	if err := clusterPOST(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/tokens", cfg.Cluster.Relay.AdminToken, request, &output); err != nil {

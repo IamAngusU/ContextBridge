@@ -168,6 +168,63 @@ func run(binary string) error {
 	test.check("observer can read metrics", observerMetrics.status == http.StatusOK && test.noSecrets(observerMetrics.body))
 	test.check("producer cannot mint credentials", producerTokenMint.status == http.StatusUnauthorized && test.noSecrets(producerTokenMint.body))
 
+	heartbeatBody, _ := json.Marshal(map[string]interface{}{
+		"schema": "contextbridge.adapter-presence.v1", "adapter_id": "dast-channel", "instance_id": "dast-host",
+		"display_name": "DAST channel", "kind": "control", "version": "1.0.0", "state": "ready",
+		"capabilities": []string{"scheduled-action"}, "lease_seconds": 60,
+	})
+	heartbeat := test.request(http.MethodPost, "/v1/cluster/adapters/heartbeat", producerA, heartbeatBody, nil)
+	var lease struct {
+		AdapterUID string `json:"adapter_uid"`
+	}
+	_ = json.Unmarshal(heartbeat.body, &lease)
+	test.check("adapter presence returns an opaque leased identity", heartbeat.status == http.StatusOK && strings.HasPrefix(lease.AdapterUID, "adp_") && test.noSecrets(heartbeat.body))
+	const destinationRef = "dst_0123456789abcdef0123456789abcdef"
+	const payloadRef = "ref_fedcba9876543210fedcba9876543210"
+	scheduledProducer, err := test.createScheduledProducerToken("dast-producer-a", lease.AdapterUID, destinationRef)
+	if err != nil {
+		return err
+	}
+	scheduledPeer, err := test.createScheduledProducerToken("dast-producer-a", lease.AdapterUID, destinationRef)
+	if err != nil {
+		return err
+	}
+	test.secrets = append(test.secrets, scheduledProducer, scheduledPeer)
+	scheduledRequest, _ := json.Marshal(map[string]interface{}{
+		"schema": "contextbridge.scheduled-action-request.v1", "adapter_uid": lease.AdapterUID,
+		"action_kind": "message.text", "destination_ref": destinationRef, "payload_ref": payloadRef,
+		"start_at": time.Now().UTC().Add(5 * time.Minute).Format(time.RFC3339), "timezone": "UTC", "priority": 20,
+	})
+	unauthorizedSchedule := test.request(http.MethodPost, "/v1/cluster/scheduled-actions/preview", "", scheduledRequest, nil)
+	unscopedSchedule := test.request(http.MethodPost, "/v1/cluster/scheduled-actions/preview", producerA, scheduledRequest, nil)
+	previewResponse := test.request(http.MethodPost, "/v1/cluster/scheduled-actions/preview", scheduledProducer, scheduledRequest, nil)
+	var preview struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}
+	_ = json.Unmarshal(previewResponse.body, &preview)
+	test.check("scheduled action requires authentication", unauthorizedSchedule.status == http.StatusUnauthorized && test.noSecrets(unauthorizedSchedule.body))
+	test.check("scheduled action requires explicit producer policy", unscopedSchedule.status == http.StatusForbidden && test.noSecrets(unscopedSchedule.body))
+	test.check("scoped scheduled action creates only a preview", previewResponse.status == http.StatusCreated && strings.HasPrefix(preview.ID, "sact_") && preview.Status == "preview" && !bytes.Contains(previewResponse.body, []byte("credential_hash")) && !bytes.Contains(previewResponse.body, []byte("dast-principal")) && test.noSecrets(previewResponse.body))
+	duplicateSchedule := test.request(http.MethodPost, "/v1/cluster/scheduled-actions/preview", scheduledProducer, []byte(`{"schema":"contextbridge.scheduled-action-request.v1","schema":"other"}`), nil)
+	rawDestination := bytes.Replace(scheduledRequest, []byte(destinationRef), []byte("+491701234567"), 1)
+	rawDestinationResponse := test.request(http.MethodPost, "/v1/cluster/scheduled-actions/preview", scheduledProducer, rawDestination, nil)
+	test.check("scheduled action duplicate JSON key rejected", duplicateSchedule.status == http.StatusBadRequest && test.noSecrets(duplicateSchedule.body))
+	test.check("scheduled action raw destination rejected", rawDestinationResponse.status == http.StatusForbidden && test.noSecrets(rawDestinationResponse.body))
+	forgedScheduledJob := test.request(http.MethodPost, "/v1/cluster/jobs", scheduledProducer, []byte(`{"source":"forged-schedule","requirements":{"task":"scheduled_action","provider":"adapter","adapter_profile":"dast-delivery"},"payload":{"prompt":"bypass confirmation"},"max_attempts":1}`), nil)
+	test.check("scheduled action task cannot bypass preview and confirmation", forgedScheduledJob.status == http.StatusForbidden && bytes.Contains(forgedScheduledJob.body, []byte("requirements.task_reserved")) && test.noSecrets(forgedScheduledJob.body))
+	forgedScheduledReservation := test.request(http.MethodPost, "/v1/cluster/assign", scheduledProducer, []byte(`{"requirements":{"task":"scheduled_action","provider":"adapter","adapter_profile":"dast-delivery"}}`), nil)
+	test.check("encrypted reservation cannot bypass scheduled action confirmation", forgedScheduledReservation.status == http.StatusForbidden && bytes.Contains(forgedScheduledReservation.body, []byte("requirements.task_reserved")) && test.noSecrets(forgedScheduledReservation.body))
+	if preview.ID != "" {
+		foreign := test.request(http.MethodPost, "/v1/cluster/scheduled-actions/"+preview.ID+"/confirm", scheduledPeer, []byte(`{}`), nil)
+		missing := test.request(http.MethodPost, "/v1/cluster/scheduled-actions/sact_"+strings.Repeat("0", 32)+"/confirm", scheduledPeer, []byte(`{}`), nil)
+		test.check("foreign scheduled action is indistinguishable from missing", foreign.status == http.StatusNotFound && missing.status == http.StatusNotFound && bytes.Equal(foreign.body, missing.body) && test.noSecrets(foreign.body))
+		confirmed := test.request(http.MethodPost, "/v1/cluster/scheduled-actions/"+preview.ID+"/confirm", scheduledProducer, []byte(`{}`), nil)
+		cancelled := test.request(http.MethodDelete, "/v1/cluster/scheduled-actions/"+preview.ID, scheduledProducer, nil, nil)
+		test.check("exact credential confirms scheduled preview", confirmed.status == http.StatusOK && bytes.Contains(confirmed.body, []byte(`"status":"active"`)) && test.noSecrets(confirmed.body))
+		test.check("exact credential cancels undispatched action", cancelled.status == http.StatusOK && bytes.Contains(cancelled.body, []byte(`"status":"cancelled"`)) && test.noSecrets(cancelled.body))
+	}
+
 	priorityDenied := test.request(http.MethodPost, "/v1/cluster/jobs", priorityCapped, []byte(`{"priority":21,"requirements":{"task":"generation","provider":"ollama"},"payload":{"prompt":"must not queue"}}`), nil)
 	priorityAllowed := test.request(http.MethodPost, "/v1/cluster/jobs", priorityCapped, []byte(`{"priority":20,"requirements":{"task":"generation","provider":"ollama"},"payload":{"prompt":"exact ceiling"}}`), nil)
 	var priorityJob struct {
@@ -334,6 +391,35 @@ func (s *suite) createPriorityCappedProducerToken(subject string, maxPriority in
 	}
 	if err := json.Unmarshal(created.body, &output); err != nil || output.Token == "" {
 		return "", errors.New("create priority-capped producer token returned an invalid response")
+	}
+	return output.Token, nil
+}
+
+func (s *suite) createScheduledProducerToken(subject, adapterUID, destinationRef string) (string, error) {
+	raw, _ := json.Marshal(map[string]interface{}{
+		"role": "producer", "subject": subject, "lifetime_hours": 1,
+		"producer_limits": map[string]interface{}{
+			"providers": []string{"adapter"}, "max_priority": 20,
+			"scheduled_actions": map[string]interface{}{
+				"schema": "contextbridge.scheduled-action-policy.v1",
+				"targets": []map[string]interface{}{{
+					"adapter_uid": adapterUID, "adapter_profile": "dast-delivery", "adapter_principal": "dast-principal",
+					"action_kinds": []string{"message.text"}, "destination_refs": []string{destinationRef},
+				}},
+				"max_active": 2, "max_horizon_seconds": 3600, "min_interval_seconds": 60,
+				"max_occurrences": 4, "max_delivery_window_seconds": 300,
+			},
+		},
+	})
+	created := s.request(http.MethodPost, "/v1/cluster/tokens", adminToken, raw, nil)
+	if created.status != http.StatusCreated {
+		return "", fmt.Errorf("create scheduled producer token returned HTTP %d: %s", created.status, created.body)
+	}
+	var output struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(created.body, &output); err != nil || output.Token == "" {
+		return "", errors.New("create scheduled producer token returned an invalid response")
 	}
 	return output.Token, nil
 }

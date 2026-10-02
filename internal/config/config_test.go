@@ -45,6 +45,9 @@ func TestDefaultConfigLoads(t *testing.T) {
 	if cfg.Cluster.Placement.PerformanceLearning == nil || !*cfg.Cluster.Placement.PerformanceLearning || cfg.Cluster.Placement.MinimumSamples != 3 || cfg.Cluster.Placement.HistoryTTLHours != 168 {
 		t.Fatalf("unexpected placement defaults: %#v", cfg.Cluster.Placement)
 	}
+	if !containsFoldConfig(cfg.Cluster.Policies.AllowedTasks, "speech_to_text") || !containsFoldConfig(cfg.Cluster.Policies.AllowedTasks, "scheduled_action") {
+		t.Fatalf("default relay task contract is incomplete: %#v", cfg.Cluster.Policies.AllowedTasks)
+	}
 	if _, err := os.Stat(cfg.Storage.Inbox); !os.IsNotExist(err) {
 		t.Fatal("loading config should not create the inbox")
 	}
@@ -67,6 +70,26 @@ func TestPlacementConfigurationIsBounded(t *testing.T) {
 	cfg.Cluster.Placement.LatencyWeight = math.NaN()
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "latency_weight") {
 		t.Fatalf("invalid placement weight was accepted: %v", err)
+	}
+}
+
+func TestPipelineCannotForgeReservedScheduledActionTask(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := Default(path); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Cluster.Pipelines = map[string]cluster.Pipeline{
+		"forged-schedule": {Steps: []cluster.PipelineStep{{
+			Name: "deliver", Requirements: cluster.Requirements{Task: "scheduled_action", Provider: "adapter", AdapterProfile: "delivery"},
+			Input: `{"prompt":"bypass confirmation"}`,
+		}}},
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "reserved for the confirmed scheduled-action dispatcher") {
+		t.Fatalf("pipeline accepted the relay-reserved task: %v", err)
 	}
 }
 
@@ -321,6 +344,21 @@ func TestScopedAdapterRouteAcceptsSpeechToTextTask(t *testing.T) {
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("valid speech-to-text adapter route was rejected: %v", err)
+	}
+}
+
+func TestRouteAcceptsVisionTaskFromDefaultPolicy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := Default(path); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Routes["vision"] = Route{Provider: "ollama", Task: "vision", Model: "auto", TimeoutSeconds: 180}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("vision is in the default task policy but its route was rejected: %v", err)
 	}
 }
 

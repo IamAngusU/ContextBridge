@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contextbridge.dev/schemas/scheduled-action-v1.schema.json",
+  "title": "ContextBridge scheduled action v1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema",
+    "id",
+    "status",
+    "owner_subject",
+    "credential_id",
+    "adapter_uid",
+    "adapter_profile",
+    "action_kind",
+    "destination_ref",
+    "payload_ref",
+    "start_at",
+    "local_start",
+    "timezone",
+    "occurrences",
+    "delivery_window_seconds",
+    "completed_occurrences",
+    "skipped_occurrences",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "schema": {
+      "const": "contextbridge.scheduled-action.v1"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^sact_[0-9a-f]{32}$"
+    },
+    "status": {
+      "enum": ["preview", "active", "completed", "failed", "unknown", "cancelled", "expired"]
+    },
+    "owner_subject": { "type": "string" },
+    "tenant_id": { "type": "string" },
+    "credential_id": { "type": "string" },
+    "adapter_uid": { "type": "string", "pattern": "^adp_[0-9a-f]{32}$" },
+    "adapter_profile": { "type": "string" },
+    "action_kind": { "type": "string" },
+    "destination_ref": { "type": "string", "pattern": "^dst_[0-9a-f]{32}$" },
+    "payload_ref": { "type": "string", "pattern": "^ref_[0-9a-f]{32}$" },
+    "start_at": { "type": "string", "format": "date-time" },
+    "local_start": { "type": "string", "format": "date-time" },
+    "timezone": { "type": "string" },
+    "repeat_every_seconds": { "type": "integer", "minimum": 0 },
+    "occurrences": { "type": "integer", "minimum": 1 },
+    "delivery_window_seconds": { "type": "integer", "minimum": 30 },
+    "priority": { "type": "integer", "minimum": -100, "maximum": 100 },
+    "completed_occurrences": { "type": "integer", "minimum": 0 },
+    "skipped_occurrences": { "type": "integer", "minimum": 0 },
+    "current_occurrence": { "type": "integer", "minimum": 1 },
+    "current_due_at": { "type": "string", "format": "date-time" },
+    "current_expires_at": { "type": "string", "format": "date-time" },
+    "current_job_id": { "type": "string" },
+    "last_job_id": { "type": "string" },
+    "last_outcome": { "type": "string" },
+    "failure_code": { "type": "string" },
+    "waiting_reason": { "type": "string" },
+    "next_run_at": { "type": "string", "format": "date-time" },
+    "next_check_at": { "type": "string", "format": "date-time" },
+    "preview_expires_at": { "type": "string", "format": "date-time" },
+    "confirmed_at": { "type": "string", "format": "date-time" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" }
+  },
+  "not": {
+    "anyOf": [
+      { "required": ["credential_hash"] },
+      { "required": ["adapter_principal"] }
+    ]
+  }
+}

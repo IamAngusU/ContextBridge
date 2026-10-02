@@ -96,6 +96,7 @@ func integrateCommand(args []string) error {
 	allowedSubjects := flags.String("allowed-subjects", "", "comma-separated owner_subject allowlist bound to a read-only UI credential")
 	egress := flags.String("egress", "", "producer egress ceiling: local_only or empty")
 	requireE2EE := flags.Bool("require-e2ee", false, "reject every cleartext job submitted with the relay producer credential")
+	scheduledActionsPolicy := flags.String("scheduled-actions-policy", "", "strict JSON file granting bounded scheduled adapter actions")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -126,11 +127,21 @@ func integrateCommand(args []string) error {
 	if *requireE2EE && target != "relay" {
 		return errors.New("--require-e2ee is available only for relay producer integration")
 	}
+	if strings.TrimSpace(*scheduledActionsPolicy) != "" && target != "relay" {
+		return errors.New("--scheduled-actions-policy is available only for relay producer integration")
+	}
 	if maxPriorityLimit != nil && target != "relay" {
 		return errors.New("--max-priority is available only for relay producer integration")
 	}
 	if maxPriorityLimit != nil && (*maxPriorityLimit < 0 || *maxPriorityLimit > 100) {
 		return errors.New("--max-priority must be between 0 and 100")
+	}
+	scheduledActions, err := readScheduledActionPolicy(*scheduledActionsPolicy)
+	if err != nil {
+		return err
+	}
+	if scheduledActions != nil && *requireE2EE {
+		return errors.New("scheduled adapter actions create a cleartext reference envelope and cannot be combined with --require-e2ee")
 	}
 
 	switch target {
@@ -283,7 +294,7 @@ func integrateCommand(args []string) error {
 		if err != nil {
 			return err
 		}
-		limits := cluster.ProducerLimits{MaxQueuedJobs: *maxQueuedJobs, MaxJobsPerHour: *maxJobsPerHour, MaxPriority: maxPriorityLimit, Providers: splitIntegrationList(*providers), AllowedTenants: splitIntegrationList(*allowedTenants), Egress: strings.TrimSpace(*egress), RequireE2EE: *requireE2EE}
+		limits := cluster.ProducerLimits{MaxQueuedJobs: *maxQueuedJobs, MaxJobsPerHour: *maxJobsPerHour, MaxPriority: maxPriorityLimit, Providers: splitIntegrationList(*providers), AllowedTenants: splitIntegrationList(*allowedTenants), Egress: strings.TrimSpace(*egress), RequireE2EE: *requireE2EE, ScheduledActions: scheduledActions}
 		info, err := createRelayIntegrationBundleGoverned(context.Background(), cfg, path, *subject, splitIntegrationList(*groups), *lifetimeHours, limits)
 		if err != nil {
 			return err
@@ -312,7 +323,7 @@ func integrateCommand(args []string) error {
 		if *lifetimeHours < 0 || *lifetimeHours > 10*365*24 {
 			return errors.New("--lifetime-hours must be between 0 and 87600")
 		}
-		if strings.TrimSpace(*groups) != "" || *maxQueuedJobs != 0 || *maxJobsPerHour != 0 || maxPriorityLimit != nil || strings.TrimSpace(*providers) != "" || strings.TrimSpace(*egress) != "" || *requireE2EE {
+		if strings.TrimSpace(*groups) != "" || *maxQueuedJobs != 0 || *maxJobsPerHour != 0 || maxPriorityLimit != nil || strings.TrimSpace(*providers) != "" || strings.TrimSpace(*egress) != "" || *requireE2EE || scheduledActions != nil {
 			return errors.New("producer groups, admission limits, providers, egress, and E2EE requirements do not apply to a read-only UI credential")
 		}
 		path, err := filepath.Abs(*writeEnv)

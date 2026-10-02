@@ -115,6 +115,8 @@ func TestMetricsRequiresObserverAndUsesOnlyBoundedAggregateLabels(t *testing.T) 
 				"contextbridge_worker_slots{state=\"busy\"} 2",
 				"contextbridge_jobs{state=\"queued\"} 0",
 				"contextbridge_jobs{state=\"failed\"} 3",
+				"contextbridge_scheduled_actions{state=\"active\"} 0",
+				"contextbridge_scheduled_actions{state=\"unknown\"} 0",
 				"contextbridge_routing_circuits_open 1",
 				"contextbridge_routing_circuits_probation 0",
 				"contextbridge_retained_compute_seconds 0.000",

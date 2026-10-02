@@ -69,6 +69,16 @@ func relayOpenAPI() map[string]interface{} {
 		"required": true,
 		"content":  map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]string{"$ref": "#/components/schemas/TokenCreateRequest"}}},
 	}
+	scheduledPreviewOperation := operation("Preview a credential-scoped scheduled adapter action", []string{"producer"}, "ScheduledAction", "201")
+	scheduledPreviewOperation["requestBody"] = map[string]interface{}{
+		"required": true,
+		"content":  map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]string{"$ref": "#/components/schemas/ScheduledActionRequest"}}},
+	}
+	scheduledListOperation := operation("List scheduled adapter actions created by this exact credential", []string{"producer"}, "ScheduledActionList")
+	scheduledListOperation["parameters"] = []map[string]interface{}{
+		{"name": "status", "in": "query", "schema": map[string]interface{}{"type": "string", "enum": []string{ScheduledActionPreview, ScheduledActionActive, ScheduledActionCompleted, ScheduledActionFailed, ScheduledActionUnknown, ScheduledActionCancelled, ScheduledActionExpired}}},
+		{"name": "limit", "in": "query", "schema": map[string]interface{}{"type": "integer", "minimum": 1, "maximum": maximumScheduledActionList, "default": maximumScheduledActionList}},
+	}
 	paths := map[string]interface{}{
 		"/v1/cluster/openapi.json": map[string]interface{}{"get": operation("Get this OpenAPI contract", []string{"admin", "observer", "producer", "node"}, "OpenAPI")},
 		"/v1/cluster/protocol":     map[string]interface{}{"get": operation("Get protocol capabilities and limits", []string{"admin", "observer", "producer", "node"}, "Object")},
@@ -101,6 +111,15 @@ func relayOpenAPI() map[string]interface{} {
 			},
 			"post": operation("Enable or disable one external adapter", []string{"admin"}, "Object"),
 		},
+		"/v1/cluster/scheduled-actions/preview": map[string]interface{}{"post": scheduledPreviewOperation},
+		"/v1/cluster/scheduled-actions":         map[string]interface{}{"get": scheduledListOperation},
+		"/v1/cluster/scheduled-actions/{id}": pathItem("id", map[string]interface{}{
+			"get":    operation("Get one scheduled adapter action created by this exact credential", []string{"producer"}, "ScheduledAction"),
+			"delete": operation("Cancel one scheduled adapter action created by this exact credential", []string{"producer"}, "ScheduledAction"),
+		}),
+		"/v1/cluster/scheduled-actions/{id}/confirm": pathItem("id", map[string]interface{}{
+			"post": operation("Confirm an unexpired scheduled adapter action preview", []string{"producer"}, "ScheduledAction"),
+		}),
 		"/v1/cluster/tokens": map[string]interface{}{
 			"get":  operation("List credential metadata without bearer values", []string{"admin"}, "Object"),
 			"post": tokenCreationOperation,
@@ -165,6 +184,69 @@ func relayOpenAPI() map[string]interface{} {
 				"SubmitRequest": map[string]interface{}{
 					"type": "object", "properties": map[string]interface{}{"id": map[string]string{"type": "string"}, "tenant_id": map[string]string{"type": "string"}, "source": map[string]string{"type": "string"}, "requirements": map[string]string{"type": "object"}, "payload": map[string]interface{}{}, "sealed_payload": map[string]string{"type": "object"}, "pool_authorization": map[string]string{"$ref": "#/components/schemas/PoolJobAuthorization"}, "assignment_id": map[string]string{"type": "string"}, "assignment_secret": map[string]interface{}{"type": "string", "writeOnly": true}, "priority": map[string]interface{}{"type": "integer", "minimum": -100, "maximum": 100}, "max_attempts": map[string]interface{}{"type": "integer", "minimum": 0, "maximum": 10}},
 				},
+				"ScheduledActionTarget": map[string]interface{}{
+					"type": "object", "additionalProperties": false, "required": []string{"adapter_uid", "adapter_profile", "adapter_principal", "action_kinds", "destination_refs"},
+					"properties": map[string]interface{}{
+						"adapter_uid":       map[string]interface{}{"type": "string", "pattern": "^adp_[0-9a-f]{32}$"},
+						"adapter_profile":   map[string]interface{}{"type": "string", "minLength": 1, "maxLength": 80},
+						"adapter_principal": map[string]interface{}{"type": "string", "minLength": 1, "maxLength": 80},
+						"action_kinds":      map[string]interface{}{"type": "array", "minItems": 1, "maxItems": maximumScheduledActionKindsPerTarget, "uniqueItems": true, "items": map[string]interface{}{"type": "string", "pattern": "^[a-z0-9][a-z0-9._:-]{0,79}$"}},
+						"destination_refs":  map[string]interface{}{"type": "array", "minItems": 1, "maxItems": maximumScheduledDestinationsPerTarget, "uniqueItems": true, "items": map[string]interface{}{"type": "string", "pattern": "^dst_[0-9a-f]{32}$"}},
+					},
+				},
+				"ScheduledActionLimits": map[string]interface{}{
+					"type": "object", "additionalProperties": false, "required": []string{"schema", "targets"},
+					"properties": map[string]interface{}{
+						"schema":                      map[string]interface{}{"type": "string", "const": ScheduledActionPolicyV1},
+						"targets":                     map[string]interface{}{"type": "array", "minItems": 1, "maxItems": maximumScheduledActionTargets, "items": map[string]string{"$ref": "#/components/schemas/ScheduledActionTarget"}},
+						"max_active":                  map[string]interface{}{"type": "integer", "minimum": 0, "maximum": maximumScheduledMaxActive},
+						"max_horizon_seconds":         map[string]interface{}{"type": "integer", "minimum": 0, "maximum": maximumScheduledHorizonSeconds},
+						"min_interval_seconds":        map[string]interface{}{"anyOf": []map[string]interface{}{{"const": 0}, {"type": "integer", "minimum": minimumScheduledIntervalSeconds, "maximum": maximumScheduledHorizonSeconds}}},
+						"max_occurrences":             map[string]interface{}{"type": "integer", "minimum": 0, "maximum": maximumScheduledOccurrences},
+						"max_delivery_window_seconds": map[string]interface{}{"anyOf": []map[string]interface{}{{"const": 0}, {"type": "integer", "minimum": minimumScheduledDeliveryWindowSeconds, "maximum": maximumScheduledDeliveryWindowSeconds}}},
+					},
+				},
+				"ScheduledActionRequest": map[string]interface{}{
+					"type": "object", "additionalProperties": false,
+					"required": []string{"schema", "adapter_uid", "action_kind", "destination_ref", "payload_ref", "start_at", "timezone"},
+					"properties": map[string]interface{}{
+						"schema":                  map[string]interface{}{"type": "string", "const": ScheduledActionRequestV1},
+						"tenant_id":               map[string]interface{}{"type": "string", "maxLength": 200},
+						"adapter_uid":             map[string]interface{}{"type": "string", "pattern": "^adp_[0-9a-f]{32}$"},
+						"action_kind":             map[string]interface{}{"type": "string", "pattern": "^[a-z0-9][a-z0-9._:-]{0,79}$"},
+						"destination_ref":         map[string]interface{}{"type": "string", "pattern": "^dst_[0-9a-f]{32}$"},
+						"payload_ref":             map[string]interface{}{"type": "string", "pattern": "^ref_[0-9a-f]{32}$"},
+						"start_at":                map[string]interface{}{"type": "string", "format": "date-time"},
+						"timezone":                map[string]interface{}{"type": "string", "minLength": 1, "maxLength": 80},
+						"repeat_every_seconds":    map[string]interface{}{"anyOf": []map[string]interface{}{{"const": 0}, {"type": "integer", "minimum": minimumScheduledIntervalSeconds, "maximum": maximumScheduledHorizonSeconds}}},
+						"occurrences":             map[string]interface{}{"type": "integer", "minimum": 0, "maximum": maximumScheduledOccurrences},
+						"delivery_window_seconds": map[string]interface{}{"anyOf": []map[string]interface{}{{"const": 0}, {"type": "integer", "minimum": minimumScheduledDeliveryWindowSeconds, "maximum": maximumScheduledDeliveryWindowSeconds}}},
+						"priority":                map[string]interface{}{"type": "integer", "minimum": -100, "maximum": 100},
+					},
+				},
+				"ScheduledAction": map[string]interface{}{
+					"type": "object", "description": "Content-minimized durable action. The execution principal and credential hash are never returned.",
+					"required": []string{"schema", "id", "status", "owner_subject", "credential_id", "adapter_uid", "adapter_profile", "action_kind", "destination_ref", "payload_ref", "start_at", "local_start", "timezone", "occurrences", "delivery_window_seconds", "completed_occurrences", "skipped_occurrences", "created_at", "updated_at"},
+					"properties": map[string]interface{}{
+						"schema": map[string]interface{}{"type": "string", "const": ScheduledActionV1}, "id": map[string]string{"type": "string"},
+						"status":        map[string]interface{}{"type": "string", "enum": []string{ScheduledActionPreview, ScheduledActionActive, ScheduledActionCompleted, ScheduledActionFailed, ScheduledActionUnknown, ScheduledActionCancelled, ScheduledActionExpired}},
+						"owner_subject": map[string]string{"type": "string"}, "tenant_id": map[string]string{"type": "string"}, "credential_id": map[string]string{"type": "string"},
+						"adapter_uid": map[string]string{"type": "string"}, "adapter_profile": map[string]string{"type": "string"}, "action_kind": map[string]string{"type": "string"},
+						"destination_ref": map[string]string{"type": "string"}, "payload_ref": map[string]string{"type": "string"}, "start_at": map[string]interface{}{"type": "string", "format": "date-time"},
+						"local_start": map[string]string{"type": "string"}, "timezone": map[string]string{"type": "string"}, "repeat_every_seconds": map[string]string{"type": "integer"},
+						"occurrences": map[string]string{"type": "integer"}, "delivery_window_seconds": map[string]string{"type": "integer"}, "priority": map[string]string{"type": "integer"},
+						"completed_occurrences": map[string]string{"type": "integer"}, "skipped_occurrences": map[string]string{"type": "integer"}, "current_occurrence": map[string]string{"type": "integer"},
+						"current_due_at": map[string]interface{}{"type": "string", "format": "date-time"}, "current_expires_at": map[string]interface{}{"type": "string", "format": "date-time"},
+						"current_job_id": map[string]string{"type": "string"}, "last_job_id": map[string]string{"type": "string"}, "last_outcome": map[string]string{"type": "string"},
+						"failure_code": map[string]string{"type": "string"}, "waiting_reason": map[string]string{"type": "string"}, "next_run_at": map[string]interface{}{"type": "string", "format": "date-time"},
+						"next_check_at": map[string]interface{}{"type": "string", "format": "date-time"}, "preview_expires_at": map[string]interface{}{"type": "string", "format": "date-time"},
+						"confirmed_at": map[string]interface{}{"type": "string", "format": "date-time"}, "created_at": map[string]interface{}{"type": "string", "format": "date-time"}, "updated_at": map[string]interface{}{"type": "string", "format": "date-time"},
+					},
+				},
+				"ScheduledActionList": map[string]interface{}{
+					"type": "object", "required": []string{"schema", "actions", "total"},
+					"properties": map[string]interface{}{"schema": map[string]interface{}{"type": "string", "const": ScheduledActionListV1}, "actions": map[string]interface{}{"type": "array", "items": map[string]string{"$ref": "#/components/schemas/ScheduledAction"}}, "total": map[string]string{"type": "integer"}},
+				},
 				"ObserverLimits": map[string]interface{}{
 					"type": "object", "additionalProperties": false,
 					"properties": map[string]interface{}{
@@ -182,6 +264,7 @@ func relayOpenAPI() map[string]interface{} {
 						"allowed_tenants":   map[string]interface{}{"type": "array", "maxItems": 32, "uniqueItems": true, "items": map[string]interface{}{"type": "string", "maxLength": 200}},
 						"egress":            map[string]interface{}{"type": "string", "enum": []string{"", "local_only"}},
 						"require_e2ee":      map[string]string{"type": "boolean"},
+						"scheduled_actions": map[string]string{"$ref": "#/components/schemas/ScheduledActionLimits"},
 					},
 				},
 				"TokenCreateRequest": map[string]interface{}{

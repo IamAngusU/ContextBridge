@@ -49,6 +49,8 @@ var (
 	bucketJobIdempotency      = []byte("job_idempotency_v1")
 	bucketJobIdempotencyByJob = []byte("job_idempotency_by_job_v1")
 	bucketProducerRateWindows = []byte("producer_rate_windows_v1")
+	bucketScheduledActions    = []byte("scheduled_actions_v1")
+	bucketScheduledChecks     = []byte("scheduled_action_checks_v1")
 	keyJobOwnerIndexVersion   = []byte("job_owner_index_version")
 	jobOwnerIndexVersion      = []byte("1")
 	keyOwnerLookupVersion     = []byte("execution_owner_lookup_version")
@@ -68,6 +70,7 @@ func requiredStoreBuckets() [][]byte {
 		bucketQueue, bucketQueueJobIndex, bucketQueueCounts, bucketNodes, bucketTokens, bucketPairings, bucketPairCodes,
 		bucketAssignments, bucketEvents, bucketJobEvents, bucketPipelineEvents, bucketPipelineRuns, bucketPipelineOwnerLookup, bucketSessionPlacements,
 		bucketAdapterSessionLocks, bucketAdapterControls, bucketJobIdempotency, bucketJobIdempotencyByJob, bucketProducerRateWindows,
+		bucketScheduledActions, bucketScheduledChecks,
 		bucketHistoricalTotals,
 	}
 }
@@ -267,20 +270,13 @@ func (s *Store) AdapterEnabled(adapterUID string) (bool, error) {
 	if !validAdapterUID(adapterUID) {
 		return false, errors.New("adapter UID is invalid")
 	}
-	control := AdapterControl{}
+	enabled := false
 	err := s.db.View(func(tx *bolt.Tx) error {
-		return getJSON(tx.Bucket(bucketAdapterControls), adapterUID, &control)
+		var err error
+		enabled, err = adapterEnabledTx(tx, adapterUID)
+		return err
 	})
-	if errors.Is(err, os.ErrNotExist) {
-		return true, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	if control.Schema != AdapterControlV1 || control.AdapterUID != adapterUID || control.ActorSubject == "" || control.UpdatedAt.IsZero() {
-		return false, errors.New("adapter control record is invalid")
-	}
-	return control.Enabled, nil
+	return enabled, err
 }
 
 // SetAdapterEnabled stores one explicit operator decision. The adapter still
@@ -470,7 +466,7 @@ func normalizeObserverLimits(limits ObserverLimits) ObserverLimits {
 }
 
 func validateProducerLimits(role string, limits ProducerLimits) error {
-	if role != "producer" && (limits.MaxQueuedJobs != 0 || limits.MaxJobsPerHour != 0 || limits.MaxPriority != nil || len(limits.Providers) != 0 || len(limits.AllowedTenants) != 0 || limits.Egress != "" || limits.RequireE2EE) {
+	if role != "producer" && (limits.MaxQueuedJobs != 0 || limits.MaxJobsPerHour != 0 || limits.MaxPriority != nil || len(limits.Providers) != 0 || len(limits.AllowedTenants) != 0 || limits.Egress != "" || limits.RequireE2EE || limits.ScheduledActions != nil) {
 		return errors.New("producer limits may only be assigned to producer tokens")
 	}
 	if limits.MaxQueuedJobs < 0 || limits.MaxQueuedJobs > maxQueuedJobsPerOwner {
@@ -513,6 +509,15 @@ func validateProducerLimits(role string, limits ProducerLimits) error {
 	if limits.Egress != "" && limits.Egress != "local_only" {
 		return errors.New("producer_limits.egress must be empty or local_only")
 	}
+	if err := validateScheduledActionLimits(limits.ScheduledActions); err != nil {
+		return err
+	}
+	if limits.ScheduledActions != nil && limits.RequireE2EE {
+		return errors.New("producer_limits.scheduled_actions cannot be combined with require_e2ee because the relay must create a bounded adapter envelope at dispatch time")
+	}
+	if limits.ScheduledActions != nil && len(limits.Providers) > 0 && !containsFold(limits.Providers, "adapter") {
+		return errors.New("producer_limits.scheduled_actions requires provider adapter when a provider allowlist is set")
+	}
 	return nil
 }
 
@@ -524,6 +529,7 @@ func normalizeProducerLimits(limits ProducerLimits) ProducerLimits {
 	limits.Providers = cleanList(limits.Providers, 32, 80)
 	limits.AllowedTenants = cleanList(limits.AllowedTenants, 32, 200)
 	limits.Egress = strings.ToLower(strings.TrimSpace(limits.Egress))
+	limits.ScheduledActions = normalizeScheduledActionLimits(limits.ScheduledActions)
 	return limits
 }
 
@@ -1303,6 +1309,13 @@ func (s *Store) createJob(request SubmitRequest, maxQueued int, limits ProducerL
 }
 
 func prepareJob(request SubmitRequest, idempotencyKey, requestHash string, now time.Time) (Job, error) {
+	if request.scheduledActionInternal {
+		if request.Requirements.Task != scheduledActionTask {
+			return Job{}, errors.New("internal scheduled-action capability requires the exact scheduled_action task")
+		}
+	} else if IsRelayReservedTask(request.Requirements.Task) {
+		return Job{}, ErrScheduledActionTaskReserved
+	}
 	if err := request.PolicyDecision.ValidateAllowed(); err != nil {
 		return Job{}, err
 	}
@@ -2781,36 +2794,45 @@ func (s *Store) CancelJobForProducer(id, owner string, allowedTenants []string) 
 		if owner != "" && (job.OwnerSubject != owner || !tenantAllowed(job.TenantID, allowedTenants)) {
 			return os.ErrNotExist
 		}
-		if job.Status == JobCompleted || job.Status == JobFailed || job.Status == JobCancelled {
-			return errors.New("job is already final")
-		}
-		queued := job.Status == JobQueued
-		job.Status = JobCancelled
-		job.FinishedAt = time.Now().UTC()
-		job.UpdatedAt = job.FinishedAt
-		if queued {
-			// No provider action can have begun for a queued job. Retain its
-			// identity, ownership, policy and routing evidence, but discard the
-			// attacker-controlled bulk body. Idempotency continues to resolve to
-			// this terminal tombstone without retaining MiBs per cancel cycle.
-			job.Payload = nil
-			job.SealedPayload = nil
-			job.Result = nil
-			job.SealedResult = nil
-			job.Progress = nil
-		}
-		if err := deleteQueueEntry(tx, id); err != nil {
-			return err
-		}
-		if err := putJSON(tx.Bucket(bucketJobs), id, job); err != nil {
-			return err
-		}
-		if err := appendAuthoritativeJobEventTx(tx, s, job, "job.cancelled"); err != nil {
-			return err
-		}
-		return appendPipelineStepEventTx(tx, s, job, "pipeline.step.cancelled")
+		var err error
+		job, err = cancelJobTx(tx, s, job, time.Now().UTC())
+		return err
 	})
 	return job, err
+}
+
+func cancelJobTx(tx *bolt.Tx, store *Store, job Job, now time.Time) (Job, error) {
+	if terminalJobStatus(job.Status) {
+		return Job{}, errors.New("job is already final")
+	}
+	queued := job.Status == JobQueued
+	job.Status = JobCancelled
+	job.FinishedAt = now.UTC()
+	job.UpdatedAt = job.FinishedAt
+	if queued {
+		// No provider action can have begun for a queued job. Retain its
+		// identity, ownership, policy and routing evidence, but discard the
+		// attacker-controlled bulk body. Idempotency continues to resolve to
+		// this terminal tombstone without retaining MiBs per cancel cycle.
+		job.Payload = nil
+		job.SealedPayload = nil
+		job.Result = nil
+		job.SealedResult = nil
+		job.Progress = nil
+	}
+	if err := deleteQueueEntry(tx, job.ID); err != nil {
+		return Job{}, err
+	}
+	if err := putJSON(tx.Bucket(bucketJobs), job.ID, job); err != nil {
+		return Job{}, err
+	}
+	if err := appendAuthoritativeJobEventTx(tx, store, job, "job.cancelled"); err != nil {
+		return Job{}, err
+	}
+	if err := appendPipelineStepEventTx(tx, store, job, "pipeline.step.cancelled"); err != nil {
+		return Job{}, err
+	}
+	return job, nil
 }
 
 func (s *Store) CompleteJob(id, nodeID string, attempt int, result json.RawMessage, sealed *SealedEnvelope, usage Usage, jobError string, execution ...*ExecutionMetadata) (Job, error) {

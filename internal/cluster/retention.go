@@ -48,6 +48,7 @@ type RetentionResult struct {
 	Events            int
 	PipelineRuns      int
 	SessionPlacements int
+	ScheduledActions  int
 }
 
 type historicalJobTotals struct {
@@ -130,6 +131,10 @@ func (s *Store) PruneRetention(now time.Time, policy RetentionPolicy) (Retention
 		}); err != nil {
 			return err
 		}
+		activeScheduledActionJobs, err := scheduledActionCurrentJobRefsTx(tx, cutoff)
+		if err != nil {
+			return err
+		}
 		jobKeep, err := newestTerminalJobs(tx.Bucket(bucketJobs), cutoff, policy.MaxTerminalJobs)
 		if err != nil {
 			return err
@@ -159,6 +164,12 @@ func (s *Store) PruneRetention(now time.Time, policy RetentionPolicy) (Retention
 				continue
 			}
 			if _, activeProbe := activeProbeJobs[job.ID]; activeProbe {
+				continue
+			}
+			// CurrentJobID is live scheduler state even after the linked job turns
+			// terminal: the next reconciliation consumes that record to advance the
+			// occurrence. Keep it until the action itself reaches retention age.
+			if _, activeSchedule := activeScheduledActionJobs[job.ID]; activeSchedule {
 				continue
 			}
 			// A cancelled adapter execution can remain active until its matching
@@ -211,6 +222,32 @@ func (s *Store) PruneRetention(now time.Time, policy RetentionPolicy) (Retention
 			return err
 		}
 		result.SessionPlacements = removedPlacements
+		removedScheduledActions, err := pruneScheduledActionsTx(tx, cutoff)
+		if err != nil {
+			return err
+		}
+		result.ScheduledActions = removedScheduledActions
+		return nil
+	})
+	return result, err
+}
+
+func scheduledActionCurrentJobRefsTx(tx *bolt.Tx, cutoff time.Time) (map[string]struct{}, error) {
+	result := map[string]struct{}{}
+	err := tx.Bucket(bucketScheduledActions).ForEach(func(key, value []byte) error {
+		var action ScheduledAction
+		if err := json.Unmarshal(value, &action); err != nil || !validStoredScheduledAction(action, string(key)) || !validScheduledActionStatus(action.Status) {
+			return errors.New("scheduled action record is invalid")
+		}
+		if action.CurrentJobID == "" {
+			return nil
+		}
+		// Terminal actions older than the same cutoff are removed later in this
+		// transaction, so their historical job references need no extra sweep.
+		if scheduledActionTerminal(action.Status) && action.UpdatedAt.Before(cutoff) {
+			return nil
+		}
+		result[action.CurrentJobID] = struct{}{}
 		return nil
 	})
 	return result, err

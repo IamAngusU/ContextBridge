@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contextbridge.dev/schemas/scheduled-action-policy-v1.schema.json",
+  "title": "ContextBridge scheduled action policy v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "targets"],
+  "properties": {
+    "schema": {
+      "const": "contextbridge.scheduled-action-policy.v1"
+    },
+    "targets": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["adapter_uid", "adapter_profile", "adapter_principal", "action_kinds", "destination_refs"],
+        "properties": {
+          "adapter_uid": {
+            "type": "string",
+            "pattern": "^adp_[0-9a-f]{32}$"
+          },
+          "adapter_profile": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "adapter_principal": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "action_kinds": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._:-]{0,79}$"
+            }
+          },
+          "destination_refs": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^dst_[0-9a-f]{32}$"
+            }
+          }
+        }
+      }
+    },
+    "max_active": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "Zero selects the relay default of 8 per owner and tenant."
+    },
+    "max_horizon_seconds": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 31536000,
+      "description": "Zero selects the relay default of 604800 seconds."
+    },
+    "min_interval_seconds": {
+      "anyOf": [
+        { "const": 0 },
+        { "type": "integer", "minimum": 60, "maximum": 31536000 }
+      ],
+      "description": "Zero selects the relay default of 900 seconds."
+    },
+    "max_occurrences": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 366,
+      "description": "Zero selects the relay default of 32."
+    },
+    "max_delivery_window_seconds": {
+      "anyOf": [
+        { "const": 0 },
+        { "type": "integer", "minimum": 30, "maximum": 86400 }
+      ],
+      "description": "Zero selects the relay default of 3600 seconds."
+    }
+  }
+}

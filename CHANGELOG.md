@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Added opt-in, credential-scoped scheduled adapter actions. Producers can
+  preview, explicitly confirm, inspect, and cancel only administrator-bound
+  action kinds and opaque destinations; the relay durably emits one-attempt
+  v2 adapter jobs and stops on ambiguous execution instead of replaying an
+  external side effect. Exact-credential isolation, bounded intervals and
+  horizons, fresh adapter presence, disable/revocation checks, normalized IANA
+  timezones, per-owner/global history bounds, retention, CLI/OpenAPI/JSON
+  schemas, fixed-cardinality Prometheus state gauges, and black-box coverage
+  are included. IANA timezone data is embedded so local and relay schedules
+  remain portable on standalone Windows installations and offline hosts.
+- Corrected the generated default relay task allowlist to retain the already
+  documented `speech_to_text` task; the generated file, example file, and
+  in-memory fallback now expose the same neutral task set. Route validation
+  now also accepts the already supported/default-allowed `vision` task.
 - Added an optional producer-token `max_priority` ceiling with CLI and OpenAPI
   support. Explicit zero blocks self-promotion above the normal tier, omission
   preserves the historical maximum of 100, and both ordinary and reserved
