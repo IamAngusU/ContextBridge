@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Extended `contextbridge adapter setup` with exact `local`/`remote` execution
+  classification and repeatable bounded `KEY=JSON` profile options. Setup
+  remains idempotent, rejects ambiguous or oversized option structures, and
+  reports only option keys so driver configuration does not become a secret
+  display channel.
 - Let adapter inspection and relay-admission commands accept one unambiguous
   leased adapter or instance ID in addition to the stable `adp_...` UID. The
   CLI now accepts flags on either side of that selector, refuses ambiguous

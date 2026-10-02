@@ -37,6 +37,8 @@ contextbridge adapter setup local-speech \
   --task speech_to_text \
   --route speech_local \
   --model whisper-large-v3-turbo \
+  --classification local \
+  --option 'language_hints=["de","en"]' \
   --token-file ./secrets/local-speech.token \
   --create-token
 ```
@@ -47,6 +49,15 @@ a missing credential is created. An existing credential is reused without
 being displayed or rotated, and conflicting existing configuration is
 rejected. The adapter process is still started separately and must prove its
 own readiness through the protocol below.
+
+`--classification local|remote` records the reviewed execution boundary for
+that exact profile. It does not make an adapter trusted and it does not weaken
+per-job egress policy. Repeatable `--option KEY=JSON` values provide bounded,
+typed driver settings such as host allowlists or response-size limits. They
+are stored in the main configuration and returned to the scoped adapter, so
+secret values must remain in independent permission-restricted files and only
+their file paths may be referenced by options. Setup output lists option keys,
+never option values.
 
 Use `contextbridge adapter list`, `details`, and `doctor` to inspect the
 result. `enable`/`start` and `disable`/`stop` change durable relay admission
