@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -93,7 +94,7 @@ func TestAdapterConformanceCoreRecordsDeliberateViolations(t *testing.T) {
 	malformedProgress.claimed = true
 	progressRequest := httptest.NewRequest(http.MethodPost, "/v2/adapter/jobs/"+malformedProgress.jobID+"/progress", strings.NewReader(`{"sequence":0,"text":"bad","busy":true}`))
 	progressRequest.Header.Set("Authorization", "Bearer "+malformedProgress.token)
-	progressRequest.Header.Set("X-ContextBridge-Lease-Generation", "1")
+	progressRequest.Header.Set("X-ContextBridge-Lease-Generation", strconv.FormatUint(malformedProgress.leaseGeneration, 10))
 	progressRequest.Header.Set("X-ContextBridge-Lease-Capability", malformedProgress.leaseCapability)
 	progressRecorder := httptest.NewRecorder()
 	malformedProgress.ServeHTTP(progressRecorder, progressRequest)
@@ -108,12 +109,48 @@ func TestAdapterConformanceCoreRecordsDeliberateViolations(t *testing.T) {
 	invalidOutput.claimed = true
 	completionRequest := httptest.NewRequest(http.MethodPost, "/v2/adapter/jobs/"+invalidOutput.jobID+"/complete", strings.NewReader(`{"mode":"json","json":{"other":true}}`))
 	completionRequest.Header.Set("Authorization", "Bearer "+invalidOutput.token)
-	completionRequest.Header.Set("X-ContextBridge-Lease-Generation", "1")
+	completionRequest.Header.Set("X-ContextBridge-Lease-Generation", strconv.FormatUint(invalidOutput.leaseGeneration, 10))
 	completionRequest.Header.Set("X-ContextBridge-Lease-Capability", invalidOutput.leaseCapability)
 	completionRecorder := httptest.NewRecorder()
 	invalidOutput.ServeHTTP(completionRecorder, completionRequest)
 	if completionRecorder.Code != http.StatusOK || !strings.Contains(invalidOutput.observation().violation, "normalization") {
 		t.Fatalf("invalid output was not recorded as a conformance violation: status=%d observation=%+v", completionRecorder.Code, invalidOutput.observation())
+	}
+
+	cancelledCompletion, err := newAdapterConformanceCore(options, adapterConformanceCancellation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelledCompletion.claimed = true
+	cancelledRequest := httptest.NewRequest(http.MethodPost, "/v2/adapter/jobs/"+cancelledCompletion.jobID+"/complete", strings.NewReader(`{"mode":"text","text":"too late"}`))
+	cancelledRequest.Header.Set("Authorization", "Bearer "+cancelledCompletion.token)
+	cancelledRequest.Header.Set("X-ContextBridge-Lease-Generation", strconv.FormatUint(cancelledCompletion.leaseGeneration, 10))
+	cancelledRequest.Header.Set("X-ContextBridge-Lease-Capability", cancelledCompletion.leaseCapability)
+	cancelledRecorder := httptest.NewRecorder()
+	cancelledCompletion.ServeHTTP(cancelledRecorder, cancelledRequest)
+	if cancelledRecorder.Code != http.StatusConflict ||
+		!strings.Contains(cancelledCompletion.observation().violation, "without rechecking cancelled lease") {
+		t.Fatalf("completion without a cancellation check was not rejected: status=%d observation=%+v", cancelledRecorder.Code, cancelledCompletion.observation())
+	}
+
+	staleLease, err := newAdapterConformanceCore(options, adapterConformanceLeaseRotation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldGeneration, oldCapability := staleLease.leaseGeneration, staleLease.leaseCapability
+	staleLease.leaseRejected = true
+	if err := staleLease.rotateLease(); err != nil {
+		t.Fatal(err)
+	}
+	staleRequest := httptest.NewRequest(http.MethodPost, "/v2/adapter/jobs/"+staleLease.jobID+"/claim", strings.NewReader(`{"action":"prepare"}`))
+	staleRequest.Header.Set("Authorization", "Bearer "+staleLease.token)
+	staleRequest.Header.Set("X-ContextBridge-Lease-Generation", strconv.FormatUint(oldGeneration, 10))
+	staleRequest.Header.Set("X-ContextBridge-Lease-Capability", oldCapability)
+	staleRecorder := httptest.NewRecorder()
+	staleLease.ServeHTTP(staleRecorder, staleRequest)
+	if staleRecorder.Code != http.StatusConflict ||
+		!strings.Contains(staleLease.observation().violation, "generation/capability fence") {
+		t.Fatalf("stale rotated lease was not rejected: status=%d observation=%+v", staleRecorder.Code, staleLease.observation())
 	}
 }
 
@@ -138,13 +175,32 @@ func TestRunAdapterConformanceWithIndependentProcess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !report.Passed || len(report.Checks) < 7 {
+	required := map[string]bool{
+		"unauthorized_is_terminal":                false,
+		"http_failure_not_retried":                false,
+		"expired_lease_is_terminal":               false,
+		"scoped_lifecycle":                        false,
+		"endpoint_capability_renewal":             false,
+		"claim_before_completion":                 false,
+		"cancellation_observed_before_completion": false,
+		"lease_generation_capability_rotation":    false,
+		"ambiguous_completion_not_retried":        false,
+	}
+	if !report.Passed || len(report.Checks) < len(required) {
 		raw, _ := json.Marshal(report)
 		t.Fatalf("unexpected conformance report: %s", raw)
 	}
 	for _, check := range report.Checks {
 		if !check.Passed {
 			t.Fatalf("check %s failed: %s", check.ID, check.Detail)
+		}
+		if _, exists := required[check.ID]; exists {
+			required[check.ID] = true
+		}
+	}
+	for id, observed := range required {
+		if !observed {
+			t.Fatalf("required conformance check %s was not reported", id)
 		}
 	}
 }
@@ -253,15 +309,20 @@ func runAdapterConformanceHelper() error {
 	}
 	job, _ := work["job"].(map[string]interface{})
 	jobID, _ := job["id"].(string)
+	rawLeaseGeneration, _ := work["lease_generation"].(float64)
+	leaseGeneration := uint64(rawLeaseGeneration)
 	leaseCapability, _ := work["lease_capability"].(string)
-	if jobID == "" || leaseCapability == "" {
+	if jobID == "" || leaseGeneration == 0 || float64(leaseGeneration) != rawLeaseGeneration || leaseCapability == "" {
 		return errors.New("work response omitted lease evidence")
 	}
 	leaseHeaders := map[string]string{
-		"X-ContextBridge-Lease-Generation": "1",
+		"X-ContextBridge-Lease-Generation": strconv.FormatUint(leaseGeneration, 10),
 		"X-ContextBridge-Lease-Capability": leaseCapability,
 	}
 	jobPath := "/v2/adapter/jobs/" + jobID
+	if _, _, err := request(http.MethodGet, jobPath+"/lease", nil, leaseHeaders); err != nil {
+		return err
+	}
 	if _, _, err := request(http.MethodPost, jobPath+"/claim", map[string]string{"action": "prepare"}, leaseHeaders); err != nil {
 		return err
 	}
@@ -272,6 +333,9 @@ func runAdapterConformanceHelper() error {
 	}
 	endpointCapability, err = heartbeat(endpointCapability, "busy")
 	if err != nil {
+		return err
+	}
+	if _, _, err := request(http.MethodGet, jobPath+"/lease", nil, leaseHeaders); err != nil {
 		return err
 	}
 	if _, _, err := request(http.MethodPost, jobPath+"/complete", map[string]interface{}{

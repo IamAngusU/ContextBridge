@@ -10,10 +10,12 @@
   `contextbridge.adapter-conformance.v1` JSON report. An explicitly selected
   out-of-tree executable now proves terminal auth/HTTP failures, scoped v2
   lifecycle use, expired-lease handling, endpoint-capability renewal, claim
-  ordering, and no replay after an ambiguous completion against disposable
-  loopback fake cores. The harness never invokes a shell, bounds and suppresses
-  child output, uses only ephemeral scoped credentials, and remains self-run
-  evidence rather than certification.
+  ordering, cancellation observation, replacement lease generation/capability
+  fencing, and no replay after an ambiguous completion against disposable
+  loopback fake cores. Lease generations are nontrivial and read from each
+  grant rather than assumed. The harness never invokes a shell, bounds and
+  suppresses child output, uses only ephemeral scoped credentials, and remains
+  self-run evidence rather than certification.
 - Extended `contextbridge adapter setup` with exact `local`/`remote` execution
   classification and repeatable bounded `KEY=JSON` profile options. Setup
   remains idempotent, rejects ambiguous or oversized option structures, and

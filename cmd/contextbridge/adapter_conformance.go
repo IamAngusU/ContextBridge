@@ -5,6 +5,7 @@ import (
 	"context"
 	cryptorand "crypto/rand"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -205,7 +206,7 @@ func runAdapterConformance(options adapterConformanceOptions) (adapterConformanc
 		Schema: adapterConformanceSchema, Protocol: adapterConformanceProtocol,
 		Adapter: filepath.Base(options.executable), Profile: options.profile, StartedAt: time.Now().UTC(),
 	}
-	checks := make([]adapterConformanceCheck, 0, 7)
+	checks := make([]adapterConformanceCheck, 0, 9)
 
 	unauthorized, err := runAdapterConformanceScenario(options, adapterConformanceUnauthorized)
 	if err != nil {
@@ -243,6 +244,25 @@ func runAdapterConformance(options adapterConformanceOptions) (adapterConformanc
 			"the adapter crossed the explicit claim boundary before completion"),
 	)
 
+	cancellation, err := runAdapterConformanceScenario(options, adapterConformanceCancellation)
+	if err != nil {
+		return report, err
+	}
+	checks = append(checks, cancellation.check("cancellation_observed_before_completion",
+		cancellation.cancelled && cancellation.claimed && cancellation.claimRequests == 1 &&
+			cancellation.leaseRequests >= 2 && cancellation.completeRequests == 0 &&
+			cancellation.nextAfterCancellation == 0 && cancellation.violation == "",
+		"the adapter rechecked lease authority, observed cancellation, and stopped without completion or new work"))
+
+	rotation, err := runAdapterConformanceScenario(options, adapterConformanceLeaseRotation)
+	if err != nil {
+		return report, err
+	}
+	checks = append(checks, rotation.check("lease_generation_capability_rotation",
+		rotation.leaseRotated && rotation.leaseGrants == 2 && rotation.claimRequests == 2 && rotation.completed &&
+			rotation.nextAfterLeaseRejection == 0 && rotation.violation == "",
+		"a restarted adapter used the fresh generation and capability after an unclaimed lease was replaced"))
+
 	ambiguous, err := runAdapterConformanceScenario(options, adapterConformanceAmbiguousComplete)
 	if err != nil {
 		return report, err
@@ -269,6 +289,8 @@ const (
 	adapterConformanceHTTPFailure       adapterConformanceScenario = "http_failure"
 	adapterConformanceLeaseRejected     adapterConformanceScenario = "lease_rejected"
 	adapterConformanceLifecycle         adapterConformanceScenario = "lifecycle"
+	adapterConformanceCancellation      adapterConformanceScenario = "cancellation"
+	adapterConformanceLeaseRotation     adapterConformanceScenario = "lease_rotation"
 	adapterConformanceAmbiguousComplete adapterConformanceScenario = "ambiguous_complete"
 )
 
@@ -278,13 +300,18 @@ type adapterConformanceObservation struct {
 	heartbeats               int
 	claimRequests            int
 	progressRequests         int
+	leaseRequests            int
+	leaseGrants              int
 	completeRequests         int
 	nextAfterComplete        int
 	nextAfterLeaseRejection  int
+	nextAfterCancellation    int
 	claimSequence            int
 	completeSequence         int
 	claimed                  bool
 	completed                bool
+	cancelled                bool
+	leaseRotated             bool
 	echoedEndpointCapability bool
 	violation                string
 }
@@ -313,30 +340,39 @@ type adapterConformanceCore struct {
 	timeout                  time.Duration
 	endpointCapability       string
 	leaseCapability          string
+	leaseGeneration          uint64
 	requestSequence          int
 	totalRequests            int
 	statusRequests           int
 	heartbeats               int
 	claimRequests            int
 	progressRequests         int
+	leaseRequests            int
+	leaseGrants              int
 	completeRequests         int
 	nextAfterComplete        int
 	nextAfterLeaseRejection  int
+	nextAfterCancellation    int
 	claimSequence            int
 	completeSequence         int
 	progressSequence         uint64
 	jobDelivered             bool
 	claimed                  bool
 	completed                bool
+	cancelled                bool
 	leaseRejected            bool
+	leaseRotated             bool
+	rotationReady            bool
 	echoedEndpointCapability bool
 	violation                string
 	firstRequest             chan struct{}
 	completionAttempt        chan struct{}
 	leaseRejectionAttempt    chan struct{}
+	cancellationAttempt      chan struct{}
 	firstRequestOnce         sync.Once
 	completionAttemptOnce    sync.Once
 	leaseRejectionOnce       sync.Once
+	cancellationOnce         sync.Once
 }
 
 func newAdapterConformanceCore(options adapterConformanceOptions, scenario adapterConformanceScenario) (*adapterConformanceCore, error) {
@@ -356,6 +392,10 @@ func newAdapterConformanceCore(options adapterConformanceOptions, scenario adapt
 		return nil, err
 	}
 	leaseCapability, err := adapterConformanceSecret()
+	if err != nil {
+		return nil, err
+	}
+	leaseGeneration, err := adapterConformanceGeneration()
 	if err != nil {
 		return nil, err
 	}
@@ -383,8 +423,9 @@ func newAdapterConformanceCore(options adapterConformanceOptions, scenario adapt
 		scenario: scenario, token: token, processToken: processToken, profile: options.profile,
 		profileConfig: options.profileConfig, job: job, outputSpec: outputSpec, jobID: jobID,
 		timeout:            options.timeout,
-		endpointCapability: endpointCapability, leaseCapability: leaseCapability,
+		endpointCapability: endpointCapability, leaseCapability: leaseCapability, leaseGeneration: leaseGeneration,
 		firstRequest: make(chan struct{}), completionAttempt: make(chan struct{}), leaseRejectionAttempt: make(chan struct{}),
+		cancellationAttempt: make(chan struct{}),
 	}, nil
 }
 
@@ -396,6 +437,16 @@ func adapterConformanceSecret() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(raw), nil
 }
 
+func adapterConformanceGeneration() (uint64, error) {
+	var raw [4]byte
+	if _, err := cryptorand.Read(raw[:]); err != nil {
+		return 0, err
+	}
+	// Keep the value exactly representable by every reference-language JSON
+	// number while ensuring a hard-coded first generation can never pass.
+	return uint64(binary.BigEndian.Uint32(raw[:])) + 2, nil
+}
+
 func (core *adapterConformanceCore) observation() adapterConformanceObservation {
 	core.mu.Lock()
 	defer core.mu.Unlock()
@@ -403,10 +454,13 @@ func (core *adapterConformanceCore) observation() adapterConformanceObservation 
 		totalRequests: core.totalRequests, statusRequests: core.statusRequests, heartbeats: core.heartbeats,
 		completeRequests: core.completeRequests, nextAfterComplete: core.nextAfterComplete,
 		claimRequests: core.claimRequests, progressRequests: core.progressRequests,
+		leaseRequests: core.leaseRequests, leaseGrants: core.leaseGrants,
 		nextAfterLeaseRejection: core.nextAfterLeaseRejection,
+		nextAfterCancellation:   core.nextAfterCancellation,
 		claimSequence:           core.claimSequence, completeSequence: core.completeSequence,
-		claimed: core.claimed, completed: core.completed, echoedEndpointCapability: core.echoedEndpointCapability,
-		violation: core.violation,
+		claimed: core.claimed, completed: core.completed, cancelled: core.cancelled, leaseRotated: core.leaseRotated,
+		echoedEndpointCapability: core.echoedEndpointCapability,
+		violation:                core.violation,
 	}
 }
 
@@ -425,8 +479,11 @@ func (core *adapterConformanceCore) ServeHTTP(w http.ResponseWriter, request *ht
 	if core.completed && strings.Contains(request.URL.Path, "/jobs/next") {
 		core.nextAfterComplete++
 	}
-	if core.leaseRejected && strings.Contains(request.URL.Path, "/jobs/next") {
+	if core.leaseRejected && !core.rotationReady && strings.Contains(request.URL.Path, "/jobs/next") {
 		core.nextAfterLeaseRejection++
+	}
+	if core.cancelled && strings.Contains(request.URL.Path, "/jobs/next") {
+		core.nextAfterCancellation++
 	}
 	core.mu.Unlock()
 
@@ -517,18 +574,25 @@ func (core *adapterConformanceCore) handleNext(w http.ResponseWriter, request *h
 		return
 	}
 	core.jobDelivered = true
+	core.leaseGrants++
 	job := core.job
+	leaseGeneration := core.leaseGeneration
+	leaseCapability := core.leaseCapability
 	core.mu.Unlock()
 	adapterConformanceJSON(w, http.StatusOK, map[string]interface{}{
 		"job": job, "profile": core.profileConfig, "deadline": time.Now().Add(core.timeout).UTC(),
-		"lease_generation": 1, "lease_capability": core.leaseCapability,
+		"lease_generation": leaseGeneration, "lease_capability": leaseCapability,
 		"lease_expires_at": time.Now().Add(core.timeout).UTC(),
 	})
 }
 
 func (core *adapterConformanceCore) handleLeaseAction(w http.ResponseWriter, request *http.Request, sequence int) {
-	if request.Header.Get("X-ContextBridge-Lease-Generation") != "1" ||
-		request.Header.Get("X-ContextBridge-Lease-Capability") != core.leaseCapability {
+	core.mu.Lock()
+	expectedGeneration := strconv.FormatUint(core.leaseGeneration, 10)
+	expectedCapability := core.leaseCapability
+	core.mu.Unlock()
+	if request.Header.Get("X-ContextBridge-Lease-Generation") != expectedGeneration ||
+		request.Header.Get("X-ContextBridge-Lease-Capability") != expectedCapability {
 		core.mu.Lock()
 		core.recordViolation("lease action omitted or changed its generation/capability fence")
 		core.mu.Unlock()
@@ -551,7 +615,8 @@ func (core *adapterConformanceCore) handleLeaseAction(w http.ResponseWriter, req
 		}
 		core.mu.Lock()
 		core.claimRequests++
-		if core.scenario == adapterConformanceLeaseRejected {
+		if core.scenario == adapterConformanceLeaseRejected ||
+			(core.scenario == adapterConformanceLeaseRotation && !core.rotationReady) {
 			core.leaseRejected = true
 			core.leaseRejectionOnce.Do(func() { close(core.leaseRejectionAttempt) })
 			core.mu.Unlock()
@@ -594,6 +659,18 @@ func (core *adapterConformanceCore) handleLeaseAction(w http.ResponseWriter, req
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
+		core.mu.Lock()
+		core.leaseRequests++
+		cancelled := core.scenario == adapterConformanceCancellation && core.leaseRequests >= 2
+		if cancelled {
+			core.cancelled = true
+			core.cancellationOnce.Do(func() { close(core.cancellationAttempt) })
+		}
+		core.mu.Unlock()
+		if cancelled {
+			adapterConformanceJSON(w, http.StatusConflict, map[string]string{"error": "job was cancelled"})
+			return
+		}
 		adapterConformanceJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "lease_expires_at": time.Now().Add(core.timeout).UTC()})
 	case "release":
 		if request.Method != http.MethodPost {
@@ -628,6 +705,17 @@ func (core *adapterConformanceCore) handleComplete(w http.ResponseWriter, reques
 		core.recordViolation("adapter sent a malformed or oversized completion")
 		core.mu.Unlock()
 		adapterConformanceJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "invalid completion"})
+		return
+	}
+	if core.scenario == adapterConformanceCancellation {
+		core.mu.Lock()
+		core.completeRequests++
+		core.completeSequence = sequence
+		core.cancelled = true
+		core.recordViolation("adapter attempted completion without rechecking cancelled lease authority")
+		core.cancellationOnce.Do(func() { close(core.cancellationAttempt) })
+		core.mu.Unlock()
+		adapterConformanceJSON(w, http.StatusConflict, map[string]string{"error": "job was cancelled"})
 		return
 	}
 	rawPayload, err := json.Marshal(payload)
@@ -722,12 +810,61 @@ func runAdapterConformanceScenario(options adapterConformanceOptions, scenario a
 	if err := os.WriteFile(tokenFile, []byte(core.processToken+"\n"), 0o600); err != nil {
 		return adapterConformanceObservation{}, err
 	}
+	baseURL := "http://" + listener.Addr().String()
+	var signal <-chan struct{}
+	switch scenario {
+	case adapterConformanceUnauthorized, adapterConformanceHTTPFailure:
+		signal = core.firstRequest
+	case adapterConformanceLeaseRejected:
+		signal = core.leaseRejectionAttempt
+	case adapterConformanceCancellation:
+		signal = core.cancellationAttempt
+	case adapterConformanceLifecycle, adapterConformanceAmbiguousComplete:
+		signal = core.completionAttempt
+	}
+	if scenario == adapterConformanceLeaseRotation {
+		if err := runAdapterConformanceProcess(options, core, baseURL, tokenFile, core.leaseRejectionAttempt); err != nil {
+			return adapterConformanceObservation{}, err
+		}
+		if observation := core.observation(); observation.violation != "" {
+			return observation, nil
+		}
+		if err := core.rotateLease(); err != nil {
+			return adapterConformanceObservation{}, err
+		}
+		signal = core.completionAttempt
+	}
+	if err := runAdapterConformanceProcess(options, core, baseURL, tokenFile, signal); err != nil {
+		return adapterConformanceObservation{}, err
+	}
+	return core.observation(), nil
+}
 
+func (core *adapterConformanceCore) rotateLease() error {
+	capability, err := adapterConformanceSecret()
+	if err != nil {
+		return err
+	}
+	core.mu.Lock()
+	defer core.mu.Unlock()
+	if core.scenario != adapterConformanceLeaseRotation || !core.leaseRejected || core.rotationReady {
+		return errors.New("adapter conformance lease rotation was requested in an invalid state")
+	}
+	core.leaseGeneration++
+	core.leaseCapability = capability
+	core.jobDelivered = false
+	core.claimed = false
+	core.progressSequence = 0
+	core.rotationReady = true
+	core.leaseRotated = true
+	return nil
+}
+
+func runAdapterConformanceProcess(options adapterConformanceOptions, core *adapterConformanceCore, baseURL, tokenFile string, signal <-chan struct{}) error {
 	processContext, cancelProcess := context.WithCancel(context.Background())
 	defer cancelProcess()
 	command := exec.CommandContext(processContext, options.executable, options.arguments...) // #nosec G204 -- explicit operator-selected executable and argv, never a shell.
 	command.Dir = options.workingDir
-	baseURL := "http://" + listener.Addr().String()
 	command.Env = adapterConformanceEnvironment(os.Environ(), map[string]string{
 		"CONTEXTBRIDGE_URL":                 baseURL,
 		"CONTEXTBRIDGE_ADAPTER_TOKEN":       core.processToken,
@@ -739,38 +876,28 @@ func runAdapterConformanceScenario(options adapterConformanceOptions, scenario a
 	var stdout, stderr boundedAdapterConformanceBuffer
 	command.Stdout, command.Stderr = &stdout, &stderr
 	if err := command.Start(); err != nil {
-		return adapterConformanceObservation{}, fmt.Errorf("start adapter: %w", err)
+		return fmt.Errorf("start adapter: %w", err)
 	}
 	processDone := make(chan error, 1)
 	go func() { processDone <- command.Wait() }()
 
 	deadline := time.NewTimer(options.timeout)
 	defer deadline.Stop()
-	var signal <-chan struct{}
-	switch scenario {
-	case adapterConformanceUnauthorized, adapterConformanceHTTPFailure:
-		signal = core.firstRequest
-	case adapterConformanceLeaseRejected:
-		signal = core.leaseRejectionAttempt
-	case adapterConformanceLifecycle, adapterConformanceAmbiguousComplete:
-		signal = core.completionAttempt
-	}
 	select {
 	case <-signal:
 	case processErr := <-processDone:
-		observation := core.observation()
-		if observation.violation == "" {
-			observation.violation = "adapter exited before the scenario produced its required evidence: " + boundedAdapterConformanceExit(processErr)
-		}
-		return observation, nil
+		core.mu.Lock()
+		core.recordViolation("adapter exited before the scenario produced its required evidence: " + boundedAdapterConformanceExit(processErr))
+		core.mu.Unlock()
+		return nil
 	case <-deadline.C:
-		cancelProcess()
-		<-processDone
-		observation := core.observation()
-		if observation.violation == "" {
-			observation.violation = "adapter scenario timed out before required protocol evidence"
+		if err := stopAdapterConformanceProcess(cancelProcess, command, processDone); err != nil {
+			return err
 		}
-		return observation, nil
+		core.mu.Lock()
+		core.recordViolation("adapter scenario timed out before required protocol evidence")
+		core.mu.Unlock()
+		return nil
 	}
 
 	processExited := false
@@ -787,17 +914,28 @@ func runAdapterConformanceScenario(options adapterConformanceOptions, scenario a
 		}
 	}
 	if !processExited {
-		cancelProcess()
+		if err := stopAdapterConformanceProcess(cancelProcess, command, processDone); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func stopAdapterConformanceProcess(cancel context.CancelFunc, command *exec.Cmd, processDone <-chan error) error {
+	cancel()
+	for attempt := 0; attempt < 2; attempt++ {
+		timer := time.NewTimer(2 * time.Second)
 		select {
 		case <-processDone:
-		case <-time.After(2 * time.Second):
+			timer.Stop()
+			return nil
+		case <-timer.C:
 			if command.Process != nil {
 				_ = command.Process.Kill()
 			}
-			<-processDone
 		}
 	}
-	return core.observation(), nil
+	return errors.New("adapter process did not terminate after cancellation and forced kill")
 }
 
 func adapterConformanceEnvironment(environment []string, overrides map[string]string) []string {

@@ -156,6 +156,16 @@ export class ContextBridgeAdapterV2 {
     })).payload;
   }
 
+  async lease(work, { renew = false } = {}) {
+    const { payload } = await this.request(`v2/adapter/jobs/${encodeURIComponent(work.job.id)}/lease`, {
+      method: renew ? "POST" : "GET", headers: this.leaseHeaders(work),
+    });
+    if (payload?.ok !== true || typeof payload.lease_expires_at !== "string" || !Number.isFinite(Date.parse(payload.lease_expires_at))) {
+      throw new Error("core returned malformed adapter lease status");
+    }
+    return payload;
+  }
+
   async progress(work, { sequence, text = "", phase = "generating", percent = 0, busy = true } = {}) {
     if (!Number.isSafeInteger(sequence) || sequence < 1) throw new Error("progress sequence must be a positive safe integer");
     return (await this.request(`v2/adapter/jobs/${encodeURIComponent(work.job.id)}/progress`, {
@@ -182,9 +192,11 @@ export async function runReferenceAdapterOnce(options) {
       await new Promise((resolve) => setTimeout(resolve, 200));
       continue;
     }
+    await client.lease(work);
     await client.claim(work, "prepare");
     await client.progress(work, { sequence: 1, text: "reference adapter accepted the bounded lease", percent: 50, busy: true });
     endpointCapability = await client.heartbeat(endpointCapability, "busy");
+    await client.lease(work);
     const result = await client.complete(work, { mode: "text", text: options.reply ?? "REFERENCE-ADAPTER-OK", model: "reference-adapter" });
     await client.heartbeat(endpointCapability, "idle");
     return { job_id: work.job.id, result };

@@ -226,15 +226,20 @@ The v1 report checks that:
   bounded progress and completion stay on the scoped v2 surface;
 - a later heartbeat renews the original endpoint capability;
 - the adapter claims the lease before completion; and
+- the adapter rechecks lease authority, observes a cancellation, and stops
+  without completion or polling new work;
+- a restarted adapter follows a replacement lease's fresh generation and
+  opaque capability instead of reusing stale fencing material; and
 - a disconnect after completion bytes arrive is treated as ambiguous and is
   neither replayed nor followed by polling for new work.
 
 Use `--profile-file` and `--job-file` for a real adapter's bounded driver
-configuration and job shape. The job **must be side-effect-free**: the harness
-runs it once for the successful lifecycle and once while deliberately dropping
-the completion response. The harness does not sandbox the operator-selected
-executable or block its provider/network access. Run it in the isolation the
-adapter normally requires, and never point it at a destructive profile.
+configuration and job shape. The job **must be side-effect-free and safely
+repeatable**: the current suite can execute it four times across successful,
+cancellation, replacement-lease, and ambiguous-completion scenarios. The
+harness does not sandbox the operator-selected executable or block its
+provider/network access. Run it in the isolation the adapter normally requires,
+and never point it at a destructive profile.
 
 The machine-readable report schema is
 [`adapter-conformance-v1.schema.json`](schemas/adapter-conformance-v1.schema.json).

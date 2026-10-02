@@ -44,6 +44,7 @@ test("reference adapter completes the scoped v2 lifecycle without privileged API
     }
     assert.equal(request.headers["x-contextbridge-lease-generation"], "4");
     assert.equal(request.headers["x-contextbridge-lease-capability"], leaseCapability);
+    if (path.endsWith("/lease")) return json(response, 200, { ok: true, lease_expires_at: new Date(Date.now() + 30_000).toISOString() });
     if (path.endsWith("/claim")) return json(response, 200, { ok: true, observation_only: true });
     if (path.endsWith("/progress")) return json(response, 200, { ok: true });
     if (path.endsWith("/complete")) return json(response, 200, body);
@@ -54,10 +55,44 @@ test("reference adapter completes the scoped v2 lifecycle without privileged API
     assert.equal(completed.result.text, "REFERENCE-ADAPTER-OK");
   });
   assert.deepEqual(seen.filter((entry) => entry.path.includes("/jobs/job-reference")).map((entry) => entry.path), [
+    "/v2/adapter/jobs/job-reference/lease",
     "/v2/adapter/jobs/job-reference/claim",
     "/v2/adapter/jobs/job-reference/progress",
+    "/v2/adapter/jobs/job-reference/lease",
     "/v2/adapter/jobs/job-reference/complete",
   ]);
+});
+
+test("reference adapter observes cancellation before completion", async () => {
+  let leaseChecks = 0;
+  let completions = 0;
+  await withCore(async (request, response) => {
+    for await (const _chunk of request) { /* drain the bounded test request */ }
+    const path = new URL(request.url, "http://127.0.0.1").pathname;
+    if (path === "/v2/adapter/status") return json(response, 200, { ok: true, protocol: "contextbridge.adapter.v2", principal_id: "reference", allowed_profiles: ["reference"] });
+    if (path === "/v2/adapter/profiles") return json(response, 200, { reference: { label: "Reference", driver: "reference" } });
+    if (path === "/v2/adapter/heartbeat") return json(response, 200, { ok: true, protocol: "contextbridge.adapter.v2", endpoints: [{ profile: "reference", endpoint_id: 1, endpoint_capability: endpointCapability }] });
+    if (path === "/v2/adapter/jobs/next") return json(response, 200, { job: { id: "job-cancelled", prompt: "test" }, lease_generation: 9, lease_capability: leaseCapability });
+    if (path.endsWith("/lease")) {
+      leaseChecks += 1;
+      if (leaseChecks === 2) return json(response, 409, { error: "job was cancelled" });
+      return json(response, 200, { ok: true, lease_expires_at: new Date(Date.now() + 30_000).toISOString() });
+    }
+    if (path.endsWith("/claim")) return json(response, 200, { ok: true, observation_only: true });
+    if (path.endsWith("/progress")) return json(response, 200, { ok: true });
+    if (path.endsWith("/complete")) {
+      completions += 1;
+      return json(response, 200, { mode: "text", text: "unexpected" });
+    }
+    return json(response, 404, { error: "not found" });
+  }, async (baseURL) => {
+    await assert.rejects(
+      runReferenceAdapterOnce({ baseURL, token, profile: "reference", endpointID: 1, waitMS: 1_000 }),
+      /HTTP 409.*cancelled/u,
+    );
+  });
+  assert.equal(leaseChecks, 2);
+  assert.equal(completions, 0);
 });
 
 test("HTTP failures are not retried and unsafe credential destinations are rejected", async () => {
