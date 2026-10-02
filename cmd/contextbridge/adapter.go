@@ -24,13 +24,16 @@ import (
 
 func adapterCommand(args []string) error {
 	if len(args) == 0 || helpFlag(args[0]) {
-		fmt.Fprintln(os.Stdout, `Usage: contextbridge adapter list|details|doctor|setup|enable|disable|start|stop [options]
+		fmt.Fprintln(os.Stdout, `Usage: contextbridge adapter list|details|doctor|setup|conformance|enable|disable|start|stop [options]
 
 Adapters are optional out-of-tree components. list/details/doctor are read-only.
 setup registers one bounded adapter profile. --classification records whether
 its execution crosses a remote boundary; repeatable --option KEY=JSON stores
 non-secret driver configuration. Credentials are created only when explicitly
 requested.
+conformance launches an explicit adapter executable directly (never through a
+shell) against a disposable loopback fake core. It emits free point-in-time
+self-test evidence; it is not certification or endorsement.
 enable/start and disable/stop change the relay's desired admission state; they
 do not install packages, invent missing credentials, or make an unhealthy
 adapter ready. Control accepts a stable adp_ UID or one unambiguous leased
@@ -46,6 +49,8 @@ adapter/instance ID.`)
 		return adapterDoctorCommand(args[1:])
 	case "setup":
 		return adapterSetupCommand(args[1:])
+	case "conformance":
+		return adapterConformanceCommand(args[1:])
 	case "enable", "start":
 		return adapterControlCommand("enable", args[1:])
 	case "disable", "stop":

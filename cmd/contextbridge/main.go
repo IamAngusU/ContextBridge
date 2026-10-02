@@ -224,7 +224,7 @@ func writeCommandGroupHelp(out io.Writer, path []string) bool {
 	case "integrate":
 		help = "Usage: contextbridge integrate openai|litellm|mcp|relay|ui [options]\n"
 	case "adapter":
-		help = "Usage: contextbridge adapter list|details|doctor|setup|enable|disable|start|stop [options]\n"
+		help = "Usage: contextbridge adapter list|details|doctor|setup|conformance|enable|disable|start|stop [options]\n"
 	case "verification":
 		help = "Usage: contextbridge verification verify [options]\n"
 	case "update":

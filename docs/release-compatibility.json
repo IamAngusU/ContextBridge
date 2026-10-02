@@ -13,6 +13,11 @@
   ],
   "main_only_commands": [
     {
+      "args": ["adapter", "conformance", "--help"],
+      "release_output_must_not_contain": "contextbridge adapter ",
+      "readme_marker": "<!-- release-compat: main-only: adapter conformance -->"
+    },
+    {
       "args": ["cluster", "estimate", "--help"],
       "release_output_must_contain": "unknown cluster command estimate",
       "readme_marker": "<!-- release-compat: main-only: cluster estimate -->"
