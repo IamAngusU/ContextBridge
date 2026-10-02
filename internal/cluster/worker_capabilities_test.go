@@ -97,6 +97,80 @@ func TestWorkerAdvertisesBoundedPerEndpointAdapterChoices(t *testing.T) {
 	}
 }
 
+func TestWorkerAdvertisesReadyAdapterRouteModelAsVerifiedAvailable(t *testing.T) {
+	capabilities := workerCapabilitiesForStatus(t, map[string]interface{}{
+		"routes": map[string]interface{}{
+			"speech": map[string]interface{}{
+				"task": "speech_to_text", "provider": "adapter", "adapter_profile": "local-speech", "model": "whisper-base-cpu",
+			},
+		},
+		"adapter": map[string]interface{}{
+			"connected": true, "ready": true, "active_endpoints": 2,
+			"endpoints": []map[string]interface{}{
+				{"id": 1, "profile": "other-profile", "state": "waiting", "current_model": "whisper-base-cpu", "models": []string{"whisper-base-cpu"}},
+				{"id": 2, "profile": "local-speech", "state": "waiting", "current_model": "whisper-base-cpu", "models": []string{"whisper-base-cpu"}},
+			},
+		},
+	})
+
+	if !containsFold(capabilities.Tasks, "speech_to_text") || !containsFold(capabilities.Providers, "adapter") {
+		t.Fatalf("ready adapter route was not advertised: %#v", capabilities)
+	}
+	for _, model := range capabilities.Models {
+		if model.Provider == "adapter" && model.Name == "whisper-base-cpu" {
+			if !model.Available || !model.Loaded || !model.CapabilitiesVerified || model.CapabilitySource != "adapter_heartbeat" || !containsFold(model.Tasks, "speech_to_text") || containsFold(model.Tasks, "generation") || containsFold(model.Tasks, "vision") || model.Vision {
+				t.Fatalf("ready adapter model evidence is incomplete: %#v", model)
+			}
+			return
+		}
+	}
+	t.Fatalf("ready adapter model was not advertised: %#v", capabilities.Models)
+}
+
+func TestWorkerDoesNotAdvertiseMismatchedOrBusyAdapterRoute(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		profile  string
+		model    string
+		state    string
+		ready    bool
+		endpoint int
+	}{
+		{name: "profile mismatch", profile: "other-profile", model: "whisper-base-cpu", state: "waiting", ready: true, endpoint: 1},
+		{name: "model mismatch", profile: "local-speech", model: "different-model", state: "waiting", ready: true, endpoint: 1},
+		{name: "busy", profile: "local-speech", model: "whisper-base-cpu", state: "busy", ready: true, endpoint: 1},
+		{name: "not ready", profile: "local-speech", model: "whisper-base-cpu", state: "waiting", ready: false, endpoint: 1},
+		{name: "no endpoint", profile: "local-speech", model: "whisper-base-cpu", state: "waiting", ready: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			endpoints := []map[string]interface{}{}
+			if test.endpoint > 0 {
+				endpoints = append(endpoints, map[string]interface{}{
+					"id": test.endpoint, "profile": test.profile, "state": test.state, "current_model": test.model, "models": []string{test.model},
+				})
+			}
+			capabilities := workerCapabilitiesForStatus(t, map[string]interface{}{
+				"routes": map[string]interface{}{
+					"speech": map[string]interface{}{
+						"task": "speech_to_text", "provider": "adapter", "adapter_profile": "local-speech", "model": "whisper-base-cpu",
+					},
+				},
+				"adapter": map[string]interface{}{
+					"connected": true, "ready": test.ready, "active_endpoints": test.endpoint, "endpoints": endpoints,
+				},
+			})
+			if containsFold(capabilities.Tasks, "speech_to_text") {
+				t.Fatalf("unavailable adapter route advertised its task: %#v", capabilities)
+			}
+			for _, model := range capabilities.Models {
+				if model.Provider == "adapter" && model.Name == "whisper-base-cpu" {
+					t.Fatalf("unavailable adapter route advertised its model: %#v", model)
+				}
+			}
+		})
+	}
+}
+
 func TestRelayScopesOpaqueAdapterSessionTelemetry(t *testing.T) {
 	capabilities := Capabilities{AdapterSessions: []AdapterSessionCapability{
 		{EndpointID: 1, Profile: "profile-one", SessionKey: "cb:" + strings.Repeat("a", 64), SessionKeySupported: true, CanCreateSession: true, DefaultNewSession: true},

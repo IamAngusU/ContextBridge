@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Made adapter model readiness route-authoritative. Modern workers now require
+  an exact ready endpoint for the configured adapter profile/model, publish
+  verified availability and loaded state only from that heartbeat, and no
+  longer label every adapter model as generation/vision. Aggregate-only legacy
+  adapters remain routable without upgrading configured intent to verified
+  endpoint evidence. Added `cluster logout [--account NAME]` as an explicit
+  local credential-removal command that preserves relay credentials and pool
+  authority files.
 - Added opt-in, credential-scoped scheduled adapter actions. Producers can
   preview, explicitly confirm, inspect, and cancel only administrator-bound
   action kinds and opaque destinations; the relay durably emits one-attempt

@@ -19,7 +19,7 @@ var completionSubcommands = map[string][]string{
 	"integrate":    {"openai", "litellm", "mcp", "relay", "ui"},
 	"adapter":      {"list", "details", "doctor", "setup", "conformance", "enable", "disable", "start", "stop"},
 	"verification": {"verify"},
-	"cluster":      {"status", "events", "estimate", "node", "protocol", "conformance", "submit", "chat", "agent", "selftest", "route", "contract", "receipt", "login", "account", "token", "pairing", "pool", "configure", "dashboard", "pipeline", "lan"},
+	"cluster":      {"status", "events", "estimate", "node", "protocol", "conformance", "submit", "chat", "agent", "selftest", "route", "contract", "receipt", "login", "logout", "account", "token", "pairing", "pool", "configure", "dashboard", "pipeline", "lan"},
 	"route":        {"explain"},
 	"update":       {"status", "check", "apply", "enable", "disable", "auto"},
 	"completion":   {"powershell", "bash", "zsh"},
@@ -60,7 +60,7 @@ $script:ContextBridgeSubcommands = @{
     integrate = @('openai','litellm','mcp','relay','ui')
 	adapter = @('list','details','doctor','setup','conformance','enable','disable','start','stop')
     verification = @('verify')
-	cluster = @('status','events','estimate','node','protocol','conformance','submit','chat','scheduled-action','agent','selftest','route','contract','receipt','login','account','token','pairing','pool','configure','dashboard','pipeline','lan')
+	cluster = @('status','events','estimate','node','protocol','conformance','submit','chat','scheduled-action','agent','selftest','route','contract','receipt','login','logout','account','token','pairing','pool','configure','dashboard','pipeline','lan')
     route = @('explain')
     update = @('status','check','apply','enable','disable','auto')
     completion = @('powershell','bash','zsh')
@@ -125,7 +125,8 @@ $script:ContextBridgeOptions = @{
     'cluster configure' = @('--config','--mode','--relay-url','--public-url','--name','--listen','--interactive')
     'cluster dashboard' = @('--config','--no-open')
     'cluster pipeline' = @('activity','--config','--name','--file','--token','--json')
-    'cluster login' = @('--config','--token-file','--account','--relay','--pool-authority-file','--activate')
+	'cluster login' = @('--config','--token-file','--account','--relay','--pool-authority-file','--activate')
+	'cluster logout' = @('--config','--account')
 	'cluster account' = @('list','use','remove','--config','--json')
 	'cluster token' = @('create','list','revoke','--config','--role','--subject','--groups','--lifetime-hours','--max-queued-jobs','--max-jobs-per-hour','--max-priority','--providers','--allowed-tenants','--allowed-subjects','--egress','--require-e2ee','--scheduled-actions-policy')
 	'cluster token create' = @('--config','--role','--subject','--groups','--lifetime-hours','--max-queued-jobs','--max-jobs-per-hour','--max-priority','--providers','--allowed-tenants','--allowed-subjects','--egress','--require-e2ee','--scheduled-actions-policy')
@@ -276,6 +277,7 @@ _contextbridge_complete() {
       "cluster dashboard") candidates="--config --no-open" ;;
       "cluster pipeline") candidates="activity --config --name --file --token --json" ;;
       "cluster login") candidates="--config --token-file --account --relay --pool-authority-file --activate" ;;
+	  "cluster logout") candidates="--config --account" ;;
 	  "cluster account") candidates="list use remove --config --json" ;;
 	  "cluster token") candidates="create list revoke --config --role --subject --groups --lifetime-hours --max-queued-jobs --max-jobs-per-hour --max-priority --providers --allowed-tenants --allowed-subjects --egress --require-e2ee --scheduled-actions-policy" ;;
 	  "cluster token create") candidates="--config --role --subject --groups --lifetime-hours --max-queued-jobs --max-jobs-per-hour --max-priority --providers --allowed-tenants --allowed-subjects --egress --require-e2ee --scheduled-actions-policy" ;;
@@ -341,7 +343,7 @@ _contextbridge_complete() {
       integrate) candidates="openai litellm mcp relay ui" ;;
 	  adapter) candidates="list details doctor setup conformance enable disable start stop" ;;
       verification) candidates="verify" ;;
-	  cluster) candidates="status events estimate node protocol conformance submit chat scheduled-action agent selftest route contract receipt login account token pairing pool configure dashboard pipeline lan" ;;
+	  cluster) candidates="status events estimate node protocol conformance submit chat scheduled-action agent selftest route contract receipt login logout account token pairing pool configure dashboard pipeline lan" ;;
       route) candidates="explain" ;;
       update) candidates="status check apply enable disable auto" ;;
       completion) candidates="powershell bash zsh" ;;
@@ -463,7 +465,7 @@ case "$words[2]" in
     ;;
   cluster)
     if (( CURRENT == 3 )); then
-	  _values 'cluster action' status events estimate node protocol conformance submit chat scheduled-action agent selftest route contract receipt login account token pairing pool configure dashboard pipeline lan
+	  _values 'cluster action' status events estimate node protocol conformance submit chat scheduled-action agent selftest route contract receipt login logout account token pairing pool configure dashboard pipeline lan
       return
     fi
     case "$words[3]" in
@@ -540,6 +542,7 @@ case "$words[2]" in
         fi
         ;;
 	  login) _arguments "${config[@]}" '--token-file[Producer token file]:token file:_files' '--account[Named cluster account]:account:' '--relay[Relay URL for the account]:URL:' '--pool-authority-file[Customer pool authority]:authority file:_files' '--activate[Make this account the default]' ;;
+	  logout) _arguments "${config[@]}" '--account[Named cluster account; defaults to the active account]:account:' ;;
 	  account) _arguments "${config[@]}" '--json[Print machine-readable account metadata]' '1:account action:(list use remove)' '2:account name:' ;;
 	  token)
 		case "$words[4]" in

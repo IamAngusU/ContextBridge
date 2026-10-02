@@ -78,7 +78,7 @@ func TestCompletionScriptsExposeGuidedClusterSubmission(t *testing.T) {
 func TestCompletionScriptsExposeClusterAccounts(t *testing.T) {
 	for name, script := range map[string]string{"powershell": powershellCompletionScript(), "bash": bashCompletionScript(), "zsh": zshCompletionScript()} {
 		t.Run(name, func(t *testing.T) {
-			for _, wanted := range []string{"account", "--pool-authority-file", "--activate"} {
+			for _, wanted := range []string{"account", "logout", "--pool-authority-file", "--activate"} {
 				if !strings.Contains(script, wanted) {
 					t.Fatalf("completion does not expose %s", wanted)
 				}
