@@ -168,7 +168,8 @@ POOL AND ROUTING
   contextbridge cluster scheduled-action preview|confirm|list|show|cancel
                                                Schedule scoped external adapter actions
   contextbridge cluster agent auto|plan|run   Run bounded agent workflows
-  contextbridge cluster pairing|token|login|account   Manage scoped cluster access
+  contextbridge cluster pairing|token|login|logout|account
+                                               Manage scoped cluster access
   contextbridge cluster lan init|relocate|join|status
                                                Build an explicitly trusted offline LAN pool
   contextbridge selftest                      Check local + pool readiness without AI work
@@ -240,7 +241,7 @@ func writeCommandGroupHelp(out io.Writer, path []string) bool {
 
 Observe:  status, events, estimate, node, dashboard, protocol
 Run:      submit, chat, pipeline, scheduled-action, agent, selftest, route
-Trust:    pairing, token, login, account, lan
+Trust:    pairing, token, login, logout, account, lan
 Verify:   contract, receipt, conformance
 Setup:    configure
 
@@ -1617,7 +1618,7 @@ func freeLocalAddress() (string, error) {
 
 func clusterCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: contextbridge cluster status|events|estimate|node|protocol|conformance|submit|chat|scheduled-action|agent|selftest|route|contract|receipt|login|account|token|pairing|pool|lan")
+		return errors.New("usage: contextbridge cluster status|events|estimate|node|protocol|conformance|submit|chat|scheduled-action|agent|selftest|route|contract|receipt|login|logout|account|token|pairing|pool|lan")
 	}
 	switch args[0] {
 	case "status":
@@ -1650,6 +1651,8 @@ func clusterCommand(args []string) error {
 		return clusterReceiptCommand(args[1:])
 	case "login":
 		return clusterLoginCommand(args[1:])
+	case "logout":
+		return clusterLogoutCommand(args[1:])
 	case "account":
 		return clusterAccountCommand(args[1:])
 	case "token":
@@ -2874,6 +2877,54 @@ func clusterLoginCommand(args []string) error {
 			fmt.Print(" and activated")
 		}
 		fmt.Println(". Use --account to select it without changing the default.")
+	}
+	return nil
+}
+
+func clusterLogoutCommand(args []string) error {
+	flags := flag.NewFlagSet("cluster logout", flag.ContinueOnError)
+	path := flags.String("config", defaultConfigPath(), "config path")
+	accountName := flags.String("account", "", "named cluster account; defaults to cluster.active_account")
+	if err := parseInterspersedFlags(flags, args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected cluster logout argument %q", flags.Arg(0))
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	name := strings.TrimSpace(*accountName)
+	if name == "" {
+		name = strings.TrimSpace(cfg.Cluster.ActiveAccount)
+	}
+	if name != "" {
+		if _, exists := cfg.Cluster.Accounts[name]; !exists {
+			return fmt.Errorf("cluster account %q is not configured", name)
+		}
+		delete(cfg.Cluster.Accounts, name)
+		if cfg.Cluster.ActiveAccount == name {
+			cfg.Cluster.ActiveAccount = ""
+		}
+		if cfg.Cluster.SelectedAccount == name {
+			cfg.Cluster.SelectedAccount = ""
+		}
+	} else if strings.TrimSpace(cfg.Cluster.ClientToken) != "" {
+		cfg.Cluster.ClientToken = ""
+	} else {
+		return errors.New("no active or legacy cluster credential is configured")
+	}
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	if err := config.Save(*path, cfg); err != nil {
+		return err
+	}
+	if name == "" {
+		fmt.Println("Removed the local legacy cluster credential. Relay credentials and authority files were not revoked or deleted.")
+	} else {
+		fmt.Printf("Logged out cluster account %s locally. Relay credentials and authority files were not revoked or deleted.\n", name)
 	}
 	return nil
 }

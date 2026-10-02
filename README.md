@@ -408,6 +408,7 @@ contextbridge cluster login --account alice --token-file ./alice-token.json --po
 contextbridge cluster login --account bob --token-file ./bob-token.json --activate=false
 contextbridge cluster account list
 contextbridge cluster chat --account alice --provider ollama --prompt "Private pool turn"
+contextbridge cluster logout --account alice
 ```
 
 `cluster account use NAME` changes the default; `--account` selects one account
@@ -415,6 +416,9 @@ for a single chat, submission, or route preview. Distinct OS logins already get
 distinct default configuration directories and are required when local users
 must be unable to read one another's credentials. Named accounts inside one OS
 login prevent accidental pool/token mixing but are not a local-user sandbox.
+`cluster logout` removes only the selected local credential association. It
+does not revoke the relay credential or delete a customer authority file; use
+`cluster token revoke` separately when the credential itself must stop working.
 
 ### 4. Change a device's role later
 

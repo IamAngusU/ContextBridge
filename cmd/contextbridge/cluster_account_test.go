@@ -90,3 +90,72 @@ func TestNamedClusterAccountsKeepCredentialsAndPoolsSeparate(t *testing.T) {
 		t.Fatalf("account removal deleted customer authority: %v", err)
 	}
 }
+
+func TestClusterLogoutRemovesOnlyTheSelectedCredential(t *testing.T) {
+	directory := t.TempDir()
+	configPath := filepath.Join(directory, "config.yml")
+	if err := config.Default(configPath); err != nil {
+		t.Fatal(err)
+	}
+	legacyTokenPath := filepath.Join(directory, "legacy-token.txt")
+	if err := os.WriteFile(legacyTokenPath, []byte("cb_"+strings.Repeat("l", 40)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := clusterLoginCommand([]string{"--config", configPath, "--token-file", legacyTokenPath}); err != nil {
+		t.Fatal(err)
+	}
+	authorityPath := filepath.Join(directory, "alice-authority.json")
+	if _, err := cluster.CreatePoolAuthorityFile(authorityPath, "alice-pool", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"alice", "bob"} {
+		tokenPath := filepath.Join(directory, name+"-token.txt")
+		if err := os.WriteFile(tokenPath, []byte("cb_"+strings.Repeat(name[:1], 40)), 0600); err != nil {
+			t.Fatal(err)
+		}
+		args := []string{"--config", configPath, "--account", name, "--token-file", tokenPath}
+		if name == "alice" {
+			args = append(args, "--pool-authority-file", authorityPath)
+		}
+		if name == "bob" {
+			args = append(args, "--activate=false")
+		}
+		if err := clusterLoginCommand(args); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := clusterLogoutCommand([]string{"--config", configPath}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Cluster.ActiveAccount != "" || cfg.Cluster.ClientToken == "" || len(cfg.Cluster.Accounts) != 1 {
+		t.Fatalf("active named logout removed the wrong credential: %#v", cfg.Cluster)
+	}
+	if _, exists := cfg.Cluster.Accounts["bob"]; !exists {
+		t.Fatal("unselected account was removed")
+	}
+	if _, err := os.Stat(authorityPath); err != nil {
+		t.Fatalf("logout deleted the customer authority file: %v", err)
+	}
+
+	if err := clusterLogoutCommand([]string{"--config", configPath, "--account", "bob"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := clusterLogoutCommand([]string{"--config", configPath}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Cluster.ClientToken != "" || len(cfg.Cluster.Accounts) != 0 {
+		t.Fatalf("logout left producer credentials configured: %#v", cfg.Cluster)
+	}
+	if err := clusterLogoutCommand([]string{"--config", configPath}); err == nil {
+		t.Fatal("logout without a configured credential succeeded")
+	}
+}

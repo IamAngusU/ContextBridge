@@ -1293,10 +1293,11 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 				} `json:"endpoints"`
 			} `json:"adapter"`
 			Routes map[string]struct {
-				Task     string   `json:"task"`
-				Model    string   `json:"model"`
-				Provider string   `json:"provider"`
-				Fallback []string `json:"fallback"`
+				Task           string   `json:"task"`
+				Model          string   `json:"model"`
+				Provider       string   `json:"provider"`
+				AdapterProfile string   `json:"adapter_profile"`
+				Fallback       []string `json:"fallback"`
 			} `json:"routes"`
 			Runtime struct {
 				Engines map[string]struct {
@@ -1373,7 +1374,7 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 				if !providerAllowed(provider) {
 					return false
 				}
-				if provider == "adapter" {
+				if strings.EqualFold(provider, "adapter") {
 					return status.Adapter.Connected && status.Adapter.Ready
 				}
 				engine, ok := status.Runtime.Engines[provider]
@@ -1469,7 +1470,15 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 				if task == "" {
 					task = "generation"
 				}
+				adapterSelection, adapterRouteReady := selectReadyAdapterSession(capability.AdapterSessions, Requirements{
+					Provider:       "adapter",
+					AdapterProfile: route.AdapterProfile,
+					Model:          route.Model,
+				})
+				legacyAdapterReady := status.Adapter.Connected && status.Adapter.Ready && status.Adapter.ActiveEndpoints > 0 && len(capability.AdapterSessions) == 0
+				adapterRouteReady = status.Adapter.Connected && status.Adapter.Ready && (adapterRouteReady || legacyAdapterReady)
 				providers := append([]string{route.Provider}, route.Fallback...)
+				routeUsesAdapter := containsFold(providers, "adapter")
 				routeReady := false
 				for _, provider := range providers {
 					if provider != "" && providerOnline(provider) {
@@ -1478,6 +1487,12 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 							seenProviders[provider] = true
 						}
 						providerSupportsTask := providerSupportsRouteTask(provider, route.Model, task)
+						if strings.EqualFold(provider, "adapter") {
+							// A connected adapter transport is only liveness evidence. Route
+							// readiness requires one exact, currently schedulable endpoint for
+							// the configured profile and model.
+							providerSupportsTask = adapterRouteReady
+						}
 						if providerSupportsTask && (len(w.cfg.AllowedTasks) == 0 || containsFold(w.cfg.AllowedTasks, task)) {
 							if !containsFold(capability.AutomaticTasks[provider], task) {
 								capability.AutomaticTasks[provider] = append(capability.AutomaticTasks[provider], task)
@@ -1490,11 +1505,38 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 					capability.Tasks = append(capability.Tasks, task)
 					seenTasks[task] = true
 				}
-				allowedRouteModel := modelAllowed(route.Model)
-				if strings.EqualFold(route.Provider, "adapter") {
-					allowedRouteModel = adapterModelAllowed(route.Model)
+				if routeUsesAdapter && adapterRouteReady && adapterSelection.EndpointID > 0 {
+					models := append([]string(nil), adapterSelection.ModelChoices...)
+					if explicit := strings.TrimSpace(route.Model); explicit != "" && !strings.EqualFold(explicit, "auto") {
+						models = []string{explicit}
+					} else if current := strings.TrimSpace(adapterSelection.CurrentModel); current != "" {
+						models = append(models, current)
+					}
+					for _, model := range models {
+						if strings.TrimSpace(model) == "" || !adapterModelAllowed(model) {
+							continue
+						}
+						vision, embedding := modelFeatures(model, task)
+						if tasks := allowedModelTasks(modelTasks(task, vision, embedding)); len(tasks) > 0 {
+							addModel(ModelCapability{
+								Name: model, Provider: "adapter", Tasks: tasks,
+								Available: true, Loaded: adapterModelEqual(adapterSelection.CurrentModel, model),
+								Vision: vision, Embedding: embedding,
+								CapabilitiesVerified: true, CapabilitySource: "adapter_heartbeat",
+							})
+						}
+					}
+				} else if routeUsesAdapter && legacyAdapterReady && strings.TrimSpace(route.Model) != "" && !strings.EqualFold(strings.TrimSpace(route.Model), "auto") && adapterModelAllowed(route.Model) {
+					// Legacy local services publish only aggregate adapter liveness. Keep
+					// their explicit configured model routable, but do not upgrade that
+					// intent to verified availability or loaded-state evidence.
+					vision, embedding := modelFeatures(route.Model, task)
+					if tasks := allowedModelTasks(modelTasks(task, vision, embedding)); len(tasks) > 0 {
+						addModel(ModelCapability{Name: route.Model, Provider: "adapter", Tasks: tasks, Vision: vision, Embedding: embedding, CapabilitySource: "configured_route_legacy"})
+					}
 				}
-				if route.Model != "" && providerOnline(route.Provider) && allowedRouteModel && providerSupportsRouteTask(route.Provider, route.Model, task) {
+				allowedRouteModel := modelAllowed(route.Model)
+				if route.Model != "" && !strings.EqualFold(route.Provider, "adapter") && providerOnline(route.Provider) && allowedRouteModel && providerSupportsRouteTask(route.Provider, route.Model, task) {
 					// A runtime inventory entry for the same provider and model is
 					// authoritative. Route defaults describe intent, not what the
 					// model can execute, and therefore must never add generation or
@@ -1520,23 +1562,6 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 				model := runtimeModels[key]
 				if modelAllowed(model.Name) {
 					addModel(model)
-				}
-			}
-			for _, endpoint := range capability.AdapterSessions {
-				if !providerAllowed("adapter") {
-					break
-				}
-				models := append([]string{}, endpoint.ModelChoices...)
-				if endpoint.CurrentModel != "" {
-					models = append(models, endpoint.CurrentModel)
-				}
-				for _, model := range models {
-					if model == "" || !adapterModelAllowed(model) {
-						continue
-					}
-					if tasks := allowedModelTasks([]string{"generation", "vision"}); len(tasks) > 0 {
-						addModel(ModelCapability{Name: model, Provider: "adapter", Vision: true, Tasks: tasks})
-					}
 				}
 			}
 		}

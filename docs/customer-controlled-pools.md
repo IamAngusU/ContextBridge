@@ -56,12 +56,17 @@ contextbridge cluster login --account bob --token-file ./bob-token.json --pool-a
 contextbridge cluster account list
 contextbridge cluster account use alice
 contextbridge cluster submit --account bob --file ./job.json
+contextbridge cluster logout --account bob
 ```
 
 `cluster chat`, `cluster submit`, and `cluster route explain` accept
 `--account`; otherwise they use `cluster.active_account`. Selecting an ordinary
 account never inherits another account's authority. Removing an account removes
 its saved association but deliberately does not delete its authority file.
+`cluster logout [--account NAME]` is the clearer local sign-out spelling: it
+removes the active or selected saved credential but does not revoke it at the
+relay and never deletes an authority file. Administrators revoke a leaked or
+retired credential separately with `cluster token revoke TOKEN_ID`.
 
 Separate OS users already receive separate default configuration directories.
 Use that boundary when people on the same computer must not be able to read one
