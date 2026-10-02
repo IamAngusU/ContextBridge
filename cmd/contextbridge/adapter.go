@@ -9,6 +9,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/IamAngusU/ContextBridge/internal/cluster"
 	"github.com/IamAngusU/ContextBridge/internal/config"
+	"github.com/IamAngusU/ContextBridge/internal/strictjson"
 )
 
 func adapterCommand(args []string) error {
@@ -25,8 +27,10 @@ func adapterCommand(args []string) error {
 		fmt.Fprintln(os.Stdout, `Usage: contextbridge adapter list|details|doctor|setup|enable|disable|start|stop [options]
 
 Adapters are optional out-of-tree components. list/details/doctor are read-only.
-setup registers one bounded local adapter profile and creates its independent
-credential file only when explicitly requested.
+setup registers one bounded adapter profile. --classification records whether
+its execution crosses a remote boundary; repeatable --option KEY=JSON stores
+non-secret driver configuration. Credentials are created only when explicitly
+requested.
 enable/start and disable/stop change the relay's desired admission state; they
 do not install packages, invent missing credentials, or make an unhealthy
 adapter ready. Control accepts a stable adp_ UID or one unambiguous leased
@@ -53,6 +57,7 @@ adapter/instance ID.`)
 
 func adapterSetupCommand(args []string) error {
 	flags := flag.NewFlagSet("adapter setup", flag.ContinueOnError)
+	var rawOptions adapterSetupOptions
 	path := flags.String("config", defaultConfigPath(), "config path")
 	label := flags.String("label", "", "human-readable adapter profile label")
 	driver := flags.String("driver", "", "bounded adapter driver identifier")
@@ -63,12 +68,14 @@ func adapterSetupCommand(args []string) error {
 	principalID := flags.String("principal", "", "scoped principal ID; defaults to the profile")
 	tokenFile := flags.String("token-file", "", "private adapter credential file")
 	createToken := flags.Bool("create-token", false, "create the credential file if it is missing; never overwrite")
+	classification := flags.String("classification", "", "execution classification: local or remote")
+	flags.Var(&rawOptions, "option", "profile option as KEY=JSON; repeat for multiple bounded non-secret options")
 	asJSON := flags.Bool("json", false, "print machine-readable redacted setup details")
 	if err := parseInterspersedFlags(flags, args); err != nil {
 		return err
 	}
 	if flags.NArg() != 1 {
-		return errors.New("usage: contextbridge adapter setup PROFILE --driver ID --task TASK --token-file FILE [--create-token]")
+		return errors.New("usage: contextbridge adapter setup PROFILE --driver ID --task TASK --token-file FILE [--classification local|remote] [--option KEY=JSON] [--create-token]")
 	}
 	profile := strings.TrimSpace(flags.Arg(0))
 	if strings.TrimSpace(*driver) == "" || strings.TrimSpace(*task) == "" || strings.TrimSpace(*tokenFile) == "" {
@@ -76,6 +83,14 @@ func adapterSetupCommand(args []string) error {
 	}
 	if *timeoutSeconds < 1 || *timeoutSeconds > 3600 {
 		return errors.New("--timeout-seconds must be between 1 and 3600")
+	}
+	class := strings.ToLower(strings.TrimSpace(*classification))
+	if class != "" && class != "local" && class != "remote" {
+		return errors.New("--classification must be local or remote")
+	}
+	profileOptions, err := rawOptions.values()
+	if err != nil {
+		return err
 	}
 	if strings.TrimSpace(*label) == "" {
 		*label = profile
@@ -121,8 +136,8 @@ func adapterSetupCommand(args []string) error {
 	if cfg.Routes == nil {
 		cfg.Routes = map[string]config.Route{}
 	}
-	profileConfig := config.AdapterProfile{Label: strings.TrimSpace(*label), Driver: strings.TrimSpace(*driver)}
-	if current, exists := cfg.AdapterProfiles[profile]; exists && (current.Label != profileConfig.Label || current.Driver != profileConfig.Driver || len(current.Options) != 0) {
+	profileConfig := config.AdapterProfile{Label: strings.TrimSpace(*label), Driver: strings.TrimSpace(*driver), Options: profileOptions}
+	if current, exists := cfg.AdapterProfiles[profile]; exists && (current.Label != profileConfig.Label || current.Driver != profileConfig.Driver || !sameAdapterSetupOptions(current.Options, profileConfig.Options)) {
 		return fmt.Errorf("adapter profile %s already exists with different settings", profile)
 	}
 	routeConfig := config.Route{Provider: "adapter", TimeoutSeconds: *timeoutSeconds, AdapterProfile: profile,
@@ -138,6 +153,22 @@ func adapterSetupCommand(args []string) error {
 	cfg.AdapterProfiles[profile] = profileConfig
 	cfg.Routes[strings.TrimSpace(*routeName)] = routeConfig
 	cfg.Providers.Adapter.Principals[strings.TrimSpace(*principalID)] = principalConfig
+	if class != "" {
+		if cfg.Cluster.Policies.Execution.AdapterProfileClassifications == nil {
+			cfg.Cluster.Policies.Execution.AdapterProfileClassifications = map[string]string{}
+		}
+		classificationKey := profile
+		for existingProfile, existingClass := range cfg.Cluster.Policies.Execution.AdapterProfileClassifications {
+			if !strings.EqualFold(existingProfile, profile) {
+				continue
+			}
+			if !strings.EqualFold(existingClass, class) {
+				return fmt.Errorf("adapter profile %s already has a different execution classification", profile)
+			}
+			classificationKey = existingProfile
+		}
+		cfg.Cluster.Policies.Execution.AdapterProfileClassifications[classificationKey] = class
+	}
 	if cfg.Providers.Adapter.AuthMode == "" {
 		cfg.Providers.Adapter.AuthMode = "scoped"
 	}
@@ -150,7 +181,8 @@ func adapterSetupCommand(args []string) error {
 	}
 	keepCredential = true
 	result := map[string]interface{}{"profile": profile, "route": strings.TrimSpace(*routeName), "principal": strings.TrimSpace(*principalID),
-		"task": strings.TrimSpace(*task), "model": strings.TrimSpace(*model), "token_file": credentialPath, "credential_created": created}
+		"task": strings.TrimSpace(*task), "model": strings.TrimSpace(*model), "classification": class,
+		"option_keys": sortedAdapterOptionKeys(profileOptions), "token_file": credentialPath, "credential_created": created}
 	if *asJSON {
 		return json.NewEncoder(os.Stdout).Encode(result)
 	}
@@ -162,6 +194,145 @@ func adapterSetupCommand(args []string) error {
 	}
 	fmt.Println("Start the adapter process separately; ordinary ContextBridge routes remain independent if it is absent.")
 	return nil
+}
+
+type adapterSetupOptions []string
+
+func (values *adapterSetupOptions) String() string { return strings.Join(*values, ",") }
+
+func (values *adapterSetupOptions) Set(value string) error {
+	*values = append(*values, value)
+	return nil
+}
+
+func (values adapterSetupOptions) values() (map[string]interface{}, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	if len(values) > 64 {
+		return nil, errors.New("--option accepts at most 64 entries")
+	}
+	result := make(map[string]interface{}, len(values))
+	seen := map[string]string{}
+	totalBytes := 0
+	for _, raw := range values {
+		totalBytes += len(raw)
+		if totalBytes > 64*1024 {
+			return nil, errors.New("--option data exceeds the 64 KiB setup limit")
+		}
+		key, encoded, found := strings.Cut(raw, "=")
+		key = strings.TrimSpace(key)
+		if !found || key == "" || encoded == "" {
+			return nil, errors.New("--option must use KEY=JSON")
+		}
+		if len(key) > 80 || !isAdapterOptionKey(key) {
+			return nil, fmt.Errorf("--option key %q must be a bounded identifier", key)
+		}
+		folded := strings.ToLower(key)
+		if existing, ok := seen[folded]; ok {
+			return nil, fmt.Errorf("--option keys %q and %q are case-insensitively ambiguous", existing, key)
+		}
+		seen[folded] = key
+		if err := strictjson.Validate([]byte(encoded)); err != nil {
+			return nil, fmt.Errorf("--option %s must contain unambiguous JSON: %w", key, err)
+		}
+		decoder := json.NewDecoder(strings.NewReader(encoded))
+		decoder.UseNumber()
+		var decoded interface{}
+		if err := decoder.Decode(&decoded); err != nil {
+			return nil, fmt.Errorf("--option %s must contain valid JSON: %w", key, err)
+		}
+		if decoder.Decode(&struct{}{}) != io.EOF {
+			return nil, fmt.Errorf("--option %s contains trailing JSON data", key)
+		}
+		decoded, err := normalizeAdapterOptionJSON(decoded, 0)
+		if err != nil {
+			return nil, fmt.Errorf("--option %s: %w", key, err)
+		}
+		result[key] = decoded
+	}
+	return result, nil
+}
+
+func isAdapterOptionKey(value string) bool {
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') || character == '_' || character == '-' || character == '.' {
+			continue
+		}
+		return false
+	}
+	return value != ""
+}
+
+func normalizeAdapterOptionJSON(value interface{}, depth int) (interface{}, error) {
+	if depth > 8 {
+		return nil, errors.New("JSON nesting exceeds 8 levels")
+	}
+	switch typed := value.(type) {
+	case json.Number:
+		if integer, err := typed.Int64(); err == nil {
+			return integer, nil
+		}
+		decimal, err := typed.Float64()
+		if err != nil {
+			return nil, errors.New("number is outside the supported JSON range")
+		}
+		return decimal, nil
+	case []interface{}:
+		if len(typed) > 256 {
+			return nil, errors.New("JSON array exceeds 256 items")
+		}
+		for index := range typed {
+			normalized, err := normalizeAdapterOptionJSON(typed[index], depth+1)
+			if err != nil {
+				return nil, err
+			}
+			typed[index] = normalized
+		}
+		return typed, nil
+	case map[string]interface{}:
+		if len(typed) > 64 {
+			return nil, errors.New("JSON object exceeds 64 properties")
+		}
+		nestedSeen := map[string]string{}
+		for key, item := range typed {
+			folded := strings.ToLower(key)
+			if existing, exists := nestedSeen[folded]; exists {
+				return nil, fmt.Errorf("JSON properties %q and %q are case-insensitively ambiguous", existing, key)
+			}
+			nestedSeen[folded] = key
+			normalized, err := normalizeAdapterOptionJSON(item, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			typed[key] = normalized
+		}
+		return typed, nil
+	case string:
+		if len(typed) > 16*1024 {
+			return nil, errors.New("JSON string exceeds 16 KiB")
+		}
+		return typed, nil
+	default:
+		return value, nil
+	}
+}
+
+func sortedAdapterOptionKeys(options map[string]interface{}) []string {
+	keys := make([]string, 0, len(options))
+	for key := range options {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func sameAdapterSetupOptions(left, right map[string]interface{}) bool {
+	leftJSON, leftErr := json.Marshal(left)
+	rightJSON, rightErr := json.Marshal(right)
+	return leftErr == nil && rightErr == nil && string(leftJSON) == string(rightJSON)
 }
 
 func ensureAdapterSetupToken(path string, create bool) (string, bool, error) {
