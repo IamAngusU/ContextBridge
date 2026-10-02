@@ -658,10 +658,13 @@ contextbridge uninstall --dry-run
 
 For `route explain`, use a native cluster job such as [examples/cluster-job.json](examples/cluster-job.json). Pool commands require a configured, running relay and an authorized credential. Route previews and conformance checks do not send inference requests; uninstall dry-run does not stop or remove anything.
 
+<!-- release-compat: main-only: adapter conformance -->
+
 | Want to… | Command / guide |
 | --- | --- |
 | Connect an OpenAI-compatible app | `contextbridge integrate openai --write-env .contextbridge.env` · [Integrations](docs/integrations.md) |
 | Register an optional local adapter | `contextbridge adapter setup PROFILE ...` · [Out-of-tree adapters](docs/adapters.md) |
+| Test an out-of-tree adapter | `contextbridge adapter conformance --adapter PATH ...` · [Adapter Conformance v1](docs/adapters.md#free-adapter-conformance-v1) |
 | Add CB to an existing LiteLLM gateway | `contextbridge integrate litellm --write-config ./litellm-contextbridge.yaml --write-env ./.contextbridge-litellm.env` · [Example](examples/litellm/README.md) |
 | Submit durable jobs from n8n or another workflow engine | Keep the workflow external and use a stable operation ID · [Example](examples/external-workflow/README.md) |
 | Connect an MCP client | `contextbridge mcp serve` · [Integrations](docs/integrations.md) |

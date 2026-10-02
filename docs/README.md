@@ -50,7 +50,8 @@ described as vendor integrations here.
 - [Management API](management-api.md): scoped dashboard credentials, identity,
   OpenAPI discovery, cursor history, live event streams, and safe local
   configuration editing with machine-readable limits.
-- [Provider-neutral adapters](adapters.md): out-of-tree endpoint contract.
+- [Provider-neutral adapters](adapters.md): out-of-tree endpoint contract and
+  free black-box conformance harness.
 - [Hosted Relay readiness](hosted-relay.md): what is and is not ready for a
   managed coordination service.
 - [Privacy boundaries](privacy.md): cleartext, optional E2EE,
@@ -62,6 +63,8 @@ described as vendor integrations here.
   labels, optional credential-bound scopes, and the hosted-isolation boundary.
 - [Job Contract v1 schema](schemas/job-contract-v1.schema.json): reusable
   machine-readable submission boundary.
+- [Adapter Conformance v1 schema](schemas/adapter-conformance-v1.schema.json):
+  machine-readable black-box adapter evidence.
 - [Verification Statement v1 schema](schemas/verification-statement-v1.schema.json):
   portable signed-review envelope.
 - [Verification Trust Key v1 schema](schemas/verification-trust-key-v1.schema.json):

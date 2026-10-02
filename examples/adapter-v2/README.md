@@ -67,10 +67,21 @@ sh scripts/test-reference-adapter-e2e.sh
 
 The second command builds the real public ContextBridge binary, starts an
 isolated loopback service with scoped credentials, runs this out-of-tree Node
-adapter, submits one bounded job, and verifies the terminal result. It needs no
-model, provider account, Internet connection, or privileged API.
+adapter, runs Adapter Conformance v1, submits one bounded job, and verifies the
+terminal result. It needs no model, provider account, Internet connection, or
+privileged API.
 
-Passing this example test is not adapter certification. The actual core also
-has adversarial tests for principal isolation, endpoint capability renewal,
-lease fencing, malformed progress and bounded artifacts. A standalone adapter
-conformance harness remains a separate compatibility milestone.
+You can run only the black-box suite with:
+
+```sh
+contextbridge adapter conformance \
+  --adapter node \
+  --arg ./examples/adapter-v2/reference-adapter.mjs \
+  --profile reference \
+  --working-directory .
+```
+
+Passing this example test is not adapter certification. The suite is bounded,
+self-run evidence for the tested executable and moment; the actual core also
+has adversarial tests for principal isolation, lease fencing, malformed
+progress and bounded artifacts.

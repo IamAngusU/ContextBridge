@@ -17,7 +17,7 @@ var completionSubcommands = map[string][]string{
 	"runtime":      {"install"},
 	"mcp":          {"serve"},
 	"integrate":    {"openai", "litellm", "mcp", "relay", "ui"},
-	"adapter":      {"list", "details", "doctor", "setup", "enable", "disable", "start", "stop"},
+	"adapter":      {"list", "details", "doctor", "setup", "conformance", "enable", "disable", "start", "stop"},
 	"verification": {"verify"},
 	"cluster":      {"status", "events", "estimate", "node", "protocol", "conformance", "submit", "chat", "agent", "selftest", "route", "contract", "receipt", "login", "account", "token", "pairing", "pool", "configure", "dashboard", "pipeline", "lan"},
 	"route":        {"explain"},
@@ -58,7 +58,7 @@ $script:ContextBridgeSubcommands = @{
     runtime = @('install')
     mcp = @('serve')
     integrate = @('openai','litellm','mcp','relay','ui')
-	adapter = @('list','details','doctor','setup','enable','disable','start','stop')
+	adapter = @('list','details','doctor','setup','conformance','enable','disable','start','stop')
     verification = @('verify')
 	cluster = @('status','events','estimate','node','protocol','conformance','submit','chat','agent','selftest','route','contract','receipt','login','account','token','pairing','pool','configure','dashboard','pipeline','lan')
     route = @('explain')
@@ -96,6 +96,7 @@ $script:ContextBridgeOptions = @{
 	'adapter details' = @('--config','--account','--token','--token-file','--json')
 	'adapter doctor' = @('--config','--account','--token','--token-file','--json')
 	'adapter setup' = @('--config','--label','--driver','--route','--task','--model','--timeout-seconds','--principal','--token-file','--classification','--option','--create-token','--json')
+	'adapter conformance' = @('--adapter','--arg','--profile','--profile-file','--job-file','--working-directory','--timeout-seconds','--json')
 	'adapter enable' = @('--config','--account','--token','--token-file','--json')
 	'adapter disable' = @('--config','--account','--token','--token-file','--json')
 	'adapter start' = @('--config','--account','--token','--token-file','--json')
@@ -151,7 +152,7 @@ $script:ContextBridgeTakesValue = @(
     '--slots','--endpoint','--relay','--name','--providers','--models','--tasks','--groups',
     '--token','--account','--provider','--group','--model','--profile','--reasoning','--session','--prompt',
 	'--min-artifacts','--min-images','--local-model','--image-profile','--timeout','--job-timeout','--poll','--after','--limit','--offset','--idempotency-key','--subject','--groups','--allowed-tenants','--allowed-subjects','--lifetime-hours',
-	'--mode','--relay-url','--public-url','--listen','--role','--subject','--approve','--deny','--label','--driver','--route','--task','--model','--timeout-seconds','--principal','--classification','--option',
+	'--mode','--relay-url','--public-url','--listen','--role','--subject','--approve','--deny','--label','--driver','--route','--task','--model','--timeout-seconds','--principal','--classification','--option','--adapter','--arg','--profile-file','--job-file','--working-directory',
     '--managed-service','--samples','--warmup','--database-jobs','--idle-duration','--binary',
     '--goal','--goal-file','--planner-provider','--planner-profile','--planner-model','--allow-providers',
     '--policy','--allow-adapter-profiles','--max-steps','--step-timeout','--max-runtime','--planner-timeout','--out','--plan','--approve'
@@ -231,7 +232,10 @@ _contextbridge_complete() {
   fi
 
   case "$previous" in
-    --config|--file|--artifacts|--artifact|--attach-image|--identity|--job-dir|--token-file|--pool-authority-file|--binary|--trust-key|--evidence-dir|--write-env|--write-config|--certificate-out|--out|--bundle)
+	--working-directory)
+	  if declare -F _filedir >/dev/null 2>&1; then _filedir -d; else COMPREPLY=( $(compgen -d -- "$current") ); fi
+	  return ;;
+	--config|--file|--artifacts|--artifact|--attach-image|--identity|--job-dir|--token-file|--pool-authority-file|--binary|--trust-key|--evidence-dir|--write-env|--write-config|--certificate-out|--out|--bundle|--adapter|--profile-file|--job-file)
       if declare -F _filedir >/dev/null 2>&1; then _filedir; else COMPREPLY=( $(compgen -f -- "$current") ); fi
       return ;;
     --provider) candidates="adapter ollama nuextract jina" ;;
@@ -288,6 +292,7 @@ _contextbridge_complete() {
       "integrate ui") candidates="--config --json --write-env --subject --lifetime-hours --allowed-subjects --allowed-tenants" ;;
 	  "adapter list"|"adapter details"|"adapter doctor"|"adapter enable"|"adapter disable"|"adapter start"|"adapter stop") candidates="--config --account --token --token-file --json" ;;
 	  "adapter setup") candidates="--config --label --driver --route --task --model --timeout-seconds --principal --token-file --classification --option --create-token --json" ;;
+	  "adapter conformance") candidates="--adapter --arg --profile --profile-file --job-file --working-directory --timeout-seconds --json" ;;
       "verification verify") candidates="--file --trust-key --artifact --require-artifact --evidence-dir --require-evidence --json" ;;
       benchmark) candidates="--json --samples --warmup --database-jobs --idle-duration --binary" ;;
       "schedule add") candidates="--config --file --interactive" ;;
@@ -328,7 +333,7 @@ _contextbridge_complete() {
       runtime) candidates="install" ;;
       mcp) candidates="serve" ;;
       integrate) candidates="openai litellm mcp relay ui" ;;
-      adapter) candidates="list details doctor setup enable disable start stop" ;;
+	  adapter) candidates="list details doctor setup conformance enable disable start stop" ;;
       verification) candidates="verify" ;;
 	  cluster) candidates="status events estimate node protocol conformance submit chat agent selftest route contract receipt login account token pairing pool configure dashboard pipeline lan" ;;
       route) candidates="explain" ;;
@@ -429,11 +434,12 @@ case "$words[2]" in
     ;;
   adapter)
     if (( CURRENT == 3 )); then
-      _values 'adapter action' list details doctor setup enable disable start stop
+	  _values 'adapter action' list details doctor setup conformance enable disable start stop
       return
     fi
     case "$words[3]" in
-      setup) _arguments "${config[@]}" '--label[Human-readable profile label]:label:' '--driver[Bounded adapter driver ID]:driver:' '--route[Local route name]:route:' '--task[Handled job task]:task:' '--model[Exact model selector]:model:' '--timeout-seconds[Route timeout]:seconds:' '--principal[Scoped principal ID]:principal:' '--token-file[Private credential file]:credential file:_files' '--classification[Execution boundary]:classification:(local remote)' '*--option[Non-secret profile option as KEY=JSON]:option:' '--create-token[Create a missing credential without overwriting]' '--json[Print redacted machine-readable setup details]' '1:profile ID:' ;;
+	  setup) _arguments "${config[@]}" '--label[Human-readable profile label]:label:' '--driver[Bounded adapter driver ID]:driver:' '--route[Local route name]:route:' '--task[Handled job task]:task:' '--model[Exact model selector]:model:' '--timeout-seconds[Route timeout]:seconds:' '--principal[Scoped principal ID]:principal:' '--token-file[Private credential file]:credential file:_files' '--classification[Execution boundary]:classification:(local remote)' '*--option[Non-secret profile option as KEY=JSON]:option:' '--create-token[Create a missing credential without overwriting]' '--json[Print redacted machine-readable setup details]' '1:profile ID:' ;;
+	  conformance) _arguments '--adapter[Exact adapter executable]:adapter executable:_files' '*--arg[One literal adapter argument]:argument:' '--profile[Safe adapter profile ID]:profile:' '--profile-file[Bounded JSON adapter profile]:profile file:_files' '--job-file[Side-effect-free bounded JSON job]:job file:_files' '--working-directory[Adapter working directory]:directory:_directories' '--timeout-seconds[Maximum seconds per isolated scenario]:seconds:' '--json[Print machine-readable conformance report]' ;;
 	  list|doctor) _arguments "${config[@]}" '--account[Named cluster account]:account:' '--token[Scoped relay credential]:token:' '--token-file[Scoped credential file]:token file:_files' '--json[Print machine-readable JSON]' ;;
 	  details|enable|disable|start|stop) _arguments "${config[@]}" '--account[Named cluster account]:account:' '--token[Scoped relay credential]:token:' '--token-file[Scoped credential file]:token file:_files' '--json[Print machine-readable JSON]' '1:adapter UID:' ;;
       *) _arguments '*:argument:' ;;

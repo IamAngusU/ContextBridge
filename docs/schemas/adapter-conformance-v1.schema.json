@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contextbridge.dev/schemas/adapter-conformance-v1.schema.json",
+  "title": "ContextBridge adapter conformance report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "protocol", "adapter", "profile", "started_at", "completed_at", "passed", "checks"],
+  "properties": {
+    "schema": { "const": "contextbridge.adapter-conformance.v1" },
+    "protocol": { "const": "contextbridge.adapter.v2" },
+    "adapter": { "type": "string", "minLength": 1, "maxLength": 260 },
+    "profile": { "$ref": "#/$defs/safe_id" },
+    "started_at": { "type": "string", "format": "date-time" },
+    "completed_at": { "type": "string", "format": "date-time" },
+    "passed": { "type": "boolean" },
+    "checks": {
+      "type": "array",
+      "minItems": 7,
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/check" }
+    }
+  },
+  "$defs": {
+    "safe_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$" },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "passed", "detail", "requests"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,79}$" },
+        "passed": { "type": "boolean" },
+        "detail": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "requests": { "type": "integer", "minimum": 0, "maximum": 100000 }
+      }
+    }
+  }
+}

@@ -83,6 +83,7 @@ func TestPublicCoreProductSurfaceIsPresent(t *testing.T) {
 		"docs/README.md",
 		"docs/compatibility.md",
 		"docs/verification.md",
+		"docs/schemas/adapter-conformance-v1.schema.json",
 		"docs/schemas/verification-statement-v1.schema.json",
 		"docs/schemas/adapter-presence-v1.schema.json",
 		"docs/schemas/verification-trust-key-v1.schema.json",

@@ -29,6 +29,34 @@ adapter_token="adapter-reference-token-0123456789abcdef"
 
 go build -trimpath -o "$work/contextbridge" "$root/cmd/contextbridge"
 
+"$work/contextbridge" adapter conformance \
+    --adapter "$(command -v node)" \
+    --arg "$root/examples/adapter-v2/reference-adapter.mjs" \
+    --profile reference \
+    --working-directory "$root" \
+    --timeout-seconds 10 \
+    --json >"$work/conformance.json"
+
+python3 - "$work/conformance.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    report = json.load(f)
+assert report["schema"] == "contextbridge.adapter-conformance.v1", report
+assert report["protocol"] == "contextbridge.adapter.v2", report
+assert report["passed"] is True, report
+expected = {
+    "unauthorized_is_terminal",
+    "http_failure_not_retried",
+    "expired_lease_is_terminal",
+    "scoped_lifecycle",
+    "endpoint_capability_renewal",
+    "claim_before_completion",
+    "ambiguous_completion_not_retried",
+}
+assert expected <= {item["id"] for item in report["checks"]}, report
+assert all(item["passed"] for item in report["checks"]), report
+PY
+
 cat >"$work/config.yml" <<EOF
 version: 1
 server:
@@ -101,4 +129,4 @@ assert adapter["result"]["text"] == "REFERENCE-ADAPTER-OK", adapter
 assert adapter["job_id"], adapter
 PY
 
-printf '%s\n' "ContextBridge adapter v2 reference E2E passed."
+printf '%s\n' "ContextBridge adapter v2 reference E2E and conformance passed."

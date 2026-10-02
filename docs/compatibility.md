@@ -41,7 +41,7 @@ without sending an inference request.
 | Pool metrics | `prometheus_metrics_v1`, `GET /metrics` | Authenticated fixed-cardinality aggregates with no tenant, job, node, provider, model, prompt, or error labels |
 | Producer resource governance | `producer_resource_governance_v1`, `capacity.owner_hourly_jobs_full` | Token-bound queue, hourly job, provider and local-egress ceilings; durable fixed-window accounting |
 | Producer-required E2EE | `producer_required_e2ee_v1`, `privacy.e2ee_required` | Token-bound fail-closed rejection of cleartext job and unsupported cleartext pipeline admission; payload confidentiality only, not coordination anonymity |
-| Out-of-tree adapter | `contextbridge.adapter.v2` | Scoped principal, endpoint capability, and per-generation lease capability; no standalone adapter certification suite is claimed yet |
+| Out-of-tree adapter | `contextbridge.adapter.v2`, `contextbridge.adapter-conformance.v1` | Scoped principal, endpoint capability, per-generation lease capability, and a free self-run black-box conformance report; no certification is implied |
 | Portable resource pack | `.contextbridge-pack.json`, `schema_version: 1` | Bounded discovery and identity validation; discovery is not execution approval |
 | Runtime lifecycle ownership | `runtime.engines.*.lifecycle_owner` | External APIs and externally started runtimes are observed but never stopped by CB; only a llama.cpp process actually started by CB reports `contextbridge` ownership |
 | RAG embedding-space identity | `rag_embedding_space_identity_v1`, `contextbridge.embedding-space.v1` | Every stored vector is bound to provider/runtime/model, revision evidence, dimensions, normalization, similarity and hashed query/passage preprocessing; cross-space search fails closed |
@@ -103,6 +103,27 @@ terminal-result invariants against temporary local stores. Its report is not a
 claim of network, provider or multi-relay HA validation; see
 [`field-validation.md`](field-validation.md) for the evidence boundary.
 
+Adapter Conformance v1 launches an explicit out-of-tree adapter against an
+isolated loopback fake core and emits no privileged credential. It probes
+terminal authentication and HTTP failures, expired-lease handling, the scoped
+lifecycle, endpoint capability renewal, claim ordering, and a deliberately
+ambiguous completion:
+
+```sh
+contextbridge adapter conformance \
+  --adapter /absolute/path/to/adapter \
+  --arg run \
+  --profile example \
+  --profile-file ./safe-profile.json \
+  --job-file ./side-effect-free-job.json \
+  --json > adapter-conformance.json
+```
+
+The supplied job must be safe to execute twice. The harness does not sandbox
+the executable or prove model/provider quality. Its report schema is
+[`schemas/adapter-conformance-v1.schema.json`](schemas/adapter-conformance-v1.schema.json),
+and its full boundary is documented in [`adapters.md`](adapters.md).
+
 A passing report is point-in-time evidence for the exact endpoint, worker,
 configuration, and versions tested. It is not a permanent badge, security
 audit, performance result, or endorsement by the ContextBridge project.
@@ -121,9 +142,10 @@ Prefer a statement that names the surface and version:
   command exits successfully; publish the JSON report and tested version.
 - `Passes ContextBridge Worker Conformance v1` when the worker command exits
   successfully; publish the JSON report and evidence time.
-- `Implements the ContextBridge adapter contract` when an independent adapter
-  implements the documented lifecycle. Do not call it certified until a
-  separate adapter conformance suite exists and has actually passed.
+- `Passes ContextBridge Adapter Conformance v1` when the unmodified command
+  exits successfully; publish the JSON report, exact adapter version, tested
+  ContextBridge version, profile scope, and evidence time. Do not call the
+  adapter certified or endorsed.
 
 The bare phrase `ContextBridge-compatible` is underspecified. Accompany it
 with the supported surface, version, tested ContextBridge release, and any

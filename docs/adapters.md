@@ -191,5 +191,52 @@ unit test uses a fake core to prove request shape, scoped capabilities,
 lifecycle ordering, and no retry after an HTTP failure. A second offline CI
 test builds the real public binary and proves one complete job across the
 process boundary. It returns a fixed string rather than bundling a provider.
-Passing these examples is not certification; a standalone adversarial adapter
-conformance harness remains a separate compatibility milestone.
+
+## Free adapter conformance v1
+
+An adapter author can run the same public black-box lifecycle checks without a
+configured relay or privileged credential:
+
+```sh
+contextbridge adapter conformance \
+  --adapter node \
+  --arg ./examples/adapter-v2/reference-adapter.mjs \
+  --profile reference \
+  --working-directory . \
+  --json > adapter-conformance.json
+```
+
+The command starts the exact executable and literal argument list directly,
+never through a shell. Each scenario gets a disposable loopback fake core, a
+new scoped token in a private temporary file, and the standard
+`CONTEXTBRIDGE_URL`, `CONTEXTBRIDGE_ADAPTER_TOKEN`,
+`CONTEXTBRIDGE_ADAPTER_TOKEN_FILE`, `CONTEXTBRIDGE_ADAPTER_PROFILE`, and
+`CONTEXTBRIDGE_ADAPTER_ENDPOINT_ID` environment variables. Temporary state is
+removed after the run and captured process output is bounded and excluded from
+the report.
+
+The v1 report checks that:
+
+- an authentication failure is terminal and never causes a credential or
+  protocol downgrade;
+- an explicit HTTP failure is not automatically replayed;
+- a rejected or expired lease is not progressed, completed, replayed, or
+  replaced with newly polled work;
+- profile discovery, heartbeat, endpoint-pinned polling, lease fencing,
+  bounded progress and completion stay on the scoped v2 surface;
+- a later heartbeat renews the original endpoint capability;
+- the adapter claims the lease before completion; and
+- a disconnect after completion bytes arrive is treated as ambiguous and is
+  neither replayed nor followed by polling for new work.
+
+Use `--profile-file` and `--job-file` for a real adapter's bounded driver
+configuration and job shape. The job **must be side-effect-free**: the harness
+runs it once for the successful lifecycle and once while deliberately dropping
+the completion response. The harness does not sandbox the operator-selected
+executable or block its provider/network access. Run it in the isolation the
+adapter normally requires, and never point it at a destructive profile.
+
+The machine-readable report schema is
+[`adapter-conformance-v1.schema.json`](schemas/adapter-conformance-v1.schema.json).
+A passing result is free, self-run, point-in-time evidence—not certification,
+a security audit, provider-quality validation, or project endorsement.
