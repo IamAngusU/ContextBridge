@@ -1263,7 +1263,7 @@ func (r *Relay) handleSubmit(w http.ResponseWriter, req *http.Request) {
 			status = http.StatusForbidden
 		} else if errors.Is(err, ErrIdempotencyConflict) {
 			status = http.StatusConflict
-		} else if errors.Is(err, ErrE2EERequired) || errors.Is(err, ErrTenantScopeForbidden) {
+		} else if errors.Is(err, ErrE2EERequired) || errors.Is(err, ErrTenantScopeForbidden) || errors.Is(err, ErrPriorityScopeForbidden) {
 			status = http.StatusForbidden
 		} else if errors.Is(err, os.ErrExist) {
 			status = http.StatusConflict

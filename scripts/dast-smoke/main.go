@@ -153,7 +153,11 @@ func run(binary string) error {
 	if err != nil {
 		return err
 	}
-	test.secrets = append(test.secrets, producerA, producerB, observer)
+	priorityCapped, err := test.createPriorityCappedProducerToken("dast-priority-capped", 20)
+	if err != nil {
+		return err
+	}
+	test.secrets = append(test.secrets, producerA, producerB, observer, priorityCapped)
 
 	producerOverview := test.request(http.MethodGet, "/v1/cluster/overview", producerA, nil, nil)
 	producerMetrics := test.request(http.MethodGet, "/metrics", producerA, nil, nil)
@@ -163,6 +167,18 @@ func run(binary string) error {
 	test.check("producer cannot read operator metrics", producerMetrics.status == http.StatusUnauthorized && test.noSecrets(producerMetrics.body))
 	test.check("observer can read metrics", observerMetrics.status == http.StatusOK && test.noSecrets(observerMetrics.body))
 	test.check("producer cannot mint credentials", producerTokenMint.status == http.StatusUnauthorized && test.noSecrets(producerTokenMint.body))
+
+	priorityDenied := test.request(http.MethodPost, "/v1/cluster/jobs", priorityCapped, []byte(`{"priority":21,"requirements":{"task":"generation","provider":"ollama"},"payload":{"prompt":"must not queue"}}`), nil)
+	priorityAllowed := test.request(http.MethodPost, "/v1/cluster/jobs", priorityCapped, []byte(`{"priority":20,"requirements":{"task":"generation","provider":"ollama"},"payload":{"prompt":"exact ceiling"}}`), nil)
+	var priorityJob struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(priorityAllowed.body, &priorityJob)
+	test.check("producer priority self-promotion rejected", priorityDenied.status == http.StatusForbidden && bytes.Contains(priorityDenied.body, []byte(`"scope.priority_forbidden"`)) && test.noSecrets(priorityDenied.body))
+	test.check("exact producer priority ceiling accepted", priorityAllowed.status == http.StatusAccepted && priorityJob.ID != "" && test.noSecrets(priorityAllowed.body))
+	if priorityJob.ID != "" {
+		_ = test.request(http.MethodDelete, "/v1/cluster/jobs/"+priorityJob.ID, priorityCapped, nil, nil)
+	}
 
 	malformed := test.request(http.MethodPost, "/v1/cluster/jobs", producerA, []byte(`{"requirements":`), nil)
 	duplicate := test.request(http.MethodPost, "/v1/cluster/jobs", producerA, []byte(`{"requirements":{"task":"generation"},"requirements":{"task":"generation"},"payload":{}}`), nil)
@@ -300,6 +316,24 @@ func (s *suite) createToken(role, subject string) (string, error) {
 	}
 	if err := json.Unmarshal(created.body, &output); err != nil || output.Token == "" {
 		return "", fmt.Errorf("create %s token returned an invalid response", role)
+	}
+	return output.Token, nil
+}
+
+func (s *suite) createPriorityCappedProducerToken(subject string, maxPriority int) (string, error) {
+	raw, _ := json.Marshal(map[string]interface{}{
+		"role": "producer", "subject": subject, "lifetime_hours": 1,
+		"producer_limits": map[string]interface{}{"max_priority": maxPriority},
+	})
+	created := s.request(http.MethodPost, "/v1/cluster/tokens", adminToken, raw, nil)
+	if created.status != http.StatusCreated {
+		return "", fmt.Errorf("create priority-capped producer token returned HTTP %d", created.status)
+	}
+	var output struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(created.body, &output); err != nil || output.Token == "" {
+		return "", errors.New("create priority-capped producer token returned an invalid response")
 	}
 	return output.Token, nil
 }

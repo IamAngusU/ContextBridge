@@ -546,9 +546,13 @@ type PairResponse struct {
 // deliberately small and enforceable at admission time; usage- or cost-based
 // budgets belong here only once the relay can reserve and prove that usage.
 type ProducerLimits struct {
-	MaxQueuedJobs  int      `json:"max_queued_jobs,omitempty"`
-	MaxJobsPerHour int      `json:"max_jobs_per_hour,omitempty"`
-	Providers      []string `json:"providers,omitempty"`
+	MaxQueuedJobs  int `json:"max_queued_jobs,omitempty"`
+	MaxJobsPerHour int `json:"max_jobs_per_hour,omitempty"`
+	// MaxPriority caps producer-selected queue priority. Nil preserves the
+	// backwards-compatible range up to 100; an explicit zero prevents a
+	// credential from promoting work above the normal priority tier.
+	MaxPriority *int     `json:"max_priority,omitempty"`
+	Providers   []string `json:"providers,omitempty"`
 	// AllowedTenants binds caller-selected tenant_id values to the authenticated
 	// producer credential. One value also supplies a safe default when a request
 	// omits tenant_id; multiple values require an explicit allowed value.

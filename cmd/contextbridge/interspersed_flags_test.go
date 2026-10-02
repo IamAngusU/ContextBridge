@@ -41,3 +41,23 @@ func TestParseInterspersedFlagsStillRejectsUnknownOption(t *testing.T) {
 		t.Fatal("unknown option was accepted")
 	}
 }
+
+func TestExplicitIntFlagValueDistinguishesOmittedFromZero(t *testing.T) {
+	flags := flag.NewFlagSet("test", flag.ContinueOnError)
+	priority := flags.Int("max-priority", 100, "")
+	if err := flags.Parse(nil); err != nil {
+		t.Fatal(err)
+	}
+	if value := explicitIntFlagValue(flags, "max-priority", *priority); value != nil {
+		t.Fatalf("omitted option became an explicit ceiling: %v", *value)
+	}
+
+	flags = flag.NewFlagSet("test", flag.ContinueOnError)
+	priority = flags.Int("max-priority", 100, "")
+	if err := flags.Parse([]string{"--max-priority", "0"}); err != nil {
+		t.Fatal(err)
+	}
+	if value := explicitIntFlagValue(flags, "max-priority", *priority); value == nil || *value != 0 {
+		t.Fatalf("explicit zero was not preserved: %v", value)
+	}
+}

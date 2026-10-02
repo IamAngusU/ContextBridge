@@ -350,6 +350,7 @@ func TestAdmissionStoreErrorsHaveStableCodes(t *testing.T) {
 		{ErrIdempotencyConflict, AdmissionCodeIdempotencyConflict},
 		{ErrNodeDraining, AdmissionCodeNodeDraining},
 		{ErrE2EERequired, AdmissionCodeE2EERequired},
+		{ErrPriorityScopeForbidden, AdmissionCodePriorityForbidden},
 	}
 	for _, item := range cases {
 		if got := admissionStoreErrorCode(item.err); got != item.code {

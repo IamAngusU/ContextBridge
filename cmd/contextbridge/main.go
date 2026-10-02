@@ -2640,6 +2640,7 @@ func clusterTokenCreateCommand(args []string) error {
 	lifetimeHours := flags.Int("lifetime-hours", 0, "credential lifetime in hours; 0 never expires")
 	maxQueuedJobs := flags.Int("max-queued-jobs", 0, "producer queued-job limit; 0 uses the relay default")
 	maxJobsPerHour := flags.Int("max-jobs-per-hour", 0, "durable producer admission limit; 0 disables it")
+	maxPriority := flags.Int("max-priority", 100, "maximum producer-selected job priority, 0 to 100; omission preserves 100")
 	providers := flags.String("providers", "", "comma-separated provider allowlist")
 	allowedTenants := flags.String("allowed-tenants", "", "comma-separated tenant_id allowlist bound to this producer or observer credential")
 	allowedSubjects := flags.String("allowed-subjects", "", "comma-separated owner_subject allowlist bound to this observer credential")
@@ -2650,6 +2651,10 @@ func clusterTokenCreateCommand(args []string) error {
 	}
 	if flags.NArg() != 0 {
 		return errors.New("unexpected positional arguments")
+	}
+	maxPriorityLimit := explicitIntFlagValue(flags, "max-priority", *maxPriority)
+	if maxPriorityLimit != nil && (*maxPriorityLimit < 0 || *maxPriorityLimit > 100) {
+		return errors.New("--max-priority must be between 0 and 100")
 	}
 	cfg, err := config.Load(*path)
 	if err != nil {
@@ -2664,7 +2669,7 @@ func clusterTokenCreateCommand(args []string) error {
 	var output map[string]interface{}
 	request := map[string]interface{}{
 		"role": *role, "subject": *subject, "groups": splitWorkerList(*groups), "lifetime_hours": *lifetimeHours,
-		"producer_limits": cluster.ProducerLimits{MaxQueuedJobs: *maxQueuedJobs, MaxJobsPerHour: *maxJobsPerHour, Providers: splitWorkerList(*providers), AllowedTenants: producerTenants, Egress: strings.TrimSpace(*egress), RequireE2EE: *requireE2EE},
+		"producer_limits": cluster.ProducerLimits{MaxQueuedJobs: *maxQueuedJobs, MaxJobsPerHour: *maxJobsPerHour, MaxPriority: maxPriorityLimit, Providers: splitWorkerList(*providers), AllowedTenants: producerTenants, Egress: strings.TrimSpace(*egress), RequireE2EE: *requireE2EE},
 		"observer_limits": cluster.ObserverLimits{AllowedSubjects: splitWorkerList(*allowedSubjects), AllowedTenants: observerTenants},
 	}
 	if err := clusterPOST(context.Background(), clusterBaseURL(cfg)+"/v1/cluster/tokens", cfg.Cluster.Relay.AdminToken, request, &output); err != nil {

@@ -56,3 +56,21 @@ func isBooleanFlag(option *flag.Flag) bool {
 	value, ok := option.Value.(booleanFlag)
 	return ok && value.IsBoolFlag()
 }
+
+// explicitIntFlagValue preserves the distinction between an omitted numeric
+// option and an explicit zero. That matters for credential policy fields where
+// zero is an enforceable ceiling while omission keeps backwards-compatible
+// behavior.
+func explicitIntFlagValue(flags *flag.FlagSet, name string, value int) *int {
+	provided := false
+	flags.Visit(func(option *flag.Flag) {
+		if option.Name == name {
+			provided = true
+		}
+	})
+	if !provided {
+		return nil
+	}
+	copy := value
+	return &copy
+}

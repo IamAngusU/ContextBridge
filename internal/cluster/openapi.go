@@ -177,6 +177,7 @@ func relayOpenAPI() map[string]interface{} {
 					"properties": map[string]interface{}{
 						"max_queued_jobs":   map[string]interface{}{"type": "integer", "minimum": 0, "maximum": maxQueuedJobsPerOwner},
 						"max_jobs_per_hour": map[string]interface{}{"type": "integer", "minimum": 0, "maximum": 1000000},
+						"max_priority":      map[string]interface{}{"type": "integer", "minimum": 0, "maximum": 100, "description": "Maximum queue priority this producer may select; omission preserves the historical maximum of 100."},
 						"providers":         map[string]interface{}{"type": "array", "maxItems": 32, "uniqueItems": true, "items": map[string]interface{}{"type": "string", "maxLength": 80}},
 						"allowed_tenants":   map[string]interface{}{"type": "array", "maxItems": 32, "uniqueItems": true, "items": map[string]interface{}{"type": "string", "maxLength": 200}},
 						"egress":            map[string]interface{}{"type": "string", "enum": []string{"", "local_only"}},

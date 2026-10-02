@@ -176,7 +176,7 @@ func TestRelayIntegrationJSONWritesSecretOnlyToPrivateFile(t *testing.T) {
 	}
 	previousStdout := os.Stdout
 	os.Stdout = writeEnd
-	commandErr := integrateCommand([]string{"relay", "--config", configPath, "--subject", "json-app", "--allowed-tenants", "tenant-a,tenant-b", "--write-env", envPath, "--json"})
+	commandErr := integrateCommand([]string{"relay", "--config", configPath, "--subject", "json-app", "--allowed-tenants", "tenant-a,tenant-b", "--max-priority", "0", "--write-env", envPath, "--json"})
 	_ = writeEnd.Close()
 	os.Stdout = previousStdout
 	stdout, _ := io.ReadAll(readEnd)
@@ -186,6 +186,9 @@ func TestRelayIntegrationJSONWritesSecretOnlyToPrivateFile(t *testing.T) {
 	}
 	if len(issued.ProducerLimits.AllowedTenants) != 2 || issued.ProducerLimits.AllowedTenants[0] != "tenant-a" || issued.ProducerLimits.AllowedTenants[1] != "tenant-b" {
 		t.Fatalf("relay integration lost --allowed-tenants: %#v", issued.ProducerLimits)
+	}
+	if issued.ProducerLimits.MaxPriority == nil || *issued.ProducerLimits.MaxPriority != 0 {
+		t.Fatalf("relay integration lost explicit zero priority ceiling: %#v", issued.ProducerLimits)
 	}
 	var report relayIntegrationInfo
 	if err := json.Unmarshal(stdout, &report); err != nil || report.TokenID != "tok_json" || strings.Contains(string(stdout), secret) {
@@ -271,7 +274,7 @@ func TestUIIntegrationCreatesReadOnlyObserverBundle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if issued.Role != "observer" || issued.Subject != "custom-dashboard" || issued.ProducerLimits.MaxQueuedJobs != 0 || issued.ProducerLimits.MaxJobsPerHour != 0 || len(issued.ProducerLimits.Providers) != 0 || len(issued.ProducerLimits.AllowedTenants) != 0 || issued.ProducerLimits.Egress != "" {
+	if issued.Role != "observer" || issued.Subject != "custom-dashboard" || issued.ProducerLimits.MaxQueuedJobs != 0 || issued.ProducerLimits.MaxJobsPerHour != 0 || issued.ProducerLimits.MaxPriority != nil || len(issued.ProducerLimits.Providers) != 0 || len(issued.ProducerLimits.AllowedTenants) != 0 || issued.ProducerLimits.Egress != "" {
 		t.Fatalf("UI integration did not request a plain observer identity: %#v", issued)
 	}
 	if len(issued.ObserverLimits.AllowedSubjects) != 1 || issued.ObserverLimits.AllowedSubjects[0] != "website-api" || len(issued.ObserverLimits.AllowedTenants) != 1 || issued.ObserverLimits.AllowedTenants[0] != "production" {
@@ -312,11 +315,12 @@ func TestRelayIntegrationIssuesDurableProducerGovernance(t *testing.T) {
 	t.Cleanup(server.Close)
 	cfg := config.Config{Cluster: config.Cluster{Relay: config.ClusterRelay{PublicURL: server.URL, AdminToken: admin}}}
 	path := filepath.Join(t.TempDir(), "bounded.env")
-	want := cluster.ProducerLimits{MaxQueuedJobs: 3, MaxJobsPerHour: 25, Providers: []string{"ollama"}, AllowedTenants: []string{"tenant-a"}, Egress: "local_only", RequireE2EE: true}
+	maxPriority := 80
+	want := cluster.ProducerLimits{MaxQueuedJobs: 3, MaxJobsPerHour: 25, MaxPriority: &maxPriority, Providers: []string{"ollama"}, AllowedTenants: []string{"tenant-a"}, Egress: "local_only", RequireE2EE: true}
 	if _, err := createRelayIntegrationBundleGoverned(context.Background(), cfg, path, "bounded-app", nil, 24, want); err != nil {
 		t.Fatal(err)
 	}
-	if issued.ProducerLimits.MaxQueuedJobs != want.MaxQueuedJobs || issued.ProducerLimits.MaxJobsPerHour != want.MaxJobsPerHour || issued.ProducerLimits.Egress != want.Egress || len(issued.ProducerLimits.Providers) != 1 || issued.ProducerLimits.Providers[0] != "ollama" || len(issued.ProducerLimits.AllowedTenants) != 1 || issued.ProducerLimits.AllowedTenants[0] != "tenant-a" || !issued.ProducerLimits.RequireE2EE {
+	if issued.ProducerLimits.MaxQueuedJobs != want.MaxQueuedJobs || issued.ProducerLimits.MaxJobsPerHour != want.MaxJobsPerHour || issued.ProducerLimits.MaxPriority == nil || *issued.ProducerLimits.MaxPriority != maxPriority || issued.ProducerLimits.Egress != want.Egress || len(issued.ProducerLimits.Providers) != 1 || issued.ProducerLimits.Providers[0] != "ollama" || len(issued.ProducerLimits.AllowedTenants) != 1 || issued.ProducerLimits.AllowedTenants[0] != "tenant-a" || !issued.ProducerLimits.RequireE2EE {
 		t.Fatalf("governance was not sent to the relay: %#v", issued.ProducerLimits)
 	}
 }
@@ -548,6 +552,29 @@ func TestLiteLLMIntegrationCommandRequiresBothOutputPaths(t *testing.T) {
 	err := integrateCommand([]string{"litellm", "--config", configPath, "--write-config", filepath.Join(t.TempDir(), "litellm.yaml")})
 	if err == nil || !strings.Contains(err.Error(), "must be provided together") {
 		t.Fatalf("one-file LiteLLM command was not rejected clearly: %v", err)
+	}
+}
+
+func TestIntegrationPriorityCeilingIsRelayOnlyAndBounded(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yml")
+	if err := config.Default(configPath); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"wrong target", []string{"openai", "--config", configPath, "--max-priority", "20"}, "only for relay"},
+		{"below range", []string{"relay", "--config", configPath, "--max-priority", "-1"}, "between 0 and 100"},
+		{"above range", []string{"relay", "--config", configPath, "--max-priority", "101"}, "between 0 and 100"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := integrateCommand(test.args)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("unexpected priority option result: %v", err)
+			}
+		})
 	}
 }
 

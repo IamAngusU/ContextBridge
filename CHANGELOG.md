@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Added an optional producer-token `max_priority` ceiling with CLI and OpenAPI
+  support. Explicit zero blocks self-promotion above the normal tier, omission
+  preserves the historical maximum of 100, and both ordinary and reserved
+  E2EE admission fail closed with `scope.priority_forbidden` before queue or
+  reservation mutation. This establishes authorization for numeric queue
+  priority without claiming preemption or reserved realtime capacity.
 - Replaced implementation-specific adapter names in public CLI fixtures and
   examples with provider-neutral identifiers. Generic Ogg/Opus compatibility
   remains documented by container behavior rather than by a private channel
