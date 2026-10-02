@@ -16,7 +16,7 @@ func TestAdapterSetupCreatesScopedCredentialAndIdempotentConfig(t *testing.T) {
 	if err := config.Default(configPath); err != nil {
 		t.Fatal(err)
 	}
-	args := []string{"local-speech", "--config", configPath, "--label", "Local speech", "--driver", "alva-speech",
+	args := []string{"local-speech", "--config", configPath, "--label", "Local speech", "--driver", "example-speech",
 		"--route", "speech_local", "--task", "speech_to_text", "--model", "whisper-large-v3-turbo",
 		"--token-file", credentialPath, "--create-token"}
 	if err := adapterSetupCommand(args); err != nil {
@@ -40,7 +40,7 @@ func TestAdapterSetupCreatesScopedCredentialAndIdempotentConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := adapterSetupCommand([]string{"local-speech", "--config", configPath, "--label", "Local speech", "--driver", "alva-speech",
+	if err := adapterSetupCommand([]string{"local-speech", "--config", configPath, "--label", "Local speech", "--driver", "example-speech",
 		"--route", "speech_local", "--task", "speech_to_text", "--model", "whisper-large-v3-turbo", "--token-file", credentialPath}); err != nil {
 		t.Fatalf("idempotent setup failed: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestAdapterSetupNeverCreatesCredentialImplicitly(t *testing.T) {
 	if err := config.Default(configPath); err != nil {
 		t.Fatal(err)
 	}
-	err := adapterSetupCommand([]string{"local-speech", "--config", configPath, "--driver", "alva-speech",
+	err := adapterSetupCommand([]string{"local-speech", "--config", configPath, "--driver", "example-speech",
 		"--task", "speech_to_text", "--token-file", credentialPath})
 	if err == nil {
 		t.Fatal("setup created a credential without explicit authorization")

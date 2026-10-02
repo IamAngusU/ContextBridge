@@ -24,12 +24,12 @@ func TestSpeechToTextAcceptsCompleteBoundedOggOpus(t *testing.T) {
 	}
 }
 
-func TestSpeechToTextAcceptsWhatsAppOggOpusWithoutEOSAtExactPageBoundary(t *testing.T) {
+func TestSpeechToTextAcceptsLinkedDeviceOggOpusWithoutEOSAtExactPageBoundary(t *testing.T) {
 	raw := testOggOpusWithFinalFlags(48_000, 0)
 	info, err := InspectAudioInput(AudioInput{Name: "voice-note.ogg", MediaType: "audio/ogg; codecs=opus",
 		DataBase64: base64.StdEncoding.EncodeToString(raw)})
 	if err != nil || info.Bytes != int64(len(raw)) || info.DurationMS != 1000 {
-		t.Fatalf("valid WhatsApp-style stream rejected: %+v, %v", info, err)
+		t.Fatalf("valid linked-device stream rejected: %+v, %v", info, err)
 	}
 	truncated := raw[:len(raw)-1]
 	if _, err := InspectAudioInput(AudioInput{Name: "voice-note.ogg", MediaType: "audio/ogg; codecs=opus",

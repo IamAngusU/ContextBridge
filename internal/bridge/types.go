@@ -89,8 +89,8 @@ type ImageInput struct {
 }
 
 // AudioInput carries one complete, verified inline audio recording. The first
-// public contract intentionally accepts only Ogg/Opus, the format used by
-// WhatsApp voice notes and a format with a bounded, inspectable container.
+// public contract intentionally accepts only Ogg/Opus, a common voice-note
+// format with a bounded, inspectable container.
 type AudioInput struct {
 	Name       string `json:"name,omitempty"`
 	MediaType  string `json:"media_type"`
