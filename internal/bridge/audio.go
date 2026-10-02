@@ -23,8 +23,8 @@ type AudioInfo struct {
 // routing metadata. Ogg checksums, page order, Opus headers, an exact final
 // page boundary and the terminal granule position are all verified without
 // decoding attacker-controlled audio. A final EOS bit is accepted and fences
-// trailing pages, but is not required: WhatsApp's linked-device export can
-// produce decoder-valid Ogg/Opus recordings without that advisory flag.
+// trailing pages, but is not required: linked-device exports can produce
+// decoder-valid Ogg/Opus recordings without that advisory flag.
 func InspectAudioInput(input AudioInput) (AudioInfo, error) {
 	if len(input.Name) > 255 || strings.IndexFunc(input.Name, unicode.IsControl) >= 0 {
 		return AudioInfo{}, errors.New("audio.name must be at most 255 bytes without control characters")

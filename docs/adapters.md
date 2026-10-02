@@ -67,7 +67,7 @@ Ordinary local, pool, and other adapter routes remain independent.
 
 `details`, `enable`/`start`, and `disable`/`stop` accept the stable `adp_...`
 UID printed by `list`. While a fresh lease exists they also accept an exact
-adapter ID or instance ID, such as `whatsapp-primary`, when it resolves to one
+adapter ID or instance ID, such as `messaging-primary`, when it resolves to one
 visible adapter. Ambiguous friendly IDs fail closed and require the stable UID;
 the UID also remains the recovery selector after every lease has expired.
 

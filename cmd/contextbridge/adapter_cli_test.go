@@ -61,8 +61,8 @@ func TestAdapterCLIRejectsAmbiguousCredentialSources(t *testing.T) {
 }
 
 func TestAdapterCLIAllowsOptionsAfterFriendlySelector(t *testing.T) {
-	options, positional, err := parseAdapterCLIFlags("adapter details", []string{"whatsapp-primary", "--json", "--account", "operator"}, true)
-	if err != nil || len(positional) != 1 || positional[0] != "whatsapp-primary" || !options.asJSON || options.account != "operator" {
+	options, positional, err := parseAdapterCLIFlags("adapter details", []string{"messaging-primary", "--json", "--account", "operator"}, true)
+	if err != nil || len(positional) != 1 || positional[0] != "messaging-primary" || !options.asJSON || options.account != "operator" {
 		t.Fatalf("interspersed adapter flags: options=%+v positional=%v err=%v", options, positional, err)
 	}
 }
@@ -71,10 +71,10 @@ func TestAdapterCLIResolvesFriendlySelectorOnlyWhenUnambiguous(t *testing.T) {
 	uidA := "adp_" + strings.Repeat("a", 32)
 	uidB := "adp_" + strings.Repeat("b", 32)
 	items := []cluster.AdapterPresence{
-		{AdapterUID: uidA, AdapterID: "whatsapp", InstanceID: "whatsapp-primary"},
-		{AdapterUID: uidA, AdapterID: "whatsapp", InstanceID: "whatsapp-secondary"},
+		{AdapterUID: uidA, AdapterID: "messaging", InstanceID: "messaging-primary"},
+		{AdapterUID: uidA, AdapterID: "messaging", InstanceID: "messaging-secondary"},
 	}
-	for _, selector := range []string{"whatsapp", "WHATSAPP-PRIMARY"} {
+	for _, selector := range []string{"messaging", "MESSAGING-PRIMARY"} {
 		uid, err := resolveAdapterUIDFromItems(selector, items)
 		if err != nil || uid != uidA {
 			t.Fatalf("selector %q = %q, %v", selector, uid, err)
@@ -83,8 +83,8 @@ func TestAdapterCLIResolvesFriendlySelectorOnlyWhenUnambiguous(t *testing.T) {
 	if _, err := resolveAdapterUIDFromItems("missing", items); err == nil || !strings.Contains(err.Error(), "no visible leased adapter") {
 		t.Fatalf("missing selector = %v", err)
 	}
-	items = append(items, cluster.AdapterPresence{AdapterUID: uidB, AdapterID: "support", InstanceID: "whatsapp-primary"})
-	if _, err := resolveAdapterUIDFromItems("whatsapp-primary", items); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+	items = append(items, cluster.AdapterPresence{AdapterUID: uidB, AdapterID: "support", InstanceID: "messaging-primary"})
+	if _, err := resolveAdapterUIDFromItems("messaging-primary", items); err == nil || !strings.Contains(err.Error(), "ambiguous") {
 		t.Fatalf("ambiguous selector = %v", err)
 	}
 }

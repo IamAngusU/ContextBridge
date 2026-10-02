@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Replaced implementation-specific adapter names in public CLI fixtures and
+  examples with provider-neutral identifiers. Generic Ogg/Opus compatibility
+  remains documented by container behavior rather than by a private channel
+  integration, keeping the public core independent from maintainer adapters.
 - Added free `contextbridge adapter conformance` black-box checks and the
   `contextbridge.adapter-conformance.v1` JSON report. An explicitly selected
   out-of-tree executable now proves terminal auth/HTTP failures, scoped v2
