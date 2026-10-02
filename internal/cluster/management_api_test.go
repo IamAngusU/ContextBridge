@@ -121,6 +121,10 @@ func TestCursorJobHistoryIsStableAndFilterBound(t *testing.T) {
 	if response.StatusCode != http.StatusOK || specification["openapi"] != "3.1.0" || response.Header.Get("X-Request-ID") == "" {
 		t.Fatalf("invalid OpenAPI response: status=%d request_id=%q spec=%#v", response.StatusCode, response.Header.Get("X-Request-ID"), specification)
 	}
+	encodedSpecification, err := json.Marshal(specification)
+	if err != nil || !strings.Contains(string(encodedSpecification), `"max_priority"`) {
+		t.Fatalf("OpenAPI omits the producer priority ceiling: %s err=%v", encodedSpecification, err)
+	}
 	paths, ok := specification["paths"].(map[string]interface{})
 	if !ok {
 		t.Fatalf("OpenAPI paths are missing: %#v", specification)

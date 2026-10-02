@@ -71,10 +71,12 @@ group, session, or other routing metadata.
 
 ## Fail-closed credential rule
 
-`require_e2ee` is stored with the producer credential. Enforcement happens in
-both the relay contract path and durable store admission, so a caller cannot
-weaken it by omitting a CLI flag or bypassing one HTTP handler. It is ignored
-for no other role: assigning producer limits to an observer, node, or admin
+`require_e2ee` and an optional `max_priority` ceiling are stored with the
+producer credential. Enforcement happens in both the relay contract path and
+durable store admission, so a caller cannot weaken either boundary by omitting
+a CLI flag or bypassing one HTTP handler. Reserved E2EE admission enforces the
+same priority ceiling before consuming the reservation. These controls apply
+to no other role: assigning producer limits to an observer, node, or admin
 credential is rejected.
 
 Current pipeline execution uses cleartext step payloads and is therefore

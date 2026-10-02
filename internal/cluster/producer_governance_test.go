@@ -23,6 +23,10 @@ func governedTestRequest(t *testing.T, owner, marker string) SubmitRequest {
 	return SubmitRequest{OwnerSubject: owner, Requirements: requirements, PolicyDecision: decision, Payload: json.RawMessage(fmt.Sprintf(`{"prompt":%q}`, marker))}
 }
 
+func producerPriorityLimit(value int) *int {
+	return &value
+}
+
 func TestProducerHourlyAdmissionLimitIsDurableAndIdempotent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cluster.db")
 	store, err := OpenStore(path)
@@ -119,6 +123,90 @@ func TestProducerTokenScopesProviderEgressAndQueue(t *testing.T) {
 	sealed.Sealed = &SealedEnvelope{Algorithm: sealedAlgorithm, Ciphertext: "opaque"}
 	if _, err := store.CreateJobAdmittedGoverned(sealed, 10, record.ProducerLimits); err != nil {
 		t.Fatalf("durable admission rejected a sealed payload: %v", err)
+	}
+}
+
+func TestProducerPriorityCeilingIsDurableAndEnforcedByStore(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "cluster.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	limits := ProducerLimits{MaxPriority: producerPriorityLimit(80)}
+	token, saved, err := store.CreateTokenWithLimits("producer", "interactive-app", nil, time.Hour, limits)
+	if err != nil || token == "" || saved.ProducerLimits.MaxPriority == nil || *saved.ProducerLimits.MaxPriority != 80 {
+		t.Fatalf("priority ceiling was not persisted: %#v %v", saved, err)
+	}
+	if _, _, err := store.CreateTokenWithLimits("observer", "observer", nil, time.Hour, limits); err == nil {
+		t.Fatal("non-producer token accepted a priority ceiling")
+	}
+	for _, invalid := range []int{-1, 101} {
+		if _, _, err := store.CreateTokenWithLimits("producer", "invalid", nil, time.Hour, ProducerLimits{MaxPriority: producerPriorityLimit(invalid)}); err == nil {
+			t.Fatalf("invalid priority ceiling %d was accepted", invalid)
+		}
+	}
+	denied := governedTestRequest(t, "interactive-app", "denied")
+	denied.Priority = 81
+	if _, err := store.CreateJobAdmittedGoverned(denied, 10, limits); !errors.Is(err, ErrPriorityScopeForbidden) {
+		t.Fatalf("store admitted priority above credential ceiling: %v", err)
+	}
+	allowed := governedTestRequest(t, "interactive-app", "allowed")
+	allowed.Priority = 80
+	if job, err := store.CreateJobAdmittedGoverned(allowed, 10, limits); err != nil || job.Priority != 80 {
+		t.Fatalf("store rejected exact credential ceiling: job=%#v err=%v", job, err)
+	}
+
+	policy, err := EvaluateExecutionPolicy(ExecutionPolicyConfig{}, "", Requirements{Task: "generation"}, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignment := Assignment{
+		ID: "priority-scope-assignment", JobID: "priority-scope-job", NodeID: "node-a", PublicKey: "key",
+		OwnerSubject: "interactive-app", Attempt: 1, ExpiresAt: time.Now().UTC().Add(time.Minute),
+		Requirements: Requirements{Task: "generation"}, PolicyDecision: policy,
+	}
+	if err := store.CreateReservationAdmitted(assignment, "priority-scope-secret", "interactive-app", 10, 10); err != nil {
+		t.Fatal(err)
+	}
+	sealed := &SealedEnvelope{Algorithm: sealedAlgorithm, Ciphertext: "opaque"}
+	if _, err := store.ConsumeReservationAdmittedGovernedWithPolicy(assignment.ID, "priority-scope-secret", assignment.JobID, sealed, "test", "", "interactive-app", 81, 1, 10, limits, policy); !errors.Is(err, ErrPriorityScopeForbidden) {
+		t.Fatalf("reserved admission escaped its priority ceiling: %v", err)
+	}
+	if job, err := store.ConsumeReservationAdmittedGovernedWithPolicy(assignment.ID, "priority-scope-secret", assignment.JobID, sealed, "test", "", "interactive-app", 80, 1, 10, limits, policy); err != nil || job.Priority != 80 {
+		t.Fatalf("priority rejection consumed the reservation: job=%#v err=%v", job, err)
+	}
+}
+
+func TestProducerPriorityCeilingRejectsValidateAndSubmit(t *testing.T) {
+	relay, err := NewRelay(RelayConfig{
+		Database: filepath.Join(t.TempDir(), "relay.db"), AdminToken: "admin_012345678901234567890123456789012345",
+		AllowedTasks: []string{"generation"}, MaxJobBytes: 4096,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+	server := httptest.NewServer(relay.Handler())
+	defer server.Close()
+	token, _, err := relay.store.CreateTokenWithLimits("producer", "interactive-app", nil, time.Hour, ProducerLimits{MaxPriority: producerPriorityLimit(80)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	denied := []byte(`{"priority":81,"requirements":{"task":"generation"},"payload":{"prompt":"bounded"}}`)
+	for _, path := range []string{"/v1/cluster/contracts/validate", "/v1/cluster/jobs"} {
+		status, response := relayHTTPTest(t, http.MethodPost, server.URL+path, token, denied)
+		var problem contractErrorResponse
+		if err := json.Unmarshal(response, &problem); err != nil {
+			t.Fatal(err)
+		}
+		if status != http.StatusForbidden || problem.Code != AdmissionCodePriorityForbidden {
+			t.Fatalf("%s priority ceiling = HTTP %d %#v", path, status, problem)
+		}
+	}
+	allowed := []byte(`{"priority":80,"requirements":{"task":"generation"},"payload":{"prompt":"bounded"}}`)
+	status, response := relayHTTPTest(t, http.MethodPost, server.URL+"/v1/cluster/jobs", token, allowed)
+	if status != http.StatusAccepted {
+		t.Fatalf("exact priority ceiling = HTTP %d: %s", status, response)
 	}
 }
 
@@ -289,7 +377,7 @@ func TestTokenAPIValidatesAndPersistsProducerLimits(t *testing.T) {
 	defer relay.Close()
 	server := httptest.NewServer(relay.Handler())
 	defer server.Close()
-	body := []byte(`{"role":"producer","subject":"bounded-api","producer_limits":{"max_queued_jobs":2,"max_jobs_per_hour":10,"providers":["ollama"],"allowed_tenants":["tenant-a"],"egress":"local_only","require_e2ee":true}}`)
+	body := []byte(`{"role":"producer","subject":"bounded-api","producer_limits":{"max_queued_jobs":2,"max_jobs_per_hour":10,"max_priority":80,"providers":["ollama"],"allowed_tenants":["tenant-a"],"egress":"local_only","require_e2ee":true}}`)
 	status, response := relayHTTPTest(t, http.MethodPost, server.URL+"/v1/cluster/tokens", admin, body)
 	if status != http.StatusCreated {
 		t.Fatalf("token API = %d: %s", status, response)
@@ -300,13 +388,19 @@ func TestTokenAPIValidatesAndPersistsProducerLimits(t *testing.T) {
 	if err := json.Unmarshal(response, &created); err != nil {
 		t.Fatal(err)
 	}
-	if created.Record.ProducerLimits.MaxQueuedJobs != 2 || created.Record.ProducerLimits.MaxJobsPerHour != 10 || created.Record.ProducerLimits.Egress != "local_only" || len(created.Record.ProducerLimits.AllowedTenants) != 1 || created.Record.ProducerLimits.AllowedTenants[0] != "tenant-a" || !created.Record.ProducerLimits.RequireE2EE {
+	if created.Record.ProducerLimits.MaxQueuedJobs != 2 || created.Record.ProducerLimits.MaxJobsPerHour != 10 || created.Record.ProducerLimits.MaxPriority == nil || *created.Record.ProducerLimits.MaxPriority != 80 || created.Record.ProducerLimits.Egress != "local_only" || len(created.Record.ProducerLimits.AllowedTenants) != 1 || created.Record.ProducerLimits.AllowedTenants[0] != "tenant-a" || !created.Record.ProducerLimits.RequireE2EE {
 		t.Fatalf("token API lost governance: %#v", created.Record)
 	}
-	body = []byte(`{"role":"observer","subject":"observer","producer_limits":{"max_jobs_per_hour":1}}`)
-	status, _ = relayHTTPTest(t, http.MethodPost, server.URL+"/v1/cluster/tokens", admin, body)
-	if status != http.StatusUnprocessableEntity {
-		t.Fatalf("observer producer limits were not rejected: HTTP %d", status)
+	for _, invalid := range []string{
+		`{"role":"observer","subject":"observer","producer_limits":{"max_jobs_per_hour":1}}`,
+		`{"role":"observer","subject":"observer","producer_limits":{"max_priority":0}}`,
+		`{"role":"producer","subject":"negative","producer_limits":{"max_priority":-1}}`,
+		`{"role":"producer","subject":"too-high","producer_limits":{"max_priority":101}}`,
+	} {
+		status, _ = relayHTTPTest(t, http.MethodPost, server.URL+"/v1/cluster/tokens", admin, []byte(invalid))
+		if status != http.StatusUnprocessableEntity {
+			t.Fatalf("invalid producer priority policy was not rejected: HTTP %d body=%s", status, invalid)
+		}
 	}
 }
 

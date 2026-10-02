@@ -386,6 +386,7 @@ contextbridge integrate relay \
   --lifetime-hours 720 \
   --max-queued-jobs 8 \
   --max-jobs-per-hour 120 \
+  --max-priority 20 \
   --providers ollama \
   --allowed-tenants my-server-app \
   --egress local_only \
@@ -402,10 +403,15 @@ and JSON metadata remain redacted.
 Producer governance is part of the issued credential, not a promise made by
 the calling application. `--max-queued-jobs` lowers its concurrent queue
 share; `--max-jobs-per-hour` is a durable, producer-scoped fixed window that
-survives relay restarts; `--providers` is an allowlist; and `--egress
-local_only` prevents the credential from widening a local-only boundary. An
-exact idempotent replay returns its existing job without consuming another
-hourly admission. Current governance deliberately does not claim daily token,
+survives relay restarts; `--max-priority` caps caller-selected queue priority
+from 0 through 100 (explicit `0` blocks promotion, omission preserves the
+historical ceiling of 100); `--providers` is an allowlist; and `--egress
+local_only` prevents the credential from widening a local-only boundary.
+Above-ceiling admission fails with the stable `scope.priority_forbidden` code
+before queue mutation, including the reservation/E2EE path. This is queue
+admission authority, not preemption or reserved realtime capacity. An exact
+idempotent replay returns its existing job without consuming another hourly
+admission. Current governance deliberately does not claim daily token,
 compute, or cost quotas: unknown provider usage is never treated as zero, and
 those budgets require reservation-grade usage evidence before enforcement can
 be trustworthy.

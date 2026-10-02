@@ -101,6 +101,7 @@ var (
 	ErrPipelineParentTerminal      = errors.New("pipeline parent no longer authorizes child execution")
 	ErrE2EERequired                = errors.New("producer credential requires an end-to-end encrypted payload")
 	ErrTenantScopeForbidden        = errors.New("producer credential does not authorize this tenant_id")
+	ErrPriorityScopeForbidden      = errors.New("producer credential does not authorize this job priority")
 )
 
 type reservation struct {
@@ -469,7 +470,7 @@ func normalizeObserverLimits(limits ObserverLimits) ObserverLimits {
 }
 
 func validateProducerLimits(role string, limits ProducerLimits) error {
-	if role != "producer" && (limits.MaxQueuedJobs != 0 || limits.MaxJobsPerHour != 0 || len(limits.Providers) != 0 || len(limits.AllowedTenants) != 0 || limits.Egress != "" || limits.RequireE2EE) {
+	if role != "producer" && (limits.MaxQueuedJobs != 0 || limits.MaxJobsPerHour != 0 || limits.MaxPriority != nil || len(limits.Providers) != 0 || len(limits.AllowedTenants) != 0 || limits.Egress != "" || limits.RequireE2EE) {
 		return errors.New("producer limits may only be assigned to producer tokens")
 	}
 	if limits.MaxQueuedJobs < 0 || limits.MaxQueuedJobs > maxQueuedJobsPerOwner {
@@ -477,6 +478,9 @@ func validateProducerLimits(role string, limits ProducerLimits) error {
 	}
 	if limits.MaxJobsPerHour < 0 || limits.MaxJobsPerHour > 1_000_000 {
 		return errors.New("producer_limits.max_jobs_per_hour must be 0 to 1000000")
+	}
+	if limits.MaxPriority != nil && (*limits.MaxPriority < 0 || *limits.MaxPriority > 100) {
+		return errors.New("producer_limits.max_priority must be 0 to 100 when set")
 	}
 	if len(limits.Providers) > 32 {
 		return errors.New("producer_limits.providers accepts at most 32 providers")
@@ -513,10 +517,18 @@ func validateProducerLimits(role string, limits ProducerLimits) error {
 }
 
 func normalizeProducerLimits(limits ProducerLimits) ProducerLimits {
+	if limits.MaxPriority != nil {
+		priority := *limits.MaxPriority
+		limits.MaxPriority = &priority
+	}
 	limits.Providers = cleanList(limits.Providers, 32, 80)
 	limits.AllowedTenants = cleanList(limits.AllowedTenants, 32, 200)
 	limits.Egress = strings.ToLower(strings.TrimSpace(limits.Egress))
 	return limits
+}
+
+func producerPriorityAllowed(priority int, limits ProducerLimits) bool {
+	return limits.MaxPriority == nil || priority <= *limits.MaxPriority
 }
 
 func (s *Store) EnsureToken(token, role, subject string, groups []string) error {
@@ -1342,6 +1354,9 @@ func (s *Store) admitPreparedJobTx(tx *bolt.Tx, job *Job, maxQueued int, limits 
 	if limits.RequireE2EE && job.SealedPayload == nil {
 		return false, ErrE2EERequired
 	}
+	if !producerPriorityAllowed(job.Priority, limits) {
+		return false, ErrPriorityScopeForbidden
+	}
 	if len(limits.AllowedTenants) > 0 && !contains(limits.AllowedTenants, job.TenantID) {
 		return false, ErrTenantScopeForbidden
 	}
@@ -1868,8 +1883,14 @@ func (s *Store) consumeReservationAdmitted(id, secret, requestedJobID string, se
 	if sealed == nil {
 		return Job{}, false, errors.New("reserved assignments require a sealed payload")
 	}
+	if priority < -100 || priority > 100 {
+		return Job{}, false, errors.New("priority must be between -100 and 100")
+	}
 	if len(limits.AllowedTenants) > 0 && !contains(limits.AllowedTenants, tenant) {
 		return Job{}, false, ErrTenantScopeForbidden
+	}
+	if !producerPriorityAllowed(priority, limits) {
+		return Job{}, false, ErrPriorityScopeForbidden
 	}
 	if idempotencyKey != "" {
 		if err := ValidateIdempotencyKey(idempotencyKey); err != nil {

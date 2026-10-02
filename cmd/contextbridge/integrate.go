@@ -90,6 +90,7 @@ func integrateCommand(args []string) error {
 	lifetimeHours := flags.Int("lifetime-hours", 720, "producer credential lifetime in hours; 0 never expires")
 	maxQueuedJobs := flags.Int("max-queued-jobs", 0, "producer queued-job limit; 0 uses the relay default")
 	maxJobsPerHour := flags.Int("max-jobs-per-hour", 0, "durable producer admission limit; 0 disables it")
+	maxPriority := flags.Int("max-priority", 100, "maximum producer-selected job priority, 0 to 100; omission preserves 100")
 	providers := flags.String("providers", "", "comma-separated provider allowlist")
 	allowedTenants := flags.String("allowed-tenants", "", "comma-separated tenant_id allowlist bound to a relay or read-only UI credential")
 	allowedSubjects := flags.String("allowed-subjects", "", "comma-separated owner_subject allowlist bound to a read-only UI credential")
@@ -101,6 +102,7 @@ func integrateCommand(args []string) error {
 	if flags.NArg() != 0 {
 		return errors.New("unexpected positional arguments")
 	}
+	maxPriorityLimit := explicitIntFlagValue(flags, "max-priority", *maxPriority)
 	if target == "openai" && *jsonOutput && strings.TrimSpace(*writeEnv) != "" {
 		return errors.New("--json and --write-env are separate output modes")
 	}
@@ -123,6 +125,12 @@ func integrateCommand(args []string) error {
 	}
 	if *requireE2EE && target != "relay" {
 		return errors.New("--require-e2ee is available only for relay producer integration")
+	}
+	if maxPriorityLimit != nil && target != "relay" {
+		return errors.New("--max-priority is available only for relay producer integration")
+	}
+	if maxPriorityLimit != nil && (*maxPriorityLimit < 0 || *maxPriorityLimit > 100) {
+		return errors.New("--max-priority must be between 0 and 100")
 	}
 
 	switch target {
@@ -275,7 +283,7 @@ func integrateCommand(args []string) error {
 		if err != nil {
 			return err
 		}
-		limits := cluster.ProducerLimits{MaxQueuedJobs: *maxQueuedJobs, MaxJobsPerHour: *maxJobsPerHour, Providers: splitIntegrationList(*providers), AllowedTenants: splitIntegrationList(*allowedTenants), Egress: strings.TrimSpace(*egress), RequireE2EE: *requireE2EE}
+		limits := cluster.ProducerLimits{MaxQueuedJobs: *maxQueuedJobs, MaxJobsPerHour: *maxJobsPerHour, MaxPriority: maxPriorityLimit, Providers: splitIntegrationList(*providers), AllowedTenants: splitIntegrationList(*allowedTenants), Egress: strings.TrimSpace(*egress), RequireE2EE: *requireE2EE}
 		info, err := createRelayIntegrationBundleGoverned(context.Background(), cfg, path, *subject, splitIntegrationList(*groups), *lifetimeHours, limits)
 		if err != nil {
 			return err
@@ -304,7 +312,7 @@ func integrateCommand(args []string) error {
 		if *lifetimeHours < 0 || *lifetimeHours > 10*365*24 {
 			return errors.New("--lifetime-hours must be between 0 and 87600")
 		}
-		if strings.TrimSpace(*groups) != "" || *maxQueuedJobs != 0 || *maxJobsPerHour != 0 || strings.TrimSpace(*providers) != "" || strings.TrimSpace(*egress) != "" || *requireE2EE {
+		if strings.TrimSpace(*groups) != "" || *maxQueuedJobs != 0 || *maxJobsPerHour != 0 || maxPriorityLimit != nil || strings.TrimSpace(*providers) != "" || strings.TrimSpace(*egress) != "" || *requireE2EE {
 			return errors.New("producer groups, admission limits, providers, egress, and E2EE requirements do not apply to a read-only UI credential")
 		}
 		path, err := filepath.Abs(*writeEnv)

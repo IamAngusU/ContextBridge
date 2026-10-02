@@ -45,6 +45,7 @@ const (
 	AdmissionCodePolicyTenant          = PolicyCodeTenantDenied
 	AdmissionCodePolicyTenantRequired  = PolicyCodeTenantRequired
 	AdmissionCodePriorityInvalid       = "priority.invalid"
+	AdmissionCodePriorityForbidden     = "scope.priority_forbidden"
 	AdmissionCodeRequestInvalidJSON    = "request.invalid_json"
 	AdmissionCodeRequirementsInvalid   = "requirements.invalid"
 	AdmissionCodeRequirementsManaged   = "requirements.relay_managed"
@@ -99,6 +100,7 @@ var stableAdmissionErrorCodes = []string{
 	AdmissionCodeReservationRequired,
 	AdmissionCodeReservationSubmitOnly,
 	AdmissionCodeScopeForbidden,
+	AdmissionCodePriorityForbidden,
 	AdmissionCodeTenantScopeForbidden,
 	AdmissionCodeServiceStopping,
 	AdmissionCodeSourceInvalid,
@@ -179,6 +181,9 @@ func (r *Relay) prepareAdmission(input SubmitRequest, record TokenRecord, mode a
 	}
 	if input.Priority < -100 || input.Priority > 100 {
 		return SubmitRequest{}, ContractValidation{}, rejectAdmission(http.StatusUnprocessableEntity, AdmissionCodePriorityInvalid, errors.New("priority must be between -100 and 100"))
+	}
+	if record.Role == "producer" && !producerPriorityAllowed(input.Priority, record.ProducerLimits) {
+		return SubmitRequest{}, ContractValidation{}, rejectAdmission(http.StatusForbidden, AdmissionCodePriorityForbidden, ErrPriorityScopeForbidden)
 	}
 	if len([]byte(input.Source)) > 120 || strings.IndexFunc(input.Source, unicode.IsControl) >= 0 {
 		return SubmitRequest{}, ContractValidation{}, rejectAdmission(http.StatusUnprocessableEntity, AdmissionCodeSourceInvalid, errors.New("source must be at most 120 UTF-8 bytes without control characters"))
@@ -281,6 +286,8 @@ func admissionStoreErrorCode(err error) string {
 		return AdmissionCodeE2EERequired
 	case errors.Is(err, ErrTenantScopeForbidden):
 		return AdmissionCodeTenantScopeForbidden
+	case errors.Is(err, ErrPriorityScopeForbidden):
+		return AdmissionCodePriorityForbidden
 	default:
 		return ""
 	}

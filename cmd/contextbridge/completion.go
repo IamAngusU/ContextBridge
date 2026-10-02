@@ -90,7 +90,7 @@ $script:ContextBridgeOptions = @{
     'integrate openai' = @('--config','--json','--show-token','--write-env','--check','--live')
     'integrate litellm' = @('--config','--json','--write-config','--write-env')
     'integrate mcp' = @('--config','--json')
-    'integrate relay' = @('--config','--json','--write-env','--subject','--groups','--lifetime-hours','--max-queued-jobs','--max-jobs-per-hour','--providers','--allowed-tenants','--egress','--require-e2ee')
+    'integrate relay' = @('--config','--json','--write-env','--subject','--groups','--lifetime-hours','--max-queued-jobs','--max-jobs-per-hour','--max-priority','--providers','--allowed-tenants','--egress','--require-e2ee')
     'integrate ui' = @('--config','--json','--write-env','--subject','--lifetime-hours','--allowed-subjects','--allowed-tenants')
 	'adapter list' = @('--config','--account','--token','--token-file','--json')
 	'adapter details' = @('--config','--account','--token','--token-file','--json')
@@ -126,8 +126,8 @@ $script:ContextBridgeOptions = @{
     'cluster pipeline' = @('activity','--config','--name','--file','--token','--json')
     'cluster login' = @('--config','--token-file','--account','--relay','--pool-authority-file','--activate')
 	'cluster account' = @('list','use','remove','--config','--json')
-	'cluster token' = @('create','list','revoke','--config','--role','--subject','--groups','--lifetime-hours','--max-queued-jobs','--max-jobs-per-hour','--providers','--allowed-tenants','--allowed-subjects','--egress','--require-e2ee')
-	'cluster token create' = @('--config','--role','--subject','--groups','--lifetime-hours','--max-queued-jobs','--max-jobs-per-hour','--providers','--allowed-tenants','--allowed-subjects','--egress','--require-e2ee')
+	'cluster token' = @('create','list','revoke','--config','--role','--subject','--groups','--lifetime-hours','--max-queued-jobs','--max-jobs-per-hour','--max-priority','--providers','--allowed-tenants','--allowed-subjects','--egress','--require-e2ee')
+	'cluster token create' = @('--config','--role','--subject','--groups','--lifetime-hours','--max-queued-jobs','--max-jobs-per-hour','--max-priority','--providers','--allowed-tenants','--allowed-subjects','--egress','--require-e2ee')
 	'cluster token list' = @('--config','--token','--limit','--offset','--json')
 	'cluster token revoke' = @('--config','--token','--json')
 	'cluster pairing' = @('--config','--approve','--deny')
@@ -144,14 +144,15 @@ $script:ContextBridgeValueOptions = @{
 
     '--reasoning' = @('instant','medium','high','xhigh','pro','max')
     '--mode' = @('local','client','relay','worker','all')
-    '--role' = @('admin','producer','node','observer')
+	'--role' = @('admin','producer','node','observer')
+	'--max-priority' = @('0','20','40','60','80','100')
 	'--classification' = @('local','remote')
 }
 $script:ContextBridgeTakesValue = @(
 	'--config','--install-dir','--file','--job','--artifacts','--artifact','--attach-image','--identity','--job-dir','--token-file','--pool-authority-file','--trust-key','--evidence-dir','--write-env','--write-config','--bundle','--advertise-host','--certificate-out',
     '--slots','--endpoint','--relay','--name','--providers','--models','--tasks','--groups',
     '--token','--account','--provider','--group','--model','--profile','--reasoning','--session','--prompt',
-	'--min-artifacts','--min-images','--local-model','--image-profile','--timeout','--job-timeout','--poll','--after','--limit','--offset','--idempotency-key','--subject','--groups','--allowed-tenants','--allowed-subjects','--lifetime-hours',
+	'--min-artifacts','--min-images','--local-model','--image-profile','--timeout','--job-timeout','--poll','--after','--limit','--offset','--idempotency-key','--subject','--groups','--allowed-tenants','--allowed-subjects','--lifetime-hours','--max-queued-jobs','--max-jobs-per-hour','--max-priority',
 	'--mode','--relay-url','--public-url','--listen','--role','--subject','--approve','--deny','--label','--driver','--route','--task','--model','--timeout-seconds','--principal','--classification','--option','--adapter','--arg','--profile-file','--job-file','--working-directory',
     '--managed-service','--samples','--warmup','--database-jobs','--idle-duration','--binary',
     '--goal','--goal-file','--planner-provider','--planner-profile','--planner-model','--allow-providers',
@@ -243,6 +244,7 @@ _contextbridge_complete() {
     --reasoning) candidates="instant medium high xhigh pro max" ;;
     --mode) candidates="local client relay worker all" ;;
     --role) candidates="admin producer node observer" ;;
+	--max-priority) candidates="0 20 40 60 80 100" ;;
 	--classification) candidates="local remote" ;;
     --wait|--e2ee|--require-e2ee|--stream|--json|--follow|--pipeline|--interactive|--show-token|--check|--live|--no-open|--topmost|--image|--new-session|--new-session-per-job|--foreground-new-session|--run|--dry-run|--keep-artifacts|--no-updates|--discover|--force|--relay-only|--require-artifact|--require-evidence|--create-token) boolean_previous=1 ;;
   esac
@@ -273,8 +275,8 @@ _contextbridge_complete() {
       "cluster pipeline") candidates="activity --config --name --file --token --json" ;;
       "cluster login") candidates="--config --token-file --account --relay --pool-authority-file --activate" ;;
 	  "cluster account") candidates="list use remove --config --json" ;;
-	  "cluster token") candidates="create list revoke --config --role --subject --groups --lifetime-hours --max-queued-jobs --max-jobs-per-hour --providers --allowed-tenants --allowed-subjects --egress --require-e2ee" ;;
-	  "cluster token create") candidates="--config --role --subject --groups --lifetime-hours --max-queued-jobs --max-jobs-per-hour --providers --allowed-tenants --allowed-subjects --egress --require-e2ee" ;;
+	  "cluster token") candidates="create list revoke --config --role --subject --groups --lifetime-hours --max-queued-jobs --max-jobs-per-hour --max-priority --providers --allowed-tenants --allowed-subjects --egress --require-e2ee" ;;
+	  "cluster token create") candidates="--config --role --subject --groups --lifetime-hours --max-queued-jobs --max-jobs-per-hour --max-priority --providers --allowed-tenants --allowed-subjects --egress --require-e2ee" ;;
 	  "cluster token list") candidates="--config --token --limit --offset --json" ;;
 	  "cluster token revoke") candidates="--config --token --json" ;;
 	  "cluster pairing") candidates="--config --approve --deny" ;;
@@ -288,7 +290,7 @@ _contextbridge_complete() {
       "integrate openai") candidates="--config --json --show-token --write-env --check --live" ;;
       "integrate litellm") candidates="--config --json --write-config --write-env" ;;
       "integrate mcp") candidates="--config --json" ;;
-      "integrate relay") candidates="--config --json --write-env --subject --groups --lifetime-hours --max-queued-jobs --max-jobs-per-hour --providers --allowed-tenants --egress --require-e2ee" ;;
+      "integrate relay") candidates="--config --json --write-env --subject --groups --lifetime-hours --max-queued-jobs --max-jobs-per-hour --max-priority --providers --allowed-tenants --egress --require-e2ee" ;;
       "integrate ui") candidates="--config --json --write-env --subject --lifetime-hours --allowed-subjects --allowed-tenants" ;;
 	  "adapter list"|"adapter details"|"adapter doctor"|"adapter enable"|"adapter disable"|"adapter start"|"adapter stop") candidates="--config --account --token --token-file --json" ;;
 	  "adapter setup") candidates="--config --label --driver --route --task --model --timeout-seconds --principal --token-file --classification --option --create-token --json" ;;
@@ -427,7 +429,7 @@ case "$words[2]" in
       openai) _arguments "${config[@]}" '--json[Print redacted machine-readable connection settings]' '--show-token[Explicitly include the local API token in terminal output]' '--write-env[Create a new private environment file without overwriting]:environment file:_files' '--check[Verify service, authentication and route without inference]' '--live[Also send one explicit bounded live inference smoke request]' ;;
       litellm) _arguments "${config[@]}" '--json[Print redacted machine-readable integration settings]' '--write-config[Create a new secret-free LiteLLM configuration]:configuration file:_files' '--write-env[Create a new private LiteLLM environment file]:environment file:_files' ;;
       mcp) _arguments "${config[@]}" '--json[Print the MCP client configuration as JSON]' ;;
-      relay) _arguments "${config[@]}" '--json[Print redacted credential metadata]' '--write-env[Create a new private producer environment file]:environment file:_files' '--subject[Remote application identity]:identity:' '--groups[Comma-separated scheduling groups]:groups:' '--lifetime-hours[Credential lifetime; 0 never expires]:hours:' '--max-queued-jobs[Producer queued-job limit]:count:' '--max-jobs-per-hour[Durable hourly admission limit]:count:' '--providers[Comma-separated provider allowlist]:providers:' '--allowed-tenants[Comma-separated authenticated tenant_id allowlist]:tenants:' '--egress[Producer egress ceiling]:egress:(local_only)' '--require-e2ee[Reject cleartext jobs for this producer]' ;;
+      relay) _arguments "${config[@]}" '--json[Print redacted credential metadata]' '--write-env[Create a new private producer environment file]:environment file:_files' '--subject[Remote application identity]:identity:' '--groups[Comma-separated scheduling groups]:groups:' '--lifetime-hours[Credential lifetime; 0 never expires]:hours:' '--max-queued-jobs[Producer queued-job limit]:count:' '--max-jobs-per-hour[Durable hourly admission limit]:count:' '--max-priority[Maximum producer-selected job priority]:priority:(0 20 40 60 80 100)' '--providers[Comma-separated provider allowlist]:providers:' '--allowed-tenants[Comma-separated authenticated tenant_id allowlist]:tenants:' '--egress[Producer egress ceiling]:egress:(local_only)' '--require-e2ee[Reject cleartext jobs for this producer]' ;;
       ui) _arguments "${config[@]}" '--json[Print redacted credential metadata]' '--write-env[Create a new private observer environment file]:environment file:_files' '--subject[Read-only UI identity]:identity:' '--lifetime-hours[Credential lifetime; 0 never expires]:hours:' '--allowed-subjects[Comma-separated visible producer subjects]:subjects:' '--allowed-tenants[Comma-separated visible tenant IDs]:tenants:' ;;
       *) _arguments '*:argument:' ;;
     esac
@@ -532,8 +534,8 @@ case "$words[2]" in
 		case "$words[4]" in
 		  list) _arguments "${config[@]}" '--token[Relay admin token]:token:' '--limit[Records per page]:count:' '--offset[Record offset]:count:' '--json[Print machine-readable credential metadata]' ;;
 		  revoke) _arguments "${config[@]}" '--token[Relay admin token]:token:' '--json[Print revoked credential metadata]' '1:token ID:' ;;
-		  create) _arguments "${config[@]}" '--role[Token role]:role:(admin producer node observer)' '--subject[Token label]:label:' '--groups[Comma-separated scheduling groups]:groups:' '--lifetime-hours[Credential lifetime; 0 never expires]:hours:' '--max-queued-jobs[Producer queued-job limit]:count:' '--max-jobs-per-hour[Durable hourly admission limit]:count:' '--providers[Comma-separated provider allowlist]:providers:' '--allowed-tenants[Producer or observer tenant allowlist]:tenants:' '--allowed-subjects[Observer owner_subject allowlist]:subjects:' '--egress[Producer egress ceiling]:egress:(local_only)' '--require-e2ee[Reject cleartext jobs for this producer]' ;;
-		  *) _arguments "${config[@]}" '1:token action:(create list revoke)' '--role[Token role]:role:(admin producer node observer)' '--subject[Token label]:label:' '--groups[Comma-separated scheduling groups]:groups:' '--lifetime-hours[Credential lifetime; 0 never expires]:hours:' '--max-queued-jobs[Producer queued-job limit]:count:' '--max-jobs-per-hour[Durable hourly admission limit]:count:' '--providers[Comma-separated provider allowlist]:providers:' '--allowed-tenants[Producer or observer tenant allowlist]:tenants:' '--allowed-subjects[Observer owner_subject allowlist]:subjects:' '--egress[Producer egress ceiling]:egress:(local_only)' '--require-e2ee[Reject cleartext jobs for this producer]' ;;
+		  create) _arguments "${config[@]}" '--role[Token role]:role:(admin producer node observer)' '--subject[Token label]:label:' '--groups[Comma-separated scheduling groups]:groups:' '--lifetime-hours[Credential lifetime; 0 never expires]:hours:' '--max-queued-jobs[Producer queued-job limit]:count:' '--max-jobs-per-hour[Durable hourly admission limit]:count:' '--max-priority[Maximum producer-selected job priority]:priority:(0 20 40 60 80 100)' '--providers[Comma-separated provider allowlist]:providers:' '--allowed-tenants[Producer or observer tenant allowlist]:tenants:' '--allowed-subjects[Observer owner_subject allowlist]:subjects:' '--egress[Producer egress ceiling]:egress:(local_only)' '--require-e2ee[Reject cleartext jobs for this producer]' ;;
+		  *) _arguments "${config[@]}" '1:token action:(create list revoke)' '--role[Token role]:role:(admin producer node observer)' '--subject[Token label]:label:' '--groups[Comma-separated scheduling groups]:groups:' '--lifetime-hours[Credential lifetime; 0 never expires]:hours:' '--max-queued-jobs[Producer queued-job limit]:count:' '--max-jobs-per-hour[Durable hourly admission limit]:count:' '--max-priority[Maximum producer-selected job priority]:priority:(0 20 40 60 80 100)' '--providers[Comma-separated provider allowlist]:providers:' '--allowed-tenants[Producer or observer tenant allowlist]:tenants:' '--allowed-subjects[Observer owner_subject allowlist]:subjects:' '--egress[Producer egress ceiling]:egress:(local_only)' '--require-e2ee[Reject cleartext jobs for this producer]' ;;
 		esac
 		;;
 	  pairing) _arguments "${config[@]}" '--approve[Approve pairing code]:code:' '--deny[Deny pairing code]:code:' ;;

@@ -40,8 +40,9 @@ It then treats the Relay as an external HTTP service. The current suite checks
 public health behavior, security headers, missing and invalid credentials,
 role boundaries, metrics access, credential-mint authority, malformed and
 duplicate JSON, invalid UTF-8, body and header bounds, method restrictions,
-hostile origins, producer ownership, cross-producer existence-oracle
-resistance, cancellation authority, pairing rate limits, response secret
+hostile origins, producer priority-ceiling enforcement, producer ownership,
+cross-producer existence-oracle resistance, cancellation authority, pairing
+rate limits, response secret
 leaks, and process health after hostile input.
 
 Run the same gate locally on Linux or macOS:
