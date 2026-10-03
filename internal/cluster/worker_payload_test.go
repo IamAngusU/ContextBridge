@@ -111,6 +111,45 @@ func TestPrepareLocalPayloadMakesRequirementsSessionAuthoritative(t *testing.T) 
 	}
 }
 
+func TestScheduledAdapterActionCarriesAuthenticatedExecutionScope(t *testing.T) {
+	raw, err := prepareLocalPayload([]byte(`{
+		"contextbridge_owner_subject":"forged-owner",
+		"contextbridge_tenant_id":"forged-tenant",
+		"metadata":{"contextbridge_scheduled_action":{"schema":"contextbridge.scheduled-adapter-action.v1"}}
+	}`), Requirements{Task: "scheduled_action", Provider: "adapter", AdapterProfile: "publisher"}, "local-action", "owner-a", "tenant-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var job map[string]interface{}
+	if err := json.Unmarshal(raw, &job); err != nil {
+		t.Fatal(err)
+	}
+	if job["contextbridge_owner_subject"] != "owner-a" || job["contextbridge_tenant_id"] != "tenant-a" {
+		t.Fatalf("scheduled action did not receive authenticated execution scope: %#v", job)
+	}
+
+	if _, err := prepareLocalPayload([]byte(`{}`), Requirements{Task: "scheduled_action", Provider: "adapter"}, "local-action"); err == nil || !strings.Contains(err.Error(), "owner subject") {
+		t.Fatalf("scheduled action without authenticated owner was accepted: %v", err)
+	}
+}
+
+func TestOrdinaryAdapterJobCannotForgeScheduledExecutionScope(t *testing.T) {
+	raw, err := prepareLocalPayload([]byte(`{"contextbridge_owner_subject":"forged-owner","contextbridge_tenant_id":"forged-tenant"}`), Requirements{Task: "generation", Provider: "adapter"}, "local-job", "owner-a", "tenant-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var job map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &job); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := job["contextbridge_owner_subject"]; ok {
+		t.Fatal("ordinary adapter job retained a forged owner subject")
+	}
+	if _, ok := job["contextbridge_tenant_id"]; ok {
+		t.Fatal("ordinary adapter job retained a forged tenant scope")
+	}
+}
+
 func TestPrepareLocalPayloadRemovesUnauthenticatedAdapterRoutingHints(t *testing.T) {
 	raw, err := prepareLocalPayload([]byte(`{
 		"prompt":"hello",
@@ -304,7 +343,7 @@ func TestWorkerConsoleLabelsDoNotExposePromptOrAssumeSelectedModel(t *testing.T)
 }
 
 func TestCompactLocalSubmissionDoesNotEchoLargeInput(t *testing.T) {
-	raw := []byte(`{"job":{"id":"job-1","prompt":"private prompt","text":"private text","image_base64":"very-large-input","model":"qwen","contextbridge_session_key":"cb:private-routing-key","contextbridge_adapter_endpoint_id":42,"contextbridge_adapter_principal":"adapter-a"},"contextbridge_adapter_endpoint_id":42,"contextbridge_adapter_principal":"adapter-a","contextbridge_ephemeral_adapter_endpoint":true,"output":{"mode":"text","text":"answer","contextbridge_adapter_endpoint_id":42,"contextbridge_ephemeral_adapter_endpoint":true},"status":"completed"}`)
+	raw := []byte(`{"job":{"id":"job-1","prompt":"private prompt","text":"private text","image_base64":"very-large-input","model":"qwen","contextbridge_session_key":"cb:private-routing-key","contextbridge_adapter_endpoint_id":42,"contextbridge_adapter_principal":"adapter-a","contextbridge_owner_subject":"private-owner","contextbridge_tenant_id":"private-tenant"},"contextbridge_adapter_endpoint_id":42,"contextbridge_adapter_principal":"adapter-a","contextbridge_ephemeral_adapter_endpoint":true,"output":{"mode":"text","text":"answer","contextbridge_adapter_endpoint_id":42,"contextbridge_ephemeral_adapter_endpoint":true},"status":"completed"}`)
 	compact, err := compactLocalSubmission(raw)
 	if err != nil {
 		t.Fatal(err)
@@ -346,6 +385,12 @@ func TestCompactLocalSubmissionDoesNotEchoLargeInput(t *testing.T) {
 	}
 	if _, ok := compactJob["contextbridge_adapter_principal"]; ok {
 		t.Fatal("internal adapter principal leaked inside the producer result")
+	}
+	if _, ok := compactJob["contextbridge_owner_subject"]; ok {
+		t.Fatal("internal owner subject leaked inside the producer result")
+	}
+	if _, ok := compactJob["contextbridge_tenant_id"]; ok {
+		t.Fatal("internal tenant scope leaked inside the producer result")
 	}
 	var compactOutput map[string]json.RawMessage
 	if err := json.Unmarshal(decoded["output"], &compactOutput); err != nil {

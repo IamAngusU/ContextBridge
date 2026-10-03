@@ -112,12 +112,26 @@ immediately before the side effect. This keeps timers and execution authority
 out of channel-specific processes without coupling the public core to a
 vendor.
 
+Use two credentials with the same producer subject for a mutating deployment.
+The channel keeps the credential containing the scheduled-action policy; the
+executor receives a second producer credential without scheduled-action
+authority and uses it only for presence. Because the stable presence UID is
+derived from cluster, subject, and adapter ID, both still bind to the same UID,
+while a compromised executor cannot preview or confirm work for itself.
+
 The execution route must use the exact `scheduled_action` task. ContextBridge
 reserves that task against normal job submissions, encrypted reservations and
 pipeline steps; only the confirmed scheduler can mint its in-memory admission
 capability. The adapter must independently fail closed unless the payload is
 the expected `contextbridge.scheduled-adapter-action.v1` opaque-reference
 envelope for its profile and exact presence UID.
+
+For that reserved task, the authenticated worker also replaces any caller
+claims and supplies `contextbridge_owner_subject` and
+`contextbridge_tenant_id` on the leased local job. A mutating adapter must bind
+both values to its separately staged destination and payload records. These
+execution-only fields are removed from the producer-visible result; ordinary
+adapter jobs cannot set them through a cluster payload.
 
 ## Local protocol v2
 

@@ -283,12 +283,23 @@ func TestScheduledActionHTTPDispatchIsScopedAtomicAndContentMinimized(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	presenceToken, _, err := relay.store.CreateToken("producer", "channel-a", nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
 	heartbeat := AdapterHeartbeat{
 		Schema: AdapterPresenceV1, AdapterID: "message-primary", InstanceID: "host-a", DisplayName: "Message adapter",
 		Kind: "control", Version: "1.0.0", State: "ready", Capabilities: []string{"scheduled-action"}, LeaseSeconds: 60,
 	}
-	if response := adapterPresenceRequest(t, relay, http.MethodPost, "/v1/cluster/adapters/heartbeat", token, heartbeat); response.Code != http.StatusOK {
+	if response := adapterPresenceRequest(t, relay, http.MethodPost, "/v1/cluster/adapters/heartbeat", presenceToken, heartbeat); response.Code != http.StatusOK {
 		t.Fatalf("adapter heartbeat: %d %s", response.Code, response.Body.String())
+	}
+	identityResponse := adapterPresenceRequest(t, relay, http.MethodGet, "/v1/cluster/whoami", presenceToken, nil)
+	var presenceIdentity struct {
+		Permissions []string `json:"permissions"`
+	}
+	if identityResponse.Code != http.StatusOK || json.Unmarshal(identityResponse.Body.Bytes(), &presenceIdentity) != nil || contains(presenceIdentity.Permissions, "scheduled-actions:write-own") {
+		t.Fatalf("least-privilege presence credential gained scheduled-action authority: %d %s", identityResponse.Code, identityResponse.Body.String())
 	}
 	location, _ := time.LoadLocation("Europe/Berlin")
 	input := scheduledTestRequest(t, uid, time.Now().In(location).Add(time.Minute))

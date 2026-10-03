@@ -40,9 +40,16 @@ type Job struct {
 	// They bind name-based admission to the endpoint resolved on this machine.
 	ContextBridgeEgress                 string `json:"contextbridge_egress,omitempty"`
 	ContextBridgeProviderClassification string `json:"contextbridge_provider_classification,omitempty"`
-	AdapterProfile                      string `json:"adapter_profile,omitempty"`
-	Model                               string `json:"model,omitempty"`
-	Reasoning                           string `json:"reasoning,omitempty"`
+	// ContextBridgeOwnerSubject and ContextBridgeTenantID are authenticated
+	// execution scope for relay-created scheduled actions. The worker removes
+	// caller claims and supplies these values only for the reserved
+	// scheduled_action task, allowing a mutating adapter to bind opaque staged
+	// references without exposing the scope in producer-visible results.
+	ContextBridgeOwnerSubject string `json:"contextbridge_owner_subject,omitempty"`
+	ContextBridgeTenantID     string `json:"contextbridge_tenant_id,omitempty"`
+	AdapterProfile            string `json:"adapter_profile,omitempty"`
+	Model                     string `json:"model,omitempty"`
+	Reasoning                 string `json:"reasoning,omitempty"`
 	// MaxCostUSD is an authenticated cluster upper bound. It is enforced only
 	// by engines with an operator-reviewed reservation calculation; an unknown
 	// provider price fails closed instead of being treated as zero.
