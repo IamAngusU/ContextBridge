@@ -2598,20 +2598,11 @@ func clusterSubmitCommandWithIO(args []string, stdin io.Reader, output io.Writer
 			if streamed {
 				fmt.Fprintln(os.Stderr)
 			}
-			if job.SealedResult != nil {
-				raw, err := cluster.OpenResponse(shared, job.SealedResult, cluster.ResultAAD(encryptionContext))
-				if err != nil {
-					return err
-				}
-				raw, paths, references, err := materializeClusterArtifacts(raw, *artifactDir)
-				if err != nil {
-					return err
-				}
-				reportSavedArtifacts(paths, references)
-				_, err = os.Stdout.Write(append(raw, '\n'))
+			raw, err := clusterCompletedResult(job, *sealed, shared, encryptionContext)
+			if err != nil {
 				return err
 			}
-			raw, paths, references, err := materializeClusterArtifacts(job.Result, *artifactDir)
+			raw, paths, references, err := materializeClusterArtifacts(raw, *artifactDir)
 			if err != nil {
 				return err
 			}
@@ -2622,6 +2613,25 @@ func clusterSubmitCommandWithIO(args []string, stdin io.Reader, output io.Writer
 			return fmt.Errorf("job %s: %s", job.Status, job.Error)
 		}
 	}
+}
+
+// clusterCompletedResult selects the result representation from the mode the
+// caller requested, never from the shape of an untrusted relay response. This
+// keeps E2EE fail closed before bytes can reach stdout or artifact handling.
+func clusterCompletedResult(job cluster.Job, sealed bool, shared string, encryptionContext cluster.EncryptionContext) ([]byte, error) {
+	if sealed {
+		if job.SealedResult == nil {
+			return nil, errors.New("worker returned no encrypted result")
+		}
+		if len(job.Result) != 0 {
+			return nil, errors.New("worker returned plaintext alongside an encrypted result")
+		}
+		return cluster.OpenResponse(shared, job.SealedResult, cluster.ResultAAD(encryptionContext))
+	}
+	if job.SealedResult != nil {
+		return nil, errors.New("worker returned an encrypted result for a plaintext job")
+	}
+	return job.Result, nil
 }
 
 func clusterTokenCommand(args []string) error {

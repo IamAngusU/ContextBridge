@@ -119,7 +119,9 @@ response and must stop admitting work while continuing its heartbeat. A later
 enable does not install software, supply missing secrets or prove readiness;
 the adapter must still report a fresh `ready` lease. Producers see only their
 own adapters, and scoped observers see only presence within their subject and
-tenant scope.
+tenant scope. When one presence spans several tenants and an observer is
+allowed only a subset, CB returns only that tenant intersection and redacts the
+non-partitionable readiness, capacity, queue, capability and error telemetry.
 
 This presence contract is independent from the pull-based execution protocol
 below. A deployment may implement either, both, or neither without changing

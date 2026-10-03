@@ -5,8 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -103,5 +105,68 @@ func TestHuggingFaceMetadataRejectsMutableOrMismatchedRevision(t *testing.T) {
 	defer func() { huggingFaceBaseURL = previousBase }()
 	if _, err := huggingFaceMetadata(context.Background(), "owner/repo", strings.Repeat("a", 40)); err == nil {
 		t.Fatal("registry response silently changed an explicitly approved revision")
+	}
+}
+
+func TestRegistryEgressPolicyRejectsUntrustedRedirectDestinations(t *testing.T) {
+	var reached bool
+	privateTarget := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		reached = true
+		_, _ = response.Write([]byte(`{"sha":"` + strings.Repeat("a", 40) + `"}`))
+	}))
+	defer privateTarget.Close()
+	entry := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		http.Redirect(response, request, privateTarget.URL+"/metadata", http.StatusFound)
+	}))
+	defer entry.Close()
+	previousBase := huggingFaceBaseURL
+	huggingFaceBaseURL = entry.URL
+	defer func() { huggingFaceBaseURL = previousBase }()
+	if _, err := huggingFaceMetadata(context.Background(), "owner/repo", ""); err == nil {
+		t.Fatalf("cross-origin private redirect was not rejected: %v", err)
+	}
+	if reached {
+		t.Fatal("registry client connected to the rejected redirect destination")
+	}
+}
+
+func TestRegistryEgressPolicyAllowsOnlyOfficialHTTPSOrigins(t *testing.T) {
+	policy := &registryEgressTransport{}
+	for _, raw := range []string{
+		"https://huggingface.co/owner/repo",
+		"https://cas-server.xethub.hf.co/path",
+		"https://cas-server.xethub-eu.hf.co/path",
+		"https://us.aws.cdn.hf.co/path",
+		"https://cdn-lfs-eu-1.hf.co/path",
+	} {
+		destination, _ := url.Parse(raw)
+		if err := policy.validateDestination(destination); err != nil {
+			t.Fatalf("official registry destination %q was rejected: %v", raw, err)
+		}
+	}
+	for _, raw := range []string{
+		"http://huggingface.co/owner/repo",
+		"https://huggingface.co:8443/owner/repo",
+		"https://huggingface.co.evil.example/owner/repo",
+		"https://127.0.0.1/metadata",
+		"https://user:secret@huggingface.co/owner/repo",
+	} {
+		destination, _ := url.Parse(raw)
+		if err := policy.validateDestination(destination); err == nil {
+			t.Fatalf("unsafe registry destination %q was accepted", raw)
+		}
+	}
+}
+
+func TestRegistryEgressPolicyRejectsNonPublicAddresses(t *testing.T) {
+	for _, raw := range []string{"127.0.0.1", "10.0.0.1", "169.254.169.254", "100.64.0.1", "198.18.0.1", "::1", "fc00::1", "fe80::1"} {
+		if isPublicRegistryIP(net.ParseIP(raw)) {
+			t.Fatalf("non-public address %s was accepted", raw)
+		}
+	}
+	for _, raw := range []string{"1.1.1.1", "2606:4700:4700::1111"} {
+		if !isPublicRegistryIP(net.ParseIP(raw)) {
+			t.Fatalf("public address %s was rejected", raw)
+		}
 	}
 }

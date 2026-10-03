@@ -11,7 +11,9 @@ import (
 	"io"
 	"io/fs"
 	"math"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -117,7 +119,9 @@ var ollamaCapabilityCache = struct {
 	items map[string]ollamaCapabilityCacheEntry
 }{items: map[string]ollamaCapabilityCacheEntry{}}
 
-var huggingFaceBaseURL = "https://huggingface.co"
+const defaultHuggingFaceBaseURL = "https://huggingface.co"
+
+var huggingFaceBaseURL = defaultHuggingFaceBaseURL
 
 func Builtin(name string) (config.Model, bool) {
 	switch strings.ToLower(strings.TrimSpace(name)) {
@@ -832,7 +836,7 @@ func huggingFaceMetadata(ctx context.Context, repository, requestedRevision stri
 		endpoint += "/revision/" + requestedRevision
 	}
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"?blobs=true", nil)
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	resp, err := registryHTTPClient(30 * time.Second).Do(req)
 	if err != nil {
 		return huggingFaceModelMetadata{}, err
 	}
@@ -915,7 +919,7 @@ func downloadAttempt(ctx context.Context, url, target, expected string, progress
 	if offset > 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
 	}
-	resp, err := (&http.Client{Timeout: 0}).Do(req)
+	resp, err := registryHTTPClient(0).Do(req)
 	if err != nil {
 		return err
 	}
@@ -1020,6 +1024,122 @@ func downloadAttempt(ctx context.Context, url, target, expected string, progress
 	_ = os.Remove(metadataPath)
 	progress("Installed "+filepath.Base(target), received, total)
 	return nil
+}
+
+const maximumRegistryRedirects = 5
+
+var (
+	carrierGradeNAT = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
+	benchmarkNet    = &net.IPNet{IP: net.IPv4(198, 18, 0, 0), Mask: net.CIDRMask(15, 32)}
+)
+
+type registryEgressTransport struct {
+	base *url.URL
+}
+
+func registryHTTPClient(timeout time.Duration) *http.Client {
+	base, _ := url.Parse(huggingFaceBaseURL)
+	policy := &registryEgressTransport{base: base}
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: policy,
+		CheckRedirect: func(request *http.Request, via []*http.Request) error {
+			if len(via) >= maximumRegistryRedirects {
+				return errors.New("model registry exceeded the redirect limit")
+			}
+			return policy.validateDestination(request.URL)
+		},
+	}
+}
+
+func (transport *registryEgressTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if err := transport.validateDestination(request.URL); err != nil {
+		return nil, err
+	}
+	baseTransport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return nil, errors.New("default HTTP transport is unavailable")
+	}
+	perRequest := baseTransport.Clone()
+	var proxyURL *url.URL
+	if perRequest.Proxy != nil {
+		var err error
+		proxyURL, err = perRequest.Proxy(request)
+		if err != nil {
+			return nil, fmt.Errorf("resolve model registry proxy: %w", err)
+		}
+	}
+	if proxyURL == nil {
+		host := request.URL.Hostname()
+		port := request.URL.Port()
+		if port == "" {
+			port = "443"
+		}
+		addresses, err := net.DefaultResolver.LookupIPAddr(request.Context(), host)
+		if err != nil {
+			return nil, fmt.Errorf("resolve model registry destination: %w", err)
+		}
+		approved := make([]net.IP, 0, len(addresses))
+		for _, address := range addresses {
+			if transport.isTestOrigin(request.URL) || isPublicRegistryIP(address.IP) {
+				approved = append(approved, address.IP)
+			}
+		}
+		if len(approved) == 0 {
+			return nil, errors.New("model registry destination resolved only to a non-public address")
+		}
+		perRequest.Proxy = nil
+		perRequest.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+			var lastErr error
+			dialer := net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+			for _, address := range approved {
+				connection, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(address.String(), port))
+				if dialErr == nil {
+					return connection, nil
+				}
+				lastErr = dialErr
+			}
+			return nil, lastErr
+		}
+	}
+	return perRequest.RoundTrip(request)
+}
+
+func (transport *registryEgressTransport) validateDestination(destination *url.URL) error {
+	if destination == nil || destination.User != nil || destination.Hostname() == "" {
+		return errors.New("model registry destination is malformed")
+	}
+	if transport.isTestOrigin(destination) {
+		return nil
+	}
+	if !strings.EqualFold(destination.Scheme, "https") {
+		return errors.New("model registry destinations must use HTTPS")
+	}
+	if port := destination.Port(); port != "" && port != "443" {
+		return errors.New("model registry destinations must use HTTPS port 443")
+	}
+	host := strings.ToLower(strings.TrimSuffix(destination.Hostname(), "."))
+	if host != "huggingface.co" && !strings.HasSuffix(host, ".huggingface.co") && host != "hf.co" && !strings.HasSuffix(host, ".hf.co") {
+		return fmt.Errorf("model registry redirect host %q is not trusted", host)
+	}
+	return nil
+}
+
+func (transport *registryEgressTransport) isTestOrigin(destination *url.URL) bool {
+	if transport.base == nil || strings.EqualFold(strings.TrimRight(transport.base.String(), "/"), defaultHuggingFaceBaseURL) {
+		return false
+	}
+	return strings.EqualFold(destination.Scheme, transport.base.Scheme) && strings.EqualFold(destination.Host, transport.base.Host)
+}
+
+func isPublicRegistryIP(address net.IP) bool {
+	if address == nil || !address.IsGlobalUnicast() || address.IsPrivate() || address.IsLoopback() || address.IsLinkLocalUnicast() || address.IsLinkLocalMulticast() || address.IsUnspecified() || address.IsMulticast() {
+		return false
+	}
+	if ipv4 := address.To4(); ipv4 != nil && (carrierGradeNAT.Contains(ipv4) || benchmarkNet.Contains(ipv4)) {
+		return false
+	}
+	return true
 }
 
 func readPartialDownloadMetadata(path string) (partialDownloadMetadata, error) {

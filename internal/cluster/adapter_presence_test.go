@@ -123,6 +123,45 @@ func TestAdapterControlPersistsButPresenceDoesNot(t *testing.T) {
 	}
 }
 
+func TestAdapterPresenceProjectsTenantScopeAndRedactsAggregateTelemetry(t *testing.T) {
+	admin := "admin_012345678901234567890123456789012345"
+	relay, err := NewRelay(RelayConfig{Database: filepath.Join(t.TempDir(), "relay.db"), AdminToken: admin}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+	producer, _, err := relay.store.CreateTokenWithPolicies("producer", "source-a", nil, time.Hour,
+		ProducerLimits{AllowedTenants: []string{"tenant-a", "tenant-b"}}, ObserverLimits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observer, _, err := relay.store.CreateTokenWithPolicies("observer", "observer-a", nil, time.Hour,
+		ProducerLimits{}, ObserverLimits{AllowedSubjects: []string{"source-a"}, AllowedTenants: []string{"tenant-a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	heartbeat := AdapterHeartbeat{
+		Schema: AdapterPresenceV1, AdapterID: "example.ingress", InstanceID: "host-a", DisplayName: "Example ingress",
+		Kind: "ingress", Version: "1.2.3", State: "ready", Capabilities: []string{"message.receive", "message.send"},
+		Capacity: 4, Active: 2, QueueDepth: 3, LastErrorCode: "private-aggregate", LeaseSeconds: 30,
+	}
+	if response := adapterPresenceRequest(t, relay, http.MethodPost, "/v1/cluster/adapters/heartbeat", producer, heartbeat); response.Code != http.StatusOK {
+		t.Fatalf("heartbeat returned %d: %s", response.Code, response.Body.String())
+	}
+	response := adapterPresenceRequest(t, relay, http.MethodGet, "/v1/cluster/adapters", observer, nil)
+	var list AdapterPresenceList
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &list) != nil || list.Total != 1 {
+		t.Fatalf("scoped observer response = %d %s", response.Code, response.Body.String())
+	}
+	item := list.Adapters[0]
+	if len(item.TenantIDs) != 1 || item.TenantIDs[0] != "tenant-a" || item.State != "scope_redacted" {
+		t.Fatalf("tenant projection failed: %#v", item)
+	}
+	if len(item.Capabilities) != 0 || item.Active != 0 || item.Capacity != 0 || item.QueueDepth != 0 || item.LastErrorCode != "" || item.Available || item.Enabled || !item.LastSeenAt.IsZero() || !item.LeaseExpiresAt.IsZero() {
+		t.Fatalf("cross-tenant aggregate telemetry was disclosed: %#v", item)
+	}
+}
+
 func TestAdapterHeartbeatRejectsAuthorityAndAmbiguousClaims(t *testing.T) {
 	input := AdapterHeartbeat{Schema: AdapterPresenceV1, AdapterID: "example", InstanceID: "one", DisplayName: "Example", Kind: "ingress", Version: "1", State: "ready", Capabilities: []string{"chat", "chat"}}
 	if _, err := normalizeAdapterHeartbeat(input); err == nil {
