@@ -283,9 +283,9 @@ func TestValidateJobMultiImageAggregateBoundary(t *testing.T) {
 }
 
 func TestResponseJobDoesNotEchoVisualInput(t *testing.T) {
-	job := Job{ID: "job-1", Prompt: "describe", ImageBase64: "large-input", ImageMediaType: "image/png", Model: "vision-model"}
+	job := Job{ID: "job-1", Prompt: "describe", ImageBase64: "large-input", ImageMediaType: "image/png", Model: "vision-model", ContextBridgeOwnerSubject: "private-owner", ContextBridgeTenantID: "private-tenant"}
 	response := responseJob(job)
-	if response.ImageBase64 != "" || response.ImageMediaType != "image/png" || response.ID != "job-1" || response.Model != "vision-model" {
+	if response.ImageBase64 != "" || response.ImageMediaType != "image/png" || response.ID != "job-1" || response.Model != "vision-model" || response.ContextBridgeOwnerSubject != "" || response.ContextBridgeTenantID != "" {
 		t.Fatalf("visual response envelope was not compacted safely: %#v", response)
 	}
 	if job.ImageBase64 != "large-input" {

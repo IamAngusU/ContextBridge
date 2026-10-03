@@ -119,6 +119,13 @@ capability. The adapter must independently fail closed unless the payload is
 the expected `contextbridge.scheduled-adapter-action.v1` opaque-reference
 envelope for its profile and exact presence UID.
 
+For that reserved task, the authenticated worker also replaces any caller
+claims and supplies `contextbridge_owner_subject` and
+`contextbridge_tenant_id` on the leased local job. A mutating adapter must bind
+both values to its separately staged destination and payload records. These
+execution-only fields are removed from the producer-visible result; ordinary
+adapter jobs cannot set them through a cluster payload.
+
 ## Local protocol v2
 
 The stable identifier is `contextbridge.adapter.v2`. Adapters connect to the

@@ -800,6 +800,8 @@ func responseJob(job Job) Job {
 	job.ContextBridgeSessionKey = ""
 	job.ContextBridgeAdapterEndpointID = 0
 	job.ContextBridgeAdapterPrincipal = ""
+	job.ContextBridgeOwnerSubject = ""
+	job.ContextBridgeTenantID = ""
 	return job
 }
 

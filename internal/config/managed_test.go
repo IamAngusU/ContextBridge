@@ -66,6 +66,25 @@ func TestManagedConfigRedactsValidatesAndAtomicallyApplies(t *testing.T) {
 	}
 }
 
+func TestManagedConfigTaskConstraintsMatchValidatedRouteTasks(t *testing.T) {
+	var tasks []string
+	for _, item := range ManagedConfigConstraints() {
+		if item["path"] == "routes.*.task" {
+			var ok bool
+			tasks, ok = item["enum"].([]string)
+			if !ok {
+				t.Fatalf("route task enum has unexpected type: %#v", item["enum"])
+			}
+			break
+		}
+	}
+	for _, task := range []string{"vision", "speech_to_text", "scheduled_action"} {
+		if !containsString(tasks, task) {
+			t.Fatalf("managed route task constraints omit validated task %q: %#v", task, tasks)
+		}
+	}
+}
+
 func TestManagedConfigRejectsMissingSecretAndUnknownFields(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yml")
 	if err := Default(path); err != nil {

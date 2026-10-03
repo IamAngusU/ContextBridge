@@ -67,7 +67,7 @@ func ManagedConfigConstraints() []map[string]interface{} {
 		constraint("portable_resources.max_scan_candidates", "integer", "minimum", 1, "maximum", 32768),
 		constraint("updates.channel", "string", "enum", []string{"stable", "preview"}),
 		constraint("updates.check_interval_hours", "integer", "minimum", 1, "maximum", 720),
-		constraint("routes.*.task", "string", "enum", []string{"", "moderation", "generation", "extraction", "embedding", "rag_ingest", "rag_query", "speech_to_text"}),
+		constraint("routes.*.task", "string", "enum", []string{"", "moderation", "generation", "extraction", "embedding", "rag_ingest", "rag_query", "vision", "speech_to_text", "scheduled_action"}),
 		constraint("routes.*.timeout_seconds", "integer", "minimum_when_set", 1, "maximum", 86400, "zero_means_default", true),
 		constraint("adapter_profiles.*.label", "string", "max_bytes", 100),
 		constraint("adapter_profiles.*.options", "object", "max_properties", 64),

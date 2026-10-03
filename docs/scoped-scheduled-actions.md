@@ -172,6 +172,10 @@ is pinned to the policy's v2 principal and profile. Its metadata contains a
 target adapter UID, occurrence, opaque references, due time and expiry. The
 adapter must reject an envelope for any other UID, recheck its lease, and call
 the v2 `claim` endpoint immediately before the external side effect.
+The worker supplies the authenticated `contextbridge_owner_subject` and
+`contextbridge_tenant_id` beside the envelope on the local leased job. The
+adapter must require those execution-only values to match the owner and tenant
+recorded when the opaque destination and payload references were staged.
 The inner envelope has a reusable strict schema:
 [`scheduled-adapter-action-v1.schema.json`](schemas/scheduled-adapter-action-v1.schema.json).
 

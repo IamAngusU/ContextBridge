@@ -1004,6 +1004,7 @@ func compactLocalSubmission(raw []byte) ([]byte, error) {
 	for _, field := range []string{
 		"prompt", "text", "texts", "documents", "query", "image_base64", "images", "audio",
 		"contextbridge_session_key", "contextbridge_adapter_endpoint_id", "contextbridge_adapter_principal",
+		"contextbridge_owner_subject", "contextbridge_tenant_id",
 	} {
 		delete(job, field)
 	}
@@ -1106,6 +1107,8 @@ func prepareLocalPayload(payload []byte, requirements Requirements, localJobID s
 	delete(job, "contextbridge_session_key")
 	delete(job, "contextbridge_egress")
 	delete(job, "contextbridge_provider_classification")
+	delete(job, "contextbridge_owner_subject")
+	delete(job, "contextbridge_tenant_id")
 	session := canonicalSessionID(requirements.SessionID)
 	rawSession, _ := json.Marshal(session)
 	job["session_id"] = rawSession
@@ -1128,6 +1131,19 @@ func prepareLocalPayload(payload []byte, requirements Requirements, localJobID s
 	if requirements.AdapterPrincipal != "" && strings.EqualFold(provider, "adapter") {
 		rawPrincipal, _ := json.Marshal(requirements.AdapterPrincipal)
 		job["contextbridge_adapter_principal"] = rawPrincipal
+	}
+	if strings.EqualFold(provider, "adapter") && strings.EqualFold(requirements.Task, "scheduled_action") {
+		if len(owner) == 0 || strings.TrimSpace(owner[0]) == "" {
+			return nil, errors.New("scheduled adapter actions require an authenticated owner subject")
+		}
+		rawOwner, _ := json.Marshal(strings.TrimSpace(owner[0]))
+		job["contextbridge_owner_subject"] = rawOwner
+		tenant := ""
+		if len(owner) > 1 {
+			tenant = strings.TrimSpace(owner[1])
+		}
+		rawTenant, _ := json.Marshal(tenant)
+		job["contextbridge_tenant_id"] = rawTenant
 	}
 	// A adapter endpoint is a security boundary between producer conversations.
 	// Derive its internal binding from the authenticated producer, never from a
