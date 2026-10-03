@@ -59,6 +59,28 @@ secret values must remain in independent permission-restricted files and only
 their file paths may be referenced by options. Setup output lists option keys,
 never option values.
 
+An adapter intended for a bounded agent may expose one non-secret syntax hint
+with the reserved option `agent_instruction_contract`. The value is a single
+printable string of at most 2 KiB. Only this option is copied into the planner
+prompt; paths, credentials, host policy, executable locations, and every other
+driver option stay hidden. The hint is not authority: the selected profile,
+relay execution policy, scoped credential, adapter-side request validation,
+lease, egress and any later confirmation remain independent gates.
+
+For example, a strict research adapter can state that its instruction must be
+one versioned JSON request. The planner may then propose that JSON inside an
+explicitly allowed adapter step instead of guessing a natural-language
+contract. The operator still reviews the resulting plan hash, or separately
+opts into a named agent authority.
+
+For an agent adapter step, Core places that exact request in `job.text`; the
+ordinary trusted prompt wrapper remains separate. Such a step must set
+`use_previous=false`, which prevents prior untrusted evidence from being
+silently concatenated into a machine request. Put research or retrieval first,
+then pass its normalized result to a later model step for synthesis. Profiles
+with an instruction contract are asked for JSON output; Core strictly validates
+and compacts that evidence before the handoff.
+
 Use `contextbridge adapter list`, `details`, and `doctor` to inspect the
 result. `enable`/`start` and `disable`/`stop` change durable relay admission
 for presence-reporting ingress adapters; they do not supervise a local v2

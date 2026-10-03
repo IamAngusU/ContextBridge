@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/IamAngusU/ContextBridge/internal/bridge"
 	"github.com/IamAngusU/ContextBridge/internal/cluster"
 	"github.com/IamAngusU/ContextBridge/internal/config"
 )
@@ -19,16 +20,16 @@ func validAgentPlanForTest(t *testing.T) agentPlan {
 	return agentPlan{
 		Version:           agentPlanVersion,
 		AuthorizationMode: agentAuthorizationManual,
-		Goal:              "Compare two short answers.",
-		Summary:           "Draft locally, then review in Profile Two.",
+		Goal:              "Research a bounded topic, then summarize it.",
+		Summary:           "Fetch bounded evidence in Profile Two, then summarize locally.",
 		Policy:            policy,
 		Binding:           validAgentBindingForTest(),
 		Evidence: agentPlannerEvidence{
 			Provider: "deepseek", JobID: "job-planner", NodeID: "node-one", CostStatus: "upper_bound",
 		},
 		Steps: []agentStep{
-			{ID: "draft", Provider: "ollama", Instruction: "Produce a concise draft."},
-			{ID: "review", Provider: "adapter", Profile: "profile-two", Instruction: "Review the submitted draft for factual errors.", UsePrevious: true},
+			{ID: "research", Provider: "adapter", Profile: "profile-two", Instruction: `{"schema":"example.request.v1","action":"capabilities"}`},
+			{ID: "summarize", Provider: "ollama", Instruction: "Summarize the submitted evidence.", UsePrevious: true},
 		},
 	}
 }
@@ -50,7 +51,7 @@ func TestAgentPlanBindsAndValidatesExplicitPolicy(t *testing.T) {
 	if err := validateAgentPlan(plan); err != nil {
 		t.Fatal(err)
 	}
-	plan.Steps[1].Profile = "profile-one"
+	plan.Steps[0].Profile = "profile-one"
 	if err := validateAgentPlan(plan); err == nil || !strings.Contains(err.Error(), "explicitly approved") {
 		t.Fatalf("unapproved adapter profile was not rejected: %v", err)
 	}
@@ -361,15 +362,59 @@ func TestAgentPlannerPromptMakesAuthorityBoundaryExplicit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	prompt := agentPlannerPrompt(policy)
-	for _, required := range []string{"untrusted data", "separate hash approval", `"ollama"`, `"profile-two"`, "shell commands, tools"} {
+	cfg := config.Config{AdapterProfiles: map[string]config.AdapterProfile{
+		"profile-two": {
+			Options: map[string]interface{}{
+				config.AdapterAgentInstructionContractOption: `Instruction must be one strict JSON object with schema example.request.v1.`,
+				"credential_file": `/srv/adapter/must-not-leak.token`,
+			},
+		},
+	}}
+	prompt := agentPlannerPrompt(policy, agentAdapterInstructionContracts(cfg, policy))
+	for _, required := range []string{"untrusted data", "separate hash approval", `"ollama"`, `"profile-two"`, "shell commands", "instruction contracts"} {
 		if !strings.Contains(strings.ToLower(prompt), strings.ToLower(required)) {
 			t.Errorf("planner prompt lacks %q", required)
 		}
 	}
+	if !strings.Contains(prompt, "example.request.v1") {
+		t.Fatal("planner prompt omitted the operator-owned adapter instruction contract")
+	}
+	if strings.Contains(prompt, "must-not-leak") || strings.Contains(prompt, "credential_file") {
+		t.Fatal("planner prompt exposed an adapter option outside the dedicated instruction contract")
+	}
 	var proposal agentPlannerProposal
 	if err := json.Unmarshal([]byte(`{"version":1,"summary":"one","steps":[{"id":"draft","provider":"ollama","instruction":"Draft."}]}`), &proposal); err != nil || proposal.Steps[0].Provider != "ollama" {
 		t.Fatalf("documented planner schema is not decodable: %#v / %v", proposal, err)
+	}
+}
+
+func TestAgentResultTextCarriesStrictJSONBetweenSteps(t *testing.T) {
+	output := &bridge.Output{Mode: "json", JSON: json.RawMessage(` {"schema":"evidence.v1","items":[1,2]} `)}
+	got, err := agentResultText(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != `{"schema":"evidence.v1","items":[1,2]}` {
+		t.Fatalf("JSON evidence was not compacted for the next step: %q", got)
+	}
+
+	for name, invalid := range map[string]*bridge.Output{
+		"duplicate JSON property": {Mode: "json", JSON: json.RawMessage(`{"a":1,"a":2}`)},
+		"empty output":            {Mode: "text"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := agentResultText(invalid); err == nil {
+				t.Fatal("invalid intermediate output was accepted")
+			}
+		})
+	}
+}
+
+func TestAgentPlanRejectsPreviousEvidenceAsAdapterRequestContent(t *testing.T) {
+	plan := validAgentPlanForTest(t)
+	plan.Steps[1] = agentStep{ID: "research-again", Provider: "adapter", Profile: "profile-two", Instruction: `{"schema":"example.request.v1"}`, UsePrevious: true}
+	if err := validateAgentPlan(plan); err == nil || !strings.Contains(err.Error(), "cannot use a previous result") {
+		t.Fatalf("adapter previous-result ambiguity was accepted: %v", err)
 	}
 }
 

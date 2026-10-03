@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Made adapter-backed bounded agents interoperable without exposing opaque
+  driver configuration. An adapter profile may provide one validated,
+  operator-owned `agent_instruction_contract`; only that string is shown to
+  the planner, while credentials, paths, and all other options remain hidden.
+  Plans still bind the complete effective configuration and cannot widen
+  provider, profile, egress, tenant, cost, or confirmation authority.
+  Exact adapter requests now cross the bridge as submitted content instead of
+  being hidden inside the trusted prompt wrapper, and cannot be mixed with a
+  prior step's evidence.
+  Structured JSON evidence is now strictly validated and normalized when it
+  becomes the next step's explicitly untrusted input.
+  Agent plans are version 7 and older saved plans must be regenerated and
+  reviewed under the clarified adapter request boundary.
 - Bound confirmed scheduled adapter actions to an authenticated
   `remote_allowed` execution constraint before worker delivery. Remote action
   adapters can now verify both the relay's provider classification and the

@@ -202,6 +202,14 @@ type AdapterProfile struct {
 	Options map[string]interface{} `yaml:"options,omitempty" json:"options,omitempty"`
 }
 
+const (
+	// AdapterAgentInstructionContractOption is the only adapter option exposed
+	// to an agent planner. All other options may describe paths, credentials, or
+	// runtime policy and therefore stay outside prompt material.
+	AdapterAgentInstructionContractOption       = "agent_instruction_contract"
+	AdapterAgentInstructionContractMaximumBytes = 2 << 10
+)
+
 type Cluster struct {
 	Relay             ClusterRelay                `yaml:"relay" json:"relay"`
 	Worker            ClusterWorker               `yaml:"worker" json:"worker"`
@@ -595,9 +603,17 @@ func (c Config) Validate() error {
 		if len(profile.Options) > 64 {
 			return fmt.Errorf("adapter profile %s has more than 64 options", name)
 		}
-		for option := range profile.Options {
+		for option, value := range profile.Options {
 			if len(option) > 80 || !safeNamePattern.MatchString(option) || strings.Contains(option, "..") {
 				return fmt.Errorf("adapter profile %s has an invalid option name", name)
+			}
+			if option == AdapterAgentInstructionContractOption {
+				contract, ok := value.(string)
+				if !ok || strings.TrimSpace(contract) != contract || contract == "" || len(contract) > AdapterAgentInstructionContractMaximumBytes || !utf8.ValidString(contract) || strings.IndexFunc(contract, func(r rune) bool {
+					return r != ' ' && !unicode.IsPrint(r)
+				}) >= 0 {
+					return fmt.Errorf("adapter profile %s %s must contain 1..%d printable UTF-8 bytes without surrounding whitespace", name, option, AdapterAgentInstructionContractMaximumBytes)
+				}
 			}
 		}
 	}

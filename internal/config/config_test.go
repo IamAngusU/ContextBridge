@@ -233,6 +233,29 @@ func TestAdapterProfilesUseBoundedNeutralIdentifiers(t *testing.T) {
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("unsafe adapter driver identifier was accepted")
 	}
+
+	cfg.AdapterProfiles["review-endpoint"] = AdapterProfile{Options: map[string]interface{}{
+		AdapterAgentInstructionContractOption: "Return one bounded JSON request.",
+	}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("bounded adapter agent instruction contract was rejected: %v", err)
+	}
+	for name, value := range map[string]interface{}{
+		"wrong type":         []interface{}{"not", "text"},
+		"multiline":          "first\nsecond",
+		"non-printing space": "first\u00a0second",
+		"oversized":          strings.Repeat("x", AdapterAgentInstructionContractMaximumBytes+1),
+		"empty string":       " ",
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg.AdapterProfiles["review-endpoint"] = AdapterProfile{Options: map[string]interface{}{
+				AdapterAgentInstructionContractOption: value,
+			}}
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("invalid adapter agent instruction contract was accepted")
+			}
+		})
+	}
 }
 
 func TestScopedAdapterPrincipalsAreIndependentBoundedAndRedacted(t *testing.T) {

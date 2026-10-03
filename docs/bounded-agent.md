@@ -119,3 +119,31 @@ change cannot inherit stale authority.
   cost requires an explicit operator decision.
 
 The model proposes work inside the envelope. The operator owns the envelope.
+
+## Adapter evidence and external changes
+
+A bounded plan may use an explicitly allowlisted adapter profile. For adapters
+with a machine-shaped request, the operator can place a non-secret
+`agent_instruction_contract` on that profile. ContextBridge gives the planner
+only that syntax description, never the profile's credential paths or other
+options. The adapter remains responsible for validating the exact request and
+its own least-privilege boundary. Core carries the exact adapter request in
+submitted content rather than its trusted prompt wrapper. Adapter steps cannot
+also consume a previous result; a following model step can consume their
+normalized evidence instead.
+Contracted adapter evidence must be valid, unambiguous JSON; Core validates and
+compacts it before it can become the next step's submitted text.
+
+Structured adapter evidence is carried to a later step as normalized,
+explicitly untrusted text. It is not promoted into the later model's system
+instructions. This supports workflows such as research, source-aware drafting,
+and verification while keeping the plan limited to the reviewed providers and
+profiles.
+
+External mutation is a different authority tier. Agent steps cannot submit the
+reserved `scheduled_action` task or turn evidence into a write credential. A
+channel must stage a typed payload and opaque destination, obtain a relay
+preview, and explicitly confirm the scheduled action under a credential-bound
+policy. The one-attempt action adapter then claims its fenced lease immediately
+before the provider call. This is how posting or updating can be offered
+without making a prompt an administrator.
