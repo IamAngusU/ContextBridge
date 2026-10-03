@@ -298,11 +298,8 @@ func (r *Relay) visibleAdapterPresences(record TokenRecord, now time.Time) []Ada
 	r.pruneAdapterPresencesLocked(now)
 	items := make([]AdapterPresence, 0, len(r.adapterPresences))
 	for _, item := range r.adapterPresences {
-		if adapterPresenceVisible(record, item) {
-			copy := item
-			copy.Capabilities = append([]string(nil), item.Capabilities...)
-			copy.TenantIDs = append([]string(nil), item.TenantIDs...)
-			items = append(items, copy)
+		if projected, visible := projectAdapterPresence(record, item); visible {
+			items = append(items, projected)
 		}
 	}
 	sort.Slice(items, func(i, j int) bool {
@@ -322,29 +319,53 @@ func (r *Relay) pruneAdapterPresencesLocked(now time.Time) {
 	}
 }
 
-func adapterPresenceVisible(record TokenRecord, item AdapterPresence) bool {
+func projectAdapterPresence(record TokenRecord, item AdapterPresence) (AdapterPresence, bool) {
+	projected := item
+	projected.Capabilities = append([]string(nil), item.Capabilities...)
+	projected.TenantIDs = append([]string(nil), item.TenantIDs...)
 	switch record.Role {
 	case "admin":
-		return true
+		return projected, true
 	case "producer":
-		return record.Subject == item.OwnerSubject
+		return projected, record.Subject == item.OwnerSubject
 	case "observer":
 		if len(record.ObserverLimits.AllowedSubjects) > 0 && !contains(record.ObserverLimits.AllowedSubjects, item.OwnerSubject) {
-			return false
+			return AdapterPresence{}, false
 		}
 		if len(record.ObserverLimits.AllowedTenants) == 0 {
-			return true
+			return projected, true
 		}
 		if len(item.TenantIDs) == 0 {
-			return false
+			return AdapterPresence{}, false
 		}
+		visibleTenants := make([]string, 0, len(item.TenantIDs))
 		for _, tenant := range item.TenantIDs {
 			if contains(record.ObserverLimits.AllowedTenants, tenant) {
-				return true
+				visibleTenants = append(visibleTenants, tenant)
 			}
 		}
+		if len(visibleTenants) == 0 {
+			return AdapterPresence{}, false
+		}
+		projected.TenantIDs = visibleTenants
+		if len(visibleTenants) != len(item.TenantIDs) {
+			// Operational values are aggregate, not partitioned by tenant. A
+			// partially scoped observer may learn that the adapter identity exists
+			// for its tenant, but receives no cross-tenant readiness or load signal.
+			projected.State = "scope_redacted"
+			projected.Capabilities = nil
+			projected.Active = 0
+			projected.Capacity = 0
+			projected.QueueDepth = 0
+			projected.LastErrorCode = ""
+			projected.Enabled = false
+			projected.Available = false
+			projected.LastSeenAt = time.Time{}
+			projected.LeaseExpiresAt = time.Time{}
+		}
+		return projected, true
 	}
-	return false
+	return AdapterPresence{}, false
 }
 
 func summarizeAdapterPresences(items []AdapterPresence) AdapterPresenceList {

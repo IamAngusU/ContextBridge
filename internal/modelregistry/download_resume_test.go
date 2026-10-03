@@ -29,6 +29,7 @@ func TestChecksumFailureDoesNotPoisonNextModelPull(t *testing.T) {
 		_, _ = w.Write(good)
 	}))
 	defer server.Close()
+	useTestRegistryOrigin(t, server.URL)
 	target := filepath.Join(t.TempDir(), "model.gguf")
 	if err := download(context.Background(), server.URL, target, expected, func(string, int64, int64) {}); err == nil || !strings.Contains(err.Error(), "SHA256 mismatch") {
 		t.Fatalf("corrupt first download returned %v", err)
@@ -59,6 +60,7 @@ func TestCompleteValidPartialFinalizesAfterRangeNotSatisfiable(t *testing.T) {
 		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
 	}))
 	defer server.Close()
+	useTestRegistryOrigin(t, server.URL)
 	if err := writePartialDownloadMetadata(target+".partial.json", partialDownloadMetadata{URL: server.URL, Expected: expected}); err != nil {
 		t.Fatal(err)
 	}
@@ -82,6 +84,7 @@ func TestBadContentRangeCannotAppendToPartial(t *testing.T) {
 		_, _ = w.Write([]byte("def"))
 	}))
 	defer server.Close()
+	useTestRegistryOrigin(t, server.URL)
 	if err := writePartialDownloadMetadata(partial+".json", partialDownloadMetadata{URL: server.URL}); err != nil {
 		t.Fatal(err)
 	}
@@ -113,10 +116,18 @@ func TestPartialFromDifferentModelRevisionIsDiscarded(t *testing.T) {
 		_, _ = w.Write(content)
 	}))
 	defer server.Close()
+	useTestRegistryOrigin(t, server.URL)
 	if err := download(context.Background(), server.URL, target, expected, func(string, int64, int64) {}); err != nil {
 		t.Fatal(err)
 	}
 	if raw, err := os.ReadFile(target); err != nil || string(raw) != string(content) {
 		t.Fatalf("different model revision was not downloaded cleanly: %q %v", raw, err)
 	}
+}
+
+func useTestRegistryOrigin(t *testing.T, origin string) {
+	t.Helper()
+	previous := huggingFaceBaseURL
+	huggingFaceBaseURL = origin
+	t.Cleanup(func() { huggingFaceBaseURL = previous })
 }

@@ -967,6 +967,7 @@ func (s *Store) RecordScopedAdapterHeartbeat(principal string, status AdapterCli
 		s.endpointCaps = map[adapterEndpointKey]adapterEndpointCapability{}
 	}
 	status.Connected = status.State != "paused"
+	deriveScopedAdapterAggregates(&status)
 	status.LastSeen = now
 	status.Adapter = principal
 	for index := range status.Endpoints {
@@ -1032,6 +1033,33 @@ func (s *Store) RecordScopedAdapterHeartbeat(principal string, status AdapterCli
 		s.addActivityLocked("adapter", "Scoped adapter "+principal+" connected", "")
 	}
 	return capabilities, nil
+}
+
+// deriveScopedAdapterAggregates makes validated endpoint records the sole
+// source of v2 scheduling readiness. The aggregate fields remain accepted on
+// the wire for compatibility, but a scoped principal cannot use contradictory
+// counters to activate the legacy global-readiness fallback.
+func deriveScopedAdapterAggregates(status *AdapterClientStatus) {
+	status.ActiveEndpoints = 0
+	status.BusyEndpoints = 0
+	if !status.Connected {
+		status.Ready = false
+		return
+	}
+	for _, endpoint := range status.Endpoints {
+		state := strings.ToLower(strings.TrimSpace(endpoint.State))
+		switch state {
+		case "offline", "paused", "stopped", "error":
+			continue
+		}
+		status.ActiveEndpoints++
+		switch state {
+		case "idle", "waiting", "session_bound":
+		default:
+			status.BusyEndpoints++
+		}
+	}
+	status.Ready = status.ActiveEndpoints > 0
 }
 
 func endpointCapabilityMatches(record adapterEndpointCapability, capability string, now time.Time) bool {

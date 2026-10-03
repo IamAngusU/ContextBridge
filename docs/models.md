@@ -81,6 +81,15 @@ manifest is ignored rather than overriding operator configuration. A configured
 branch name, unverified response, missing file digest or mismatched bytes fails
 closed.
 
+Remote pulls use one registry-specific egress policy. Every redirect is
+revalidated, limited to five hops, required to remain on HTTPS port 443 under
+the official `huggingface.co` or `hf.co` host families, and connected only to a
+publicly routable resolved address when no operator-configured proxy is in use.
+This keeps storage/CDN redirects working without letting a registry response
+turn a model pull into a request to loopback, private, link-local, carrier-grade
+NAT, or benchmark networks. Digest verification remains a separate final
+integrity check; it cannot replace the outbound network boundary.
+
 The manifest records what CB verified at installation time. Listing it does not
 rehash a multi-gigabyte model on every status refresh, so later same-size local
 tampering is outside that evidence. Pin `revision` and `sha256` in the reviewed

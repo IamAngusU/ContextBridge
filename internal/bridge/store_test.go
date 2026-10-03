@@ -78,6 +78,37 @@ func TestScopedAdapterCapabilitiesFencePrincipalEndpointAndLeaseGeneration(t *te
 	}
 }
 
+func TestScopedAdapterHeartbeatDerivesReadinessFromEndpointRecords(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capabilities, err := store.RecordScopedAdapterHeartbeat("adapter-a", AdapterClientStatus{
+		State: "waiting", Ready: true, ActiveEndpoints: 16, BusyEndpoints: 16,
+	}); err != nil || len(capabilities) != 0 {
+		t.Fatalf("empty scoped heartbeat failed unexpectedly: %#v %v", capabilities, err)
+	}
+	status := store.AdapterStatus()
+	if status.Ready || status.ActiveEndpoints != 0 || status.BusyEndpoints != 0 || len(status.Endpoints) != 0 {
+		t.Fatalf("unproven aggregate readiness survived normalization: %#v", status)
+	}
+
+	if _, err := store.RecordScopedAdapterHeartbeat("adapter-a", AdapterClientStatus{
+		State: "waiting", Ready: false,
+		Endpoints: []AdapterEndpointStatus{
+			{ID: 1, Profile: "profile-a", State: "waiting"},
+			{ID: 2, Profile: "profile-a", State: "working"},
+			{ID: 3, Profile: "profile-a", State: "offline"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	status = store.AdapterStatus()
+	if !status.Ready || status.ActiveEndpoints != 2 || status.BusyEndpoints != 1 || len(status.Endpoints) != 3 {
+		t.Fatalf("endpoint-derived aggregate is incorrect: %#v", status)
+	}
+}
+
 func TestScopedAdapterHeartbeatKeepsCapabilityStableDuringLongPolls(t *testing.T) {
 	store, err := NewStore(t.TempDir())
 	if err != nil {
