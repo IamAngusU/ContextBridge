@@ -58,6 +58,7 @@ type RelayConfig struct {
 	MaxSessionPlacements int
 	RetentionSweep       time.Duration
 	Placement            PlacementPolicy
+	InteractiveCapacity  InteractiveCapacity
 }
 
 var relayRequestSequence atomic.Uint64
@@ -91,6 +92,7 @@ type Relay struct {
 	authority         RelayAuthority
 	logger            *log.Logger
 	mu                sync.RWMutex
+	dispatchMu        sync.Mutex
 	workers           map[string]*workerConnection
 	rateMu            sync.Mutex
 	rate              map[string]*rateWindow
@@ -210,6 +212,7 @@ type workerConnection struct {
 // until the matching result or connection teardown, while remembering that a
 // terminalized job no longer requires another stale-jobs store scan.
 type workerReservation struct {
+	interactive     bool
 	storeTerminal   bool
 	dispatchStarted bool
 	attempt         int
@@ -234,15 +237,30 @@ func newWorkerConnection(conn *websocket.Conn, capacity int, credentialHash ...s
 }
 
 func (w *workerConnection) reserve(jobID string) bool {
+	return w.reserveCapacity(jobID, 0, false)
+}
+
+// The reservation gate repeats the scheduler limit under the live slot lock.
+func (w *workerConnection) reserveCapacity(jobID string, reservedSlots int, interactive bool) bool {
 	w.stateMu.Lock()
 	defer w.stateMu.Unlock()
 	if _, exists := w.inFlight[jobID]; exists {
 		return false
 	}
-	if len(w.inFlight) >= w.capacity {
+	limit := w.capacity
+	if reservedSlots > 0 && !interactive {
+		limit -= min(reservedSlots, w.capacity)
+		for _, reservation := range w.inFlight {
+			if reservation.interactive {
+				limit++
+			}
+		}
+		limit = min(limit, w.capacity)
+	}
+	if len(w.inFlight) >= limit {
 		return false
 	}
-	w.inFlight[jobID] = workerReservation{}
+	w.inFlight[jobID] = workerReservation{interactive: interactive}
 	return true
 }
 
@@ -359,6 +377,9 @@ type rateWindow struct {
 }
 
 func NewRelay(cfg RelayConfig, logger *log.Logger) (*Relay, error) {
+	if err := cfg.InteractiveCapacity.Validate(); err != nil {
+		return nil, err
+	}
 	if cfg.Listen == "" {
 		cfg.Listen = "127.0.0.1:32150"
 	}
@@ -1083,12 +1104,20 @@ func (r *Relay) handleJobRuntimeEstimate(w http.ResponseWriter, req *http.Reques
 }
 
 func (r *Relay) handleRouteExplain(w http.ResponseWriter, req *http.Request) {
-	var input AssignmentRequest
+	var input RouteExplainRequest
 	if err := decodeJSON(req.Body, &input, 64<<10); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	record, _ := tokenRecord(req.Context())
+	if input.Priority < -100 || input.Priority > 100 {
+		writeErrorCode(w, http.StatusUnprocessableEntity, AdmissionCodePriorityInvalid, errors.New("priority must be between -100 and 100"))
+		return
+	}
+	if record.Role == "producer" && !producerPriorityAllowed(input.Priority, record.ProducerLimits) {
+		writeErrorCode(w, http.StatusForbidden, AdmissionCodePriorityForbidden, ErrPriorityScopeForbidden)
+		return
+	}
 	if input.Requirements.AdapterEndpointID != 0 || input.Requirements.AdapterPrincipal != "" || input.Requirements.AdapterSessionRecovery {
 		writeError(w, http.StatusUnprocessableEntity, errors.New("adapter endpoint and recovery requirements are relay-assigned"))
 		return
@@ -1130,7 +1159,12 @@ func (r *Relay) handleRouteExplain(w http.ResponseWriter, req *http.Request) {
 	}
 	nodes = nodesForPoolAssignment(nodes, input.PoolID, input.PoolAuthorityKey, time.Now().UTC())
 	routingRequirements, requiredSessionNode := r.withSessionAffinity(input.Requirements, record.Subject)
-	_, decision := rankWithDecisionForOwnerPolicy(nodes, routingRequirements, r.store.EstimateVRAM(input.Requirements), record.Subject, time.Now().UTC(), r.cfg.Placement)
+	demand, err := r.store.interactiveDemandSnapshot(nodes, r.cfg.InteractiveCapacity, r.fairnessSnapshot())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	_, decision := rankWithInteractiveCapacity(nodes, routingRequirements, r.store.EstimateVRAM(input.Requirements), record.Subject, time.Now().UTC(), r.cfg.Placement, r.cfg.InteractiveCapacity, input.Priority, demand)
 	decision.ID, err = randomID("route_preview")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -1852,6 +1886,8 @@ func (r *Relay) dispatchLoop(ctx context.Context) {
 }
 
 func (r *Relay) dispatch() {
+	r.dispatchMu.Lock()
+	defer r.dispatchMu.Unlock()
 	now := time.Now().UTC()
 	r.runScheduledActions(now)
 	if r.maintenanceDue(now) {
@@ -1867,6 +1903,13 @@ func (r *Relay) dispatch() {
 	nodes, err := r.routingNodes()
 	if err != nil {
 		return
+	}
+	demand, err := r.store.interactiveDemandSnapshot(nodes, r.cfg.InteractiveCapacity, owners)
+	if err != nil {
+		return
+	}
+	if len(r.cfg.InteractiveCapacity.Scopes) > 0 {
+		jobs = mergeInteractiveQueue(jobs, demand.jobs, owners)
 	}
 	for _, queued := range jobs {
 		if busy, busyErr := r.store.AdapterSessionBusy(queued.OwnerSubject, queued.Requirements, queued.ID); busyErr != nil || busy {
@@ -1893,7 +1936,7 @@ func (r *Relay) dispatch() {
 			// preserves all existing functionality without noisy failed attempts.
 			jobNodes = nodesForPoolAssignment(nodes, "", "", now)
 		}
-		candidates, decision := rankWithDecisionForOwnerPolicy(jobNodes, routingRequirements, estimatedVRAM, queued.OwnerSubject, now, r.cfg.Placement)
+		candidates, decision := rankWithInteractiveCapacity(jobNodes, routingRequirements, estimatedVRAM, queued.OwnerSubject, now, r.cfg.Placement, r.cfg.InteractiveCapacity, queued.Priority, demand)
 		if queued.PolicyDecision.Schema != "" {
 			policyDecision := queued.PolicyDecision
 			decision.PolicyDecision = &policyDecision
@@ -1932,7 +1975,12 @@ func (r *Relay) dispatch() {
 			if !r.beginAdmission() {
 				return
 			}
-			if !worker.reserve(queued.ID) {
+			slots, borrow := r.cfg.InteractiveCapacity.scopeFor(candidate.Node)
+			interactive := len(r.cfg.InteractiveCapacity.Scopes) > 0 && queued.Priority >= r.cfg.InteractiveCapacity.MinPriority
+			if borrow && !demand.unknown && !demand.pending[candidate.Node.ID] {
+				slots = 0
+			}
+			if !worker.reserveCapacity(queued.ID, slots, interactive) {
 				r.endAdmission()
 				rejectRoutingCandidate(&decision, candidate.Node.ID, "worker_at_capacity")
 				continue
@@ -1991,6 +2039,9 @@ func (r *Relay) dispatch() {
 				r.recordDispatchedOwner(job.Priority, job.OwnerSubject)
 				_ = r.store.AddEvent(Event{Kind: "job.assigned", Message: "Job assigned to " + candidate.Node.Name, JobID: job.ID, NodeID: candidate.Node.ID})
 				candidate.Node.Capabilities.Running++
+				if interactive {
+					candidate.Node.interactiveRunning++
+				}
 				for index := range nodes {
 					if nodes[index].ID == candidate.Node.ID {
 						nodes[index] = candidate.Node
@@ -2488,10 +2539,11 @@ func (r *Relay) routingNodes() ([]Node, error) {
 			nodes[index].Connected = false
 			continue
 		}
-		running, capacity := worker.load()
+		running, capacity, interactive := worker.capacityLoad()
 		nodes[index].Connected = true
 		nodes[index].Capabilities.Running = running
 		nodes[index].Capabilities.MaxConcurrent = capacity
+		nodes[index].interactiveRunning = interactive
 	}
 	return nodes, nil
 }
