@@ -342,7 +342,7 @@ func TestScheduledActionHTTPDispatchIsScopedAtomicAndContentMinimized(t *testing
 		t.Fatalf("due action was not dispatched: %#v, %v", dispatched, err)
 	}
 	job, err := relay.store.GetJob(dispatched.CurrentJobID)
-	if err != nil || job.MaxAttempts != 1 || job.Requirements.Provider != "adapter" || job.Requirements.AdapterProfile != "message-delivery" || job.Requirements.AdapterPrincipal != "message-adapter" || job.Requirements.Task != "scheduled_action" {
+	if err != nil || job.MaxAttempts != 1 || job.Requirements.Provider != "adapter" || job.Requirements.AdapterProfile != "message-delivery" || job.Requirements.AdapterPrincipal != "message-adapter" || job.Requirements.Task != "scheduled_action" || job.Requirements.Egress != "remote_allowed" {
 		t.Fatalf("scheduled adapter job = %#v, %v", job, err)
 	}
 	if strings.Contains(string(job.Payload), "+49") || strings.Contains(string(job.Payload), "hello") {
@@ -398,6 +398,11 @@ func TestScheduledActionTaskCannotBeSubmittedDirectly(t *testing.T) {
 	})
 	if err != nil || !internal.scheduledActionInternal {
 		t.Fatalf("internal scheduled action did not receive its in-memory capability: %#v %v", internal, err)
+	}
+	localOnly := record
+	localOnly.ProducerLimits.Egress = "local_only"
+	if _, _, err := relay.prepareAdmission(internal, localOnly, admissionScheduledAction); admissionErrorCode(err) != AdmissionCodeScopeForbidden {
+		t.Fatalf("local-only credential authorized a remote scheduled adapter action: %v", err)
 	}
 	encoded, err := json.Marshal(internal)
 	if err != nil || strings.Contains(string(encoded), "scheduledActionInternal") || strings.Contains(string(encoded), "scheduled_action_internal") {

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Bound confirmed scheduled adapter actions to an authenticated
+  `remote_allowed` execution constraint before worker delivery. Remote action
+  adapters can now verify both the relay's provider classification and the
+  caller-side egress boundary, while credentials restricted to `local_only`
+  continue to fail closed before dispatch.
 - Made adapter model readiness route-authoritative. Modern workers now require
   an exact ready endpoint for the configured adapter profile/model, publish
   verified availability and loaded state only from that heartbeat, and no

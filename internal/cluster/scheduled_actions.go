@@ -1133,7 +1133,7 @@ func scheduledActionDispatchMatches(action ScheduledAction, record TokenRecord, 
 	if requirements.Group != "" && !containsFold(record.Groups, requirements.Group) {
 		return false
 	}
-	return requirements.Egress == "" || (record.ProducerLimits.Egress == "local_only" && requirements.Egress == "local_only")
+	return requirements.Egress == expected.Requirements.Egress
 }
 
 func buildScheduledActionSubmit(action ScheduledAction) (SubmitRequest, error) {
@@ -1155,7 +1155,14 @@ func buildScheduledActionSubmit(action ScheduledAction) (SubmitRequest, error) {
 	}
 	return SubmitRequest{
 		ContractVersion: JobContractV1, TenantID: action.TenantID, Source: "scheduled-action",
-		Requirements:            Requirements{Task: scheduledActionTask, Provider: "adapter", AdapterProfile: action.AdapterProfile, SessionID: action.ID},
+		// A confirmed scheduled adapter action is an explicit authorization to
+		// cross a remote boundary when the operator policy classifies and permits
+		// that profile. Preserve that authenticated constraint for the local v2
+		// adapter instead of making it infer authority from payload metadata.
+		Requirements: Requirements{
+			Task: scheduledActionTask, Provider: "adapter", AdapterProfile: action.AdapterProfile,
+			SessionID: action.ID, Egress: "remote_allowed",
+		},
 		Payload:                 payload,
 		Priority:                action.Priority,
 		MaxAttempts:             1,
