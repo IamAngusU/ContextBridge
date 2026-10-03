@@ -29,6 +29,12 @@ The producer selects the target UID, action kind and destination reference. It
 cannot mix a UID with another target's profile or principal. Presence proves
 fresh liveness only; it never grants execution authority.
 
+Do not place the policy-bearing producer credential in the executor process.
+Issue a second producer credential with the same subject and no
+`scheduled_actions` policy for presence heartbeats. The subject keeps the
+stable UID aligned, while only the channel credential can preview and confirm
+actions.
+
 Example `scheduled-action-policy.json`:
 
 ```json

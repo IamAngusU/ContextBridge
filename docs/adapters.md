@@ -112,6 +112,13 @@ immediately before the side effect. This keeps timers and execution authority
 out of channel-specific processes without coupling the public core to a
 vendor.
 
+Use two credentials with the same producer subject for a mutating deployment.
+The channel keeps the credential containing the scheduled-action policy; the
+executor receives a second producer credential without scheduled-action
+authority and uses it only for presence. Because the stable presence UID is
+derived from cluster, subject, and adapter ID, both still bind to the same UID,
+while a compromised executor cannot preview or confirm work for itself.
+
 The execution route must use the exact `scheduled_action` task. ContextBridge
 reserves that task against normal job submissions, encrypted reservations and
 pipeline steps; only the confirmed scheduler can mint its in-memory admission
