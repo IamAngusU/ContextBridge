@@ -329,8 +329,8 @@ func TestClusterRouteExplainSupportsPreviewAndDurableJobDecision(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/cluster/routes/explain":
-			var request cluster.AssignmentRequest
-			if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request.Requirements.Task != "generation" {
+			var request cluster.RouteExplainRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request.Requirements.Task != "generation" || request.Priority != 80 {
 				http.Error(w, "invalid request", http.StatusBadRequest)
 				return
 			}
@@ -370,7 +370,7 @@ func TestClusterRouteExplainSupportsPreviewAndDurableJobDecision(t *testing.T) {
 		t.Fatal(err)
 	}
 	jobPath := filepath.Join(temporary, "job.json")
-	if err := os.WriteFile(jobPath, []byte(`{"requirements":{"task":"generation"},"payload":{"prompt":"hello"}}`), 0600); err != nil {
+	if err := os.WriteFile(jobPath, []byte(`{"requirements":{"task":"generation"},"priority":80,"payload":{"prompt":"hello"}}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	stdout, err := os.CreateTemp(temporary, "route-output-*.txt")

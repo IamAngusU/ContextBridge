@@ -1522,6 +1522,7 @@ func relayConfig(cfg config.Config) cluster.RelayConfig {
 		MaxTerminalRuns:      cfg.Cluster.Relay.MaxTerminalPipelineRuns,
 		MaxSessionPlacements: cfg.Cluster.Relay.MaxSessionPlacements,
 		RetentionSweep:       time.Duration(cfg.Cluster.Relay.RetentionSweepSeconds) * time.Second,
+		InteractiveCapacity:  cfg.Cluster.InteractiveCapacity,
 		Placement: cluster.PlacementPolicy{
 			PerformanceLearning: cfg.Cluster.Placement.PerformanceLearning != nil && *cfg.Cluster.Placement.PerformanceLearning,
 			MinimumSamples:      boundedPlacementMinimumSamples(cfg.Cluster.Placement.MinimumSamples),
@@ -1894,7 +1895,7 @@ func clusterRouteCommand(args []string) error {
 				return err
 			}
 		}
-		if err := clusterPOST(context.Background(), clusterClientBaseURL(cfg)+"/v1/cluster/routes/explain", *token, request, &decision); err != nil {
+		if err := clusterPOST(context.Background(), clusterClientBaseURL(cfg)+"/v1/cluster/routes/explain", *token, cluster.RouteExplainRequest{AssignmentRequest: request, Priority: input.Priority}, &decision); err != nil {
 			return err
 		}
 	} else {
@@ -1934,6 +1935,9 @@ func printRoutingDecision(decision cluster.RoutingDecision) {
 	for _, candidate := range decision.Candidates {
 		if candidate.Eligible {
 			detail := routingScoreSummary(candidate.ScoreComponents)
+			if candidate.ReservedSlots > 0 {
+				detail += fmt.Sprintf(" · reserve %d · %s", candidate.ReservedSlots, candidate.ReservationOutcome)
+			}
 			if candidate.RecoveryProbation {
 				detail += " · single recovery probe"
 			}

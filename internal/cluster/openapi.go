@@ -64,6 +64,14 @@ func relayOpenAPI() map[string]interface{} {
 	jobSubmitOperation["requestBody"] = map[string]interface{}{"required": true, "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]string{"$ref": "#/components/schemas/SubmitRequest"}}}}
 	assignmentOperation := operation("Reserve an E2EE worker assignment", []string{"admin", "producer"}, "AssignmentResponse", "201")
 	assignmentOperation["requestBody"] = map[string]interface{}{"required": true, "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"type": "object", "required": []string{"requirements"}, "properties": map[string]interface{}{"tenant_id": map[string]string{"type": "string"}, "pool_id": map[string]string{"type": "string"}, "pool_authority_public_key": map[string]string{"type": "string"}, "requirements": map[string]string{"type": "object"}}}}}}
+	routeExplainOperation := operation("Explain placement and reserved capacity without admission", []string{"admin", "producer"}, "Object")
+	routeExplainOperation["requestBody"] = map[string]interface{}{"required": true, "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{
+		"type": "object", "additionalProperties": false, "required": []string{"requirements"},
+		"properties": map[string]interface{}{
+			"tenant_id": map[string]string{"type": "string"}, "pool_id": map[string]string{"type": "string"}, "pool_authority_public_key": map[string]string{"type": "string"},
+			"requirements": map[string]string{"type": "object"}, "priority": map[string]interface{}{"type": "integer", "minimum": -100, "maximum": 100, "default": 0, "description": "Preview scheduling priority; the producer max_priority ceiling applies."},
+		},
+	}}}}
 	tokenCreationOperation := operation("Create a scoped credential; bearer is returned once", []string{"admin"}, "TokenCreation", "201")
 	tokenCreationOperation["requestBody"] = map[string]interface{}{
 		"required": true,
@@ -100,7 +108,7 @@ func relayOpenAPI() map[string]interface{} {
 		"/v1/cluster/jobs/{id}/estimate":      pathItem("id", map[string]interface{}{"get": operation("Get a historical runtime estimate", []string{"admin", "observer", "producer"}, "Object")}),
 		"/v1/cluster/contracts/validate":      map[string]interface{}{"post": operation("Validate a job contract without admission", []string{"admin", "producer"}, "Object")},
 		"/v1/cluster/assign":                  map[string]interface{}{"post": assignmentOperation},
-		"/v1/cluster/routes/explain":          map[string]interface{}{"post": operation("Explain placement without admission", []string{"admin", "producer"}, "Object")},
+		"/v1/cluster/routes/explain":          map[string]interface{}{"post": routeExplainOperation},
 		"/v1/cluster/adapters":                map[string]interface{}{"get": operation("List visible leased external adapters", []string{"admin", "observer", "producer"}, "AdapterPresenceList")},
 		"/v1/cluster/adapters/heartbeat":      map[string]interface{}{"post": operation("Register or renew an owned external adapter lease", []string{"producer"}, "Object")},
 		"/v1/cluster/adapters/{id}":           pathItem("id", map[string]interface{}{"get": operation("Inspect one visible leased external adapter", []string{"admin", "observer", "producer"}, "AdapterPresenceList")}),

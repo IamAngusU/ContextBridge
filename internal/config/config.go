@@ -222,6 +222,8 @@ type Cluster struct {
 	Policies          ClusterPolicies             `yaml:"policies" json:"policies"`
 	Pricing           cluster.Pricing             `yaml:"pricing" json:"pricing"`
 	Pipelines         map[string]cluster.Pipeline `yaml:"pipelines" json:"pipelines"`
+
+	InteractiveCapacity cluster.InteractiveCapacity `yaml:"interactive_capacity,omitempty" json:"interactive_capacity,omitempty"`
 }
 
 // ClusterAccount is a producer-side login profile. Tokens are omitted from
@@ -900,6 +902,9 @@ func (c Config) Validate() error {
 	}
 	if c.Cluster.Worker.HeartbeatSeconds < 0 || c.Cluster.Worker.HeartbeatSeconds > 300 {
 		return errors.New("cluster.worker.heartbeat_seconds must be between 1 and 300 when set")
+	}
+	if err := c.Cluster.InteractiveCapacity.Validate(); err != nil {
+		return fmt.Errorf("cluster.interactive_capacity: %w", err)
 	}
 	if c.Cluster.Placement.MinimumSamples < 1 || c.Cluster.Placement.MinimumSamples > 1000 {
 		return errors.New("cluster.placement.minimum_samples must be between 1 and 1000")

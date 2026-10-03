@@ -20,6 +20,12 @@
   adapters can now verify both the relay's provider classification and the
   caller-side egress boundary, while credentials restricted to `local_only`
   continue to fail closed before dispatch.
+- Added opt-in, worker-group/task/provider-scoped reserved interactive slots
+  using the existing authorized numeric priority. Idle borrowing is explicit,
+  bounded demand scans fail closed, and reclaim waits for fenced slot release
+  without preempting running jobs. Route previews and durable decisions carry
+  minimal reservation evidence. Named QoS classes, starvation protection,
+  interactive concurrency quotas and QoS metrics remain separate work in #116.
 - Made adapter model readiness route-authoritative. Modern workers now require
   an exact ready endpoint for the configured adapter profile/model, publish
   verified availability and loaded state only from that heartbeat, and no

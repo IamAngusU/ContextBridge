@@ -218,6 +218,9 @@ type Capabilities struct {
 }
 
 type Node struct {
+	// Relay-local slot evidence, never advertised or persisted by workers.
+	interactiveRunning int
+
 	ID              string                 `json:"id"`
 	Name            string                 `json:"name"`
 	PublicKey       string                 `json:"public_key,omitempty"`

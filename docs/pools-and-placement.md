@@ -43,6 +43,80 @@ The relay rejects a missing or stale fence and does not let it release a newer
 slot. This is a single-relay safety primitive, not a claim of replicated
 consensus or automatic failover.
 
+## Optional reserved interactive capacity
+
+The relay can protect slots on workers in an explicitly named group with a
+matching task/provider capability. This is a numeric-priority capacity slice
+of #116, not a new producer-selectable QoS class. Omission disables it and
+preserves existing placement and credential defaults. For example:
+
+```yaml
+cluster:
+  interactive_capacity:
+    min_priority: 80
+    scopes:
+      - group: voice
+        task: generation
+        provider: ollama
+        slots: 1
+        borrow_idle: false
+```
+
+Configure producer `max_priority` ceilings below 80 for ordinary producers
+and at least 80 for producers authorized to use interactive capacity. Existing
+uncapped credentials retain their historical ability to request priority 100;
+enabling a reserve does not silently rewrite their authority.
+
+Scopes select **workers**, not a separate execution pool: every lower-priority
+job competing on a matching worker is subject to its reserve. Interactive
+priority jobs must still pass all normal placement, trust, owner, session,
+model, hardware and credential gates. Scopes require a group and task; provider
+is optional. Matching overlapping scopes take the maximum slot count, capped
+at worker concurrency, and borrowing requires unanimous opt-in across those
+scopes. A one-slot worker with one protected slot serves only interactive
+priority work until borrowing is enabled. No global hidden slot is introduced.
+
+With `borrow_idle: false`, lower-priority executions cannot exceed
+`max_concurrent - reserved_slots`. Interactive executions occupy reserved
+capacity first, allowing lower-priority work to use the remaining slots.
+The relay counts live reservations, including executions whose durable job
+has timed out, until their fenced result or connection teardown releases them.
+
+With `borrow_idle: true`, lower-priority work may use all slots when the
+dispatch snapshot proves there is no compatible queued interactive demand.
+The relay examines the priority-ordered durable queue projection independently
+of the rotating dispatch window. It inspects at most 4096 interactive entries;
+an incomplete scan disables borrowing for that pass. Matching interactive
+candidates supplement the rotating window, retaining numeric priority order
+and producer rotation within each tier. Occupied adapter counters and GPU
+memory do not erase demand; actual placement still requires current readiness
+and free hardware capacity. Explicit encrypted worker bindings and unsigned
+jobs on certified pool workers are respected. Demand may conservatively retain
+a reserve while other placement gates, such as a circuit, prevent dispatch.
+
+An arrival after the snapshot is observed on the next dispatch pass. Reclaim
+stops new lower-priority assignments above the ordinary capacity limit. It
+never cancels, kills, migrates or replays an already running borrower. A newly
+arriving interactive job can therefore wait for a borrower to finish; idle
+borrowing does **not** guarantee bounded interactive latency. Use protected
+capacity and suitable worker concurrency for that headroom. The live slot
+gate checks the limit again under its lock; dispatch passes are serialized.
+
+`cluster route explain --file job.json` forwards the job's priority (default
+0), enforcing the existing credential ceiling. The same preview and durable
+assignment evidence expose only `reserved_slots`, `reservation_outcome`
+(`protected`, `borrow_idle`, `reclaim`, `demand_unknown`, `interactive`), and
+the stable placement rejection reason `interactive_capacity_reserved`. They
+do not expose queued owner names, job IDs, payloads, or queue-demand counts.
+E2EE reservation creation keeps its existing binding contract; capacity is
+enforced when the promoted durable job is dispatched.
+
+Still separate in #116: authorized named QoS classes and required-class
+admission failures; aging or bounded service budgets against starvation;
+per-owner/tenant/producer interactive concurrency quotas; class receipts,
+queue-delay evidence and fixed-cardinality QoS metrics. This slice does not
+claim those guarantees and does not introduce running-job preemption.
+
 ## Selection order
 
 The scheduler first rejects nodes that cannot prove hard requirements such as:

@@ -35,6 +35,8 @@ type RoutingScoreComponents struct {
 // evidence needed to audit a placement decision without copying a worker's
 // complete hardware or adapter-session inventory into every job.
 type RoutingCandidateDecision struct {
+	ReservedSlots      int                    `json:"reserved_slots,omitempty"`
+	ReservationOutcome string                 `json:"reservation_outcome,omitempty"`
 	NodeID             string                 `json:"node_id"`
 	NodeName           string                 `json:"node_name,omitempty"`
 	Eligible           bool                   `json:"eligible"`
