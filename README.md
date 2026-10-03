@@ -49,7 +49,7 @@ Ollama is one possible resource. So is llama.cpp. So is an OpenAI-compatible mod
 
 The relay authenticates and queues jobs, applies configured policy, filters incompatible workers and ranks the remaining resources using current capacity and capability evidence. It records what actually handled the work. Workers connect outbound, so the machines doing the work do not need public inbound ports.
 
-## Weird shit works
+## Built for messy real-world networks
 
 CB is developed against a deliberately messy setup, not a clean two-node demo that has never seen a router reboot.
 
@@ -73,6 +73,25 @@ The point is not to pretend distributed systems never fail. It is to know **wher
 Connect **Ollama**, managed **llama.cpp**, **OpenAI-compatible model APIs** and optional external adapters. Get durable jobs, routing explanations, schedules, deterministic pipelines, bounded multi-step planning, MCP, configurable cost and egress boundaries, optional E2EE and free [conformance checks](docs/compatibility.md).
 
 No ContextBridge cloud account is required for self-hosting.
+
+### Control model at a glance
+
+| Question | Current answer |
+| --- | --- |
+| Does CB require a user profile? | No. Local-only use and self-hosted pools work without a CB account or human login. |
+| What are named `cluster` accounts? | Local selectors for a relay URL, producer credential and optional customer-held pool authority. They prevent accidental credential mixing; they are not username/password identities or a sandbox between people sharing one OS login. |
+| Does Core authenticate people with passwords or passkeys? | No. Core authenticates services, producers, workers, observers and administrators with scoped credentials and cryptographic worker/pool identity. A UI may use a passkey for its own human session and keep CB credentials in its backend; Core does not currently act as an identity provider. |
+| Can one node be restricted? | Yes. Worker groups/tags, allowed tasks, providers, models, concurrency and hardware/capability evidence are hard placement inputs. Producer credentials independently limit tenants, providers, priority, queue/rate use, egress, E2EE and scheduled-action authority. |
+| Can a node stop taking new work temporarily? | Yes: `contextbridge cluster node drain NODE_ID`; `resume` reopens admission. Running work is not silently killed. |
+| Can a device stay connected without contributing compute? | Yes. Configure it as `client`/`sender`; it can submit authorized work without worker heartbeats or assignments. |
+| Are ports random? | Stable loopback defaults are `32145` (local service), `32150` (relay) and `32151` (opt-in LAN TLS listener). `cluster configure --listen auto` selects a free relay port at configuration time. CB does not silently move an established endpoint later; a conflict fails visibly so clients are not redirected to an unexpected service. |
+| Does CB steal window focus? | Ordinary services and workers do not open a browser. `dashboard` is an explicit UI command and supports `--no-open`; managed Windows restarts use a hidden process. |
+| Is MCP tied to OpenAI? | No. The stdio MCP server is client-neutral. Its four bounded tools expose status, contract validation, durable submission and result retrieval; the submitted job may target any route the credential and pool policy permit. |
+
+See [customer-controlled pools](docs/customer-controlled-pools.md),
+[pool placement](docs/pools-and-placement.md), [operations](docs/operations.md),
+[security](docs/security.md) and [application integrations](docs/integrations.md)
+for the exact trust and API boundaries.
 
 ## Get running
 
