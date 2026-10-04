@@ -934,6 +934,17 @@ func agentResultText(output *bridge.Output) (string, error) {
 	if output == nil {
 		return "", errors.New("returned no output")
 	}
+	if failure := strings.TrimSpace(output.Error); failure != "" {
+		const maximum = 512
+		if len(failure) > maximum {
+			failure = failure[:maximum]
+			for failure != "" && !utf8.ValidString(failure) {
+				failure = failure[:len(failure)-1]
+			}
+			failure += "…"
+		}
+		return "", fmt.Errorf("provider returned an execution error: %s", failure)
+	}
 	if output.Text != "" {
 		return output.Text, nil
 	}
