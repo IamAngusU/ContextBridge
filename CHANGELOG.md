@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Stopped bounded agent execution when a completed provider envelope contains
+  an execution error. Adapter and model failures can no longer be printed as a
+  successful step or passed onward as if they were evidence.
 - Required strict JSON provider output when the next reviewed agent step will
   pass that result verbatim to a contracted adapter. Markdown fences and prose
   now fail at the model-output boundary instead of reaching the adapter handoff.

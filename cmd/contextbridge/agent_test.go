@@ -401,6 +401,7 @@ func TestAgentResultTextCarriesStrictJSONBetweenSteps(t *testing.T) {
 	for name, invalid := range map[string]*bridge.Output{
 		"duplicate JSON property": {Mode: "json", JSON: json.RawMessage(`{"a":1,"a":2}`)},
 		"empty output":            {Mode: "text"},
+		"provider error":          {Mode: "text", Error: "adapter_invalid_request"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := agentResultText(invalid); err == nil {
