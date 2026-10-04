@@ -62,6 +62,27 @@ func TestDefaultChatRouteIncludesScopedAdapterProfile(t *testing.T) {
 	}
 }
 
+func TestDefaultChatRouteDropsAdapterProfileForAnotherProvider(t *testing.T) {
+	cfg := config.Config{Routes: map[string]config.Route{
+		"default": {Provider: "deepseek", Model: "deepseek-flash", AdapterProfile: "remote-chat"},
+	}}
+	provider, model, profile := defaultChatRoute(cfg, "adapter")
+	if provider != "deepseek" || model != "deepseek-flash" || profile != "" {
+		t.Fatalf("provider-incompatible route defaults leaked: provider=%q model=%q profile=%q", provider, model, profile)
+	}
+}
+
+func TestChatScopedRouteDefaultsFollowProviderOverride(t *testing.T) {
+	model, profile := chatScopedRouteDefaults("adapter", "ollama", "adapter-model", "remote-chat", false, false)
+	if model != "" || profile != "" {
+		t.Fatalf("inherited scoped defaults survived a provider override: model=%q profile=%q", model, profile)
+	}
+	model, profile = chatScopedRouteDefaults("adapter", "ollama", "qwen3:8b", "explicit-profile", true, true)
+	if model != "qwen3:8b" || profile != "explicit-profile" {
+		t.Fatalf("explicit route flags were cleared: model=%q profile=%q", model, profile)
+	}
+}
+
 func TestDoAcceptsPromptAfterFlags(t *testing.T) {
 	got, err := chatPromptArgument("do", "", []string{"Was", "ist", "10", "mal", "3?"})
 	if err != nil || got != "Was ist 10 mal 3?" {

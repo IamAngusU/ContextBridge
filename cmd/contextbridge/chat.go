@@ -109,9 +109,24 @@ func defaultChatRoute(cfg config.Config, fallbackProvider string) (string, strin
 			provider = value
 		}
 		model = strings.TrimSpace(route.Model)
-		profile = strings.TrimSpace(route.AdapterProfile)
+		if strings.EqualFold(provider, "adapter") {
+			profile = strings.TrimSpace(route.AdapterProfile)
+		}
 	}
 	return provider, model, profile
+}
+
+func chatScopedRouteDefaults(defaultProvider, selectedProvider, model, profile string, modelExplicit, profileExplicit bool) (string, string) {
+	if strings.EqualFold(strings.TrimSpace(defaultProvider), strings.TrimSpace(selectedProvider)) {
+		return model, profile
+	}
+	if !modelExplicit {
+		model = ""
+	}
+	if !profileExplicit {
+		profile = ""
+	}
+	return model, profile
 }
 
 func chatPromptArgument(commandName, explicit string, extras []string) (string, error) {
@@ -156,11 +171,19 @@ func clusterChatCommandWithDefaults(args []string, commandName, defaultProvider,
 		return err
 	}
 	e2eeExplicit := false
+	modelExplicit := false
+	profileExplicit := false
 	flags.Visit(func(option *flag.Flag) {
-		if option.Name == "e2ee" {
+		switch option.Name {
+		case "e2ee":
 			e2eeExplicit = true
+		case "model":
+			modelExplicit = true
+		case "profile":
+			profileExplicit = true
 		}
 	})
+	*model, *profile = chatScopedRouteDefaults(defaultProvider, *provider, *model, *profile, modelExplicit, profileExplicit)
 	resolvedPrompt, err := chatPromptArgument(commandName, *prompt, flags.Args())
 	if err != nil {
 		return err
