@@ -33,6 +33,9 @@ var words = map[string]string{
 	"vierzehn": "14", "fourteen": "14", "fünfzehn": "15", "fifteen": "15", "sechzehn": "16", "sixteen": "16",
 	"siebzehn": "17", "seventeen": "17", "achtzehn": "18", "eighteen": "18", "neunzehn": "19", "nineteen": "19",
 	"zwanzig": "20", "twenty": "20", "hundert": "100", "hundred": "100", "tausend": "1000", "thousand": "1000",
+	"dreißig": "30", "dreissig": "30", "thirty": "30", "vierzig": "40", "forty": "40",
+	"fünfzig": "50", "fuenfzig": "50", "fifty": "50", "sechzig": "60", "sixty": "60",
+	"siebzig": "70", "seventy": "70", "achtzig": "80", "eighty": "80", "neunzig": "90", "ninety": "90",
 }
 
 // Resolve returns handled=true even for invalid recognized arithmetic, so a

@@ -10,7 +10,8 @@ func TestNaturalCalculation(t *testing.T) {
 	for prompt, want := range map[string]string{
 		"Was ist 10 mal 3?": "30", "Was macht 10 mal 3 / 30?": "1",
 		"What is 10 times 3 / 30?": "1", "Please calculate (10 + 2) / 3.": "4",
-		"Bitte berechne zehn mal drei.": "30", "How much is twenty divided by five?": "4",
+		"What is ten times three divided by thirty?": "1",
+		"Bitte berechne zehn mal drei.":              "30", "How much is twenty divided by five?": "4",
 		"Was ergibt 0,1 plus 0,2?": "0.3", "Compute 0.1 + 0.2": "0.3",
 		"(1+2)*3": "9", "2 ^ 3 ^ 2": "512", "Evaluate -2^2": "-4",
 		"Evaluate (-2)^2": "4", "Evaluate 2^-3": "0.125", "What is 1/3?": "1/3",
