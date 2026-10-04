@@ -2266,6 +2266,16 @@ func scopeNodeCapabilities(capabilities *Capabilities, record TokenRecord) {
 	capabilities.Sources = cleanList(capabilities.Sources, MaximumNodeListValues, 160)
 	capabilities.Modes = cleanList(capabilities.Modes, MaximumNodeListValues, 80)
 	capabilities.AutomaticTasks = cleanAutomaticTasks(capabilities.AutomaticTasks)
+	bindings := capabilities.RouteBindings[:0]
+	for _, binding := range capabilities.RouteBindings {
+		if validRouteBinding(binding) && !contains(bindings, binding) {
+			bindings = append(bindings, binding)
+		}
+		if len(bindings) == MaximumNodeListValues {
+			break
+		}
+	}
+	capabilities.RouteBindings = bindings
 	if len(record.Groups) > 0 {
 		capabilities.Groups = intersectFold(capabilities.Groups, record.Groups)
 	}
@@ -2392,6 +2402,9 @@ func ValidateRequirements(requirements Requirements) error {
 		if !validRoutingLabel(node, 160) {
 			return errors.New("requirements.preferred_nodes entries must be 1 to 160 bytes without surrounding whitespace or control characters")
 		}
+	}
+	if requirements.RouteBinding != "" && !validRouteBinding(requirements.RouteBinding) {
+		return errors.New("requirements.route_binding must be a lowercase sha256 digest")
 	}
 	if requirements.SessionID != "" && !validRoutingLabel(requirements.SessionID, 128) {
 		return errors.New("requirements.session_id must be at most 128 bytes without surrounding whitespace or control characters")

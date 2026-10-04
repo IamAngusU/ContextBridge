@@ -1127,7 +1127,7 @@ func scheduledActionDispatchMatches(action ScheduledAction, record TokenRecord, 
 		len(requirements.PreferredNodes) != 0 || requirements.MinFreeVRAM != 0 || requirements.Vision || requirements.Embedding ||
 		requirements.InputImageCount != 0 || requirements.InputImageBytes != 0 || requirements.InputImageMaxBytes != 0 ||
 		len(requirements.InputImageMediaTypes) != 0 || requirements.InputAudioBytes != 0 || requirements.InputAudioDurationMS != 0 ||
-		requirements.InputAudioMediaType != "" || requirements.MaxCostUSD != 0 {
+		requirements.InputAudioMediaType != "" || requirements.RouteBinding != "" || requirements.MaxCostUSD != 0 {
 		return false
 	}
 	if requirements.Group != "" && !containsFold(record.Groups, requirements.Group) {

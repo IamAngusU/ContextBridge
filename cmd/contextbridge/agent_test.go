@@ -538,6 +538,16 @@ func TestAgentEffectiveRouteModel(t *testing.T) {
 	}
 }
 
+func TestAgentRouteBindingChangesWithEffectiveRouteContract(t *testing.T) {
+	cfg := config.Config{Routes: map[string]config.Route{"default": {Provider: "ollama", Model: "qwen3.5:4b", Task: "generation"}}}
+	first := agentRouteBinding(cfg, "default")
+	cfg.Routes["default"] = config.Route{Provider: "deepseek", Model: "deepseek-chat", Task: "generation"}
+	second := agentRouteBinding(cfg, "default")
+	if first == second || !strings.HasPrefix(first, "sha256:") || len(first) != 71 {
+		t.Fatalf("route contract did not produce distinct opaque bindings: %q %q", first, second)
+	}
+}
+
 func TestAgentAutoPlannerPromptExplainsBoundedImmediateExecution(t *testing.T) {
 	policy, err := newAgentPolicy("ollama", "", agentMaximumAutoSteps, 120, 300)
 	if err != nil {

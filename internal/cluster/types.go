@@ -1,7 +1,10 @@
 package cluster
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -106,9 +109,14 @@ type Requirements struct {
 	Group                   string   `json:"group,omitempty" yaml:"group,omitempty"`
 	RequiredTags            []string `json:"required_tags,omitempty" yaml:"required_tags,omitempty"`
 	PreferredNodes          []string `json:"preferred_nodes,omitempty" yaml:"preferred_nodes,omitempty"`
-	MinFreeVRAM             uint64   `json:"min_free_vram_bytes,omitempty" yaml:"min_free_vram_bytes,omitempty"`
-	Vision                  bool     `json:"vision,omitempty" yaml:"vision,omitempty"`
-	Embedding               bool     `json:"embedding,omitempty" yaml:"embedding,omitempty"`
+	// RouteBinding is an opaque digest of the exact local route selected by the
+	// producer. When present, only workers advertising that same bounded route
+	// contract are eligible. This keeps a route name such as "default" from
+	// silently meaning something different on another pool node.
+	RouteBinding string `json:"route_binding,omitempty" yaml:"route_binding,omitempty"`
+	MinFreeVRAM  uint64 `json:"min_free_vram_bytes,omitempty" yaml:"min_free_vram_bytes,omitempty"`
+	Vision       bool   `json:"vision,omitempty" yaml:"vision,omitempty"`
+	Embedding    bool   `json:"embedding,omitempty" yaml:"embedding,omitempty"`
 	// InputImageCount lets the scheduler enforce a model's known hard image
 	// limit before dispatch. Zero means no image input, never "unknown".
 	InputImageCount      int      `json:"input_image_count,omitempty" yaml:"input_image_count,omitempty"`
@@ -204,7 +212,11 @@ type Capabilities struct {
 	// route can execute without a producer selecting a concrete model. A nil map
 	// identifies an older worker; a present map is authoritative even when a
 	// provider has no automatically routable task.
-	AutomaticTasks   map[string][]string        `json:"automatic_tasks_by_provider"`
+	AutomaticTasks map[string][]string `json:"automatic_tasks_by_provider"`
+	// RouteBindings contain only opaque digests. Route names and local policy
+	// details stay on the worker while the relay can still enforce semantic
+	// compatibility for a bound job.
+	RouteBindings    []string                   `json:"route_bindings,omitempty"`
 	Tags             []string                   `json:"tags,omitempty"`
 	Groups           []string                   `json:"groups,omitempty"`
 	MaxConcurrent    int                        `json:"max_concurrent"`
@@ -215,6 +227,33 @@ type Capabilities struct {
 	Sources          []string                   `json:"sources,omitempty"`
 	Modes            []string                   `json:"modes,omitempty"`
 	QueueDepth       int                        `json:"queue_depth"`
+}
+
+// RouteBinding returns the stable, secret-free identity of one configured
+// route contract. Runtime URLs and credentials are intentionally excluded;
+// provider/model readiness is independently verified by worker telemetry.
+func RouteBinding(name, task, model, provider, adapterProfile string, fallback []string) string {
+	normalize := func(value string) string { return strings.ToLower(strings.TrimSpace(value)) }
+	if strings.TrimSpace(task) == "" {
+		task = "generation"
+	}
+	parts := []string{
+		strings.TrimSpace(name), normalize(task), strings.TrimSpace(model),
+		normalize(provider), normalize(adapterProfile),
+	}
+	for _, candidate := range fallback {
+		parts = append(parts, normalize(candidate))
+	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func validRouteBinding(value string) bool {
+	if len(value) != len("sha256:")+sha256.Size*2 || !strings.HasPrefix(value, "sha256:") || strings.ToLower(value) != value {
+		return false
+	}
+	_, err := hex.DecodeString(value[len("sha256:"):])
+	return err == nil
 }
 
 type Node struct {

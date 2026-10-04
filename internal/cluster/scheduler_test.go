@@ -647,6 +647,27 @@ func TestFirstPreferredNodeWinsEqualLoad(t *testing.T) {
 	}
 }
 
+func TestRouteBindingRejectsSemanticallyDifferentWorkerRoute(t *testing.T) {
+	now := time.Now().UTC()
+	wanted := RouteBinding("default", "generation", "qwen3.5:4b", "ollama", "", nil)
+	other := RouteBinding("default", "generation", "deepseek-chat", "deepseek", "", nil)
+	nodes := []Node{
+		{ID: "bound", Connected: true, LastSeen: now, Capabilities: Capabilities{Providers: []string{"ollama"}, Tasks: []string{"generation"}, Models: []ModelCapability{{Name: "qwen3.5:4b", Provider: "ollama", Available: true, Tasks: []string{"generation"}}}, RouteBindings: []string{wanted}, MaxConcurrent: 1}},
+		{ID: "different", Connected: true, LastSeen: now, Capabilities: Capabilities{Providers: []string{"ollama"}, Tasks: []string{"generation"}, Models: []ModelCapability{{Name: "qwen3.5:4b", Provider: "ollama", Available: true, Tasks: []string{"generation"}}}, RouteBindings: []string{other}, MaxConcurrent: 1}},
+	}
+	requirements := Requirements{Task: "generation", Provider: "ollama", Model: "qwen3.5:4b", RouteBinding: wanted}
+	ranked := Rank(nodes, requirements)
+	if len(ranked) != 1 || ranked[0].Node.ID != "bound" {
+		t.Fatalf("route binding selected incompatible node: %#v", ranked)
+	}
+	decision := ExplainRouting(nodes, requirements, 0)
+	for _, candidate := range decision.Candidates {
+		if candidate.NodeID == "different" && !contains(candidate.RejectionReasons, "route_binding_unavailable") {
+			t.Fatalf("route mismatch lacks stable explanation: %#v", candidate)
+		}
+	}
+}
+
 func TestRankPrefersLowerCPUPressure(t *testing.T) {
 	now := time.Now().UTC()
 	nodes := []Node{
