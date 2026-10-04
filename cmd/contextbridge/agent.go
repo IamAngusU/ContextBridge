@@ -475,6 +475,12 @@ func executeAgentPlan(plan agentPlan, digest string, cfg config.Config, token st
 			stepCancel()
 			return fmt.Errorf("agent step %s: %w", step.ID, err)
 		}
+		if agentStepFeedsExactAdapterRequest(plan.Steps, index) {
+			// The next adapter receives this result as its exact machine request,
+			// so make JSON an execution contract instead of trusting the model to
+			// avoid prose or Markdown fences on its own.
+			output.Mode = "json"
+		}
 		stepRoute, err := agentRouteForTarget(cfg, step.Provider, step.Profile)
 		if err != nil {
 			stepCancel()
@@ -1382,6 +1388,14 @@ func agentPreviousInput(use bool, previous string) string {
 		return ""
 	}
 	return previous
+}
+
+func agentStepFeedsExactAdapterRequest(steps []agentStep, index int) bool {
+	if index < 0 || index+1 >= len(steps) || steps[index].Provider == "adapter" {
+		return false
+	}
+	next := steps[index+1]
+	return next.Provider == "adapter" && next.UsePrevious && next.Instruction == agentPreviousAdapterJSON
 }
 
 func agentRouteForTarget(cfg config.Config, provider, profile string) (string, error) {

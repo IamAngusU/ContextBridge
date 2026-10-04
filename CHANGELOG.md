@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Required strict JSON provider output when the next reviewed agent step will
+  pass that result verbatim to a contracted adapter. Markdown fences and prose
+  now fail at the model-output boundary instead of reaching the adapter handoff.
 - Bound every agent planner and execution payload to the unique configured
   generation route that permits its provider and adapter profile. Agent jobs
   now fail closed before submission when no route matches or several routes

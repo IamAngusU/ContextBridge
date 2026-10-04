@@ -500,6 +500,27 @@ func TestAgentRouteForTargetSelectsBoundRoute(t *testing.T) {
 	}
 }
 
+func TestAgentStepFeedsExactAdapterRequest(t *testing.T) {
+	steps := []agentStep{
+		{ID: "inspect", Provider: "adapter", Profile: "workspace-local"},
+		{ID: "compose", Provider: "ollama", UsePrevious: true},
+		{ID: "apply", Provider: "adapter", Profile: "workspace-local", Instruction: agentPreviousAdapterJSON, UsePrevious: true},
+	}
+	if agentStepFeedsExactAdapterRequest(steps, 0) {
+		t.Fatal("adapter evidence step was classified as a generated adapter request")
+	}
+	if !agentStepFeedsExactAdapterRequest(steps, 1) {
+		t.Fatal("model output consumed as an exact adapter request did not require JSON")
+	}
+	if agentStepFeedsExactAdapterRequest(steps, 2) {
+		t.Fatal("terminal adapter step was classified as a generated adapter request")
+	}
+	steps[2].Instruction = `{"schema":"example.request.v1"}`
+	if agentStepFeedsExactAdapterRequest(steps, 1) {
+		t.Fatal("ordinary adapter instruction was classified as an exact previous-result handoff")
+	}
+}
+
 func TestAgentAutoPlannerPromptExplainsBoundedImmediateExecution(t *testing.T) {
 	policy, err := newAgentPolicy("ollama", "", agentMaximumAutoSteps, 120, 300)
 	if err != nil {
