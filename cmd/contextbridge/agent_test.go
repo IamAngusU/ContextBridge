@@ -522,6 +522,36 @@ func TestAgentStepFeedsExactAdapterRequest(t *testing.T) {
 	}
 }
 
+func TestAgentPromptForExactAdapterRequestUsesOnlyDedicatedContract(t *testing.T) {
+	steps := []agentStep{
+		{ID: "compose", Provider: "ollama", Instruction: "Create the bounded request.", UsePrevious: true},
+		{ID: "apply", Provider: "adapter", Profile: "workspace-local", Instruction: agentPreviousAdapterJSON, UsePrevious: true},
+	}
+	cfg := config.Config{AdapterProfiles: map[string]config.AdapterProfile{
+		"workspace-local": {Options: map[string]interface{}{
+			config.AdapterAgentInstructionContractOption: "Use exactly schema contextbridge.workspace-request.v1 with path and content_utf8.",
+			"credential_file": `C:\secrets\must-not-leak.token`,
+		}},
+	}}
+	prompt, err := agentPromptForExactAdapterRequest(cfg, steps, 0, steps[0].Instruction)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"Create the bounded request.", "contextbridge.workspace-request.v1", "only contract-defined fields", "never invent supporting facts"} {
+		if !strings.Contains(prompt, required) {
+			t.Fatalf("exact adapter prompt lacks %q: %s", required, prompt)
+		}
+	}
+	if strings.Contains(prompt, "credential_file") || strings.Contains(prompt, "must-not-leak") {
+		t.Fatalf("exact adapter prompt leaked unrelated profile options: %s", prompt)
+	}
+
+	delete(cfg.AdapterProfiles["workspace-local"].Options, config.AdapterAgentInstructionContractOption)
+	if _, err := agentPromptForExactAdapterRequest(cfg, steps, 0, steps[0].Instruction); err == nil {
+		t.Fatal("exact adapter handoff accepted a missing contract")
+	}
+}
+
 func TestAgentEffectiveRouteModel(t *testing.T) {
 	cfg := config.Config{Routes: map[string]config.Route{
 		"default":         {Provider: "ollama", Model: "qwen-route"},

@@ -144,6 +144,14 @@ func TestNormalizeAdapterOutputEnvelopeKeepsTrustedModel(t *testing.T) {
 	}
 }
 
+func TestNormalizeAdapterErrorSurvivesRequestedModeMismatch(t *testing.T) {
+	raw := []byte(`{"mode":"text","error":"adapter_invalid_request","contextbridge_adapter_endpoint_id":7}`)
+	output := NormalizeOutput(raw, OutputSpec{Mode: "json"}, "adapter", "workspace", time.Millisecond)
+	if output.Error != "adapter_invalid_request" || len(output.JSON) != 0 || output.ContextBridgeAdapterEndpointID != 7 {
+		t.Fatalf("adapter protocol error was mistaken for JSON success: %#v", output)
+	}
+}
+
 func TestNormalizeAdapterOutputSeparatesEndpointSelectionFromRequestedModel(t *testing.T) {
 	raw := []byte(`{"mode":"text","text":"ok","model":"forged","selected_model":"remote-model-selected","selected_reasoning":"hoch"}`)
 	output := NormalizeOutput(raw, OutputSpec{Mode: "text"}, "adapter", "adapter:remote-model-pro", time.Millisecond)
