@@ -410,11 +410,61 @@ func TestAgentResultTextCarriesStrictJSONBetweenSteps(t *testing.T) {
 	}
 }
 
-func TestAgentPlanRejectsPreviousEvidenceAsAdapterRequestContent(t *testing.T) {
+func TestAgentPlanAllowsExplicitPreviousJSONAdapterHandoff(t *testing.T) {
 	plan := validAgentPlanForTest(t)
-	plan.Steps[1] = agentStep{ID: "research-again", Provider: "adapter", Profile: "profile-two", Instruction: `{"schema":"example.request.v1"}`, UsePrevious: true}
-	if err := validateAgentPlan(plan); err == nil || !strings.Contains(err.Error(), "cannot use a previous result") {
-		t.Fatalf("adapter previous-result ambiguity was accepted: %v", err)
+	plan.Steps[0] = agentStep{ID: "draft", Provider: "ollama", Instruction: "Return exactly one strict adapter request JSON object."}
+	plan.Steps[1] = agentStep{ID: "apply", Provider: "adapter", Profile: "profile-two", Instruction: agentPreviousAdapterJSON, UsePrevious: true}
+	if err := validateAgentPlan(plan); err != nil {
+		t.Fatalf("explicit previous JSON handoff was rejected: %v", err)
+	}
+
+	for name, mutate := range map[string]func(*agentPlan){
+		"wrong marker": func(candidate *agentPlan) { candidate.Steps[1].Instruction = `{"schema":"example.request.v1"}` },
+		"adapter chain": func(candidate *agentPlan) {
+			candidate.Steps[0] = agentStep{ID: "inspect", Provider: "adapter", Profile: "profile-two", Instruction: `{"schema":"example.request.v1","action":"inspect"}`}
+		},
+		"unused marker": func(candidate *agentPlan) { candidate.Steps[1].UsePrevious = false },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := validAgentPlanForTest(t)
+			candidate.Steps[0] = agentStep{ID: "draft", Provider: "ollama", Instruction: "Return exactly one strict adapter request JSON object."}
+			candidate.Steps[1] = agentStep{ID: "apply", Provider: "adapter", Profile: "profile-two", Instruction: agentPreviousAdapterJSON, UsePrevious: true}
+			mutate(&candidate)
+			if err := validateAgentPlan(candidate); err == nil {
+				t.Fatal("ambiguous previous-result adapter handoff was accepted")
+			}
+		})
+	}
+}
+
+func TestAgentStepJobInputValidatesPreviousAdapterJSON(t *testing.T) {
+	cfg := config.Config{AdapterProfiles: map[string]config.AdapterProfile{
+		"profile-two": {Options: map[string]interface{}{config.AdapterAgentInstructionContractOption: "One strict example.request.v1 JSON object."}},
+		"plain":       {Options: map[string]interface{}{}},
+	}}
+	step := agentStep{ID: "apply", Provider: "adapter", Profile: "profile-two", Instruction: agentPreviousAdapterJSON, UsePrevious: true}
+	prompt, text, output, err := agentStepJobInput(cfg, step, ` {"schema":"example.request.v1","action":"apply"} `)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prompt != agentAdapterPrompt || text != `{"schema":"example.request.v1","action":"apply"}` || output.Mode != "json" {
+		t.Fatalf("unexpected adapter handoff: prompt=%q text=%q output=%#v", prompt, text, output)
+	}
+
+	for name, previous := range map[string]string{
+		"plain text": "apply it",
+		"array":      `[{"action":"apply"}]`,
+		"duplicate":  `{"action":"inspect","action":"apply"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, _, err := agentStepJobInput(cfg, step, previous); err == nil {
+				t.Fatal("invalid previous adapter request was accepted")
+			}
+		})
+	}
+	step.Profile = "plain"
+	if _, _, _, err := agentStepJobInput(cfg, step, `{"action":"apply"}`); err == nil || !strings.Contains(err.Error(), "agent_instruction_contract") {
+		t.Fatalf("uncontracted previous adapter handoff was accepted: %v", err)
 	}
 }
 

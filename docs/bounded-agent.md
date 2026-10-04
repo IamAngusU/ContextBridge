@@ -152,6 +152,12 @@ validate paths and action shape and must claim a fenced mutation lease before
 the first write. The default Ollama-only automatic tier has no adapter or file
 authority.
 
+A reviewed plan or named operator authority may use the
+literal `contextbridge.previous-json.v1` handoff after a non-adapter step. Core
+then accepts only one strict JSON object as the next adapter request. This makes
+read-model-write workflows possible without turning untrusted prose into a
+shell or concatenating it with a trusted instruction.
+
 External mutation is a different authority tier. Agent steps cannot submit the
 reserved `scheduled_action` task or turn evidence into a write credential. A
 channel must stage a typed payload and opaque destination, obtain a relay

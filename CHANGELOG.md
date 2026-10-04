@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added an explicit strict-JSON handoff for bounded agents: after a non-adapter
+  step, a contracted adapter may consume the exact previous JSON object using
+  the reviewed `contextbridge.previous-json.v1` marker. This enables bounded
+  inspect-model-apply workflows without shell authority, adapter chaining, or
+  instruction/evidence concatenation.
 - Clarified the bounded-agent adapter contract so an explicitly selected local
   profile may describe exact workspace-relative file or archive actions.
   Arbitrary host paths, shell/executable selection, code execution, downloads,
