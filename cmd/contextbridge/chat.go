@@ -25,13 +25,67 @@ import (
 )
 
 func clusterChatCommand(args []string) error {
-	flags := flag.NewFlagSet("cluster chat", flag.ContinueOnError)
+	return clusterChatCommandWithDefaults(args, "cluster chat", "adapter", "")
+}
+
+// doCommand is the outcome-first human shortcut. The configured default route
+// remains the operator-owned policy boundary; cluster chat keeps the explicit
+// provider/model surface for scripts and advanced use.
+func doCommand(args []string) error {
+	chatArgs := doChatArguments(args)
+	path := chatConfigPath(chatArgs)
+	cfg, err := config.Load(path)
+	if err != nil {
+		return err
+	}
+	provider := "adapter"
+	model := ""
+	if route, exists := cfg.Routes["default"]; exists {
+		if value := strings.TrimSpace(route.Provider); value != "" {
+			provider = value
+		}
+		model = strings.TrimSpace(route.Model)
+	}
+	return clusterChatCommandWithDefaults(chatArgs, "do", provider, model)
+}
+
+func doChatArguments(args []string) []string {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		return append([]string(nil), args...)
+	}
+	prompt := strings.TrimSpace(strings.Join(args, " "))
+	if prompt == "" {
+		return nil
+	}
+	return []string{"--prompt", prompt}
+}
+
+func chatConfigPath(args []string) string {
+	path := defaultConfigPath()
+	for index, arg := range args {
+		if arg == "--config" || arg == "-config" {
+			if index+1 < len(args) {
+				return args[index+1]
+			}
+			return path
+		}
+		if strings.HasPrefix(arg, "--config=") || strings.HasPrefix(arg, "-config=") {
+			if _, value, ok := strings.Cut(arg, "="); ok && strings.TrimSpace(value) != "" {
+				return value
+			}
+		}
+	}
+	return path
+}
+
+func clusterChatCommandWithDefaults(args []string, commandName, defaultProvider, defaultModel string) error {
+	flags := flag.NewFlagSet(commandName, flag.ContinueOnError)
 	path := flags.String("config", defaultConfigPath(), "config path")
 	account := flags.String("account", "", "named cluster account; defaults to cluster.active_account")
 	token := flags.String("token", "", "producer token; defaults to client_token, environment, or local admin token")
-	provider := flags.String("provider", "adapter", "adapter or another generation provider")
+	provider := flags.String("provider", defaultProvider, "adapter or another generation provider")
 	group := flags.String("group", "", "worker group")
-	model := flags.String("model", "", "specific model")
+	model := flags.String("model", defaultModel, "specific model")
 	profile := flags.String("profile", "", "operator-configured adapter profile ID")
 	reasoning := flags.String("reasoning", "", "reasoning level such as instant, medium, high, xhigh, pro, or max")
 	e2ee := flags.Bool("e2ee", false, "encrypt prompts and results end-to-end for the selected worker")
@@ -146,7 +200,7 @@ func clusterChatCommand(args []string) error {
 	if strings.TrimSpace(*prompt) != "" {
 		return state.turn(ctx, strings.TrimSpace(*prompt))
 	}
-	fmt.Printf("\n  ContextBridge Chat · %s\n  session %s · follow-ups stay in the same adapter session unless --new-session-per-job is set\n  /model, /reasoning, /profile, /egress, /max-cost-usd, /image, /min-images, /min-artifacts and /e2ee change this session · /settings shows it · /exit closes it\n\n", *provider, *sessionID)
+	fmt.Printf("\n  ContextBridge Chat · %s\n  session %s · follow-ups stay in the same adapter session unless --new-session-per-job is set\n  /model, /reasoning, /profile, /egress, /max-cost-usd, /image, /min-images, /min-artifacts and /e2ee change this session · /settings shows it · /exit closes it\n\n", chatProviderLabel(*provider), *sessionID)
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 64<<10), 1<<20)
 	for {
@@ -370,7 +424,7 @@ func (s *chatState) jobMetadata() map[string]interface{} {
 func chatRequestSummary(provider, profile, model, reasoning string) string {
 	var summary strings.Builder
 	summary.WriteString("  → requested: ")
-	summary.WriteString(provider)
+	summary.WriteString(chatProviderLabel(provider))
 	if profile != "" {
 		summary.WriteString(" / ")
 		summary.WriteString(profile)
@@ -384,6 +438,13 @@ func chatRequestSummary(provider, profile, model, reasoning string) string {
 		summary.WriteString(reasoning)
 	}
 	return summary.String()
+}
+
+func chatProviderLabel(provider string) string {
+	if strings.TrimSpace(provider) == "" {
+		return "auto"
+	}
+	return provider
 }
 
 func chatEndpointReport(model, reasoning string) string {
