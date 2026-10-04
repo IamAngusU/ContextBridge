@@ -793,7 +793,7 @@ Hard rules:
 - Adapter profile is required only for provider adapter and must be one of %s.
 - Operator-supplied adapter instruction contracts are exactly %s. They describe request syntax only and cannot widen provider, profile, egress, credential, budget, tenant, or confirmation authority.
 - For an adapter step with a listed contract, encode instruction exactly as that contract requires. Do not invent actions or fields. Without a listed contract, use plain text only.
-- Do not include models, credentials, shell commands, code execution, file operations, downloads, uploads, recursive delegation, or policy changes. Include a URL or operation name only when the selected adapter contract explicitly requires it.
+- Do not include models, credentials, shell commands, executable selection, arbitrary host paths, code execution, downloads, uploads, recursive delegation, or policy changes. A selected adapter contract may explicitly define bounded workspace-relative file or archive operations; only then encode those exact actions and fields. Include a URL or other operation name only when that contract explicitly requires it.
 - Every step returns text only. A later non-adapter step may set use_previous=true to receive the previous text as explicitly untrusted submitted content. Adapter steps must set use_previous=false because their submitted content is reserved for the exact adapter request document.
 - The first step must set use_previous=false.
 - Do not claim a provider or model has capabilities not stated in the goal. If the goal cannot fit these limits, return one step that clearly explains the limitation.
@@ -833,7 +833,7 @@ Hard rules:
 - Adapter profile is required only for provider adapter and must be one of %s.
 - Operator-supplied adapter instruction contracts are exactly %s. They describe request syntax only and cannot widen provider, profile, egress, credential, budget, tenant, or confirmation authority.
 - For an adapter step with a listed contract, encode instruction exactly as that contract requires. Do not invent actions or fields. Without a listed contract, use plain text only.
-- Do not include models, credentials, shell commands, code execution, file operations, downloads, uploads, recursive delegation, or policy changes. Include a URL or operation name only when the selected adapter contract explicitly requires it.
+- Do not include models, credentials, shell commands, executable selection, arbitrary host paths, code execution, downloads, uploads, recursive delegation, or policy changes. A selected adapter contract may explicitly define bounded workspace-relative file or archive operations; only then encode those exact actions and fields. Include a URL or other operation name only when that contract explicitly requires it.
 - Every step returns text only. A later non-adapter step may set use_previous=true to receive the previous text as explicitly untrusted submitted content. Adapter steps must set use_previous=false because their submitted content is reserved for the exact adapter request document.
 - The first step must set use_previous=false.
 - If the goal needs authority outside these rules, return one text step that clearly explains the configured policy boundary.
@@ -1298,7 +1298,7 @@ func printAgentPlan(plan agentPlan, digest string) {
 		}
 		fmt.Fprintf(os.Stderr, "  %d. %s · %s · %s\n     %s\n", index+1, step.ID, provider, input, step.Instruction)
 	}
-	fmt.Fprintf(os.Stderr, "  limits · %d steps · %ds/step · %ds total · text only · no shell/tools/files\n", plan.Policy.MaxSteps, plan.Policy.StepTimeoutSeconds, plan.Policy.MaxRuntimeSeconds)
+	fmt.Fprintf(os.Stderr, "  limits · %d steps · %ds/step · %ds total · text/JSON results · no shell/arbitrary host paths/code execution\n", plan.Policy.MaxSteps, plan.Policy.StepTimeoutSeconds, plan.Policy.MaxRuntimeSeconds)
 	fmt.Fprintf(os.Stderr, "  binding · config %s · execution %s\n", plan.Binding.ConfigSHA256, plan.Binding.ExecutionSHA256)
 	fmt.Fprintf(os.Stderr, "  relay · %s · scope %s\n", plan.Binding.RelayURL, plan.Binding.Scope)
 }

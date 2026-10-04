@@ -112,7 +112,11 @@ change cannot inherit stale authority.
   separate explicit `allow_unknown_cost` authority.
 - Prior output is carried as untrusted submitted content, not promoted into
   trusted instructions.
-- There is no arbitrary shell, filesystem, URL-fetch, plugin, or tool loop.
+- There is no arbitrary shell, host filesystem, URL-fetch, plugin, or tool
+  loop. An explicitly selected adapter contract may expose bounded
+  workspace-relative file or archive operations; the profile, scoped
+  credential, adapter validator, lease and operator policy remain independent
+  gates.
 - Waiting interrupted after submission is ambiguous: inspect the recorded job
   before deciding whether to retry.
 - Known costs remain subject to execution policy and reservations; unknown
@@ -139,6 +143,14 @@ explicitly untrusted text. It is not promoted into the later model's system
 instructions. This supports workflows such as research, source-aware drafting,
 and verification while keeping the plan limited to the reviewed providers and
 profiles.
+
+A local workspace adapter may likewise define exact versioned JSON actions for
+an owned workspace. That exception does not authorize arbitrary host paths,
+shell commands, executable selection, code execution, downloads, deletion or
+promotion. Core transports the exact request; the out-of-tree adapter must
+validate paths and action shape and must claim a fenced mutation lease before
+the first write. The default Ollama-only automatic tier has no adapter or file
+authority.
 
 External mutation is a different authority tier. Agent steps cannot submit the
 reserved `scheduled_action` task or turn evidence into a write credential. A
