@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Clarified the bounded-agent adapter contract so an explicitly selected local
+  profile may describe exact workspace-relative file or archive actions.
+  Arbitrary host paths, shell/executable selection, code execution, downloads,
+  deletion and promotion remain forbidden; the default Ollama-only automatic
+  tier still has no adapter or file authority.
 - Made adapter-backed bounded agents interoperable without exposing opaque
   driver configuration. An adapter profile may provide one validated,
   operator-owned `agent_instruction_contract`; only that string is shown to

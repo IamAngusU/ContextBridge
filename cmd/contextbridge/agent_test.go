@@ -371,7 +371,7 @@ func TestAgentPlannerPromptMakesAuthorityBoundaryExplicit(t *testing.T) {
 		},
 	}}
 	prompt := agentPlannerPrompt(policy, agentAdapterInstructionContracts(cfg, policy))
-	for _, required := range []string{"untrusted data", "separate hash approval", `"ollama"`, `"profile-two"`, "shell commands", "instruction contracts"} {
+	for _, required := range []string{"untrusted data", "separate hash approval", `"ollama"`, `"profile-two"`, "shell commands", "instruction contracts", "workspace-relative", "only then encode those exact actions and fields"} {
 		if !strings.Contains(strings.ToLower(prompt), strings.ToLower(required)) {
 			t.Errorf("planner prompt lacks %q", required)
 		}
