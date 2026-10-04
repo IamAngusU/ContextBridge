@@ -69,6 +69,50 @@ func TestOllamaHostCannotTurnLocalClassIntoRemoteEgress(t *testing.T) {
 	}
 }
 
+func TestOllamaGenerationRequestsFinalResponseWithoutThinkingOutput(t *testing.T) {
+	var requested struct {
+		Think  *bool  `json:"think"`
+		Format string `json:"format"`
+	}
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/api/generate" {
+			http.NotFound(w, request)
+			return
+		}
+		if err := json.NewDecoder(request.Body).Decode(&requested); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"response":          `{"version":1}`,
+			"thinking":          "private reasoning must not be needed",
+			"done_reason":       "stop",
+			"prompt_eval_count": 3,
+			"eval_count":        2,
+		})
+	}))
+	defer provider.Close()
+
+	cfg := config.Config{
+		Routes: map[string]config.Route{"default": {Provider: "ollama", Model: "reasoning-model"}},
+		Engines: map[string]config.Engine{"ollama": {
+			Type: "ollama", URL: provider.URL, Model: "reasoning-model", TimeoutSeconds: 2,
+		}},
+	}
+	output := NewProcessor(cfg, nil).Process(context.Background(), Job{
+		Prompt: "Return one bounded object.", Output: OutputSpec{Mode: "json", RequiredKeys: []string{"version"}},
+	})
+	if output.Error != "" || string(output.JSON) != `{"version":1}` {
+		t.Fatalf("Ollama final response failed: %#v", output)
+	}
+	if requested.Think == nil || *requested.Think {
+		t.Fatalf("Ollama thinking output was not explicitly disabled: %#v", requested.Think)
+	}
+	if requested.Format != "json" {
+		t.Fatalf("structured response format was lost: %q", requested.Format)
+	}
+}
+
 func TestJobCanSelectConfiguredRouteFallback(t *testing.T) {
 	primaryCalls := 0
 	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

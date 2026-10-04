@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Requested final-only Ollama generation with `think: false`, keeping internal
+  reasoning out of returned answers and restoring structured output for models
+  that otherwise place their entire short response in the `thinking` field.
 - Preserved an existing Unix configuration file's owner during atomic saves
   and matched newly created adapter credentials to that owner. Root-run setup
   commands can no longer replace a service-owned config/token with root-owned

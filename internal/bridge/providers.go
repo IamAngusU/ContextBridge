@@ -367,6 +367,12 @@ func (p *Processor) ollama(parent context.Context, job Job, route config.Route, 
 		"model":  model,
 		"prompt": prompt,
 		"stream": false,
+		// ContextBridge consumes only the provider's final answer. Ollama
+		// exposes reasoning-capable models' internal work in a separate
+		// `thinking` field; disable it so the bounded response contract is
+		// carried by `response` and private reasoning is neither lost nor
+		// accidentally promoted to output.
+		"think": false,
 	}
 	options := map[string]int{}
 	// Vision encoders commonly consume almost all of Ollama's 4096-token
