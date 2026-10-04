@@ -132,6 +132,11 @@ func adapterSetupCommand(args []string) error {
 			_ = os.Remove(credentialPath) // #nosec G703 -- exact O_EXCL file created by this command.
 		}
 	}()
+	if created {
+		if err := matchFileOwner(configPath, credentialPath); err != nil {
+			return fmt.Errorf("match adapter credential owner to config: %w", err)
+		}
+	}
 	if cfg.AdapterProfiles == nil {
 		cfg.AdapterProfiles = map[string]config.AdapterProfile{}
 	}
