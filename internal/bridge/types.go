@@ -266,7 +266,8 @@ func NormalizeOutput(raw []byte, spec OutputSpec, provider, model string, latenc
 	mode := outputMode(spec)
 	var artifacts []Artifact
 	var envelope Output
-	if json.Unmarshal(raw, &envelope) == nil {
+	envelopeDecoded := json.Unmarshal(raw, &envelope) == nil
+	if envelopeDecoded {
 		artifacts = NormalizeArtifacts(envelope.Artifacts, spec)
 	}
 	selectedModel, selectedReasoning := "", ""
@@ -286,11 +287,18 @@ func NormalizeOutput(raw []byte, spec OutputSpec, provider, model string, latenc
 		result.ContextBridgeEphemeralAdapterEndpoint = envelope.ContextBridgeEphemeralAdapterEndpoint
 		return result
 	}
+	// Adapter responses always use the ContextBridge output envelope. Preserve
+	// protocol errors even when the adapter reports them in text mode while the
+	// caller requested JSON; otherwise a rejected mutation can be mistaken for
+	// a successful JSON result by a later agent step.
+	if provider == "adapter" && envelopeDecoded && envelope.Error != "" {
+		return outputError(envelope.Error)
+	}
 	if mode == "decision" {
 		decision := NormalizeDecision(raw, provider, model, latency)
 		return Output{Mode: mode, Decision: &decision, Model: decision.Model, SelectedModel: selectedModel, SelectedReasoning: selectedReasoning, Provider: provider, LatencyMS: decision.LatencyMS, Artifacts: artifacts, ContextBridgeAdapterEndpointID: executedAdapterEndpointID, ContextBridgeEphemeralAdapterEndpoint: envelope.ContextBridgeEphemeralAdapterEndpoint}
 	}
-	if json.Unmarshal(raw, &envelope) == nil && envelope.Mode == mode {
+	if envelopeDecoded && envelope.Mode == mode {
 		if envelope.Error != "" {
 			return outputError(envelope.Error)
 		}
