@@ -296,6 +296,7 @@ func clusterAgentPlanOrAutoCommand(args []string, automatic bool) error {
 	}
 	requirements := agentRequirements(cfg, policy, planner, profile)
 	requirements.Model = effectivePlannerModel
+	requirements.RouteBinding = agentRouteBinding(cfg, plannerRoute)
 	if planner == "adapter" {
 		requirements.AdapterFreshSession = true
 		requirements.AdapterEphemeralSession = true
@@ -500,6 +501,7 @@ func executeAgentPlan(plan agentPlan, digest string, cfg config.Config, token st
 		}
 		requirements := agentRequirements(cfg, plan.Policy, step.Provider, step.Profile)
 		requirements.Model = stepModel
+		requirements.RouteBinding = agentRouteBinding(cfg, stepRoute)
 		if err := budget.authorize(step.Provider, &requirements); err != nil {
 			stepCancel()
 			return fmt.Errorf("agent step %s: %w", step.ID, err)
@@ -1339,7 +1341,16 @@ func submitAndWaitAgentJob(ctx context.Context, relayURL, token string, input cl
 func previewAgentRoutes(ctx context.Context, relayURL, token string, cfg config.Config, plan agentPlan) {
 	for _, step := range plan.Steps {
 		requestCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		request := cluster.AssignmentRequest{TenantID: plan.Policy.TenantID, Requirements: agentRequirements(cfg, plan.Policy, step.Provider, step.Profile)}
+		requirements := agentRequirements(cfg, plan.Policy, step.Provider, step.Profile)
+		routeName, routeErr := agentRouteForTarget(cfg, step.Provider, step.Profile)
+		if routeErr != nil {
+			cancel()
+			fmt.Fprintf(os.Stderr, "  route %s · preview unavailable: %v\n", step.ID, routeErr)
+			continue
+		}
+		requirements.Model = agentEffectiveRouteModel(cfg, routeName, step.Provider, "")
+		requirements.RouteBinding = agentRouteBinding(cfg, routeName)
+		request := cluster.AssignmentRequest{TenantID: plan.Policy.TenantID, Requirements: requirements}
 		if step.Provider == "adapter" {
 			request.Requirements.AdapterFreshSession = true
 			request.Requirements.AdapterEphemeralSession = true
@@ -1464,6 +1475,11 @@ func agentEffectiveRouteModel(cfg config.Config, routeName, provider, requested 
 		return ""
 	}
 	return strings.TrimSpace(cfg.Route(routeName).Model)
+}
+
+func agentRouteBinding(cfg config.Config, routeName string) string {
+	route := cfg.Route(routeName)
+	return cluster.RouteBinding(routeName, route.Task, route.Model, route.Provider, route.AdapterProfile, route.Fallback)
 }
 
 func agentContains(values []string, expected string) bool {

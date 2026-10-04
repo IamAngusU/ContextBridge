@@ -321,6 +321,9 @@ func appendUniqueReason(reasons []string, reason string) []string {
 func routingConstraintReasons(node Node, requirements Requirements) []string {
 	capability := node.Capabilities
 	reasons := []string{}
+	if requirements.RouteBinding != "" && !contains(capability.RouteBindings, requirements.RouteBinding) {
+		reasons = append(reasons, "route_binding_unavailable")
+	}
 	explicitModel := strings.TrimSpace(requirements.Model) != "" && !strings.EqualFold(strings.TrimSpace(requirements.Model), "auto")
 	explicitReasoning := strings.TrimSpace(requirements.Reasoning) != ""
 	if requirements.Group != "" && !containsFold(capability.Groups, requirements.Group) {
@@ -406,6 +409,9 @@ func hasVRAM(node Node, required uint64) bool {
 
 func matchesNode(node Node, requirements Requirements) bool {
 	capability := node.Capabilities
+	if requirements.RouteBinding != "" && !contains(capability.RouteBindings, requirements.RouteBinding) {
+		return false
+	}
 	explicitModel := strings.TrimSpace(requirements.Model) != "" && !strings.EqualFold(strings.TrimSpace(requirements.Model), "auto")
 	explicitReasoning := strings.TrimSpace(requirements.Reasoning) != ""
 	if requirements.Group != "" && !containsFold(capability.Groups, requirements.Group) {

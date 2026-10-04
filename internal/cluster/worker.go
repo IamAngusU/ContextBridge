@@ -1481,7 +1481,7 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 				}
 				return true
 			}
-			for _, route := range status.Routes {
+			for routeName, route := range status.Routes {
 				task := route.Task
 				if task == "" {
 					task = "generation"
@@ -1520,6 +1520,12 @@ func (w *Worker) capabilities(ctx context.Context) Capabilities {
 				if routeReady && !seenTasks[task] && (len(w.cfg.AllowedTasks) == 0 || containsFold(w.cfg.AllowedTasks, task)) {
 					capability.Tasks = append(capability.Tasks, task)
 					seenTasks[task] = true
+				}
+				if routeReady && (len(w.cfg.AllowedTasks) == 0 || containsFold(w.cfg.AllowedTasks, task)) {
+					binding := RouteBinding(routeName, task, route.Model, route.Provider, route.AdapterProfile, route.Fallback)
+					if !contains(capability.RouteBindings, binding) && len(capability.RouteBindings) < MaximumNodeListValues {
+						capability.RouteBindings = append(capability.RouteBindings, binding)
+					}
 				}
 				if routeUsesAdapter && adapterRouteReady && adapterSelection.EndpointID > 0 {
 					models := append([]string(nil), adapterSelection.ModelChoices...)

@@ -15,6 +15,7 @@ func TestValidateRequirementsRejectsUnsafeRoutingLabels(t *testing.T) {
 		Group:          "demo",
 		RequiredTags:   []string{"vision"},
 		PreferredNodes: []string{"node_abc-123"},
+		RouteBinding:   RouteBinding("default", "generation", "Adapter Model A", "adapter", "profile-one", nil),
 	}
 	if err := relay.validateRequirements(valid); err != nil {
 		t.Fatalf("valid requirements rejected: %v", err)
@@ -31,6 +32,7 @@ func TestValidateRequirementsRejectsUnsafeRoutingLabels(t *testing.T) {
 		"profile newline":   func(value *Requirements) { value.AdapterProfile = "profile-one\nspoof" },
 		"oversized profile": func(value *Requirements) { value.AdapterProfile = strings.Repeat("p", 81) },
 		"oversized node id": func(value *Requirements) { value.PreferredNodes = []string{strings.Repeat("n", 161)} },
+		"bad route binding": func(value *Requirements) { value.RouteBinding = "sha256:not-a-digest" },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {

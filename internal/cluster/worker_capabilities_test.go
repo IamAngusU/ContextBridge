@@ -207,6 +207,7 @@ func TestRelayBoundsUntrustedHardwareAndInventoryTelemetry(t *testing.T) {
 		GPUs: gpus, Models: models, MaxConcurrent: MaximumWorkerConcurrency + 1, Running: int(^uint(0) >> 1),
 		AdapterEndpoints: int(^uint(0) >> 1), AdapterBusy: int(^uint(0) >> 1), QueueDepth: int(^uint(0) >> 1),
 		AutomaticTasks: map[string][]string{strings.Repeat("p", 200): {strings.Repeat("t", 200)}},
+		RouteBindings:  append(make([]string, MaximumNodeListValues+10), "invalid"),
 	}
 	scopeNodeCapabilities(&capabilities, TokenRecord{})
 	if capabilities.CPUCores != 0 || capabilities.CPUUtilization != 100 || capabilities.MemoryTotal != MaximumNodeHardwareBytes || capabilities.MemoryFree != MaximumNodeHardwareBytes {
@@ -220,6 +221,29 @@ func TestRelayBoundsUntrustedHardwareAndInventoryTelemetry(t *testing.T) {
 	}
 	if capabilities.MaxConcurrent != MaximumWorkerConcurrency || capabilities.Running != MaximumWorkerConcurrency || capabilities.AdapterEndpoints != MaximumAdapterSessions || capabilities.AdapterBusy != MaximumAdapterSessions || capabilities.QueueDepth != 1_000_000 {
 		t.Fatalf("load counters were not bounded: %#v", capabilities)
+	}
+	if len(capabilities.RouteBindings) != 0 {
+		t.Fatalf("invalid route bindings survived telemetry scoping: %#v", capabilities.RouteBindings)
+	}
+}
+
+func TestWorkerAdvertisesOnlyReadyOpaqueRouteBindings(t *testing.T) {
+	capabilities := workerCapabilitiesForStatus(t, map[string]interface{}{
+		"routes": map[string]interface{}{
+			"default": map[string]interface{}{"task": "generation", "provider": "ollama", "model": "text-model"},
+			"missing": map[string]interface{}{"task": "generation", "provider": "ollama", "model": "missing-model"},
+		},
+		"runtime": map[string]interface{}{"engines": map[string]interface{}{
+			"ollama": map[string]interface{}{
+				"state":  "online",
+				"models": []map[string]interface{}{{"name": "text-model", "capabilities": []string{"generation"}, "available": true}},
+			},
+		}},
+	})
+	wanted := RouteBinding("default", "generation", "text-model", "ollama", "", nil)
+	missing := RouteBinding("missing", "generation", "missing-model", "ollama", "", nil)
+	if !contains(capabilities.RouteBindings, wanted) || contains(capabilities.RouteBindings, missing) {
+		t.Fatalf("worker advertised incorrect route bindings: %#v", capabilities.RouteBindings)
 	}
 }
 
