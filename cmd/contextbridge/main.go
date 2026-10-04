@@ -62,6 +62,8 @@ func main() {
 		err = uninstallCommand(os.Args[2:])
 	case "console":
 		err = consoleCommand(os.Args[2:])
+	case "do":
+		err = doCommand(os.Args[2:])
 	case "submit":
 		err = submitCommand(os.Args[2:])
 	case "schedule":
@@ -155,6 +157,10 @@ START HERE
   contextbridge run                           Start local service, relay, and/or worker
   contextbridge console                       Open the detachable bounded live client
 
+ASK THE POOL
+  contextbridge do "What is 10 times 3?"      Send one turn through the configured default route
+  contextbridge do                            Keep chatting in one bounded session
+
 SEND AND INSPECT WORK
   contextbridge submit --file JOB.json        Submit one local job contract
   contextbridge result JOB_ID                 Read one retained result
@@ -218,6 +224,14 @@ func writeCommandGroupHelp(out io.Writer, path []string) bool {
 	topic := strings.Join(path, " ")
 	var help string
 	switch topic {
+	case "do":
+		help = `Usage: contextbridge do [PROMPT] [options]
+
+With a prompt, send one turn through the configured default route and exit.
+Without a prompt, open a bounded interactive session. Advanced options are the
+same as ` + "`contextbridge cluster chat`" + `. Put flags before a trailing prompt,
+or use --prompt to make mixed arguments unambiguous.
+`
 	case "schedule":
 		help = "Usage: contextbridge schedule add|list|show|pause|resume|run|delete [options]\n"
 	case "runtime":

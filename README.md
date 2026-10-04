@@ -154,6 +154,19 @@ contextbridge doctor
 contextbridge cluster chat --provider ollama --model auto --artifacts off --prompt "Reply exactly with CB-OK"
 ```
 
+For ordinary human use, the shorter command takes its provider and model from
+the configured `default` route and still lets the pool place the work:
+
+```powershell
+cb do "What is 10 times 3?"
+```
+
+Run `cb do` without a prompt for an interactive session. `cluster chat` remains
+the explicit surface for provider, model, profile, artifact, E2EE, and budget
+overrides; `do` accepts those same flags when they are needed. Put flags before
+a trailing prompt, for example `cb do --e2ee "Explain this locally"`, or use
+`--prompt` to make a mixed invocation unambiguous.
+
 Your local relay queues the request, your worker runs a compatible installed model, and the answer returns to the terminal. `auto` selects an available compatible model, not a promised quality tier.
 
 Already have a model from Hugging Face? Compatible GGUF models can be declared,
