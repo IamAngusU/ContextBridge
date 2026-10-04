@@ -208,7 +208,7 @@ func TestCompletionRootCommandsStayUnique(t *testing.T) {
 		}
 		seen[command] = true
 	}
-	for _, required := range []string{"serve", "stop", "uninstall", "console", "mcp", "integrate", "benchmark", "verification", "cluster", "route", "selftest", "completion", "version"} {
+	for _, required := range []string{"serve", "stop", "uninstall", "console", "do", "mcp", "integrate", "benchmark", "verification", "cluster", "route", "selftest", "completion", "version"} {
 		if !seen[required] {
 			t.Errorf("completion root is missing %q", required)
 		}

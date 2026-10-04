@@ -1,9 +1,82 @@
 package main
 
 import (
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/IamAngusU/ContextBridge/internal/config"
 )
+
+func TestDoChatArgumentsAcceptsNaturalPrompt(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{name: "quoted prompt", in: []string{"Was ist 10 mal 3?"}, want: []string{"--prompt", "Was ist 10 mal 3?"}},
+		{name: "unquoted prompt", in: []string{"Was", "ist", "10", "mal", "3?"}, want: []string{"--prompt", "Was ist 10 mal 3?"}},
+		{name: "interactive", in: nil, want: nil},
+		{name: "advanced flags", in: []string{"--provider", "ollama", "--prompt", "hello"}, want: []string{"--provider", "ollama", "--prompt", "hello"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := doChatArguments(test.in); !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("unexpected arguments: got %#v want %#v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestChatConfigPathFindsBothFlagForms(t *testing.T) {
+	if got := chatConfigPath([]string{"--config", "pool.yml", "--prompt", "hello"}); got != "pool.yml" {
+		t.Fatalf("separate config flag was not found: %q", got)
+	}
+	if got := chatConfigPath([]string{"--config=pool.yml", "--prompt", "hello"}); got != "pool.yml" {
+		t.Fatalf("inline config flag was not found: %q", got)
+	}
+}
+
+func TestChatHelpRequestedDoesNotNeedConfig(t *testing.T) {
+	if !chatHelpRequested([]string{"--help"}) || !chatHelpRequested([]string{"-h"}) {
+		t.Fatal("standard help flags were not detected")
+	}
+	if chatHelpRequested([]string{"--prompt", "explain --help safely"}) {
+		t.Fatal("help text inside a prompt was treated as a help flag")
+	}
+	if chatHelpRequested([]string{"--prompt", "--help"}) || chatHelpRequested([]string{"--", "--help"}) {
+		t.Fatal("a literal help prompt was treated as a help flag")
+	}
+	if !chatHelpRequested([]string{"--config", "pool.yml", "--help"}) {
+		t.Fatal("help after an option value was not detected")
+	}
+}
+
+func TestDefaultChatRouteIncludesScopedAdapterProfile(t *testing.T) {
+	cfg := config.Config{Routes: map[string]config.Route{
+		"default": {Provider: "adapter", Model: "model-one", AdapterProfile: "profile-one"},
+	}}
+	provider, model, profile := defaultChatRoute(cfg, "adapter")
+	if provider != "adapter" || model != "model-one" || profile != "profile-one" {
+		t.Fatalf("default route was not preserved: provider=%q model=%q profile=%q", provider, model, profile)
+	}
+}
+
+func TestDoAcceptsPromptAfterFlags(t *testing.T) {
+	got, err := chatPromptArgument("do", "", []string{"Was", "ist", "10", "mal", "3?"})
+	if err != nil || got != "Was ist 10 mal 3?" {
+		t.Fatalf("trailing do prompt was not accepted: prompt=%q err=%v", got, err)
+	}
+	if _, err := chatPromptArgument("cluster chat", "", []string{"unexpected"}); err == nil {
+		t.Fatal("cluster chat unexpectedly accepted positional prompt text")
+	}
+}
+
+func TestChatProviderLabelShowsAutomaticSelection(t *testing.T) {
+	if got := chatProviderLabel(""); got != "auto" {
+		t.Fatalf("empty provider should be shown as auto, got %q", got)
+	}
+}
 
 func TestChatStatusLabelsStayEnglishAcrossHostLocales(t *testing.T) {
 	t.Setenv("LC_ALL", "de_DE.UTF-8")

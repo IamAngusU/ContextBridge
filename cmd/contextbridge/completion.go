@@ -7,7 +7,7 @@ import (
 )
 
 var completionRootCommands = []string{
-	"init", "serve", "run", "stop", "console", "submit", "schedule", "result", "review",
+	"init", "serve", "run", "stop", "console", "do", "submit", "schedule", "result", "review",
 	"health", "dashboard", "status", "doctor", "guide", "hardware", "models", "resources", "uninstall",
 	"pull", "runtime", "mcp", "integrate", "adapter", "benchmark", "verification", "relay", "pair", "worker", "cluster", "route", "selftest", "update", "completion", "version", "help",
 }
@@ -72,6 +72,7 @@ $script:ContextBridgeOptions = @{
     'stop' = @('--config','--force')
     'uninstall' = @('--config','--install-dir','--purge','--force','--yes','--dry-run')
     'console' = @('--config','--token')
+    'do' = @('--config','--account','--token','--provider','--group','--model','--profile','--reasoning','--e2ee','--session','--prompt','--artifacts','--min-artifacts','--image','--min-images','--attach-image','--new-session','--new-session-per-job','--foreground-new-session','--egress','--max-cost-usd')
     'submit' = @('--file','--artifacts','--config')
     'schedule' = @('--file','--config','--interactive')
     'result' = @('--config')
@@ -259,6 +260,7 @@ _contextbridge_complete() {
     candidates=""
     case "$option_key" in
       "cluster chat") candidates="--config --account --token --provider --group --model --profile --reasoning --e2ee --session --prompt --artifacts --min-artifacts --image --min-images --attach-image --new-session --new-session-per-job --foreground-new-session --egress --max-cost-usd" ;;
+	  do) candidates="--config --account --token --provider --group --model --profile --reasoning --e2ee --session --prompt --artifacts --min-artifacts --image --min-images --attach-image --new-session --new-session-per-job --foreground-new-session --egress --max-cost-usd" ;;
 	  "cluster scheduled-action") candidates="preview confirm list show cancel --config --account --token --token-file --file --status --limit --json" ;;
       "cluster agent") candidates="plan run auto --config --token --goal --goal-file --policy --planner-provider --planner-profile --planner-model --allow-providers --allow-adapter-profiles --max-steps --step-timeout --max-runtime --planner-timeout --out --plan --approve" ;;
 	  "cluster selftest") candidates="--config --providers --local-model --run --dry-run --image --image-profile --artifacts --keep-artifacts --timeout --job-timeout --poll" ;;
@@ -334,7 +336,7 @@ _contextbridge_complete() {
 	elif [[ "$option_key" == "cluster lan" && "$COMP_CWORD" -eq 3 ]]; then
 	  candidates="init relocate join status"
   elif [ "$COMP_CWORD" -eq 1 ]; then
-    candidates="init serve run stop uninstall console submit schedule result review health dashboard status doctor guide hardware models resources pull runtime mcp integrate adapter benchmark verification relay pair worker cluster route selftest update completion version help"
+    candidates="init serve run stop uninstall console do submit schedule result review health dashboard status doctor guide hardware models resources pull runtime mcp integrate adapter benchmark verification relay pair worker cluster route selftest update completion version help"
   elif [ "$COMP_CWORD" -eq 2 ]; then
     case "$command" in
       schedule) candidates="add list show pause resume run delete" ;;
@@ -369,6 +371,7 @@ root=(
     'stop:Safely stop the local ContextBridge process'
     'uninstall:Remove owned program files and optionally managed data'
     'console:Attach a live terminal to the running service'
+    'do:Ask the configured pool with safe route defaults'
     'submit:Submit a local JSON job'
     'schedule:Manage durable schedules'
     'result:Read a saved job result'
@@ -405,6 +408,9 @@ if (( CURRENT == 2 )); then
   return
 fi
 case "$words[2]" in
+  do)
+    _arguments "${config[@]}" '--account[Named cluster account]:account:' '--token[Producer token]:token:' '--provider[Generation provider]:provider:(adapter ollama nuextract jina)' '--group[Worker group]:group:' '--model[Specific model]:model:' '--profile[Operator-configured adapter profile]:profile:' '--reasoning[Reasoning level]:level:(instant medium high xhigh pro max)' '--e2ee[Encrypt prompts and results]' '--session[Stable session ID]:session:' '--prompt[Send one turn and exit]:prompt:' '--artifacts[Artifact directory or auto/off]:directory:_directories' '--min-artifacts[Required verified files]:count:' '--image[Require a returned image]' '--min-images[Required verified images]:count:' '--attach-image[Attach a local image]:image file:_files' '--new-session[Open a fresh adapter session]' '--new-session-per-job[Open a fresh adapter session for every turn]' '--foreground-new-session[Ask the adapter to foreground a fresh session]' '--egress[Execution boundary]:egress:(local_only remote_allowed)' '--max-cost-usd[Hard remote cost limit]:USD:' '*:prompt:'
+    ;;
   schedule)
     if (( CURRENT == 3 )); then
       _values 'schedule action' add list show pause resume run delete

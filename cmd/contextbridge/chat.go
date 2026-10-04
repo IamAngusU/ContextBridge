@@ -25,14 +25,118 @@ import (
 )
 
 func clusterChatCommand(args []string) error {
-	flags := flag.NewFlagSet("cluster chat", flag.ContinueOnError)
+	return clusterChatCommandWithDefaults(args, "cluster chat", "adapter", "", "")
+}
+
+// doCommand is the outcome-first human shortcut. The configured default route
+// remains the operator-owned policy boundary; cluster chat keeps the explicit
+// provider/model surface for scripts and advanced use.
+func doCommand(args []string) error {
+	chatArgs := doChatArguments(args)
+	if chatHelpRequested(chatArgs) {
+		return clusterChatCommandWithDefaults(chatArgs, "do", "adapter", "", "")
+	}
+	path := chatConfigPath(chatArgs)
+	cfg, err := config.Load(path)
+	if err != nil {
+		return err
+	}
+	provider, model, profile := defaultChatRoute(cfg, "adapter")
+	return clusterChatCommandWithDefaults(chatArgs, "do", provider, model, profile)
+}
+
+func doChatArguments(args []string) []string {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		return append([]string(nil), args...)
+	}
+	prompt := strings.TrimSpace(strings.Join(args, " "))
+	if prompt == "" {
+		return nil
+	}
+	return []string{"--prompt", prompt}
+}
+
+func chatConfigPath(args []string) string {
+	path := defaultConfigPath()
+	for index, arg := range args {
+		if arg == "--config" || arg == "-config" {
+			if index+1 < len(args) {
+				return args[index+1]
+			}
+			return path
+		}
+		if strings.HasPrefix(arg, "--config=") || strings.HasPrefix(arg, "-config=") {
+			if _, value, ok := strings.Cut(arg, "="); ok && strings.TrimSpace(value) != "" {
+				return value
+			}
+		}
+	}
+	return path
+}
+
+func chatHelpRequested(args []string) bool {
+	valueFlags := map[string]bool{
+		"--config": true, "-config": true, "--account": true, "-account": true,
+		"--token": true, "-token": true, "--provider": true, "-provider": true,
+		"--group": true, "-group": true, "--model": true, "-model": true,
+		"--profile": true, "-profile": true, "--reasoning": true, "-reasoning": true,
+		"--session": true, "-session": true, "--prompt": true, "-prompt": true,
+		"--artifacts": true, "-artifacts": true, "--min-artifacts": true, "-min-artifacts": true,
+		"--min-images": true, "-min-images": true, "--attach-image": true, "-attach-image": true,
+		"--egress": true, "-egress": true, "--max-cost-usd": true, "-max-cost-usd": true,
+	}
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		if arg == "--" || !strings.HasPrefix(arg, "-") {
+			return false
+		}
+		if arg == "--help" || arg == "-h" {
+			return true
+		}
+		if valueFlags[arg] {
+			index++
+		}
+	}
+	return false
+}
+
+func defaultChatRoute(cfg config.Config, fallbackProvider string) (string, string, string) {
+	provider := fallbackProvider
+	model := ""
+	profile := ""
+	if route, exists := cfg.Routes["default"]; exists {
+		if value := strings.TrimSpace(route.Provider); value != "" {
+			provider = value
+		}
+		model = strings.TrimSpace(route.Model)
+		profile = strings.TrimSpace(route.AdapterProfile)
+	}
+	return provider, model, profile
+}
+
+func chatPromptArgument(commandName, explicit string, extras []string) (string, error) {
+	if len(extras) == 0 {
+		return explicit, nil
+	}
+	extra := strings.Join(extras, " ")
+	if strings.Trim(extra, `\\`) == "" {
+		return "", errors.New(`unexpected "\\": backslash line continuation works in Bash only; use ^ in Windows CMD, a backtick in PowerShell, or paste the command on one line`)
+	}
+	if commandName == "do" && strings.TrimSpace(explicit) == "" {
+		return strings.TrimSpace(extra), nil
+	}
+	return "", fmt.Errorf("unexpected %s argument %q; pass the message with --prompt or start interactive chat without extra arguments", commandName, extra)
+}
+
+func clusterChatCommandWithDefaults(args []string, commandName, defaultProvider, defaultModel, defaultProfile string) error {
+	flags := flag.NewFlagSet(commandName, flag.ContinueOnError)
 	path := flags.String("config", defaultConfigPath(), "config path")
 	account := flags.String("account", "", "named cluster account; defaults to cluster.active_account")
 	token := flags.String("token", "", "producer token; defaults to client_token, environment, or local admin token")
-	provider := flags.String("provider", "adapter", "adapter or another generation provider")
+	provider := flags.String("provider", defaultProvider, "adapter or another generation provider")
 	group := flags.String("group", "", "worker group")
-	model := flags.String("model", "", "specific model")
-	profile := flags.String("profile", "", "operator-configured adapter profile ID")
+	model := flags.String("model", defaultModel, "specific model")
+	profile := flags.String("profile", defaultProfile, "operator-configured adapter profile ID")
 	reasoning := flags.String("reasoning", "", "reasoning level such as instant, medium, high, xhigh, pro, or max")
 	e2ee := flags.Bool("e2ee", false, "encrypt prompts and results end-to-end for the selected worker")
 	sessionID := flags.String("session", "", "stable logical session ID")
@@ -57,13 +161,11 @@ func clusterChatCommand(args []string) error {
 			e2eeExplicit = true
 		}
 	})
-	if flags.NArg() > 0 {
-		extra := strings.Join(flags.Args(), " ")
-		if strings.Trim(extra, `\\`) == "" {
-			return errors.New(`unexpected "\\": backslash line continuation works in Bash only; use ^ in Windows CMD, a backtick in PowerShell, or paste the command on one line`)
-		}
-		return fmt.Errorf("unexpected cluster chat argument %q; pass the message with --prompt or start interactive chat without extra arguments", extra)
+	resolvedPrompt, err := chatPromptArgument(commandName, *prompt, flags.Args())
+	if err != nil {
+		return err
 	}
+	*prompt = resolvedPrompt
 	if *minArtifacts < 0 || *minArtifacts > 12 {
 		return errors.New("--min-artifacts must be between 0 and 12")
 	}
@@ -146,7 +248,7 @@ func clusterChatCommand(args []string) error {
 	if strings.TrimSpace(*prompt) != "" {
 		return state.turn(ctx, strings.TrimSpace(*prompt))
 	}
-	fmt.Printf("\n  ContextBridge Chat · %s\n  session %s · follow-ups stay in the same adapter session unless --new-session-per-job is set\n  /model, /reasoning, /profile, /egress, /max-cost-usd, /image, /min-images, /min-artifacts and /e2ee change this session · /settings shows it · /exit closes it\n\n", *provider, *sessionID)
+	fmt.Printf("\n  ContextBridge Chat · %s\n  session %s · follow-ups stay in the same adapter session unless --new-session-per-job is set\n  /model, /reasoning, /profile, /egress, /max-cost-usd, /image, /min-images, /min-artifacts and /e2ee change this session · /settings shows it · /exit closes it\n\n", chatProviderLabel(*provider), *sessionID)
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 64<<10), 1<<20)
 	for {
@@ -370,7 +472,7 @@ func (s *chatState) jobMetadata() map[string]interface{} {
 func chatRequestSummary(provider, profile, model, reasoning string) string {
 	var summary strings.Builder
 	summary.WriteString("  → requested: ")
-	summary.WriteString(provider)
+	summary.WriteString(chatProviderLabel(provider))
 	if profile != "" {
 		summary.WriteString(" / ")
 		summary.WriteString(profile)
@@ -384,6 +486,13 @@ func chatRequestSummary(provider, profile, model, reasoning string) string {
 		summary.WriteString(reasoning)
 	}
 	return summary.String()
+}
+
+func chatProviderLabel(provider string) string {
+	if strings.TrimSpace(provider) == "" {
+		return "auto"
+	}
+	return provider
 }
 
 func chatEndpointReport(model, reasoning string) string {
