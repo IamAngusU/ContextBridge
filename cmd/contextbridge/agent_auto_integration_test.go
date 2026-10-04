@@ -134,6 +134,7 @@ func TestAgentAutoNamedPolicyCarriesProjectAuthorityWithoutPlannerEscalation(t *
 	researchInput := ""
 	researchOutputMode := ""
 	summaryInput := ""
+	summaryOutputMode := ""
 	applyPrompt := ""
 	applyInput := ""
 	applyOutputMode := ""
@@ -165,6 +166,7 @@ func TestAgentAutoNamedPolicyCarriesProjectAuthorityWithoutPlannerEscalation(t *
 			case 3:
 				id = "summary"
 				summaryInput = payload.Text
+				summaryOutputMode = payload.Output.Mode
 			case 4:
 				id = "apply"
 				applyPrompt = payload.Prompt
@@ -181,7 +183,7 @@ func TestAgentAutoNamedPolicyCarriesProjectAuthorityWithoutPlannerEscalation(t *
 			raw, _ := json.Marshal(bridge.Submission{Status: "completed", Output: &bridge.Output{Mode: "json", JSON: json.RawMessage(` {"schema":"evidence.v1","answer":"bounded"} `), Model: "profile-two-test"}})
 			_ = json.NewEncoder(writer).Encode(cluster.Job{ID: "research", Status: cluster.JobCompleted, AssignedNode: "node-adapter", Result: raw})
 		case request.Method == http.MethodGet && request.URL.Path == "/v1/cluster/jobs/summary":
-			raw, _ := json.Marshal(bridge.Submission{Status: "completed", Output: &bridge.Output{Mode: "text", Text: ` {"schema":"example.request.v1","action":"apply"} `, Model: "qwen-test"}})
+			raw, _ := json.Marshal(bridge.Submission{Status: "completed", Output: &bridge.Output{Mode: "json", JSON: json.RawMessage(` {"schema":"example.request.v1","action":"apply"} `), Model: "qwen-test"}})
 			_ = json.NewEncoder(writer).Encode(cluster.Job{ID: "summary", Status: cluster.JobCompleted, AssignedNode: "node-local", Result: raw})
 		case request.Method == http.MethodGet && request.URL.Path == "/v1/cluster/jobs/apply":
 			raw, _ := json.Marshal(bridge.Submission{Status: "completed", Output: &bridge.Output{Mode: "json", JSON: json.RawMessage(`{"schema":"example.result.v1","status":"applied"}`), Model: "profile-two-test"}})
@@ -267,6 +269,9 @@ func TestAgentAutoNamedPolicyCarriesProjectAuthorityWithoutPlannerEscalation(t *
 	}
 	if summaryInput != `{"schema":"evidence.v1","answer":"bounded"}` {
 		t.Fatalf("structured adapter evidence was not normalized as untrusted next-step input: %q", summaryInput)
+	}
+	if summaryOutputMode != "json" {
+		t.Fatalf("model-to-adapter handoff did not require strict JSON output: %q", summaryOutputMode)
 	}
 	if applyPrompt != agentAdapterPrompt || applyInput != `{"schema":"example.request.v1","action":"apply"}` || applyOutputMode != "json" {
 		t.Fatalf("previous strict JSON did not cross the isolated adapter boundary: prompt=%q text=%q output=%q", applyPrompt, applyInput, applyOutputMode)
