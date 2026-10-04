@@ -280,9 +280,13 @@ func clusterAgentPlanOrAutoCommand(args []string, automatic bool) error {
 		}
 	}
 	plannerSession := "agent-planner-" + fmt.Sprint(time.Now().UnixNano())
+	plannerRoute, err := agentRouteForTarget(cfg, planner, profile)
+	if err != nil {
+		return fmt.Errorf("agent planner route: %w", err)
+	}
 	payload, err := json.Marshal(bridge.Job{
 		Source: "agent-planner", Task: "generation", Prompt: prompt, Text: strings.TrimSpace(*goal), Model: strings.TrimSpace(*plannerModel),
-		SessionID: plannerSession, AdapterProfile: profile,
+		SessionID: plannerSession, Route: plannerRoute, AdapterProfile: profile,
 		Metadata: agentAdapterMetadata(planner == "adapter"),
 		Output:   bridge.OutputSpec{Mode: "json", RequiredKeys: []string{"version", "summary", "steps"}, MaxBytes: 128 << 10},
 	})
@@ -471,10 +475,15 @@ func executeAgentPlan(plan agentPlan, digest string, cfg config.Config, token st
 			stepCancel()
 			return fmt.Errorf("agent step %s: %w", step.ID, err)
 		}
+		stepRoute, err := agentRouteForTarget(cfg, step.Provider, step.Profile)
+		if err != nil {
+			stepCancel()
+			return fmt.Errorf("agent step %s route: %w", step.ID, err)
+		}
 		payload, err := json.Marshal(bridge.Job{
 			Source: "agent:" + strings.TrimPrefix(digest, "sha256:")[:12], Task: "generation", Prompt: prompt,
 			Text: text, SessionID: "agent-" + strings.TrimPrefix(digest, "sha256:")[:12] + "-" + step.ID,
-			AdapterProfile: step.Profile, Metadata: agentAdapterMetadata(step.Provider == "adapter"),
+			Route: stepRoute, AdapterProfile: step.Profile, Metadata: agentAdapterMetadata(step.Provider == "adapter"),
 			Output: output,
 		})
 		if err != nil {
@@ -1373,6 +1382,50 @@ func agentPreviousInput(use bool, previous string) string {
 		return ""
 	}
 	return previous
+}
+
+func agentRouteForTarget(cfg config.Config, provider, profile string) (string, error) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	profile = strings.ToLower(strings.TrimSpace(profile))
+	if provider == "" {
+		return "", errors.New("provider is required")
+	}
+
+	matches := func(route config.Route) bool {
+		if route.Task != "" && !strings.EqualFold(strings.TrimSpace(route.Task), "generation") {
+			return false
+		}
+		allowed := strings.EqualFold(strings.TrimSpace(route.Provider), provider)
+		for _, fallback := range route.Fallback {
+			allowed = allowed || strings.EqualFold(strings.TrimSpace(fallback), provider)
+		}
+		if !allowed {
+			return false
+		}
+		if provider == "adapter" {
+			return profile != "" && strings.EqualFold(strings.TrimSpace(route.AdapterProfile), profile)
+		}
+		return profile == "" && strings.TrimSpace(route.AdapterProfile) == ""
+	}
+
+	if matches(cfg.Route("default")) {
+		return "default", nil
+	}
+	candidates := make([]string, 0, len(cfg.Routes))
+	for name, route := range cfg.Routes {
+		if name != "default" && matches(route) {
+			candidates = append(candidates, name)
+		}
+	}
+	sort.Strings(candidates)
+	switch len(candidates) {
+	case 0:
+		return "", fmt.Errorf("no generation route permits provider %q with adapter profile %q", provider, profile)
+	case 1:
+		return candidates[0], nil
+	default:
+		return "", fmt.Errorf("multiple generation routes permit provider %q with adapter profile %q: %s", provider, profile, strings.Join(candidates, ", "))
+	}
 }
 
 func agentContains(values []string, expected string) bool {
