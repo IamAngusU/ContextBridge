@@ -284,8 +284,9 @@ func clusterAgentPlanOrAutoCommand(args []string, automatic bool) error {
 	if err != nil {
 		return fmt.Errorf("agent planner route: %w", err)
 	}
+	effectivePlannerModel := agentEffectiveRouteModel(cfg, plannerRoute, planner, *plannerModel)
 	payload, err := json.Marshal(bridge.Job{
-		Source: "agent-planner", Task: "generation", Prompt: prompt, Text: strings.TrimSpace(*goal), Model: strings.TrimSpace(*plannerModel),
+		Source: "agent-planner", Task: "generation", Prompt: prompt, Text: strings.TrimSpace(*goal), Provider: planner, Model: effectivePlannerModel,
 		SessionID: plannerSession, Route: plannerRoute, AdapterProfile: profile,
 		Metadata: agentAdapterMetadata(planner == "adapter"),
 		Output:   bridge.OutputSpec{Mode: "json", RequiredKeys: []string{"version", "summary", "steps"}, MaxBytes: 128 << 10},
@@ -294,7 +295,7 @@ func clusterAgentPlanOrAutoCommand(args []string, automatic bool) error {
 		return err
 	}
 	requirements := agentRequirements(cfg, policy, planner, profile)
-	requirements.Model = strings.TrimSpace(*plannerModel)
+	requirements.Model = effectivePlannerModel
 	if planner == "adapter" {
 		requirements.AdapterFreshSession = true
 		requirements.AdapterEphemeralSession = true
@@ -486,8 +487,9 @@ func executeAgentPlan(plan agentPlan, digest string, cfg config.Config, token st
 			stepCancel()
 			return fmt.Errorf("agent step %s route: %w", step.ID, err)
 		}
+		stepModel := agentEffectiveRouteModel(cfg, stepRoute, step.Provider, "")
 		payload, err := json.Marshal(bridge.Job{
-			Source: "agent:" + strings.TrimPrefix(digest, "sha256:")[:12], Task: "generation", Prompt: prompt,
+			Source: "agent:" + strings.TrimPrefix(digest, "sha256:")[:12], Task: "generation", Prompt: prompt, Provider: step.Provider, Model: stepModel,
 			Text: text, SessionID: "agent-" + strings.TrimPrefix(digest, "sha256:")[:12] + "-" + step.ID,
 			Route: stepRoute, AdapterProfile: step.Profile, Metadata: agentAdapterMetadata(step.Provider == "adapter"),
 			Output: output,
@@ -497,6 +499,7 @@ func executeAgentPlan(plan agentPlan, digest string, cfg config.Config, token st
 			return err
 		}
 		requirements := agentRequirements(cfg, plan.Policy, step.Provider, step.Profile)
+		requirements.Model = stepModel
 		if err := budget.authorize(step.Provider, &requirements); err != nil {
 			stepCancel()
 			return fmt.Errorf("agent step %s: %w", step.ID, err)
@@ -1451,6 +1454,16 @@ func agentRouteForTarget(cfg config.Config, provider, profile string) (string, e
 	default:
 		return "", fmt.Errorf("multiple generation routes permit provider %q with adapter profile %q: %s", provider, profile, strings.Join(candidates, ", "))
 	}
+}
+
+func agentEffectiveRouteModel(cfg config.Config, routeName, provider, requested string) string {
+	if requested = strings.TrimSpace(requested); requested != "" {
+		return requested
+	}
+	if strings.EqualFold(strings.TrimSpace(provider), "adapter") {
+		return ""
+	}
+	return strings.TrimSpace(cfg.Route(routeName).Model)
 }
 
 func agentContains(values []string, expected string) bool {

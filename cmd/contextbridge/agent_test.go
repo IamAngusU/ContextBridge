@@ -522,6 +522,22 @@ func TestAgentStepFeedsExactAdapterRequest(t *testing.T) {
 	}
 }
 
+func TestAgentEffectiveRouteModel(t *testing.T) {
+	cfg := config.Config{Routes: map[string]config.Route{
+		"default":         {Provider: "ollama", Model: "qwen-route"},
+		"workspace_local": {Provider: "adapter", AdapterProfile: "workspace-local", Model: "ignored"},
+	}}
+	if got := agentEffectiveRouteModel(cfg, "default", "ollama", ""); got != "qwen-route" {
+		t.Fatalf("route model = %q; want qwen-route", got)
+	}
+	if got := agentEffectiveRouteModel(cfg, "default", "ollama", "qwen-explicit"); got != "qwen-explicit" {
+		t.Fatalf("explicit model = %q; want qwen-explicit", got)
+	}
+	if got := agentEffectiveRouteModel(cfg, "workspace_local", "adapter", ""); got != "" {
+		t.Fatalf("adapter inherited an unrelated route model: %q", got)
+	}
+}
+
 func TestAgentAutoPlannerPromptExplainsBoundedImmediateExecution(t *testing.T) {
 	policy, err := newAgentPolicy("ollama", "", agentMaximumAutoSteps, 120, 300)
 	if err != nil {

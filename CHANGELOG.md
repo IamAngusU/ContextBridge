@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Carried each agent step's reviewed provider and effective route model in both
+  the worker payload and scheduler requirements. A pooled agent can no longer
+  be placed on a node that advertises the provider but would silently resolve
+  the same route name to a different model or provider locally.
 - Stopped bounded agent execution when a completed provider envelope contains
   an execution error. Adapter and model failures can no longer be printed as a
   successful step or passed onward as if they were evidence.
