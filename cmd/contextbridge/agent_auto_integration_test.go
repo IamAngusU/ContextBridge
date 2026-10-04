@@ -211,6 +211,9 @@ func TestAgentAutoNamedPolicyCarriesProjectAuthorityWithoutPlannerEscalation(t *
 		t.Fatal(err)
 	}
 	cfg.Cluster.Relay.PublicURL = server.URL
+	defaultRoute := cfg.Routes["default"]
+	defaultRoute.Model = "qwen-test"
+	cfg.Routes["default"] = defaultRoute
 	cfg.AdapterProfiles["profile-two"] = config.AdapterProfile{
 		Label: "Remote B", Driver: "test",
 		Options: map[string]interface{}{config.AdapterAgentInstructionContractOption: "Instruction must be exactly one example.request.v1 JSON object."},
@@ -240,6 +243,8 @@ func TestAgentAutoNamedPolicyCarriesProjectAuthorityWithoutPlannerEscalation(t *
 		t.Fatalf("unexpected provider sequence: %#v", requests)
 	}
 	wantRoutes := []string{"default", "profile-two", "default", "profile-two"}
+	wantProviders := []string{"ollama", "adapter", "ollama", "adapter"}
+	wantModels := []string{"qwen-test", "", "qwen-test", ""}
 	for index, input := range requests {
 		if input.TenantID != "demo-project" || input.Requirements.Group != "private" || input.Requirements.Egress != "remote_allowed" || input.MaxAttempts != 1 {
 			t.Fatalf("request %d escaped project authority: %#v", index+1, input)
@@ -250,6 +255,9 @@ func TestAgentAutoNamedPolicyCarriesProjectAuthorityWithoutPlannerEscalation(t *
 		}
 		if payload.Route != wantRoutes[index] {
 			t.Fatalf("request %d route = %q; want %q", index+1, payload.Route, wantRoutes[index])
+		}
+		if payload.Provider != wantProviders[index] || payload.Model != wantModels[index] || input.Requirements.Model != wantModels[index] {
+			t.Fatalf("request %d target = provider %q model %q (requirement %q); want provider %q model %q", index+1, payload.Provider, payload.Model, input.Requirements.Model, wantProviders[index], wantModels[index])
 		}
 	}
 	if !requests[1].Requirements.AdapterFreshSession || !requests[1].Requirements.AdapterEphemeralSession {
