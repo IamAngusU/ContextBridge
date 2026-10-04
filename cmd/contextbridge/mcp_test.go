@@ -70,10 +70,10 @@ func TestMCPStdioLifecycleAndBoundedTools(t *testing.T) {
 		t.Fatalf("server advertised unsupported MCP tasks: %#v", capabilities)
 	}
 	listed := responseResult(t, responses[1])["tools"].([]interface{})
-	if len(listed) != 4 {
-		t.Fatalf("expected exactly four bounded tools, got %#v", listed)
+	if len(listed) != 5 {
+		t.Fatalf("expected exactly five bounded tools, got %#v", listed)
 	}
-	for index, expected := range []string{"contextbridge.status", "contextbridge.cluster_contract_validate", "contextbridge.submit", "contextbridge.result"} {
+	for index, expected := range []string{"contextbridge.status", "contextbridge.cluster_contract_validate", "contextbridge.submit", "contextbridge.result", "contextbridge.local_tool"} {
 		tool := listed[index].(map[string]interface{})
 		if tool["name"] != expected {
 			t.Fatalf("tool %d = %#v, want %s", index, tool, expected)
@@ -117,7 +117,7 @@ func TestMCPProtocolVersionNegotiation(t *testing.T) {
 			if got := responseResult(t, responses[0])["protocolVersion"]; got != test.want {
 				t.Fatalf("negotiated protocol version = %#v, want %q", got, test.want)
 			}
-			if tools, ok := responseResult(t, responses[1])["tools"].([]interface{}); !ok || len(tools) != 4 {
+			if tools, ok := responseResult(t, responses[1])["tools"].([]interface{}); !ok || len(tools) != 5 {
 				t.Fatalf("server was not usable after negotiation: %#v", responses[1])
 			}
 		})
@@ -140,7 +140,7 @@ func TestMCPEnvelopeRejectsAmbiguousJSON(t *testing.T) {
 
 func TestMCPSubmitSchemaDescribesSafeNativeJobFields(t *testing.T) {
 	tools := mcpTools()
-	if len(tools) != 4 {
+	if len(tools) != 5 {
 		t.Fatalf("unexpected tools: %#v", tools)
 	}
 	input := tools[2]["inputSchema"].(map[string]interface{})

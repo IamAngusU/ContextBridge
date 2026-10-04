@@ -227,7 +227,10 @@ func writeCommandGroupHelp(out io.Writer, path []string) bool {
 	case "do":
 		help = `Usage: contextbridge do [PROMPT] [options]
 
-With a prompt, send one turn through the configured default route and exit.
+With a prompt, use a bounded local arithmetic/random tool when unambiguous;
+otherwise send one turn through the configured default route and exit.
+Use --tools off to always use the provider. Explicit provider/model selection
+also skips local tools unless --tools auto is supplied.
 Without a prompt, open a bounded interactive session. Advanced options are the
 same as ` + "`contextbridge cluster chat`" + `. Put flags before a trailing prompt,
 or use --prompt to make mixed arguments unambiguous.
