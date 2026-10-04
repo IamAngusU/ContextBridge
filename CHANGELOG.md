@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Bound every agent planner and execution payload to the unique configured
+  generation route that permits its provider and adapter profile. Agent jobs
+  now fail closed before submission when no route matches or several routes
+  are ambiguous, instead of silently falling back to the default route.
 - Requested final-only Ollama generation with `think: false`, keeping internal
   reasoning out of returned answers and restoring structured output for models
   that otherwise place their entire short response in the `thinking` field.

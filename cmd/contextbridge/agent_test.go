@@ -468,6 +468,38 @@ func TestAgentStepJobInputValidatesPreviousAdapterJSON(t *testing.T) {
 	}
 }
 
+func TestAgentRouteForTargetSelectsBoundRoute(t *testing.T) {
+	cfg := config.Config{Routes: map[string]config.Route{
+		"default":         {Provider: "ollama"},
+		"workspace_local": {Provider: "adapter", AdapterProfile: "workspace-local", Task: "generation"},
+		"embedding":       {Provider: "ollama", Task: "embedding"},
+	}}
+
+	for name, target := range map[string]struct {
+		provider string
+		profile  string
+		want     string
+	}{
+		"default model route": {provider: "ollama", want: "default"},
+		"bound adapter route": {provider: "adapter", profile: "workspace-local", want: "workspace_local"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := agentRouteForTarget(cfg, target.provider, target.profile)
+			if err != nil || got != target.want {
+				t.Fatalf("route = %q, %v; want %q", got, err, target.want)
+			}
+		})
+	}
+
+	if _, err := agentRouteForTarget(cfg, "adapter", "missing"); err == nil {
+		t.Fatal("unbound adapter profile was accepted")
+	}
+	cfg.Routes["workspace_local_two"] = config.Route{Provider: "adapter", AdapterProfile: "workspace-local", Task: "generation"}
+	if _, err := agentRouteForTarget(cfg, "adapter", "workspace-local"); err == nil || !strings.Contains(err.Error(), "multiple generation routes") {
+		t.Fatalf("ambiguous adapter routing was accepted: %v", err)
+	}
+}
+
 func TestAgentAutoPlannerPromptExplainsBoundedImmediateExecution(t *testing.T) {
 	policy, err := newAgentPolicy("ollama", "", agentMaximumAutoSteps, 120, 300)
 	if err != nil {

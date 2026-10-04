@@ -213,6 +213,10 @@ func TestAgentAutoNamedPolicyCarriesProjectAuthorityWithoutPlannerEscalation(t *
 		Label: "Remote B", Driver: "test",
 		Options: map[string]interface{}{config.AdapterAgentInstructionContractOption: "Instruction must be exactly one example.request.v1 JSON object."},
 	}
+	cfg.Routes["profile-two"] = config.Route{Provider: "adapter", AdapterProfile: "profile-two", Task: "generation"}
+	cfg.Providers.Adapter.Principals["profile-two-test"] = config.AdapterPrincipal{
+		Token: "agent_policy_adapter_token_0123456789", AllowedProfiles: []string{"profile-two"},
+	}
 	cfg.Cluster.Policies.AgentAuthorities["demo"] = config.AgentAuthority{
 		Enabled: true, TenantID: "demo-project", Group: "private",
 		Planner:          config.AgentPlanner{Provider: "ollama", TimeoutSeconds: 120},
@@ -233,9 +237,17 @@ func TestAgentAutoNamedPolicyCarriesProjectAuthorityWithoutPlannerEscalation(t *
 	if requests[0].Requirements.Provider != "ollama" || requests[1].Requirements.Provider != "adapter" || requests[2].Requirements.Provider != "ollama" || requests[3].Requirements.Provider != "adapter" {
 		t.Fatalf("unexpected provider sequence: %#v", requests)
 	}
+	wantRoutes := []string{"default", "profile-two", "default", "profile-two"}
 	for index, input := range requests {
 		if input.TenantID != "demo-project" || input.Requirements.Group != "private" || input.Requirements.Egress != "remote_allowed" || input.MaxAttempts != 1 {
 			t.Fatalf("request %d escaped project authority: %#v", index+1, input)
+		}
+		var payload bridge.Job
+		if err := json.Unmarshal(input.Payload, &payload); err != nil {
+			t.Fatalf("request %d payload: %v", index+1, err)
+		}
+		if payload.Route != wantRoutes[index] {
+			t.Fatalf("request %d route = %q; want %q", index+1, payload.Route, wantRoutes[index])
 		}
 	}
 	if !requests[1].Requirements.AdapterFreshSession || !requests[1].Requirements.AdapterEphemeralSession {
