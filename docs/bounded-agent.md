@@ -83,6 +83,13 @@ Planning is an ordinary attributable job. The decoded proposal rejects unknown
 fields, unsafe or duplicate step IDs, targets outside the local allowlist,
 oversized text, and more than six steps.
 
+Fresh planner proposals may express a named adapter's `instruction` as either
+the existing JSON string or a JSON object. Core strictly validates and compacts
+an object into the existing string representation before policy validation and
+hash approval; it does not invent fields, repair actions, round numeric IDs, or
+grant a profile. Non-adapter instructions remain text-only. Saved approved plans
+remain string-only, so reading an old plan never silently changes its meaning.
+
 ## Execution binding
 
 ### Optional execution confirmations

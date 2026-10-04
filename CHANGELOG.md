@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Accept strict structured adapter instructions in fresh agent proposals before
+  policy validation and hash approval. Existing saved-plan representation,
+  profile restrictions and adapter validation remain unchanged; non-adapter
+  objects, duplicate keys, unknown fields and oversized requests still fail.
+
 - Added bounded local arithmetic and operating-system random-integer tools to
   natural German/English `do` and chat prompts, plus the client-neutral MCP
   `contextbridge.local_tool`. Exact arithmetic replaces model guesses for

@@ -998,8 +998,53 @@ func agentResultText(output *bridge.Output) (string, error) {
 
 func decodeAgentProposal(raw []byte) (agentPlannerProposal, error) {
 	var proposal agentPlannerProposal
-	if err := decodeAgentJSON(raw, &proposal); err != nil {
+	// Only fresh, unapproved proposals may use an object for an adapter's
+	// instruction. Saved plans keep the existing string-only representation;
+	// normalization happens before policy validation and hash approval.
+	var wire struct {
+		Version int    `json:"version"`
+		Summary string `json:"summary"`
+		Steps   []struct {
+			ID          string          `json:"id"`
+			Provider    string          `json:"provider"`
+			Profile     string          `json:"profile,omitempty"`
+			Instruction json.RawMessage `json:"instruction"`
+			UsePrevious bool            `json:"use_previous,omitempty"`
+		} `json:"steps"`
+	}
+	if len(raw) > agentMaximumPlanFileBytes {
+		return proposal, errors.New("agent proposal exceeds maximum plan size")
+	}
+	// Strict decoding still rejects unknown/case-aliased envelope and step
+	// fields, and duplicate keys recursively. Adapter data keeps its own schema
+	// (including case-sensitive map keys); its validator remains authoritative.
+	if err := decodeAgentJSON(raw, &wire); err != nil {
 		return proposal, err
+	}
+	proposal.Version, proposal.Summary = wire.Version, wire.Summary
+	for _, input := range wire.Steps {
+		step := agentStep{ID: input.ID, Provider: input.Provider, Profile: input.Profile, UsePrevious: input.UsePrevious}
+		instruction := bytes.TrimSpace(input.Instruction)
+		switch {
+		case len(instruction) > 0 && instruction[0] == '"':
+			if err := decodeAgentJSON(instruction, &step.Instruction); err != nil {
+				return proposal, err
+			}
+		case len(instruction) > 0 && instruction[0] == '{' && step.Provider == "adapter" && step.Profile != "":
+			var compact bytes.Buffer
+			// Do not round-trip via interface{}: large integer identifiers must
+			// retain their exact bytes instead of becoming float64 values.
+			if err := json.Compact(&compact, instruction); err != nil {
+				return proposal, err
+			}
+			step.Instruction = compact.String()
+		default:
+			return proposal, fmt.Errorf("instruction for %s must be text, or one JSON object for a named adapter profile", step.ID)
+		}
+		if err := validateAgentText("instruction for "+step.ID, step.Instruction, agentMaximumInstruction); err != nil {
+			return proposal, err
+		}
+		proposal.Steps = append(proposal.Steps, step)
 	}
 	return proposal, nil
 }
