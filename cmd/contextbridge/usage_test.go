@@ -12,11 +12,13 @@ func TestRootUsageIsTaskOrientedAndExplainsConsoleBoundary(t *testing.T) {
 	shown := output.String()
 	for _, want := range []string{
 		"START HERE",
+		"ASK THE POOL",
 		"SEND AND INSPECT WORK",
 		"POOL AND ROUTING",
 		"LOCAL RESOURCES AND INTEGRATIONS",
 		"OPERATE AND MAINTAIN",
 		"contextbridge guide",
+		"contextbridge do \"What is 10 times 3?\"",
 		"contextbridge cluster lan init|relocate|join|status",
 		"contextbridge COMMAND --help",
 		"console is never a host shell",
@@ -38,6 +40,7 @@ func TestDispatcherHelpDoesNotNeedConfigOrNetwork(t *testing.T) {
 		want string
 	}{
 		{[]string{"schedule"}, "add|list|show|pause|resume|run|delete"},
+		{[]string{"do"}, "configured default route"},
 		{[]string{"cluster"}, "Observe:  status, events, estimate, node"},
 		{[]string{"cluster", "agent"}, "agent auto|plan|run"},
 		{[]string{"cluster", "lan"}, "lan init|relocate|join|status"},

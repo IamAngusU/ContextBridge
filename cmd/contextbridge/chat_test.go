@@ -1,9 +1,45 @@
 package main
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestDoChatArgumentsAcceptsNaturalPrompt(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{name: "quoted prompt", in: []string{"Was ist 10 mal 3?"}, want: []string{"--prompt", "Was ist 10 mal 3?"}},
+		{name: "unquoted prompt", in: []string{"Was", "ist", "10", "mal", "3?"}, want: []string{"--prompt", "Was ist 10 mal 3?"}},
+		{name: "interactive", in: nil, want: nil},
+		{name: "advanced flags", in: []string{"--provider", "ollama", "--prompt", "hello"}, want: []string{"--provider", "ollama", "--prompt", "hello"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := doChatArguments(test.in); !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("unexpected arguments: got %#v want %#v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestChatConfigPathFindsBothFlagForms(t *testing.T) {
+	if got := chatConfigPath([]string{"--config", "pool.yml", "--prompt", "hello"}); got != "pool.yml" {
+		t.Fatalf("separate config flag was not found: %q", got)
+	}
+	if got := chatConfigPath([]string{"--config=pool.yml", "--prompt", "hello"}); got != "pool.yml" {
+		t.Fatalf("inline config flag was not found: %q", got)
+	}
+}
+
+func TestChatProviderLabelShowsAutomaticSelection(t *testing.T) {
+	if got := chatProviderLabel(""); got != "auto" {
+		t.Fatalf("empty provider should be shown as auto, got %q", got)
+	}
+}
 
 func TestChatStatusLabelsStayEnglishAcrossHostLocales(t *testing.T) {
 	t.Setenv("LC_ALL", "de_DE.UTF-8")
