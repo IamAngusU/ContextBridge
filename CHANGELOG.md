@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Preserved an existing Unix configuration file's owner during atomic saves
+  and matched newly created adapter credentials to that owner. Root-run setup
+  commands can no longer replace a service-owned config/token with root-owned
+  files that the unprivileged relay cannot read.
 - Added an explicit strict-JSON handoff for bounded agents: after a non-adapter
   step, a contracted adapter may consume the exact previous JSON object using
   the reviewed `contextbridge.previous-json.v1` marker. This enables bounded
