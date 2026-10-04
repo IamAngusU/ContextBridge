@@ -85,6 +85,33 @@ oversized text, and more than six steps.
 
 ## Execution binding
 
+### Optional execution confirmations
+
+`agent run` and `agent auto` accept `--ask all|critical|none` independently of
+authorization. `all` asks before every execution step, showing the exact resolved
+prompt/content and a request-bound confirmation code, including generated adapter
+JSON. `critical` asks before every adapter step and every remote or unclassified
+provider; only classified local model-only steps skip the question. Adapter
+action names such as `read` are not trusted as proof of safety, so this conservative
+mode currently also asks for file creation and inspection. `none` preserves the
+existing behavior after hash approval or named-policy authorization. It is not
+permission to escape the configured workspace, enable shell execution, publish,
+change policy, or bypass adapter checks.
+
+```sh
+contextbridge cluster agent run --plan ./reviewed-plan.json --approve sha256:REVIEWED_HASH --ask critical
+```
+
+EOF, a wrong answer, cancellation or timeout stops before submitting that step.
+Earlier completed steps remain completed; declining does not roll them back.
+Waiting for confirmation consumes the existing run/step deadline. The planner
+request itself is still authorized by the explicit planning command, not this
+additional execution gate. For unattended work choose `none` with an appropriately
+narrow operator policy. The default remains `none` for compatibility with existing
+hash-approved and policy-authorized workflows.
+
+## Execution binding details
+
 Every accepted plan records:
 
 - a SHA-256 of the effective secret-free configuration;

@@ -86,7 +86,7 @@ No ContextBridge cloud account is required for self-hosting.
 | Can a device stay connected without contributing compute? | Yes. Configure it as `client`/`sender`; it can submit authorized work without worker heartbeats or assignments. |
 | Are ports random? | Stable loopback defaults are `32145` (local service), `32150` (relay) and `32151` (opt-in LAN TLS listener). `cluster configure --listen auto` selects a free relay port at configuration time. CB does not silently move an established endpoint later; a conflict fails visibly so clients are not redirected to an unexpected service. |
 | Does CB steal window focus? | Ordinary services and workers do not open a browser. `dashboard` is an explicit UI command and supports `--no-open`; managed Windows restarts use a hidden process. |
-| Is MCP tied to OpenAI? | No. The stdio MCP server is client-neutral. Its four bounded tools expose status, contract validation, durable submission and result retrieval; the submitted job may target any route the credential and pool policy permit. |
+| Is MCP tied to OpenAI? | No. The stdio MCP server is client-neutral. Its five bounded tools expose status, contract validation, durable submission, result retrieval and local arithmetic/random integers; submitted jobs may target any route the credential and pool policy permit. |
 
 See [customer-controlled pools](docs/customer-controlled-pools.md),
 [pool placement](docs/pools-and-placement.md), [operations](docs/operations.md),
@@ -154,12 +154,25 @@ contextbridge doctor
 contextbridge cluster chat --provider ollama --model auto --artifacts off --prompt "Reply exactly with CB-OK"
 ```
 
-For ordinary human use, the shorter command takes its provider and model from
-the configured `default` route and still lets the pool place the work:
+For ordinary human use, the shorter command resolves unambiguous arithmetic and
+random-integer requests with real local tools. Other requests take their provider
+and model from the configured `default` route and let the pool place the work:
 
 ```powershell
 cb do "What is 10 times 3?"
+cb do "Was macht 10 mal 3 / 30?"
+cb do "Gib mir eine Zufallszahl zwischen 1 und 1000"
 ```
+
+The second calculation returns `1`, using bounded exact arithmetic, not a model
+guess. Tool results explicitly say **local · no model or pool job**. `--tools off`
+disables this shortcut; `/tools auto|off` changes an interactive session. An
+explicit provider/model/profile/group/reasoning selection disables automatic
+local tools unless `--tools auto` is also supplied. Attachments, required artifacts,
+fresh adapter sessions and E2EE remain on their requested execution path. Compound
+or unsupported requests are not extracted into partial calculations; this is not
+yet a general autonomous tool-selection loop. MCP clients can explicitly use the
+same bounded resolver through `contextbridge.local_tool` with a `prompt` string.
 
 Run `cb do` without a prompt for an interactive session. `cluster chat` remains
 the explicit surface for provider, model, profile, artifact, E2EE, and budget

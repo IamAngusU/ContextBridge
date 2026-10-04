@@ -22,6 +22,7 @@ import (
 	"github.com/IamAngusU/ContextBridge/internal/bridge"
 	"github.com/IamAngusU/ContextBridge/internal/cluster"
 	"github.com/IamAngusU/ContextBridge/internal/config"
+	"github.com/IamAngusU/ContextBridge/internal/localtools"
 )
 
 func clusterChatCommand(args []string) error {
@@ -84,6 +85,7 @@ func chatHelpRequested(args []string) bool {
 		"--artifacts": true, "-artifacts": true, "--min-artifacts": true, "-min-artifacts": true,
 		"--min-images": true, "-min-images": true, "--attach-image": true, "-attach-image": true,
 		"--egress": true, "-egress": true, "--max-cost-usd": true, "-max-cost-usd": true,
+		"--tools": true, "-tools": true,
 	}
 	for index := 0; index < len(args); index++ {
 		arg := args[index]
@@ -167,14 +169,22 @@ func clusterChatCommandWithDefaults(args []string, commandName, defaultProvider,
 	foregroundNewSession := flags.Bool("foreground-new-session", false, "ask the adapter to foreground a newly opened session")
 	egress := flags.String("egress", "", "execution boundary: local_only or remote_allowed")
 	maxCostUSD := flags.Float64("max-cost-usd", 0, "hard remote cost upper bound in USD; unknown pricing fails closed")
+	toolMode := flags.String("tools", "auto", "auto resolves unambiguous arithmetic/random requests locally; off always uses the selected provider")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	e2eeExplicit := false
 	modelExplicit := false
 	profileExplicit := false
+	routeExplicit := false
+	toolsExplicit := false
 	flags.Visit(func(option *flag.Flag) {
+		if option.Name == "provider" || option.Name == "model" || option.Name == "profile" || option.Name == "group" || option.Name == "reasoning" {
+			routeExplicit = true
+		}
 		switch option.Name {
+		case "tools":
+			toolsExplicit = true
 		case "e2ee":
 			e2eeExplicit = true
 		case "model":
@@ -183,6 +193,9 @@ func clusterChatCommandWithDefaults(args []string, commandName, defaultProvider,
 			profileExplicit = true
 		}
 	})
+	if *toolMode != "auto" && *toolMode != "off" {
+		return errors.New("--tools must be auto or off")
+	}
 	*model, *profile = chatScopedRouteDefaults(defaultProvider, *provider, *model, *profile, modelExplicit, profileExplicit)
 	resolvedPrompt, err := chatPromptArgument(commandName, *prompt, flags.Args())
 	if err != nil {
@@ -250,9 +263,6 @@ func clusterChatCommandWithDefaults(args []string, commandName, defaultProvider,
 		*e2ee = true
 	}
 	*token = clusterClientToken(cfg, *token)
-	if *token == "" {
-		return errors.New("a producer token is required; pass --token, set CONTEXTBRIDGE_CLUSTER_TOKEN, or configure cluster.client_token")
-	}
 	if *sessionID == "" {
 		*sessionID = fmt.Sprintf("terminal-%d", time.Now().Unix())
 	}
@@ -267,6 +277,7 @@ func clusterChatCommandWithDefaults(args []string, commandName, defaultProvider,
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	state := &chatState{relayURL: clusterClientBaseURL(cfg), token: *token, provider: *provider, group: *group, model: *model, profile: *profile, reasoning: *reasoning, egress: *egress, maxCostUSD: *maxCostUSD, e2ee: *e2ee, poolAuthority: poolAuthority, sessionID: *sessionID, artifactDir: *artifactDir, minArtifacts: *minArtifacts, minImages: *minImages, requireImage: *minImages > 0, images: images, newSession: *newSession || *newSessionPerJob, newSessionPerJob: *newSessionPerJob, foregroundNewSession: *foregroundNewSession}
+	state.localTools = *toolMode == "auto" && (!routeExplicit || toolsExplicit)
 
 	if strings.TrimSpace(*prompt) != "" {
 		return state.turn(ctx, strings.TrimSpace(*prompt))
@@ -314,7 +325,7 @@ func looksLikePastedChatFlag(line string) bool {
 	}
 	for _, name := range []string{"--config", "--account", "--token", "--provider", "--group", "--model", "--profile", "--reasoning",
 		"--e2ee", "--session", "--prompt", "--artifacts", "--min-artifacts", "--image", "--min-images",
-		"--attach-image", "--new-session", "--new-session-per-job", "--foreground-new-session", "--egress", "--max-cost-usd"} {
+		"--attach-image", "--new-session", "--new-session-per-job", "--foreground-new-session", "--egress", "--max-cost-usd", "--tools"} {
 		if first[0] == name || strings.HasPrefix(first[0], name+"=") {
 			return true
 		}
@@ -359,6 +370,12 @@ func (s *chatState) command(line string) (bool, string) {
 	}
 	value := strings.TrimSpace(strings.TrimPrefix(line, parts[0]))
 	switch parts[0] {
+	case "/tools":
+		if value != "auto" && value != "off" {
+			return true, "  ! use /tools auto or /tools off"
+		}
+		s.localTools = value == "auto"
+		return true, "  ✓ local tools: " + value
 	case "/model":
 		s.model = value
 		return true, "  ✓ model: " + emptyChatSetting(s.model)
@@ -472,6 +489,7 @@ type chatState struct {
 	newSession           bool
 	newSessionPerJob     bool
 	foregroundNewSession bool
+	localTools           bool
 	nodeID               string
 }
 
@@ -537,6 +555,24 @@ func chatUsedReport(provider, model string) string {
 }
 
 func (s *chatState) turn(ctx context.Context, prompt string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s.localToolsEligible() {
+		result, handled, err := localtools.Resolve(prompt)
+		if handled {
+			fmt.Printf("  → tool: %s · local · no model or pool job\n", result.Tool)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("ai  › %s\n", result.Text)
+			fmt.Println("  ↳ used: " + result.Tool + " · verified computation (not an LLM answer)")
+			return nil
+		}
+	}
+	if s.token == "" {
+		return errors.New("a producer token is required for pool requests; configure cluster.client_token or a named account")
+	}
 	fmt.Println(chatRequestSummary(s.provider, s.profile, s.model, s.reasoning))
 	minimum := s.minArtifacts
 	if s.requireImage || s.minImages > 0 {
@@ -751,6 +787,15 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 			return fmt.Errorf("job %s: %s", job.Status, job.Error)
 		}
 	}
+}
+
+func (s *chatState) localToolsEligible() bool {
+	// Never satisfy an attachment/artifact/session/E2EE contract by quietly
+	// returning a local number. Explicit provider targeting also disables tools
+	// at argument parsing unless the operator explicitly opts back in.
+	return s.localTools && !s.e2ee && s.poolAuthority == nil && s.profile == "" &&
+		len(s.images) == 0 && s.minArtifacts == 0 && s.minImages == 0 && !s.requireImage &&
+		!s.newSession && !s.newSessionPerJob && !s.foregroundNewSession
 }
 
 func clusterClientToken(cfg config.Config, explicit string) string {

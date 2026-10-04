@@ -177,8 +177,15 @@ func clusterAgentPlanOrAutoCommand(args []string, automatic bool) error {
 	out := flags.String("out", "", "write the immutable plan evidence to a new file")
 	plannerTimeout := flags.Int("planner-timeout", 180, "planner job timeout in seconds (10-600)")
 	authorityName := flags.String("policy", "", "named project authority from cluster.policies.agent_authorities (agent auto only)")
+	ask := flags.String("ask", "none", "additional execution confirmation: all, critical (adapters/remote/unknown), or none; does not expand authority")
 	if err := flags.Parse(args); err != nil {
 		return err
+	}
+	if err := validateAgentAsk(*ask); err != nil {
+		return err
+	}
+	if !automatic && *ask != "none" {
+		return errors.New("--ask applies to agent run or agent auto, not planning")
 	}
 	if flags.NArg() != 0 {
 		return fmt.Errorf("unexpected %s argument %q", commandName, strings.Join(flags.Args(), " "))
@@ -390,7 +397,7 @@ func clusterAgentPlanOrAutoCommand(args []string, automatic bool) error {
 		} else {
 			fmt.Fprintf(os.Stderr, "Configured project policy %q matched · executing without per-run approval\n", plan.Policy.AuthorityName)
 		}
-		return executeAgentPlan(plan, digest, freshConfig, freshToken)
+		return executeAgentPlanWithConfirmation(plan, digest, freshConfig, freshToken, *ask)
 	}
 	if *out == "" {
 		fmt.Fprintln(os.Stderr, "Save the JSON to a regular file before approval; generated plans are never executed directly from model output.")
@@ -406,7 +413,11 @@ func clusterAgentRunCommand(args []string) error {
 	token := flags.String("token", "", "producer token; defaults to client_token, environment, or local admin token")
 	planPath := flags.String("plan", "", "reviewed agent plan JSON")
 	approve := flags.String("approve", "", "exact sha256 approval printed by agent plan")
+	ask := flags.String("ask", "none", "additional execution confirmation: all, critical (adapters/remote/unknown), or none; does not expand authority")
 	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if err := validateAgentAsk(*ask); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 {
@@ -450,10 +461,18 @@ func clusterAgentRunCommand(args []string) error {
 	}
 	printAgentPlan(plan, digest)
 	fmt.Fprintln(os.Stderr, "Approval matched · executing only the reviewed text steps")
-	return executeAgentPlan(plan, digest, cfg, *token)
+	return executeAgentPlanWithConfirmation(plan, digest, cfg, *token, *ask)
 }
 
 func executeAgentPlan(plan agentPlan, digest string, cfg config.Config, token string) error {
+	return executeAgentPlanWithConfirmation(plan, digest, cfg, token, "none")
+}
+
+func executeAgentPlanWithConfirmation(plan agentPlan, digest string, cfg config.Config, token, ask string) error {
+	if err := validateAgentAsk(ask); err != nil {
+		return err
+	}
+	confirmer := newAgentConfirmer(os.Stdin, os.Stderr)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(plan.Policy.MaxRuntimeSeconds)*time.Second)
@@ -515,6 +534,12 @@ func executeAgentPlan(plan agentPlan, digest string, cfg config.Config, token st
 		if step.Provider == "adapter" {
 			requirements.AdapterFreshSession = true
 			requirements.AdapterEphemeralSession = true
+		}
+		if agentNeedsConfirmation(ask, cfg, step) {
+			if err := confirmer.confirm(stepCtx, step, prompt, text); err != nil {
+				stepCancel()
+				return fmt.Errorf("agent step %s: %w", step.ID, err)
+			}
 		}
 		job, submission, err := submitAndWaitAgentJob(stepCtx, clusterClientBaseURL(cfg), token, cluster.SubmitRequest{
 			Source: "agent:" + strings.TrimPrefix(digest, "sha256:")[:12], TenantID: plan.Policy.TenantID, Requirements: requirements, Payload: payload, MaxAttempts: 1,

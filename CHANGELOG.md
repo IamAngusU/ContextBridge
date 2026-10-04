@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Added bounded local arithmetic and operating-system random-integer tools to
+  natural German/English `do` and chat prompts, plus the client-neutral MCP
+  `contextbridge.local_tool`. Exact arithmetic replaces model guesses for
+  recognized expressions; division-by-zero/complexity errors do not fall back
+  to an LLM. Explicit routing, attachments, artifacts and E2EE stay respected.
+- Added optional `--ask all|critical|none` execution gates for bounded agents.
+  Confirmations show the resolved request and bind to its digest; EOF/cancellation
+  fails closed. Confirmation never expands the existing operator authority.
+
 - Carried each agent step's reviewed provider and effective route model in both
   the worker payload and scheduler requirements. A pooled agent can no longer
   be placed on a node that advertises the provider but would silently resolve

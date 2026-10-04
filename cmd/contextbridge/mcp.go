@@ -19,6 +19,7 @@ import (
 	"github.com/IamAngusU/ContextBridge/internal/bridge"
 	"github.com/IamAngusU/ContextBridge/internal/cluster"
 	"github.com/IamAngusU/ContextBridge/internal/config"
+	"github.com/IamAngusU/ContextBridge/internal/localtools"
 	"github.com/IamAngusU/ContextBridge/internal/strictjson"
 )
 
@@ -259,6 +260,8 @@ func (s *mcpStdioServer) handleToolCall(ctx context.Context, request mcpRequest)
 		result, err = s.callSubmit(ctx, params.Arguments)
 	case "contextbridge.result":
 		result, err = s.callResult(ctx, params.Arguments)
+	case "contextbridge.local_tool":
+		result, err = callLocalTool(params.Arguments)
 	default:
 		return mcpErrorResponse(request.ID, -32602, "Unknown tool: "+params.Name, nil)
 	}
@@ -266,6 +269,27 @@ func (s *mcpStdioServer) handleToolCall(ctx context.Context, request mcpRequest)
 		result = mcpExecutionError(err)
 	}
 	return mcpResultResponse(request.ID, result)
+}
+
+func callLocalTool(arguments json.RawMessage) (mcpToolResult, error) {
+	var input struct {
+		Prompt string `json:"prompt"`
+	}
+	if err := decodeMCPObject(arguments, &input); err != nil || len(input.Prompt) == 0 || len(input.Prompt) > 4096 {
+		return mcpToolResult{}, errors.New("local_tool requires a bounded prompt and no other arguments")
+	}
+	result, handled, err := localtools.Resolve(input.Prompt)
+	if err != nil {
+		return mcpToolResult{}, err
+	}
+	if !handled {
+		return mcpToolResult{}, errors.New("local_tool supports only complete arithmetic or random-integer requests; no model fallback or side effects")
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return mcpToolResult{}, err
+	}
+	return mcpJSONResult(raw)
 }
 
 func (s *mcpStdioServer) callClusterContractValidate(parent context.Context, arguments json.RawMessage) (mcpToolResult, error) {
@@ -625,6 +649,16 @@ func mcpTools() []map[string]interface{} {
 			},
 			"outputSchema": map[string]interface{}{"type": "object"},
 			"annotations":  readAnnotations,
+		},
+		{
+			"name": "contextbridge.local_tool", "title": "Local calculator and random integer",
+			"description": "Resolve one complete German/English arithmetic or random-integer request locally, without a model, network or filesystem. Examples: 'What is (10*3)/30?' or 'Gib mir eine Zufallszahl zwischen 1 und 1000'. Exact rational arithmetic; powers -64..64. Unsupported or ambiguous requests fail instead of guessing. Random bounds are inclusive; repeating a random request draws again.",
+			"inputSchema": map[string]interface{}{
+				"type": "object", "additionalProperties": false, "required": []string{"prompt"},
+				"properties": map[string]interface{}{"prompt": map[string]interface{}{"type": "string", "minLength": 1, "maxLength": 4096}},
+			},
+			"outputSchema": map[string]interface{}{"type": "object"},
+			"annotations":  map[string]interface{}{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false},
 		},
 	}
 }

@@ -287,12 +287,14 @@ Start the bounded MCP server:
 contextbridge mcp serve --config ./config.yml
 ```
 
-It exposes four tools:
+It exposes five tools:
 
 - `contextbridge.status`
 - `contextbridge.cluster_contract_validate`
 - `contextbridge.submit`
 - `contextbridge.result`
+- `contextbridge.local_tool` — bounded local arithmetic/random integers from a
+  German/English `prompt`; no model, service request, filesystem or shell.
 
 The server does not expose arbitrary shell, filesystem, credential, route
 management, schedule management, sampling, or remote-tool registration.
