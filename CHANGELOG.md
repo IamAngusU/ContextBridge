@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Added `cluster agent plan --policy NAME`: preview inside the existing named
+  authority, then execute only after exact hash approval. Planner, tenant/group,
+  egress, provider/profile and cost limits remain bound; CLI overrides and
+  changed policy/configuration are rejected. Preview still runs one authorized
+  planner job, but never the proposed work steps.
+- Added whole-plan local target preflight before the first work step: missing or
+  ambiguous routes and missing dynamic adapter contracts fail early instead of
+  allowing preceding steps to execute first. Runtime payload/lease checks remain
+  independent; no rollback, new shell authority or model-quality guarantee.
+
 - Fresh agent proposals must explicitly state each step's boolean
   `use_previous`. Missing/null data-flow choices are rejected before execution
   instead of silently dropping tool evidence. Existing hash-approved plan

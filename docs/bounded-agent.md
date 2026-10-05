@@ -60,6 +60,28 @@ Command-line flags cannot widen a named envelope. Edit the operator-owned
 configuration to change authority. Disabling or narrowing the policy causes
 later runs to stop or require a newly matching plan.
 
+### Preview a named policy before doing the work
+
+The same envelope can be used without immediately executing its proposed steps:
+
+```sh
+contextbridge cluster agent plan --config ./config.yml --policy release-copy --goal "Draft a release note, then check every factual claim" --out ./release-plan.json
+contextbridge cluster agent run --config ./config.yml --plan ./release-plan.json --approve sha256:REVIEWED_HASH --ask critical
+```
+
+`plan --policy` inherits the exact configured planner, tenant, worker group,
+providers/profiles, egress and budgets. It writes a `manual_hash` plan, not an
+automatically executable plan. `run` requires the exact reviewed hash and checks
+that both the execution binding and the named authority still match. Even a
+re-hashed edited plan cannot claim a different envelope under the policy's name.
+As with `auto --policy`, planner/allowlist/limit override flags are rejected.
+
+Preview means **no proposed work steps**, not no computation: one ordinary
+planner job runs and may incur cost or network use as authorized by the policy.
+An adapter selected as the planner still runs that adapter. Route previews are
+read-only snapshots, not reservations or guarantees of eventual availability.
+Choose a local model planner if preview itself must be local model-only work.
+
 For an adapter, local/remote classification applies to the exact profile via
 `cluster.policies.execution.adapter_profile_classifications`. Named authorities
 check the planner and **every** allowed profile before planning; a local first
@@ -110,6 +132,15 @@ an object into the existing string representation before policy validation and
 hash approval; it does not invent fields, repair actions, round numeric IDs, or
 grant a profile. Non-adapter instructions remain text-only. Saved approved plans
 remain string-only, so reading an old plan never silently changes its meaning.
+
+After structural validation, Core checks every proposed target's local route and
+every dynamic model-to-adapter handoff's nonempty operator contract. This
+preflight runs again before the first execution step. A broken later route or
+missing handoff contract therefore stops before any earlier work step is
+submitted. It does not validate an adapter-specific action, prove the goal will
+be achieved, or predict generated JSON; runtime validation, lease fencing and
+per-step confirmation remain necessary. Completed work is not rolled back when
+a later runtime/provider error occurs.
 
 ## Execution binding
 
@@ -178,6 +209,23 @@ change cannot inherit stale authority.
   cost requires an explicit operator decision.
 
 The model proposes work inside the envelope. The operator owns the envelope.
+
+### CLI regression proof
+
+The standard Go suite checks named previews, exact approval, scope propagation,
+policy changes, CLI override rejection and preflight failures. For an isolated
+external-binary proof, build `./cmd/contextbridge`, set
+`CONTEXTBRIDGE_TEST_BINARY` to that executable's absolute path, and run:
+
+```sh
+go test ./cmd/contextbridge -run TestAgentPolicyPreviewExternalBinary -count=1 -v
+```
+
+This test invokes the real CLI against a disposable loopback relay fixture. It
+checks that preview submits one planner job and zero work jobs, wrong approval
+submits no work, and exact approval submits one scoped step. The fixture supplies
+deterministic results: this is a CLI/transport proof, not a model-quality or real
+worker/adapter proof. The test is skipped unless the binary is explicitly given.
 
 ## Adapter evidence and external changes
 

@@ -126,6 +126,16 @@ func TestAgentAutoRejectsWiderAuthorityBeforeLoadingConfig(t *testing.T) {
 }
 
 func TestAgentAutoNamedPolicyCarriesProjectAuthorityWithoutPlannerEscalation(t *testing.T) {
+	for _, automatic := range []bool{true, false} {
+		name := "reviewed"
+		if automatic {
+			name = "automatic"
+		}
+		t.Run(name, func(t *testing.T) { testAgentNamedPolicyCarriesProjectAuthority(t, automatic) })
+	}
+}
+
+func testAgentNamedPolicyCarriesProjectAuthority(t *testing.T, automatic bool) {
 	const token = "agent_policy_test_token_0123456789"
 	var lock sync.Mutex
 	requests := []cluster.SubmitRequest{}
@@ -231,8 +241,37 @@ func TestAgentAutoNamedPolicyCarriesProjectAuthorityWithoutPlannerEscalation(t *
 	if err := config.Save(configPath, cfg); err != nil {
 		t.Fatal(err)
 	}
-	if err := clusterAgentAutoCommand([]string{"--config", configPath, "--token", token, "--goal", "Review this.", "--policy", "demo"}); err != nil {
-		t.Fatalf("named automatic policy failed: %v", err)
+	args := []string{"--config", configPath, "--token", token, "--goal", "Review this.", "--policy", "demo"}
+	if automatic {
+		if err := clusterAgentAutoCommand(args); err != nil {
+			t.Fatalf("named automatic policy failed: %v", err)
+		}
+	} else {
+		path := filepath.Join(t.TempDir(), "plan.json")
+		if err := clusterAgentPlanCommand(append(args, "--out", path)); err != nil {
+			t.Fatalf("named preview failed: %v", err)
+		}
+		lock.Lock()
+		count := len(requests)
+		lock.Unlock()
+		if count != 1 {
+			t.Fatalf("preview executed adapter work: %d requests", count)
+		}
+		raw, err := readRegularFileBounded(path, agentMaximumPlanFileBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan, err := decodeAgentPlan(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest, _, err := encodeAgentPlan(plan)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := clusterAgentRunCommand([]string{"--config", configPath, "--token", token, "--plan", path, "--approve", digest}); err != nil {
+			t.Fatalf("named reviewed execution failed: %v", err)
+		}
 	}
 	lock.Lock()
 	defer lock.Unlock()

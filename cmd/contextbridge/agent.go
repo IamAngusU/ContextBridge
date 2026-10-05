@@ -176,7 +176,7 @@ func clusterAgentPlanOrAutoCommand(args []string, automatic bool) error {
 	maxRuntime := flags.Int("max-runtime", 900, "total execution timeout in seconds (30-1800)")
 	out := flags.String("out", "", "write the immutable plan evidence to a new file")
 	plannerTimeout := flags.Int("planner-timeout", 180, "planner job timeout in seconds (10-600)")
-	authorityName := flags.String("policy", "", "named project authority from cluster.policies.agent_authorities (agent auto only)")
+	authorityName := flags.String("policy", "", "named project authority from cluster.policies.agent_authorities; plan only previews, auto also executes")
 	ask := flags.String("ask", "none", "additional execution confirmation: all, critical (adapters/remote/unknown), or none; does not expand authority")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -203,12 +203,9 @@ func clusterAgentPlanOrAutoCommand(args []string, automatic bool) error {
 	if err := validateAgentText("goal", *goal, agentMaximumGoalBytes); err != nil {
 		return err
 	}
-	if !automatic && strings.TrimSpace(*authorityName) != "" {
-		return errors.New("--policy is valid only with cluster agent auto")
-	}
 	explicitFlags := map[string]bool{}
 	flags.Visit(func(option *flag.Flag) { explicitFlags[option.Name] = true })
-	if automatic && strings.TrimSpace(*authorityName) != "" {
+	if strings.TrimSpace(*authorityName) != "" {
 		for _, forbidden := range []string{"planner-provider", "planner-profile", "planner-model", "allow-providers", "allow-adapter-profiles", "max-steps", "step-timeout", "max-runtime", "planner-timeout"} {
 			if explicitFlags[forbidden] {
 				return fmt.Errorf("--%s cannot override named agent policy %q; edit the operator-owned config instead", forbidden, strings.TrimSpace(*authorityName))
@@ -219,13 +216,10 @@ func clusterAgentPlanOrAutoCommand(args []string, automatic bool) error {
 	if err != nil {
 		return err
 	}
-	policy, err := newAgentPolicy(*allowedProviders, *allowedProfiles, *maxSteps, *stepTimeout, *maxRuntime)
-	if err != nil {
-		return err
-	}
+	var policy agentPolicy
 	planner := strings.ToLower(strings.TrimSpace(*plannerProvider))
 	profile := strings.ToLower(strings.TrimSpace(*plannerProfile))
-	if automatic && strings.TrimSpace(*authorityName) != "" {
+	if strings.TrimSpace(*authorityName) != "" {
 		var authority config.AgentAuthority
 		policy, authority, err = configuredAgentPolicy(cfg, strings.TrimSpace(*authorityName))
 		if err != nil {
@@ -235,6 +229,11 @@ func clusterAgentPlanOrAutoCommand(args []string, automatic bool) error {
 		profile = strings.ToLower(strings.TrimSpace(authority.Planner.AdapterProfile))
 		*plannerModel = strings.TrimSpace(authority.Planner.Model)
 		*plannerTimeout = authority.Planner.TimeoutSeconds
+	} else {
+		policy, err = newAgentPolicy(*allowedProviders, *allowedProfiles, *maxSteps, *stepTimeout, *maxRuntime)
+		if err != nil {
+			return err
+		}
 	}
 	if *plannerTimeout < 10 || *plannerTimeout > 600 {
 		return errors.New("--planner-timeout must be between 10 and 600 seconds")
@@ -342,6 +341,9 @@ func clusterAgentPlanOrAutoCommand(args []string, automatic bool) error {
 	if err := validateAgentPlan(plan); err != nil {
 		return fmt.Errorf("planner proposal rejected: %w", err)
 	}
+	if err := validateAgentExecutionTargets(cfg, plan); err != nil {
+		return err
+	}
 	if automatic && plan.AuthorizationMode == agentAuthorizationLocal {
 		if err := validateLocalAutoAgentPlan(plan); err != nil {
 			return fmt.Errorf("planner proposal rejected by local-only automatic policy: %w", err)
@@ -380,12 +382,8 @@ func clusterAgentPlanOrAutoCommand(args []string, automatic bool) error {
 			return fmt.Errorf("agent execution binding changed after automatic planning (%s); create a new automatic plan", agentBindingChangeSummary(plan.Binding, currentBinding))
 		}
 		if plan.AuthorizationMode == agentAuthorizationPolicy {
-			currentPolicy, authority, err := configuredAgentPolicy(freshConfig, plan.Policy.AuthorityName)
-			if err != nil {
-				return fmt.Errorf("configured automatic policy changed after planning: %w", err)
-			}
-			if !equalAgentPolicy(currentPolicy, plan.Policy) || plan.Evidence.Provider != strings.ToLower(strings.TrimSpace(authority.Planner.Provider)) || plan.Evidence.Profile != strings.ToLower(strings.TrimSpace(authority.Planner.AdapterProfile)) {
-				return errors.New("configured automatic policy or planner target changed after planning; create a new automatic plan")
+			if err := validateAgentConfiguredAuthority(freshConfig, plan); err != nil {
+				return err
 			}
 		}
 		freshToken := clusterClientToken(freshConfig, *token)
@@ -455,6 +453,9 @@ func clusterAgentRunCommand(args []string) error {
 	if currentBinding != plan.Binding {
 		return fmt.Errorf("agent execution binding changed after approval (%s): planned serializable config %s at %s, current %s at %s; create and review a new plan", agentBindingChangeSummary(plan.Binding, currentBinding), plan.Binding.ConfigSHA256, plan.Binding.RelayURL, currentBinding.ConfigSHA256, currentBinding.RelayURL)
 	}
+	if err := validateAgentConfiguredAuthority(cfg, plan); err != nil {
+		return err
+	}
 	*token = clusterClientToken(cfg, *token)
 	if *token == "" {
 		return errors.New("a producer token is required; pass --token, set CONTEXTBRIDGE_CLUSTER_TOKEN, or configure cluster.client_token")
@@ -470,6 +471,9 @@ func executeAgentPlan(plan agentPlan, digest string, cfg config.Config, token st
 
 func executeAgentPlanWithConfirmation(plan agentPlan, digest string, cfg config.Config, token, ask string) error {
 	if err := validateAgentAsk(ask); err != nil {
+		return err
+	}
+	if err := validateAgentExecutionTargets(cfg, plan); err != nil {
 		return err
 	}
 	confirmer := newAgentConfirmer(os.Stdin, os.Stderr)
@@ -588,6 +592,35 @@ func executeAgentPlanWithConfirmation(plan agentPlan, digest string, cfg config.
 		summary += fmt.Sprintf(" · %d step(s) with unknown cost", unknownCost)
 	}
 	fmt.Fprintln(os.Stderr, summary)
+	return nil
+}
+
+// Validate everything knowable locally before submitting the first work step.
+// This is not an adapter payload validator or a promise of worker availability.
+// Dynamic requests still undergo strict JSON and adapter-side checks at runtime.
+func validateAgentExecutionTargets(cfg config.Config, plan agentPlan) error {
+	for _, step := range plan.Steps {
+		if _, err := agentRouteForTarget(cfg, step.Provider, step.Profile); err != nil {
+			return fmt.Errorf("agent preflight step %s route: %w", step.ID, err)
+		}
+		if step.Provider == "adapter" && step.UsePrevious && !agentAdapterHasInstructionContract(cfg, step.Profile) {
+			return fmt.Errorf("agent preflight step %s: previous-result adapter handoff requires an operator-owned agent_instruction_contract", step.ID)
+		}
+	}
+	return nil
+}
+
+func validateAgentConfiguredAuthority(cfg config.Config, plan agentPlan) error {
+	if plan.Policy.AuthorityName == "" {
+		return nil
+	}
+	currentPolicy, authority, err := configuredAgentPolicy(cfg, plan.Policy.AuthorityName)
+	if err != nil {
+		return fmt.Errorf("configured agent policy changed after planning: %w", err)
+	}
+	if !equalAgentPolicy(currentPolicy, plan.Policy) || plan.Evidence.Provider != strings.ToLower(strings.TrimSpace(authority.Planner.Provider)) || plan.Evidence.Profile != strings.ToLower(strings.TrimSpace(authority.Planner.AdapterProfile)) {
+		return errors.New("configured agent policy or planner target changed after planning; create and review a new plan")
+	}
 	return nil
 }
 
@@ -930,7 +963,7 @@ func agentAdapterHasInstructionContract(cfg config.Config, profileName string) b
 		return false
 	}
 	contract, ok := profile.Options[config.AdapterAgentInstructionContractOption].(string)
-	return ok && contract != ""
+	return ok && strings.TrimSpace(contract) != ""
 }
 
 func agentStepJobInput(cfg config.Config, step agentStep, previous string) (string, string, bridge.OutputSpec, error) {
@@ -1187,6 +1220,9 @@ func validateAgentPlan(plan agentPlan) error {
 	if plan.AuthorizationMode == agentAuthorizationPolicy {
 		return validateConfiguredAutoAgentPlan(plan)
 	}
+	if plan.Policy.AuthorityName != "" {
+		return validateConfiguredAgentPolicy(plan.Policy)
+	}
 	return nil
 }
 
@@ -1221,17 +1257,21 @@ func validateConfiguredAutoAgentPlan(plan agentPlan) error {
 	if plan.AuthorizationMode != agentAuthorizationPolicy {
 		return errors.New("authorization mode must be configured_policy_auto")
 	}
-	if !agentAuthorityNamePattern.MatchString(plan.Policy.AuthorityName) || strings.Contains(plan.Policy.AuthorityName, "..") {
-		return errors.New("configured automatic plan requires a safe authority name")
+	return validateConfiguredAgentPolicy(plan.Policy)
+}
+
+func validateConfiguredAgentPolicy(policy agentPolicy) error {
+	if !agentAuthorityNamePattern.MatchString(policy.AuthorityName) || strings.Contains(policy.AuthorityName, "..") {
+		return errors.New("configured agent plan requires a safe authority name")
 	}
-	if plan.Policy.TenantID != "" && (!agentSafeRoutingValue(plan.Policy.TenantID, 128) || strings.Contains(plan.Policy.TenantID, "..")) {
-		return errors.New("configured automatic plan has an invalid tenant_id")
+	if policy.TenantID != "" && (!agentSafeRoutingValue(policy.TenantID, 128) || strings.Contains(policy.TenantID, "..")) {
+		return errors.New("configured agent plan has an invalid tenant_id")
 	}
-	if plan.Policy.Group != "" && (!agentSafeRoutingValue(plan.Policy.Group, 128) || strings.Contains(plan.Policy.Group, "..")) {
-		return errors.New("configured automatic plan has an invalid group")
+	if policy.Group != "" && (!agentSafeRoutingValue(policy.Group, 128) || strings.Contains(policy.Group, "..")) {
+		return errors.New("configured agent plan has an invalid group")
 	}
-	if plan.Policy.Egress != "local_only" && plan.Policy.Egress != "remote_allowed" {
-		return errors.New("configured automatic plan egress must be local_only or remote_allowed")
+	if policy.Egress != "local_only" && policy.Egress != "remote_allowed" {
+		return errors.New("configured agent plan egress must be local_only or remote_allowed")
 	}
 	return nil
 }
@@ -1488,7 +1528,7 @@ func printAgentPlan(plan agentPlan, digest string) {
 		if step.Profile != "" {
 			provider += "/" + step.Profile
 		}
-		input := "goal only"
+		input := "instruction only (no previous result)"
 		if step.UsePrevious {
 			input = "previous result as untrusted input"
 			if step.Provider == "adapter" {
