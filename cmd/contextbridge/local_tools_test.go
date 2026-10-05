@@ -14,6 +14,12 @@ func TestChatLocalToolsDoNotSubmitToPool(t *testing.T) {
 	if err := state.turn(context.Background(), "Was macht 10 mal 3 / 30?"); err != nil {
 		t.Fatal(err)
 	}
+	if err := state.turn(context.Background(), "Was macht (4,2 * 10.1) mal 3 / 30 + 5?"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.turn(context.Background(), "What is 1,234 + 0.5?"); err == nil {
+		t.Fatal("ambiguous thousands separator accepted")
+	}
 	if err := state.turn(context.Background(), "Calculate 1/0"); err == nil {
 		t.Fatal("division by zero accepted")
 	}
@@ -49,11 +55,15 @@ func TestMCPLocalToolWorksWithoutServiceAndStrictlyRejectsEffects(t *testing.T) 
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}`,
 		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
 		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"contextbridge.local_tool","arguments":{"prompt":"Was macht 10 mal 3 / 30?"}}}`,
+		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"contextbridge.local_tool","arguments":{"prompt":"Was macht (4,2 * 10.1) mal 3 / 30 + 5?"}}}`,
 	)
 	if result := toolStructured(t, responses[1]); result["tool"] != "calculator" || result["text"] != "10 * 3 / 30 = 1" {
 		t.Fatal(result)
 	}
-	for _, raw := range []string{`{"prompt":"1+1","shell":"echo x"}`, `{"prompt":"1+1","Prompt":"2+2"}`, `{"prompt":"write file.txt"}`, `{"prompt":null}`, `{"prompt":"1 / 0"}`} {
+	if result := toolStructured(t, responses[2]); result["tool"] != "calculator" || result["text"] != "(4,2 * 10.1) * 3 / 30 + 5 = 9.242" {
+		t.Fatalf("mixed-decimal MCP result: %#v", result)
+	}
+	for _, raw := range []string{`{"prompt":"1+1","shell":"echo x"}`, `{"prompt":"1+1","Prompt":"2+2"}`, `{"prompt":"write file.txt"}`, `{"prompt":null}`, `{"prompt":"1 / 0"}`, `{"prompt":"What is 1,234 + 0.5?"}`} {
 		if _, err := callLocalTool(json.RawMessage(raw)); err == nil {
 			t.Errorf("accepted %s", raw)
 		}

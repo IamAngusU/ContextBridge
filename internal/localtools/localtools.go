@@ -86,12 +86,9 @@ func Resolve(prompt string) (result Result, handled bool, err error) {
 		return Result{}, false, nil
 	}
 	result = Result{Tool: "calculator", Input: strings.TrimSpace(text)}
-	if strings.Contains(text, ",") {
-		// Commas without a German request are ambiguous (decimal vs thousands).
-		if !german || strings.Contains(text, ".") {
-			return result, true, errors.New("calculator: ambiguous decimal separators; use decimal points without thousands separators")
-		}
-		text = strings.ReplaceAll(text, ",", ".")
+	text, err = normalizeDecimalLiterals(text, german)
+	if err != nil {
+		return result, true, fmt.Errorf("calculator: %w", err)
 	}
 	value, err := Evaluate(text)
 	if err != nil {
@@ -99,6 +96,46 @@ func Resolve(prompt string) (result Result, handled bool, err error) {
 	}
 	result.Text = result.Input + " = " + format(value)
 	return result, true, nil
+}
+
+// Normalize each numeric literal independently: 4,2 * 10.1 is not a grouped
+// number. Dots retain their existing decimal meaning. A German request keeps
+// its existing comma-decimal preference; otherwise a comma with a plausible
+// thousands group (1,234) requires clarification rather than a numeric guess.
+// Grouping separators are never silently removed, including within German
+// requests. Evaluate remains the bounded, dot-only rational arithmetic parser.
+func normalizeDecimalLiterals(text string, german bool) (string, error) {
+	if !strings.Contains(text, ",") {
+		return text, nil
+	}
+	var normalized strings.Builder
+	for pos := 0; pos < len(text); {
+		start := pos
+		for pos < len(text) && (text[pos] >= '0' && text[pos] <= '9' || text[pos] == '.' || text[pos] == ',') {
+			pos++
+		}
+		if pos == start {
+			normalized.WriteByte(text[pos])
+			pos++
+			continue
+		}
+		literal := text[start:pos]
+		if strings.Contains(literal, ",") {
+			if strings.Count(literal, ",") != 1 || strings.Contains(literal, ".") {
+				return "", errors.New("ambiguous decimal separators within one number; use ungrouped numbers such as 1234.56")
+			}
+			integer, fraction, _ := strings.Cut(literal, ",")
+			if fraction == "" {
+				return "", errors.New("invalid decimal number; a decimal comma needs fractional digits")
+			}
+			if !german && len(integer) >= 1 && len(integer) <= 3 && integer[0] != '0' && len(fraction) == 3 {
+				return "", errors.New("ambiguous comma (decimal or thousands); write 1234 for an integer or 1.234 for a decimal")
+			}
+			literal = integer + "." + fraction
+		}
+		normalized.WriteString(literal)
+	}
+	return normalized.String(), nil
 }
 
 // Evaluate is a bounded rational-arithmetic parser, never eval or a subprocess.

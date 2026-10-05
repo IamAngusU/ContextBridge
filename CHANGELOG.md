@@ -38,6 +38,13 @@
   Scoped sandbox actions are distinguished from arbitrary host execution;
   adapter-side permission and validation boundaries remain unchanged.
 
+- Fixed local arithmetic rejecting mixed decimal commas and points in separate
+  numbers, such as `(4,2 * 10.1) * 3 / 30 + 5`. The shared `do`/chat/MCP resolver
+  now normalizes each literal independently and accepts unambiguous comma
+  decimals in English/bare expressions. German comma conventions remain intact;
+  ambiguous thousands-style commas and malformed/grouped literals fail without
+  model fallback. Exact rational arithmetic and resource limits are unchanged.
+
 - Accept strict structured adapter instructions in fresh agent proposals before
   policy validation and hash approval. Existing saved-plan representation,
   profile restrictions and adapter validation remain unchanged; non-adapter

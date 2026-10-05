@@ -174,6 +174,15 @@ or unsupported requests are not extracted into partial calculations; this is not
 yet a general autonomous tool-selection loop. MCP clients can explicitly use the
 same bounded resolver through `contextbridge.local_tool` with a `prompt` string.
 
+Decimal commas and points may be mixed **between numbers**: `cb do "Was macht
+(4,2 * 10.1) mal 3 / 30 + 5?"` computes exactly `9.242`. Results use decimal
+points (or an exact fraction). Unambiguous comma decimals such as `4,2` also work
+in English and bare expressions. German requests retain their comma-decimal
+convention; without that context, `1,234` is ambiguous and asks for an ungrouped
+integer (`1234`) or a decimal point (`1.234`). Thousands grouping such as
+`1.234,56` or `1,234.56` is not supported: write `1234.56`. Malformed or ambiguous
+recognized arithmetic remains a calculator error, never an LLM fallback.
+
 Run `cb do` without a prompt for an interactive session. `cluster chat` remains
 the explicit surface for provider, model, profile, artifact, E2EE, and budget
 overrides; `do` accepts those same flags when they are needed. Put flags before
