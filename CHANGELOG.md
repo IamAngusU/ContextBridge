@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Fixed named local-only agents incorrectly rejecting explicitly local adapter
+  profiles as remote. Planning now checks every allowed profile independently
+  using the same per-profile classification precedence as relay policy; remote
+  sibling profiles, tenant denials, cost opt-ins and critical confirmations
+  remain enforced.
+- Clarified planner request-object nesting and step metadata separation, avoiding
+  double-escaped source and metadata incorrectly inserted into adapter payloads.
+  Scoped sandbox actions are distinguished from arbitrary host execution;
+  adapter-side permission and validation boundaries remain unchanged.
+
 - Accept strict structured adapter instructions in fresh agent proposals before
   policy validation and hash approval. Existing saved-plan representation,
   profile restrictions and adapter validation remain unchanged; non-adapter

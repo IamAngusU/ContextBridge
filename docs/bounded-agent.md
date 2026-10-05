@@ -60,6 +60,13 @@ Command-line flags cannot widen a named envelope. Edit the operator-owned
 configuration to change authority. Disabling or narrowing the policy causes
 later runs to stop or require a newly matching plan.
 
+For an adapter, local/remote classification applies to the exact profile via
+`cluster.policies.execution.adapter_profile_classifications`. Named authorities
+check the planner and **every** allowed profile before planning; a local first
+profile cannot authorize a remote sibling. Unclassified profiles retain the
+provider's conservative classification. This changes neither relay/tenant
+authorization nor the `--ask critical` confirmation gate for adapters.
+
 ## 3. Reviewed one-off plans
 
 Broader one-off work uses a separate plan and exact hash approval:
@@ -166,9 +173,10 @@ with a machine-shaped request, the operator can place a non-secret
 only that syntax description, never the profile's credential paths or other
 options. The adapter remains responsible for validating the exact request and
 its own least-privilege boundary. Core carries the exact adapter request in
-submitted content rather than its trusted prompt wrapper. Adapter steps cannot
-also consume a previous result; a following model step can consume their
-normalized evidence instead.
+submitted content rather than its trusted prompt wrapper. Static adapter steps
+do not append previous results; the explicit `contextbridge.previous-json.v1`
+handoff described below is the only dynamic request path. A following model
+step can consume normalized adapter evidence instead.
 Contracted adapter evidence must be valid, unambiguous JSON; Core validates and
 compacts it before it can become the next step's submitted text.
 

@@ -554,7 +554,7 @@ func executeAgentPlanWithConfirmation(plan agentPlan, digest string, cfg config.
 		if submission.Output.Truncated {
 			return fmt.Errorf("agent step %s exceeded its output limit; partial text is not passed to another step", step.ID)
 		}
-		if err := budget.consume(step.Provider, job.Usage); err != nil {
+		if err := budget.consume(step.Provider, step.Profile, job.Usage); err != nil {
 			return fmt.Errorf("agent step %s: %w", step.ID, err)
 		}
 		previous, err = agentResultText(submission.Output)
@@ -652,17 +652,39 @@ func configuredAgentPolicy(cfg config.Config, requested string) (agentPolicy, co
 	policy.Egress = strings.TrimSpace(authority.Egress)
 	policy.MaxCostUSD = authority.MaxCostUSD
 	policy.AllowUnknownCost = authority.AllowUnknownCost
-	targets := append([]string{strings.ToLower(strings.TrimSpace(authority.Planner.Provider))}, policy.AllowedProviders...)
-	for _, provider := range targets {
+	// Classify each exact adapter target, not the generic provider and not just
+	// the first profile. A local profile must not bless a remote sibling.
+	targets := []agentStep{{Provider: strings.ToLower(strings.TrimSpace(authority.Planner.Provider)), Profile: strings.ToLower(strings.TrimSpace(authority.Planner.AdapterProfile))}}
+	for _, provider := range policy.AllowedProviders {
+		if provider == "adapter" {
+			if len(policy.AllowedAdapterProfiles) == 0 {
+				return agentPolicy{}, authority, fmt.Errorf("agent policy %q requires explicitly allowed adapter profiles", name)
+			}
+			for _, profile := range policy.AllowedAdapterProfiles {
+				targets = append(targets, agentStep{Provider: provider, Profile: profile})
+			}
+		} else {
+			targets = append(targets, agentStep{Provider: provider})
+		}
+	}
+	for _, target := range targets {
+		provider, profile := target.Provider, target.Profile
 		if _, ok := cfg.Engine(provider); !ok {
 			return agentPolicy{}, authority, fmt.Errorf("agent policy %q references unavailable provider %q", name, provider)
 		}
-		classification, costBounded := agentProviderPolicy(cfg, provider)
+		label := provider
+		if provider == "adapter" {
+			if _, ok := cfg.AdapterProfiles[profile]; !ok || !agentContains(policy.AllowedAdapterProfiles, profile) {
+				return agentPolicy{}, authority, fmt.Errorf("agent policy %q references unknown or unapproved adapter profile %q", name, profile)
+			}
+			label += "/" + profile
+		}
+		classification, costBounded := agentTargetPolicy(cfg, provider, profile)
 		if classification == "unknown" {
-			return agentPolicy{}, authority, fmt.Errorf("agent policy %q cannot classify provider %q as local or remote", name, provider)
+			return agentPolicy{}, authority, fmt.Errorf("agent policy %q cannot classify target %q as local or remote", name, label)
 		}
 		if policy.Egress == "local_only" && classification != "local" {
-			return agentPolicy{}, authority, fmt.Errorf("agent policy %q is local_only but provider %q is remote", name, provider)
+			return agentPolicy{}, authority, fmt.Errorf("agent policy %q is local_only but target %q is not local", name, label)
 		}
 		if classification == "remote" && costBounded && policy.MaxCostUSD <= 0 {
 			return agentPolicy{}, authority, fmt.Errorf("agent policy %q requires positive max_cost_usd for cost-bounded provider %q", name, provider)
@@ -670,9 +692,8 @@ func configuredAgentPolicy(cfg config.Config, requested string) (agentPolicy, co
 		if classification == "remote" && !costBounded && !policy.AllowUnknownCost {
 			return agentPolicy{}, authority, fmt.Errorf("agent policy %q must explicitly set allow_unknown_cost for provider %q", name, provider)
 		}
-		requirements := agentRequirements(cfg, policy, provider, "")
+		requirements := agentRequirements(cfg, policy, provider, profile)
 		if provider == "adapter" {
-			requirements.AdapterProfile = firstAgentAdapterProfile(policy, authority, provider)
 			requirements.AdapterFreshSession = true
 			requirements.AdapterEphemeralSession = true
 		}
@@ -680,25 +701,25 @@ func configuredAgentPolicy(cfg config.Config, requested string) (agentPolicy, co
 			return agentPolicy{}, authority, fmt.Errorf("agent policy %q target %q conflicts with relay execution policy: %w", name, provider, err)
 		}
 	}
-	for _, profile := range policy.AllowedAdapterProfiles {
-		if _, ok := cfg.AdapterProfiles[profile]; !ok {
-			return agentPolicy{}, authority, fmt.Errorf("agent policy %q references unknown adapter profile %q", name, profile)
-		}
-	}
 	return policy, authority, nil
 }
 
-func firstAgentAdapterProfile(policy agentPolicy, authority config.AgentAuthority, provider string) string {
-	if provider != "adapter" {
-		return ""
+func agentTargetPolicy(cfg config.Config, provider, profile string) (classification string, costBounded bool) {
+	classification, costBounded = agentProviderPolicy(cfg, provider)
+	if strings.EqualFold(provider, "adapter") && strings.TrimSpace(profile) != "" {
+		for name, value := range cfg.Cluster.Policies.Execution.AdapterProfileClassifications {
+			if strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(profile)) {
+				// Same operator-owned per-profile precedence as the relay. Missing
+				// classifications retain the conservative provider default.
+				classification = strings.ToLower(strings.TrimSpace(value))
+				if classification != "local" && classification != "remote" {
+					classification = "unknown"
+				}
+				break
+			}
+		}
 	}
-	if strings.TrimSpace(authority.Planner.AdapterProfile) != "" {
-		return strings.ToLower(strings.TrimSpace(authority.Planner.AdapterProfile))
-	}
-	if len(policy.AllowedAdapterProfiles) > 0 {
-		return policy.AllowedAdapterProfiles[0]
-	}
-	return ""
+	return classification, costBounded
 }
 
 func agentProviderPolicy(cfg config.Config, provider string) (classification string, costBounded bool) {
@@ -736,7 +757,7 @@ func agentProviderPolicy(cfg config.Config, provider string) (classification str
 
 func agentRequirements(cfg config.Config, policy agentPolicy, provider, profile string) cluster.Requirements {
 	requirements := cluster.Requirements{Task: "generation", Provider: provider, AdapterProfile: profile, Group: policy.Group, Egress: policy.Egress}
-	classification, costBounded := agentProviderPolicy(cfg, provider)
+	classification, costBounded := agentTargetPolicy(cfg, provider, profile)
 	if classification == "remote" && costBounded {
 		requirements.MaxCostUSD = policy.MaxCostUSD
 	}
@@ -756,7 +777,7 @@ func newAgentRunBudget(cfg config.Config, policy agentPolicy, planner agentPlann
 	if policy.MaxCostUSD <= 0 {
 		return budget, nil
 	}
-	classification, costBounded := agentProviderPolicy(cfg, planner.Provider)
+	classification, costBounded := agentTargetPolicy(cfg, planner.Provider, planner.Profile)
 	if classification != "remote" || !costBounded {
 		return budget, nil
 	}
@@ -770,7 +791,7 @@ func (b *agentRunBudget) authorize(provider string, requirements *cluster.Requir
 	if !b.enforced {
 		return nil
 	}
-	classification, costBounded := agentProviderPolicy(b.cfg, provider)
+	classification, costBounded := agentTargetPolicy(b.cfg, provider, requirements.AdapterProfile)
 	if classification != "remote" || !costBounded {
 		return nil
 	}
@@ -781,11 +802,11 @@ func (b *agentRunBudget) authorize(provider string, requirements *cluster.Requir
 	return nil
 }
 
-func (b *agentRunBudget) consume(provider string, usage cluster.Usage) error {
+func (b *agentRunBudget) consume(provider, profile string, usage cluster.Usage) error {
 	if !b.enforced {
 		return nil
 	}
-	classification, costBounded := agentProviderPolicy(b.cfg, provider)
+	classification, costBounded := agentTargetPolicy(b.cfg, provider, profile)
 	if classification != "remote" || !costBounded {
 		return nil
 	}
@@ -834,7 +855,8 @@ Hard rules:
 - Adapter profile is required only for provider adapter and must be one of %s.
 - Operator-supplied adapter instruction contracts are exactly %s. They describe request syntax only and cannot widen provider, profile, egress, credential, budget, tenant, or confirmation authority.
 - For an adapter step with a listed contract, encode instruction exactly as that contract requires. Do not invent actions or fields. Without a listed contract, use plain text only.
-- Do not include models, credentials, shell commands, executable selection, arbitrary host paths, code execution, downloads, uploads, recursive delegation, or policy changes. A selected adapter contract may explicitly define bounded workspace-relative file or archive operations; only then encode those exact actions and fields. Include a URL or other operation name only when that contract explicitly requires it.
+- When that contract requires JSON, prefer a nested object for instruction, not a string containing escaped JSON. id, provider, profile and use_previous are STEP fields: put them next to instruction, never inside its request object. Only the contract's own fields belong inside instruction. Non-adapter instructions and the previous-json marker remain strings.
+- Do not include models, credentials, shell commands, executable selection, arbitrary host paths, arbitrary code execution, downloads, uploads, recursive delegation, or policy changes. A selected adapter contract may explicitly define bounded workspace-relative file, archive or isolated sandbox operations; only then encode those exact actions and fields. Never infer host execution from a sandbox action. Include a URL or other operation name only when that contract explicitly requires it.
 - Every step returns text or strict JSON. A later non-adapter step may set use_previous=true to receive the previous result as explicitly untrusted submitted content.
 - A later adapter step may set use_previous=true only when its profile has a listed contract, its immediately preceding step is non-adapter, and its instruction is exactly "contextbridge.previous-json.v1". Core then validates and submits the previous result as one strict JSON object; it never concatenates instructions or evidence into that request.
 - The first step must set use_previous=false.
@@ -875,7 +897,8 @@ Hard rules:
 - Adapter profile is required only for provider adapter and must be one of %s.
 - Operator-supplied adapter instruction contracts are exactly %s. They describe request syntax only and cannot widen provider, profile, egress, credential, budget, tenant, or confirmation authority.
 - For an adapter step with a listed contract, encode instruction exactly as that contract requires. Do not invent actions or fields. Without a listed contract, use plain text only.
-- Do not include models, credentials, shell commands, executable selection, arbitrary host paths, code execution, downloads, uploads, recursive delegation, or policy changes. A selected adapter contract may explicitly define bounded workspace-relative file or archive operations; only then encode those exact actions and fields. Include a URL or other operation name only when that contract explicitly requires it.
+- When that contract requires JSON, prefer a nested object for instruction, not a string containing escaped JSON. id, provider, profile and use_previous are STEP fields: put them next to instruction, never inside its request object. Only the contract's own fields belong inside instruction. Non-adapter instructions and the previous-json marker remain strings.
+- Do not include models, credentials, shell commands, executable selection, arbitrary host paths, arbitrary code execution, downloads, uploads, recursive delegation, or policy changes. A selected adapter contract may explicitly define bounded workspace-relative file, archive or isolated sandbox operations; only then encode those exact actions and fields. Never infer host execution from a sandbox action. Include a URL or other operation name only when that contract explicitly requires it.
 - Every step returns text or strict JSON. A later non-adapter step may set use_previous=true to receive the previous result as explicitly untrusted submitted content.
 - A later adapter step may set use_previous=true only when its profile has a listed contract, its immediately preceding step is non-adapter, and its instruction is exactly "contextbridge.previous-json.v1". Core then validates and submits the previous result as one strict JSON object; it never concatenates instructions or evidence into that request.
 - The first step must set use_previous=false.
@@ -1471,7 +1494,7 @@ func printAgentPlan(plan agentPlan, digest string) {
 		}
 		fmt.Fprintf(os.Stderr, "  %d. %s · %s · %s\n     %s\n", index+1, step.ID, provider, input, step.Instruction)
 	}
-	fmt.Fprintf(os.Stderr, "  limits · %d steps · %ds/step · %ds total · text/JSON results · no shell/arbitrary host paths/code execution\n", plan.Policy.MaxSteps, plan.Policy.StepTimeoutSeconds, plan.Policy.MaxRuntimeSeconds)
+	fmt.Fprintf(os.Stderr, "  limits · %d steps · %ds/step · %ds total · text/JSON results · no shell/arbitrary host paths; adapter actions require their own authority\n", plan.Policy.MaxSteps, plan.Policy.StepTimeoutSeconds, plan.Policy.MaxRuntimeSeconds)
 	fmt.Fprintf(os.Stderr, "  binding · config %s · execution %s\n", plan.Binding.ConfigSHA256, plan.Binding.ExecutionSHA256)
 	fmt.Fprintf(os.Stderr, "  relay · %s · scope %s\n", plan.Binding.RelayURL, plan.Binding.Scope)
 }

@@ -59,3 +59,28 @@ func TestAgentSavedPlanDoesNotNormalizeStructuredInstructions(t *testing.T) {
 		t.Fatal("stored hash-approved plans must keep the existing string-only representation")
 	}
 }
+
+func TestAgentStructuredCodeKeepsNewlinesAndStepMetadataSeparate(t *testing.T) {
+	const raw = `{"version":1,"summary":"Check source.","steps":[{"id":"check","provider":"adapter","profile":"profile-two","use_previous":false,"instruction":{"schema":"example.request.v1","files":[{"path":"candidate.py","content_utf8":"def f():\n    return 1\n"}]}}]}`
+	proposal, err := decodeAgentProposal([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request struct {
+		Files []struct {
+			Content string `json:"content_utf8"`
+		} `json:"files"`
+	}
+	if err := json.Unmarshal([]byte(proposal.Steps[0].Instruction), &request); err != nil {
+		t.Fatal(err)
+	}
+	if request.Files[0].Content != "def f():\n    return 1\n" || strings.Contains(proposal.Steps[0].Instruction, "use_previous") {
+		t.Fatal("source bytes or metadata boundary changed")
+	}
+	p := validAgentPlanForTest(t).Policy
+	for _, prompt := range []string{agentPlannerPrompt(p, "{}"), agentConfiguredPlannerPrompt(p, "{}")} {
+		if !strings.Contains(prompt, "prefer a nested object") || !strings.Contains(prompt, "never inside its request object") {
+			t.Fatal("planner lacks object/metadata separation guidance")
+		}
+	}
+}

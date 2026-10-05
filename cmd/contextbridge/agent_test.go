@@ -111,14 +111,14 @@ func TestAgentAggregateCostBudgetConsumesPlannerAndStepReservations(t *testing.T
 	if err := budget.authorize("deepseek", &first); err != nil || math.Abs(first.MaxCostUSD-.8) > 1e-9 {
 		t.Fatalf("first step did not receive the post-planner remainder: %#v %v", first, err)
 	}
-	if err := budget.consume("deepseek", cluster.Usage{ReservedCostUSD: .6}); err != nil {
+	if err := budget.consume("deepseek", "", cluster.Usage{ReservedCostUSD: .6}); err != nil {
 		t.Fatal(err)
 	}
 	second := agentRequirements(cfg, policy, "deepseek", "")
 	if err := budget.authorize("deepseek", &second); err != nil || math.Abs(second.MaxCostUSD-.2) > 1e-9 {
 		t.Fatalf("second step received duplicated authority: %#v %v", second, err)
 	}
-	if err := budget.consume("deepseek", cluster.Usage{ReservedCostUSD: .6}); err == nil || !strings.Contains(err.Error(), "remaining aggregate authority") {
+	if err := budget.consume("deepseek", "", cluster.Usage{ReservedCostUSD: .6}); err == nil || !strings.Contains(err.Error(), "remaining aggregate authority") {
 		t.Fatalf("aggregate over-reservation was accepted: %v", err)
 	}
 	if math.Abs(budget.remaining-.2) > 1e-9 {
