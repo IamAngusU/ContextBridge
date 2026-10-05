@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -26,7 +27,7 @@ func TestAgentProposalAcceptsStructuredAdapterInstruction(t *testing.T) {
 	}
 	quoted, _ := json.Marshal(instruction)
 	stringProposal, err := decodeAgentProposal([]byte(`{"version":1,"summary":"Inspect the project.","steps":[{"id":"inspect","provider":"adapter","profile":"profile-two","use_previous":false,"instruction":` + string(quoted) + `}]}`))
-	if err != nil || stringProposal.Steps[0] != proposal.Steps[0] {
+	if err != nil || !reflect.DeepEqual(stringProposal.Steps[0], proposal.Steps[0]) {
 		t.Fatalf("existing quoted contract differs from object form: %#v %v", stringProposal, err)
 	}
 	plan := validAgentPlanForTest(t)

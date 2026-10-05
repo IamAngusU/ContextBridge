@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Added optional `input_steps` for bounded model steps: select multiple earlier
+  results and preserve the original goal in an explicitly untrusted evidence
+  bundle with step/job provenance and content digests. Selection is approval-
+  bound, local run-only and capped at 128 KiB without silent truncation. Unknown,
+  future or duplicate references, selections on adapter steps, or mixed `use_previous` input modes
+  fail closed. Exact adapter handoffs, old plan hashes, offline and authority
+  defaults remain unchanged. This does not add automatic persistent memory,
+  conditional repair, resume or a model-quality guarantee.
+- Added optional approval-bound `output_mode: json` for model steps, including
+  final answers. Core requests the actual provider JSON contract and rejects
+  text/Markdown or mixed envelopes instead of treating a prompt's formatting
+  request as a guarantee. Defaults remain text; adapter output contracts and
+  required exact JSON handoffs cannot be overridden.
+
 - Added optional `--mode lazy|normal` to `do`, cluster chat and agent plan/auto,
   plus interactive `/mode`. Reuse-first guidance applies to model prompts only;
   exact adapter requests, deterministic tools, offline policy and authority are

@@ -245,7 +245,8 @@ handoff described below is the only dynamic request path. A following model
 step can consume normalized adapter evidence instead.
 Every fresh proposed step must explicitly include boolean `use_previous`.
 Missing/null values are rejected before any execution. A step with `false`
-receives no previous result; use `true` for model steps that need diagnostics.
+receives no previous result unless it explicitly selects `input_steps` (below);
+use `true` for model steps that need only the immediately preceding result.
 Core does not guess data dependencies from natural language. Existing approved
 plan encoding is unchanged, and adding an omitted flag is never an automatic
 repair of a hash-approved plan.
@@ -258,6 +259,90 @@ explicitly untrusted text. It is not promoted into the later model's system
 instructions. This supports workflows such as research, source-aware drafting,
 and verification while keeping the plan limited to the reviewed providers and
 profiles.
+
+### Select several earlier results without losing task context
+
+A non-adapter step may set `input_steps` to an ordered list of earlier step IDs
+with `use_previous: false`. For example, after authorized steps named `memory`,
+`inspect` and `checks`, a model step can use:
+
+```json
+{
+  "id": "repair",
+  "provider": "ollama",
+  "instruction": "Use the project constraints, current code and actual test diagnostics to propose a correction. Cite source step IDs. Do not claim that a proposal has passed tests.",
+  "use_previous": false,
+  "input_steps": ["memory", "inspect", "checks"]
+}
+```
+
+This is a step fragment, not an executable whole plan. The earlier steps must
+exist and use explicitly allowed tools/profiles. A model's statement that tests
+passed is not a test receipt. The planner now knows this data-flow option;
+Core does not guess dependencies or insert read/write actions on its behalf.
+
+The selected outputs and original goal become one strict JSON submitted-content
+bundle (`contextbridge.agent-evidence.v1`). Each input carries its step ID,
+provider/profile, job ID, assigned node, SHA-256 and complete content. Metadata
+describes observed execution, not factual correctness or an authenticated
+receipt. Both the goal and all returned evidence remain untrusted data, never
+system instructions. No unselected result or implicit predecessor is added.
+
+- Selection/order is visible in preview and bound to the plan approval hash.
+- Only unique **earlier** IDs in the same plan are allowed; no self/forward or
+  cross-run references. At most five earlier results can fit a six-step plan.
+- `input_steps` cannot be mixed with `use_previous: true` or used on an adapter
+  step. Exact model-to-adapter JSON handoffs remain unchanged.
+- The complete encoded bundle, including the goal and metadata, is limited to
+  128 KiB. Missing, corrupted or over-limit evidence stops before submitting the
+  dependent step; nothing is silently shortened or replaced with a summary.
+  The ordinary 256 KiB source-output limit and rejection of truncated provider
+  results still apply. Already completed work is not rolled back.
+  This byte ceiling is not a tokenizer/context-window guarantee: choose narrow
+  tool outputs appropriate to the selected model. Automatic model-aware
+  compaction and protection against a provider's own context clipping are not
+  supplied by this feature.
+- Only explicitly referenced outputs are retained in this run's private memory;
+  nothing is persisted by this mechanism or shared across users/runs. Existing
+  tenant/group, destination, egress, cost, time, confirmation and one-attempt
+  restrictions still apply to the resolved step. This feature does not redact
+  secrets from an authorized source: use appropriately scoped read tools.
+- Omitting the field preserves legacy behavior and old plan hashes. Empty lists
+  have no effect. This does not change `do` into an automatic tool loop.
+
+An allowed workspace adapter's task-memory read can supply `memory`, while a
+separate inspection or test action supplies other inputs. Persistent storage,
+compaction, pin/todo rules, access control and writes remain the adapter's job.
+Automatic memory loading/saving, conditional stop/repair, durable resume and
+validated recipe promotion are **not** implemented by `input_steps`.
+
+Run the CLI transport proof with an explicitly built binary:
+
+```sh
+CONTEXTBRIDGE_TEST_BINARY=/absolute/path/contextbridge go test ./cmd/contextbridge -run TestAgentEvidenceExternalBinary -count=1 -v
+```
+
+On PowerShell, set `$env:CONTEXTBRIDGE_TEST_BINARY` first. The test uses the real
+CLI and a disposable loopback relay fixture, checks hash-bound selection and
+scope propagation, and supplies deterministic provider results. It does not
+measure a real model's reasoning or prove an installed persistent-memory adapter.
+
+### Machine-readable model results
+
+A non-adapter step can also set `output_mode: "json"` to request the bridge's
+actual JSON output contract, including for a final answer. Prompting a model to
+"return JSON" without this field still uses the default text output contract.
+Valid values are `text` and `json`; omission preserves the legacy default. The
+choice is shown in preview, approval-hash-bound and cannot grant file artifacts
+or new tools. Adapter output remains governed by its own contract; the field is
+not allowed on adapter steps. Explicit `text` cannot precede an exact adapter
+JSON handoff, which requires JSON.
+
+For an explicitly JSON model step, Core rejects text/Markdown envelopes, mixed
+text/JSON results, missing JSON and ambiguous JSON before using the result.
+This checks structure, not a domain schema or the truth of the answer. A later
+tool must still validate all required properties and independently authorize
+any side effect. Failure stops the run without an automatic retry or text fallback.
 
 A local workspace adapter may likewise define exact versioned JSON actions for
 an owned workspace. That exception does not authorize arbitrary host paths,
