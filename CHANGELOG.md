@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Added optional `--mode lazy|normal` to `do`, cluster chat and agent plan/auto,
+  plus interactive `/mode`. Reuse-first guidance applies to model prompts only;
+  exact adapter requests, deterministic tools, offline policy and authority are
+  unchanged. Saved style is approval-hash-bound. Defaults and global settings
+  remain unchanged; no coding-quality or performance gain is claimed.
+
 - Added `cluster agent plan --policy NAME`: preview inside the existing named
   authority, then execute only after exact hash approval. Planner, tenant/group,
   egress, provider/profile and cost limits remain bound; CLI overrides and

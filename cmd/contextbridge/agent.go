@@ -54,6 +54,7 @@ var agentAuthorityNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0
 type agentPlan struct {
 	Version           int                   `json:"version"`
 	AuthorizationMode string                `json:"authorization_mode"`
+	WorkMode          string                `json:"work_mode,omitempty"`
 	Goal              string                `json:"goal"`
 	Summary           string                `json:"summary"`
 	Policy            agentPolicy           `json:"policy"`
@@ -178,7 +179,11 @@ func clusterAgentPlanOrAutoCommand(args []string, automatic bool) error {
 	plannerTimeout := flags.Int("planner-timeout", 180, "planner job timeout in seconds (10-600)")
 	authorityName := flags.String("policy", "", "named project authority from cluster.policies.agent_authorities; plan only previews, auto also executes")
 	ask := flags.String("ask", "none", "additional execution confirmation: all, critical (adapters/remote/unknown), or none; does not expand authority")
+	workMode := flags.String("mode", "", "optional coding style: normal or lazy; bound into plan approval, never authority")
 	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if err := validateWorkMode(*workMode); err != nil {
 		return err
 	}
 	if err := validateAgentAsk(*ask); err != nil {
@@ -286,6 +291,7 @@ func clusterAgentPlanOrAutoCommand(args []string, automatic bool) error {
 		}
 	}
 	plannerSession := "agent-planner-" + fmt.Sprint(time.Now().UnixNano())
+	prompt = applyWorkMode(*workMode, prompt)
 	plannerRoute, err := agentRouteForTarget(cfg, planner, profile)
 	if err != nil {
 		return fmt.Errorf("agent planner route: %w", err)
@@ -327,7 +333,7 @@ func clusterAgentPlanOrAutoCommand(args []string, automatic bool) error {
 		return fmt.Errorf("planner proposal rejected: %w", err)
 	}
 	plan := agentPlan{
-		Version: agentPlanVersion, AuthorizationMode: agentAuthorizationManual,
+		Version: agentPlanVersion, AuthorizationMode: agentAuthorizationManual, WorkMode: *workMode,
 		Goal: strings.TrimSpace(*goal), Summary: proposal.Summary, Policy: policy, Steps: proposal.Steps,
 		Binding:  binding,
 		Evidence: agentPlannerEvidence{Provider: planner, Profile: profile, Model: submission.Output.Model, JobID: job.ID, NodeID: job.AssignedNode, CostStatus: agentCostStatus(job.Usage), CostSource: job.Usage.CostSource, ReservedCostUSD: job.Usage.ReservedCostUSD},
@@ -511,6 +517,7 @@ func executeAgentPlanWithConfirmation(plan agentPlan, digest string, cfg config.
 				return fmt.Errorf("agent step %s: %w", step.ID, err)
 			}
 		}
+		prompt = agentWorkModePrompt(plan.WorkMode, step, prompt)
 		stepRoute, err := agentRouteForTarget(cfg, step.Provider, step.Profile)
 		if err != nil {
 			stepCancel()
@@ -1124,6 +1131,9 @@ func decodeAgentJSON(raw []byte, target interface{}) error {
 }
 
 func validateAgentPlan(plan agentPlan) error {
+	if err := validateWorkMode(plan.WorkMode); err != nil {
+		return err
+	}
 	if plan.Version != agentPlanVersion {
 		return fmt.Errorf("agent plan version must be %d; create and review a new plan", agentPlanVersion)
 	}
@@ -1514,6 +1524,9 @@ func previewAgentRoutes(ctx context.Context, relayURL, token string, cfg config.
 func printAgentPlan(plan agentPlan, digest string) {
 	fmt.Fprintf(os.Stderr, "Agent plan %s\n", digest)
 	fmt.Fprintf(os.Stderr, "  authorization · %s\n", plan.AuthorizationMode)
+	if plan.WorkMode != "" {
+		fmt.Fprintf(os.Stderr, "  work style · %s · no additional authority; adapter contracts unchanged\n", plan.WorkMode)
+	}
 	if plan.Policy.AuthorityName != "" {
 		fmt.Fprintf(os.Stderr, "  project policy · %s · tenant %s · group %s · egress %s\n", plan.Policy.AuthorityName, emptyLabel(plan.Policy.TenantID, "none"), emptyLabel(plan.Policy.Group, "any"), plan.Policy.Egress)
 		if plan.Policy.MaxCostUSD > 0 {

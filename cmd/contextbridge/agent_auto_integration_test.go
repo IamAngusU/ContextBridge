@@ -15,6 +15,13 @@ import (
 )
 
 func TestAgentAutoSubmitsOnlyLocalOllamaJobs(t *testing.T) {
+	for _, mode := range []string{"", "normal", "lazy"} {
+		t.Run("mode="+mode, func(t *testing.T) { testAgentAutoSubmitsOnlyLocalOllamaJobs(t, mode) })
+	}
+}
+
+func testAgentAutoSubmitsOnlyLocalOllamaJobs(t *testing.T, mode string) {
+	t.Helper()
 	const token = "agent_auto_test_token_0123456789"
 	var lock sync.Mutex
 	requests := []cluster.SubmitRequest{}
@@ -90,7 +97,7 @@ func TestAgentAutoSubmitsOnlyLocalOllamaJobs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := clusterAgentAutoCommand([]string{"--config", configPath, "--token", token, "--goal", "Return a local marker.", "--max-steps", "1"}); err != nil {
+	if err := clusterAgentAutoCommand([]string{"--config", configPath, "--token", token, "--goal", "Return a local marker.", "--max-steps", "1", "--mode", mode}); err != nil {
 		t.Fatalf("automatic local agent failed: %v", err)
 	}
 	lock.Lock()
@@ -99,6 +106,16 @@ func TestAgentAutoSubmitsOnlyLocalOllamaJobs(t *testing.T) {
 		t.Fatalf("expected planner and one execution request, got %d", len(requests))
 	}
 	for index, request := range requests {
+		var payload bridge.Job
+		if err := json.Unmarshal(request.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.HasPrefix(payload.Prompt, lazyWorkGuidance); got != (mode == "lazy") {
+			t.Fatalf("request %d wrong work style %q: %q", index+1, mode, payload.Prompt)
+		}
+		if mode == "normal" && !strings.HasPrefix(payload.Prompt, "Work style: normal.") {
+			t.Fatalf("request %d did not reset optional style", index+1)
+		}
 		if request.Requirements.Provider != "ollama" || request.Requirements.Egress != "local_only" {
 			t.Fatalf("request %d escaped local Ollama boundary: %#v", index+1, request.Requirements)
 		}
@@ -131,11 +148,13 @@ func TestAgentAutoNamedPolicyCarriesProjectAuthorityWithoutPlannerEscalation(t *
 		if automatic {
 			name = "automatic"
 		}
-		t.Run(name, func(t *testing.T) { testAgentNamedPolicyCarriesProjectAuthority(t, automatic) })
+		for _, mode := range []string{"", "lazy"} {
+			t.Run(name+"/mode="+mode, func(t *testing.T) { testAgentNamedPolicyCarriesProjectAuthority(t, automatic, mode) })
+		}
 	}
 }
 
-func testAgentNamedPolicyCarriesProjectAuthority(t *testing.T, automatic bool) {
+func testAgentNamedPolicyCarriesProjectAuthority(t *testing.T, automatic bool, mode string) {
 	const token = "agent_policy_test_token_0123456789"
 	var lock sync.Mutex
 	requests := []cluster.SubmitRequest{}
@@ -241,7 +260,7 @@ func testAgentNamedPolicyCarriesProjectAuthority(t *testing.T, automatic bool) {
 	if err := config.Save(configPath, cfg); err != nil {
 		t.Fatal(err)
 	}
-	args := []string{"--config", configPath, "--token", token, "--goal", "Review this.", "--policy", "demo"}
+	args := []string{"--config", configPath, "--token", token, "--goal", "Review this.", "--policy", "demo", "--mode", mode}
 	if automatic {
 		if err := clusterAgentAutoCommand(args); err != nil {
 			t.Fatalf("named automatic policy failed: %v", err)
@@ -294,6 +313,9 @@ func testAgentNamedPolicyCarriesProjectAuthority(t *testing.T, automatic bool) {
 		}
 		if payload.Route != wantRoutes[index] {
 			t.Fatalf("request %d route = %q; want %q", index+1, payload.Route, wantRoutes[index])
+		}
+		if got := strings.HasPrefix(payload.Prompt, lazyWorkGuidance); got != (mode == "lazy" && payload.Provider != "adapter") {
+			t.Fatalf("request %d wrong model/adapter style boundary", index+1)
 		}
 		if payload.Provider != wantProviders[index] || payload.Model != wantModels[index] || input.Requirements.Model != wantModels[index] {
 			t.Fatalf("request %d target = provider %q model %q (requirement %q); want provider %q model %q", index+1, payload.Provider, payload.Model, input.Requirements.Model, wantProviders[index], wantModels[index])

@@ -4,6 +4,10 @@ ContextBridge separates three authorization tiers. The planner proposes text
 steps; it never grants itself a provider, credential, route, budget, tenant,
 worker group, tool, file operation, or retry.
 
+An optional [`--mode lazy` work style](lazy-mode.md) encourages reuse and minimal
+correct changes. It is included in plan approval and does not change any of the
+authority tiers below.
+
 ## 1. Local-only automatic work
 
 For a low-risk local text workflow, the operator can allow up to three Ollama
