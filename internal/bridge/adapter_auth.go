@@ -110,6 +110,7 @@ func (s *Server) handleAdapterStatusV2(w http.ResponseWriter, r *http.Request) {
 	slicesSort(profiles)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"ok": true, "protocol": adapterProtocolV2, "principal_id": identity.id, "allowed_profiles": profiles,
+		"features": []string{"resource_activity_progress_v1"},
 	})
 }
 

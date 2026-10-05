@@ -13,10 +13,23 @@ func normalizeResourceActivity(raw json.RawMessage, spec OutputSpec, provider st
 	if provider != "adapter" || len(raw) == 0 {
 		return nil, "not_reported"
 	}
-	activity, err := resourceactivity.DecodeResourceActivity(raw)
-	if err != nil {
-		return nil, "invalid"
+	return resourceactivity.Normalize(raw, true)
+}
+
+func normalizeProgressActivity(progress AdapterProgress, previous *AdapterProgress, enabled bool) AdapterProgress {
+	if enabled && len(progress.Activity) == 0 && progress.ActivityStatus == "invalid" {
+		return progress
 	}
-	canonical, _ := json.Marshal(activity)
-	return canonical, "reported"
+	if enabled && len(progress.Activity) == 0 && previous != nil {
+		progress.Activity = append(json.RawMessage(nil), previous.Activity...)
+		progress.ActivityStatus = previous.ActivityStatus
+	} else {
+		progress.Activity, progress.ActivityStatus = resourceactivity.Normalize(progress.Activity, enabled)
+	}
+	return progress
+}
+
+func cloneAdapterProgress(progress AdapterProgress) AdapterProgress {
+	progress.Activity = append(json.RawMessage(nil), progress.Activity...)
+	return progress
 }

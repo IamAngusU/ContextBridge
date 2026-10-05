@@ -17,7 +17,7 @@ const MaximumActivityItems = 32
 const MaximumActivityBytes = 24 << 10
 
 // ResourceActivity is opt-in, adapter-reported evidence, not a model's narration
-// or an independent attestation. It shares the final result's ACL and retention.
+// or an independent attestation. It shares the job progress/result ACL and retention.
 type ResourceActivity struct {
 	Schema    string        `json:"schema"`
 	Items     []ResourceUse `json:"items"`
@@ -36,6 +36,23 @@ type ResourceUse struct {
 
 var activityID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,95}$`)
 var activitySHA256 = regexp.MustCompile(`^[a-f0-9]{64}$`)
+
+// Normalize never trusts a sender-supplied status and never makes an optional
+// telemetry failure an execution failure. A new canonical buffer owns the data.
+func Normalize(raw json.RawMessage, enabled bool) (json.RawMessage, string) {
+	if !enabled {
+		return nil, ""
+	}
+	if len(raw) == 0 {
+		return nil, "not_reported"
+	}
+	activity, err := DecodeResourceActivity(raw)
+	if err != nil {
+		return nil, "invalid"
+	}
+	canonical, _ := json.Marshal(activity)
+	return canonical, "reported"
+}
 
 // DecodeResourceActivity fails closed as a whole: a partially accepted manifest
 // would make counts misleading. Never fetch URLs, resolve refs, or inspect text.

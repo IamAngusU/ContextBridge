@@ -187,6 +187,7 @@ func (s *Store) UpdateAdapterProgress(id string, generation uint64, progress Ada
 		return true
 	}
 	progress.UpdatedAt = time.Now().UTC()
+	progress = normalizeProgressActivity(progress, item.progress, item.job.Output.Activity)
 	copy := progress
 	item.progress = &copy
 	return true
@@ -205,7 +206,7 @@ func (s *Store) AdapterProgress(id string) (AdapterProgress, bool, bool) {
 	if item.progress == nil {
 		return AdapterProgress{}, true, false
 	}
-	return *item.progress, true, true
+	return cloneAdapterProgress(*item.progress), true, true
 }
 
 func NewStore(dir string) (*Store, error) {
@@ -800,6 +801,7 @@ func (s *Store) UpdateAdapterProgressScoped(id string, generation uint64, princi
 		return true
 	}
 	progress.UpdatedAt = now.UTC()
+	progress = normalizeProgressActivity(progress, item.progress, item.job.Output.Activity)
 	copy := progress
 	item.progress = &copy
 	return true
@@ -819,7 +821,7 @@ func (s *Store) AdapterProgressScoped(id string, generation uint64, principal, c
 	if item.progress == nil {
 		return AdapterProgress{}, true, false
 	}
-	return *item.progress, true, true
+	return cloneAdapterProgress(*item.progress), true, true
 }
 
 func (s *Store) CompleteScoped(id string, generation uint64, principal, capability string, output Output) bool {

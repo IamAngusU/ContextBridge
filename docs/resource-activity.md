@@ -54,6 +54,53 @@ Lifecycle `state` comes from the relay, independently of resource evidence.
 Counts describe returned receipts, not necessarily unique files or the complete
 process. If `truncated` is true, counts are lower bounds.
 
+## Live snapshots
+
+The same GET projection can show the latest **partial** snapshot while the job
+is running (`evidence_phase: progress`, `progress_sequence`, `attempt`). After
+termination, `evidence_phase: final` uses only the terminal result. Missing final
+evidence is not silently replaced with a partial progress inventory. A restart
+that marks execution ambiguous must not revive it or replay side effects.
+
+```http
+GET /v1/cluster/jobs/JOB_ID/activity/stream
+Authorization: Bearer YOUR_EXISTING_JOB_READER_CREDENTIAL
+```
+
+The separate SSE stream emits `event: activity.snapshot` and a full
+`JobResourceActivity` as `data`. **Replace**, do not append, the previous snapshot.
+Unchanged snapshots are suppressed; normal progress sequence changes can produce
+another snapshot with the same resources. There are no SSE IDs or replay log:
+`after` and `Last-Event-ID` are rejected. Reconnect for the current state. A fast
+job may only be observed after completion; a snapshot is not a guarantee that
+every intermediate action will be delivered.
+
+Streams close on terminal state, absent opt-in or E2EE, client disconnect,
+permission loss, or after 30 seconds. Clients reconnect while still interested
+and authorized; clients with Bearer credentials can use an authenticated fetch
+stream. Do not put secrets in URLs. Token expiry/revocation and current job scope
+are checked before each snapshot (250 ms polling). Capacity is shared with
+lifecycle SSE: 64 total and 8 per role/subject. Rejected connections return 503
+and `Retry-After: 1`. Writes are bounded to 10 seconds; heartbeats every 10 seconds.
+The stream is `no-store, no-transform`, with proxy buffering disabled.
+
+Discovery: the relay advertises `live_resource_activity_snapshots_v1`. The
+executing local Core separately advertises `resource_activity_progress_v1` in
+scoped `GET /v2/adapter/status.features`. Only send the optional `activity`
+progress field if that feature is present **and** `job.output.activity` is true.
+Its manifest has the same schema and limits as final receipts below. Older
+Core versions can reject unknown progress fields; lack of the feature means
+omit the field, not retry a rejected mutation.
+
+Each progress manifest is the adapter's complete current bounded snapshot,
+not a delta. A higher sequence replaces it; an omitted manifest preserves it;
+an explicit empty `items` array clears it. Invalid reports clear prior evidence
+and carry `activity_status: invalid` across the worker, without failing the job.
+Duplicate/stale sequence numbers and foreign node/attempt/lease credentials
+cannot replace current evidence. Core revalidates before storing and projecting.
+The existing worker polls local progress every 500 ms. The relay, worker and
+local Core all need this version for end-to-end delivery.
+
 ## Adapter completion contract
 
 When `job.output.activity` is true, an adapter can add this optional sibling of
@@ -102,14 +149,14 @@ not turn an already completed mutation into an error or trigger replay.
 
 ## Privacy, lifecycle and current scope
 
-- Activity shares the final result's existing retention and job-read ACL. It is
+- Activity shares the job progress/result's existing retention and job-read ACL. It is
   not a new global memory or second audit database. Labels/URLs can be sensitive;
   enabling it intentionally publishes them to those job readers.
 - The relay revalidates before projecting. Sealed input or result jobs return
   `encrypted`, never a parallel plaintext resource list.
-- Job histories and lifecycle SSE remain content-minimized. Follow
-  `/jobs/JOB_ID/events/stream`, then fetch activity after completion.
-  **Per-resource live streaming is not implemented in this slice.**
+- Job histories and lifecycle SSE remain content-minimized. Semantic resource
+  snapshots are available only through the job's scoped detail/activity surfaces;
+  no historical list of snapshots or global resource audit log is created.
 - Existing lifecycle remains available even if an adapter is absent or does not
   report resources. No private provider is required.
 - Pipeline activity uses persisted parent/child edges. Agent steps are not
@@ -118,6 +165,8 @@ not turn an already completed mutation into an error or trigger replay.
 - The optional workspace adapter is the first concrete producer: tool actions,
   file inventory/content reads, direct change-set creation/update, ZIP
   export/reuse. It does not claim to view images, browse websites, or list every
-  internally touched plan/transaction file.
+  internally touched plan/transaction file. Its progress report follows each
+  tool operation, not every internal file access; fast jobs may complete before
+  the next worker poll. No artificial runtime wait is added for visualization.
 
 No UI is bundled; terminal, web and external clients can consume the same API.

@@ -546,6 +546,7 @@ func (r *Relay) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/cluster/jobs/{id}", r.authorize("admin", "observer", "producer")(r.handleJob))
 	mux.HandleFunc("GET /v1/cluster/jobs/{id}/events", r.authorize("admin", "observer", "producer")(r.handleJobEvents))
 	mux.HandleFunc("GET /v1/cluster/jobs/{id}/activity", r.authorize("admin", "observer", "producer")(r.handleJobActivity))
+	mux.HandleFunc("GET /v1/cluster/jobs/{id}/activity/stream", r.authorize("admin", "observer", "producer")(r.handleJobActivityStream))
 	mux.HandleFunc("GET /v1/cluster/jobs/{id}/events/stream", r.authorize("admin", "observer", "producer")(r.handleJobEventStream))
 	mux.HandleFunc("GET /v1/cluster/jobs/{id}/route", r.authorize("admin", "observer", "producer")(r.handleJobRoute))
 	mux.HandleFunc("GET /v1/cluster/jobs/{id}/estimate", r.authorize("admin", "observer", "producer")(r.handleJobRuntimeEstimate))
@@ -1430,6 +1431,8 @@ func jobHistoryResponse(job Job) Job {
 		progress := *job.Progress
 		progress.Text = ""
 		progress.Detail = ""
+		progress.Activity = nil
+		progress.ActivityStatus = ""
 		job.Progress = &progress
 	}
 	if job.RoutingDecision != nil {

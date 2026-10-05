@@ -56,6 +56,7 @@ func TestProducerTenantScopeConstrainsExistingExecutionSurfaces(t *testing.T) {
 		"/v1/cluster/jobs/" + jobB.ID,
 		"/v1/cluster/jobs/" + jobB.ID + "/events",
 		"/v1/cluster/jobs/" + jobB.ID + "/activity",
+		"/v1/cluster/jobs/" + jobB.ID + "/activity/stream",
 		"/v1/cluster/jobs/" + jobB.ID + "/events/stream",
 		"/v1/cluster/jobs/" + jobB.ID + "/route",
 		"/v1/cluster/jobs/" + jobB.ID + "/estimate",

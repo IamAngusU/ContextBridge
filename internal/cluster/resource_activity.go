@@ -12,18 +12,21 @@ import (
 // JobResourceActivity deliberately is not a run/subagent tree. Only the relay's
 // persisted relationships may create groups; source labels and text may not.
 type JobResourceActivity struct {
-	Schema         string                         `json:"schema"`
-	JobID          string                         `json:"job_id"`
-	State          string                         `json:"state"`
-	NodeID         string                         `json:"node_id,omitempty"`
-	CreatedAt      time.Time                      `json:"created_at"`
-	FinishedAt     time.Time                      `json:"finished_at,omitempty"`
-	EvidenceStatus string                         `json:"evidence_status"`
-	EvidenceSource string                         `json:"evidence_source,omitempty"`
-	Resources      []resourceactivity.ResourceUse `json:"resources"`
-	Counts         map[string]int                 `json:"counts"`
-	Truncated      bool                           `json:"truncated,omitempty"`
-	EndpointID     int                            `json:"executed_adapter_endpoint_id,omitempty"`
+	Schema           string                         `json:"schema"`
+	JobID            string                         `json:"job_id"`
+	State            string                         `json:"state"`
+	NodeID           string                         `json:"node_id,omitempty"`
+	CreatedAt        time.Time                      `json:"created_at"`
+	FinishedAt       time.Time                      `json:"finished_at,omitempty"`
+	EvidenceStatus   string                         `json:"evidence_status"`
+	EvidenceSource   string                         `json:"evidence_source,omitempty"`
+	EvidencePhase    string                         `json:"evidence_phase,omitempty"`
+	ProgressSequence uint64                         `json:"progress_sequence,omitempty"`
+	Attempt          int                            `json:"attempt,omitempty"`
+	Resources        []resourceactivity.ResourceUse `json:"resources"`
+	Counts           map[string]int                 `json:"counts"`
+	Truncated        bool                           `json:"truncated,omitempty"`
+	EndpointID       int                            `json:"executed_adapter_endpoint_id,omitempty"`
 }
 
 func ProjectJobResourceActivity(job Job) JobResourceActivity {
@@ -31,7 +34,7 @@ func ProjectJobResourceActivity(job Job) JobResourceActivity {
 		Schema: "contextbridge.job-activity.v1", JobID: job.ID, State: activityJobState(job),
 		NodeID: job.AssignedNode, CreatedAt: job.CreatedAt, FinishedAt: job.FinishedAt,
 		EvidenceStatus: "not_requested", Resources: []resourceactivity.ResourceUse{}, Counts: map[string]int{},
-		EndpointID: job.ExecutedAdapterEndpointID,
+		EndpointID: job.ExecutedAdapterEndpointID, Attempt: job.Attempt,
 	}
 	// Even a malformed worker response cannot expose plaintext resource evidence
 	// beside a sealed input/result. The relay cannot inspect encrypted contents.
@@ -39,18 +42,19 @@ func ProjectJobResourceActivity(job Job) JobResourceActivity {
 		view.EvidenceStatus = "encrypted"
 		return view
 	}
-	var input struct {
-		Output struct {
-			Activity bool `json:"activity"`
-		} `json:"output"`
-	}
-	if json.Unmarshal(job.Payload, &input) != nil || !input.Output.Activity {
+	if !jobRequestsActivity(job) {
 		return view
 	}
 	view.EvidenceStatus = "pending"
 	if job.Status != JobCompleted && job.Status != JobFailed && job.Status != JobCancelled {
+		view.EvidencePhase = "progress"
+		if job.Progress != nil && job.Requirements.Provider == "adapter" {
+			view.ProgressSequence = job.Progress.Sequence
+			return projectResourceManifest(view, job.Progress.Activity, job.Progress.ActivityStatus)
+		}
 		return view
 	}
+	view.EvidencePhase = "final"
 	view.EvidenceStatus = "not_reported"
 	var result struct {
 		Output *struct {
@@ -69,13 +73,17 @@ func ProjectJobResourceActivity(job Job) JobResourceActivity {
 	if output.Provider != "adapter" || job.Requirements.Provider != "adapter" {
 		return view
 	}
-	if len(output.Activity) == 0 {
-		if output.ActivityStatus == "invalid" {
+	return projectResourceManifest(view, output.Activity, output.ActivityStatus)
+}
+
+func projectResourceManifest(view JobResourceActivity, raw json.RawMessage, status string) JobResourceActivity {
+	if len(raw) == 0 {
+		if status == "invalid" {
 			view.EvidenceStatus = "invalid"
 		}
 		return view
 	}
-	activity, err := resourceactivity.DecodeResourceActivity(output.Activity)
+	activity, err := resourceactivity.DecodeResourceActivity(raw)
 	if err != nil {
 		view.EvidenceStatus = "invalid"
 		return view
@@ -86,6 +94,29 @@ func ProjectJobResourceActivity(job Job) JobResourceActivity {
 		view.Counts[item.Kind+"."+item.Action]++
 	}
 	return view
+}
+
+func jobRequestsActivity(job Job) bool {
+	var input struct {
+		Output struct {
+			Activity bool `json:"activity"`
+		} `json:"output"`
+	}
+	return job.SealedPayload == nil && json.Unmarshal(job.Payload, &input) == nil && input.Output.Activity
+}
+
+func normalizeJobActivityProgress(job Job, progress JobProgress) JobProgress {
+	enabled := jobRequestsActivity(job) && job.Requirements.Provider == "adapter" && job.SealedResult == nil
+	if enabled && len(progress.Activity) == 0 && progress.ActivityStatus == "invalid" {
+		return progress
+	}
+	if enabled && len(progress.Activity) == 0 && job.Progress != nil {
+		progress.Activity = append(json.RawMessage(nil), job.Progress.Activity...)
+		progress.ActivityStatus = job.Progress.ActivityStatus
+		return progress
+	}
+	progress.Activity, progress.ActivityStatus = resourceactivity.Normalize(progress.Activity, enabled)
+	return progress
 }
 
 func (r *Relay) handleJobActivity(w http.ResponseWriter, req *http.Request) {
@@ -111,6 +142,9 @@ func jobResourceActivitySchema() map[string]interface{} {
 			"executed_adapter_endpoint_id": map[string]string{"type": "integer"},
 			"evidence_status":              map[string]interface{}{"type": "string", "enum": []string{"not_requested", "pending", "not_reported", "invalid", "encrypted", "reported"}},
 			"evidence_source":              map[string]interface{}{"type": "string", "const": "adapter_reported"},
+			"evidence_phase":               map[string]interface{}{"type": "string", "enum": []string{"progress", "final"}},
+			"progress_sequence":            map[string]interface{}{"type": "integer", "minimum": 1},
+			"attempt":                      map[string]interface{}{"type": "integer", "minimum": 1},
 			"truncated":                    map[string]string{"type": "boolean"},
 			"counts":                       map[string]interface{}{"type": "object", "additionalProperties": map[string]interface{}{"type": "integer", "minimum": 0, "maximum": resourceactivity.MaximumActivityItems}},
 			"resources": map[string]interface{}{

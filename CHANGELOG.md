@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Carry opt-in resource snapshots through fenced adapter progress and expose
+  `/v1/cluster/jobs/{id}/activity/stream`. Full bounded snapshots replace prior
+  snapshots, reconnect reads current state, and live connections recheck token
+  validity and job scope. No resource metadata enters generic history/events.
+  Adapter-v2 status advertises support before adapters send the new fields.
+  Running evidence is explicitly partial; terminal results and existing
+  ambiguous/restart behavior remain authoritative.
+
 - Added opt-in `output.activity` adapter resource receipts, approval-bound agent
   `--activity`, and the authenticated `/v1/cluster/jobs/{id}/activity` projection.
   Strict bounded evidence distinguishes read/cited/inspected/created/reused;

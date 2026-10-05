@@ -243,7 +243,12 @@ neither call nor discover operator state through that path.
 ## Optional resource activity
 
 Optional resource receipts can accompany a successful v2 completion when the
-job explicitly requests `output.activity`. See the provider-neutral
+job explicitly requests `output.activity`. When scoped status advertises
+`features: ["resource_activity_progress_v1"]`, an adapter can also publish
+the same bounded manifest through its existing fenced progress endpoint.
+Omit new progress fields when support is absent; older strict Core decoders may
+reject them. The relay offers a separate authenticated snapshot SSE endpoint.
+See the provider-neutral
 [resource activity contract](resource-activity.md) for schema, bounds, privacy,
 and the distinction between adapter reports and authoritative lifecycle events.
 

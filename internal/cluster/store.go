@@ -2754,6 +2754,7 @@ func (s *Store) updateJobProgress(id, nodeID string, attempt int, fence *Assignm
 			return nil
 		}
 		progress.Phase = cleanLabel(progress.Phase, 30)
+		progress = normalizeJobActivityProgress(job, progress)
 		progress.Detail = cleanLabel(progress.Detail, 500)
 		progress.UpdatedAt = time.Now().UTC()
 		copy := progress
