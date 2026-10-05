@@ -62,6 +62,22 @@ func TestAgentPlanBindsAndValidatesExplicitPolicy(t *testing.T) {
 	}
 }
 
+func TestAgentResourceActivityIsOptInAndApprovalBound(t *testing.T) {
+	plan := validAgentPlanForTest(t)
+	before, raw, err := encodeAgentPlan(plan)
+	if err != nil || strings.Contains(string(raw), "report_activity") {
+		t.Fatalf("default changed: %s %v", raw, err)
+	}
+	plan.ReportActivity = true
+	after, raw, err := encodeAgentPlan(plan)
+	if err != nil || before == after || !strings.Contains(string(raw), `"report_activity": true`) {
+		t.Fatalf("activity not approval-bound: %s %v", raw, err)
+	}
+	if _, err := decodeAgentProposal([]byte(`{"version":8,"summary":"s","report_activity":true,"steps":[]}`)); err == nil {
+		t.Fatal("planner acquired telemetry publication choice")
+	}
+}
+
 func TestAgentPlanRejectsUnsafeShape(t *testing.T) {
 	plan := validAgentPlanForTest(t)
 	plan.Version--

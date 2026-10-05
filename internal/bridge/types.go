@@ -125,6 +125,7 @@ type OutputSpec struct {
 	// and the operator-configured engine ceiling.
 	MaxTokens        int  `json:"max_tokens,omitempty"`
 	Artifacts        bool `json:"artifacts,omitempty"`
+	Activity         bool `json:"activity,omitempty"`
 	MaxArtifactBytes int  `json:"max_artifact_bytes,omitempty"`
 	MinArtifacts     int  `json:"min_artifacts,omitempty"`
 	MinImages        int  `json:"min_images,omitempty"`
@@ -187,6 +188,8 @@ type Output struct {
 	ReservedCostUSD   float64             `json:"reserved_cost_usd,omitempty"`
 	EstimatedCostUSD  float64             `json:"estimated_cost_usd,omitempty"`
 	Artifacts         []Artifact          `json:"artifacts,omitempty"`
+	Activity          json.RawMessage     `json:"activity,omitempty"`
+	ActivityStatus    string              `json:"activity_status,omitempty"`
 	// ContextBridgeAdapterEndpointID is internal execution metadata reported by the
 	// adapter process. It records the concrete endpoint that actually executed a
 	// job, which can differ from the routing endpoint when a fresh session was created.
@@ -262,11 +265,18 @@ func NormalizeDecision(raw []byte, provider, model string, latency time.Duration
 	return parsed
 }
 
-func NormalizeOutput(raw []byte, spec OutputSpec, provider, model string, latency time.Duration) Output {
+func NormalizeOutput(raw []byte, spec OutputSpec, provider, model string, latency time.Duration) (result Output) {
 	mode := outputMode(spec)
 	var artifacts []Artifact
 	var envelope Output
 	envelopeDecoded := json.Unmarshal(raw, &envelope) == nil
+	// Optional telemetry must not turn an already performed mutation into a
+	// failed/retryable job. Reject malformed evidence, not the underlying result.
+	defer func() {
+		if result.Error == "" {
+			result.Activity, result.ActivityStatus = normalizeResourceActivity(envelope.Activity, spec, provider)
+		}
+	}()
 	if envelopeDecoded {
 		artifacts = NormalizeArtifacts(envelope.Artifacts, spec)
 	}

@@ -62,6 +62,7 @@ func CurrentProtocolManifest(configuredJobBytes int64) ProtocolManifest {
 			"authoritative_pipeline_events_v1",
 			"bounded_active_work_projection_v1",
 			"bounded_execution_event_sse_v1",
+			"opt_in_resource_activity_v1",
 			"content_minimizing_execution_receipts",
 			"cursor_job_history_v1",
 			"dag_pipeline_contract_validation_v1",

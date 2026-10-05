@@ -55,6 +55,7 @@ type agentPlan struct {
 	Version           int                   `json:"version"`
 	AuthorizationMode string                `json:"authorization_mode"`
 	WorkMode          string                `json:"work_mode,omitempty"`
+	ReportActivity    bool                  `json:"report_activity,omitempty"`
 	Goal              string                `json:"goal"`
 	Summary           string                `json:"summary"`
 	Policy            agentPolicy           `json:"policy"`
@@ -183,6 +184,7 @@ func clusterAgentPlanOrAutoCommand(args []string, automatic bool) error {
 	authorityName := flags.String("policy", "", "named project authority from cluster.policies.agent_authorities; plan only previews, auto also executes")
 	ask := flags.String("ask", "none", "additional execution confirmation: all, critical (adapters/remote/unknown), or none; does not expand authority")
 	workMode := flags.String("mode", "", "optional coding style: normal or lazy; bound into plan approval, never authority")
+	reportActivity := flags.Bool("activity", false, "request bounded adapter resource evidence; stored with job results under their existing ACL and retention")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -337,7 +339,7 @@ func clusterAgentPlanOrAutoCommand(args []string, automatic bool) error {
 		return fmt.Errorf("planner proposal rejected: %w", err)
 	}
 	plan := agentPlan{
-		Version: agentPlanVersion, AuthorizationMode: agentAuthorizationManual, WorkMode: *workMode,
+		Version: agentPlanVersion, AuthorizationMode: agentAuthorizationManual, WorkMode: *workMode, ReportActivity: *reportActivity,
 		Goal: strings.TrimSpace(*goal), Summary: proposal.Summary, Policy: policy, Steps: proposal.Steps,
 		Binding:  binding,
 		Evidence: agentPlannerEvidence{Provider: planner, Profile: profile, Model: submission.Output.Model, JobID: job.ID, NodeID: job.AssignedNode, CostStatus: agentCostStatus(job.Usage), CostSource: job.Usage.CostSource, ReservedCostUSD: job.Usage.ReservedCostUSD},
@@ -531,6 +533,7 @@ func executeAgentPlanWithConfirmation(plan agentPlan, digest string, cfg config.
 			return fmt.Errorf("agent step %s route: %w", step.ID, err)
 		}
 		stepModel := agentEffectiveRouteModel(cfg, stepRoute, step.Provider, "")
+		output.Activity = plan.ReportActivity
 		payload, err := json.Marshal(bridge.Job{
 			Source: "agent:" + strings.TrimPrefix(digest, "sha256:")[:12], Task: "generation", Prompt: prompt, Provider: step.Provider, Model: stepModel,
 			Text: text, SessionID: "agent-" + strings.TrimPrefix(digest, "sha256:")[:12] + "-" + step.ID,
@@ -563,6 +566,9 @@ func executeAgentPlanWithConfirmation(plan agentPlan, digest string, cfg config.
 			Source: "agent:" + strings.TrimPrefix(digest, "sha256:")[:12], TenantID: plan.Policy.TenantID, Requirements: requirements, Payload: payload, MaxAttempts: 1,
 		})
 		stepCancel()
+		if plan.ReportActivity && job.ID != "" {
+			fmt.Fprintf(os.Stderr, "  activity · GET /v1/cluster/jobs/%s/activity\n", job.ID)
+		}
 		if err != nil {
 			return fmt.Errorf("agent step %s: %w", step.ID, err)
 		}
@@ -1615,6 +1621,9 @@ func previewAgentRoutes(ctx context.Context, relayURL, token string, cfg config.
 func printAgentPlan(plan agentPlan, digest string) {
 	fmt.Fprintf(os.Stderr, "Agent plan %s\n", digest)
 	fmt.Fprintf(os.Stderr, "  authorization · %s\n", plan.AuthorizationMode)
+	if plan.ReportActivity {
+		fmt.Fprintln(os.Stderr, "  resource activity · requested; labels/URLs share job-result readers and retention")
+	}
 	if plan.WorkMode != "" {
 		fmt.Fprintf(os.Stderr, "  work style · %s · no additional authority; adapter contracts unchanged\n", plan.WorkMode)
 	}

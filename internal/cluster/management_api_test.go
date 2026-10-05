@@ -64,6 +64,10 @@ func TestScopedObserverIdentityAndJobHistory(t *testing.T) {
 		if status != http.StatusNotFound {
 			t.Fatalf("foreign job %s status = %d", id, status)
 		}
+		status, _ = relayHTTPTest(t, http.MethodGet, server.URL+"/v1/cluster/jobs/"+id+"/activity", observer, nil)
+		if status != http.StatusNotFound {
+			t.Fatalf("foreign activity %s status = %d", id, status)
+		}
 	}
 	status, raw = relayHTTPTest(t, http.MethodGet, server.URL+"/v1/cluster/events", observer, nil)
 	if status != http.StatusForbidden || !strings.Contains(string(raw), "scope.global_events_forbidden") {

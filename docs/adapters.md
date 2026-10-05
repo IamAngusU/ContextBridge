@@ -240,6 +240,13 @@ The cluster worker observes local adapter progress through an operator-only
 endpoint outside `/v1/adapter/*` and `/v2/adapter/*`. Adapter credentials can
 neither call nor discover operator state through that path.
 
+## Optional resource activity
+
+Optional resource receipts can accompany a successful v2 completion when the
+job explicitly requests `output.activity`. See the provider-neutral
+[resource activity contract](resource-activity.md) for schema, bounds, privacy,
+and the distinction between adapter reports and authoritative lifecycle events.
+
 ## v1 migration
 
 Legacy `/v1/adapter/*` routes used the operator token and did not have opaque

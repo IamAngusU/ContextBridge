@@ -225,7 +225,7 @@ func TestAgentEvidenceExternalBinary(t *testing.T) {
 		}
 		return string(out)
 	}
-	out := invoke(true, "cluster", "agent", "plan", "--config", path, "--token", agentPreviewTestToken, "--policy", "evidence", "--goal", agentEvidenceFixtureGoal, "--out", planPath)
+	out := invoke(true, "cluster", "agent", "plan", "--config", path, "--token", agentPreviewTestToken, "--policy", "evidence", "--goal", agentEvidenceFixtureGoal, "--out", planPath, "--activity")
 	if len(requests()) != 1 || !strings.Contains(out, "memory, tests") {
 		t.Fatalf("preview lacks selection or executed work: %s", out)
 	}
@@ -236,6 +236,9 @@ func TestAgentEvidenceExternalBinary(t *testing.T) {
 	plan, err := decodeAgentPlan(raw)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !plan.ReportActivity {
+		t.Fatal("explicit activity option not saved")
 	}
 	digest, _, err := encodeAgentPlan(plan)
 	if err != nil {
@@ -262,5 +265,17 @@ func TestAgentEvidenceExternalBinary(t *testing.T) {
 		t.Fatalf("CLI did not finish: %s", out)
 	}
 	assertAgentEvidenceRequests(t, requests())
+	if !strings.Contains(out, "GET /v1/cluster/jobs/job-2/activity") {
+		t.Fatal("activity endpoint not printed")
+	}
+	for index, request := range requests() {
+		var payload bridge.Job
+		if err := json.Unmarshal(request.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.Output.Activity != (index > 0) {
+			t.Fatal("activity not preserved for work steps, or sent to planner")
+		}
+	}
 	t.Log("external CLI: reviewed input selection; tampering denied; two earlier results preserved without unrelated predecessor or authority expansion")
 }

@@ -103,6 +103,7 @@ func relayOpenAPI() map[string]interface{} {
 			"delete": operation("Cancel one owned job", []string{"admin", "producer"}, "Object"),
 		}),
 		"/v1/cluster/jobs/{id}/events":        pathItem("id", map[string]interface{}{"get": operation("Get authoritative job events", []string{"admin", "observer", "producer"}, "Object")}),
+		"/v1/cluster/jobs/{id}/activity":      pathItem("id", map[string]interface{}{"get": operation("Get bounded opt-in adapter-reported resource activity", []string{"admin", "observer", "producer"}, "JobResourceActivity")}),
 		"/v1/cluster/jobs/{id}/events/stream": pathItem("id", map[string]interface{}{"get": streamOperation("Stream authoritative job events as SSE")}),
 		"/v1/cluster/jobs/{id}/route":         pathItem("id", map[string]interface{}{"get": operation("Get the durable routing decision", []string{"admin", "observer", "producer"}, "Object")}),
 		"/v1/cluster/jobs/{id}/estimate":      pathItem("id", map[string]interface{}{"get": operation("Get a historical runtime estimate", []string{"admin", "observer", "producer"}, "Object")}),
@@ -149,9 +150,10 @@ func relayOpenAPI() map[string]interface{} {
 		"components": map[string]interface{}{
 			"securitySchemes": map[string]interface{}{"bearerAuth": map[string]string{"type": "http", "scheme": "bearer"}},
 			"schemas": map[string]interface{}{
-				"OpenAPI": map[string]string{"type": "object"},
-				"Object":  map[string]string{"type": "object"},
-				"Array":   map[string]interface{}{"type": "array", "items": map[string]string{"type": "object"}},
+				"OpenAPI":             map[string]string{"type": "object"},
+				"Object":              map[string]string{"type": "object"},
+				"JobResourceActivity": jobResourceActivitySchema(),
+				"Array":               map[string]interface{}{"type": "array", "items": map[string]string{"type": "object"}},
 				"AdapterPresenceList": map[string]interface{}{
 					"type": "object", "required": []string{"schema", "adapters", "total", "available", "setup_required", "degraded", "disabled"},
 					"properties": map[string]interface{}{

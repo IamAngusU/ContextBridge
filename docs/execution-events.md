@@ -1,5 +1,9 @@
 # Authoritative execution events
 
+For opt-in file/source/image/tool receipts from completed adapter jobs, see
+[resource activity](resource-activity.md). Those semantic fields remain outside
+the content-minimized lifecycle event stream.
+
 ContextBridge exposes a versioned, bounded per-job lifecycle history:
 
 ```text

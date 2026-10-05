@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Added opt-in `output.activity` adapter resource receipts, approval-bound agent
+  `--activity`, and the authenticated `/v1/cluster/jobs/{id}/activity` projection.
+  Strict bounded evidence distinguishes read/cited/inspected/created/reused;
+  ordinary model prose is never promoted into tool evidence. Existing result
+  ACL/retention, E2EE and content-minimized lifecycle SSE remain unchanged.
+  Missing/invalid reports are explicit and do not replay completed mutations.
+  See [resource activity](docs/resource-activity.md) for scope and limitations.
+
 - Added opt-in, approval-bound agent `verification_gate` steps with operator-
   pinned adapter checks. Valid pass receipts stop remaining work; finite check
   failures permit only remaining preapproved steps; inconclusive, mismatched,
