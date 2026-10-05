@@ -204,9 +204,9 @@ type AdapterProfile struct {
 }
 
 const (
-	// AdapterAgentInstructionContractOption is the only adapter option exposed
-	// to an agent planner. All other options may describe paths, credentials, or
-	// runtime policy and therefore stay outside prompt material.
+	// AdapterAgentInstructionContractOption is exposed to an agent planner,
+	// alongside safe IDs of explicitly pinned verification checks. All other
+	// options may describe paths, credentials, or runtime policy and stay local.
 	AdapterAgentInstructionContractOption       = "agent_instruction_contract"
 	AdapterAgentInstructionContractMaximumBytes = 2 << 10
 )
@@ -633,6 +633,9 @@ func (c Config) Validate() error {
 		}
 		if len(profile.Options) > 64 {
 			return fmt.Errorf("adapter profile %s has more than 64 options", name)
+		}
+		if _, err := AgentVerificationChecks(profile); err != nil {
+			return fmt.Errorf("adapter profile %s: %w", name, err)
 		}
 		for option, value := range profile.Options {
 			if len(option) > 80 || !safeNamePattern.MatchString(option) || strings.Contains(option, "..") {

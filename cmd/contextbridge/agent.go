@@ -114,13 +114,14 @@ type agentPlannerEvidence struct {
 }
 
 type agentStep struct {
-	ID          string   `json:"id"`
-	Provider    string   `json:"provider"`
-	Profile     string   `json:"profile,omitempty"`
-	Instruction string   `json:"instruction"`
-	UsePrevious bool     `json:"use_previous,omitempty"`
-	InputSteps  []string `json:"input_steps,omitempty"`
-	OutputMode  string   `json:"output_mode,omitempty"`
+	ID               string                 `json:"id"`
+	Provider         string                 `json:"provider"`
+	Profile          string                 `json:"profile,omitempty"`
+	Instruction      string                 `json:"instruction"`
+	UsePrevious      bool                   `json:"use_previous,omitempty"`
+	InputSteps       []string               `json:"input_steps,omitempty"`
+	OutputMode       string                 `json:"output_mode,omitempty"`
+	VerificationGate *agentVerificationGate `json:"verification_gate,omitempty"`
 }
 
 // agentPlannerProposal intentionally excludes policy. Unknown fields are
@@ -292,6 +293,7 @@ func clusterAgentPlanOrAutoCommand(args []string, automatic bool) error {
 			prompt = agentConfiguredPlannerPrompt(policy, contracts)
 		}
 	}
+	prompt += agentVerificationPlannerInstructions(cfg, policy)
 	plannerSession := "agent-planner-" + fmt.Sprint(time.Now().UnixNano())
 	prompt = applyWorkMode(*workMode, prompt)
 	plannerRoute, err := agentRouteForTarget(cfg, planner, profile)
@@ -498,6 +500,7 @@ func executeAgentPlanWithConfirmation(plan agentPlan, digest string, cfg config.
 	evidence := map[string]agentStepEvidence{}
 	neededEvidence := agentReferencedResults(plan.Steps)
 	knownCost, knownCostJobs, unknownCost := 0.0, 0, 0
+	executed := 0
 	for index, step := range plan.Steps {
 		fmt.Fprintf(os.Stderr, "[%d/%d] %s · %s", index+1, len(plan.Steps), step.ID, step.Provider)
 		if step.Profile != "" {
@@ -572,6 +575,10 @@ func executeAgentPlanWithConfirmation(plan agentPlan, digest string, cfg config.
 		if err := budget.consume(step.Provider, step.Profile, job.Usage); err != nil {
 			return fmt.Errorf("agent step %s: %w", step.ID, err)
 		}
+		gateStatus, err := agentVerificationStatus(cfg, step, text, submission.Output)
+		if err != nil {
+			return fmt.Errorf("agent step %s verification: %w", step.ID, err)
+		}
 		previous, err = agentStepResultText(step, submission.Output)
 		if err != nil {
 			return fmt.Errorf("agent step %s: %w", step.ID, err)
@@ -593,6 +600,17 @@ func executeAgentPlanWithConfirmation(plan agentPlan, digest string, cfg config.
 			unknownCost++
 			fmt.Fprintf(os.Stderr, "  ✓ %s · %s · cost unknown\n", shortChatID(job.AssignedNode), emptyLabel(submission.Output.Model, "model unavailable"))
 		}
+		executed++
+		if gateStatus == "passed" {
+			fmt.Fprintf(os.Stderr, "  verification passed · %s · %d remaining step(s) skipped; no automatic promotion\n", step.VerificationGate.Check, len(plan.Steps)-executed)
+			break
+		}
+		if gateStatus == "failed" {
+			if index == len(plan.Steps)-1 {
+				return errors.New("agent verification failed; bounded repairs exhausted; no automatic promotion")
+			}
+			fmt.Fprintln(os.Stderr, "  verification failed · continuing only the remaining approved steps")
+		}
 	}
 	authority := "reviewed"
 	if plan.AuthorizationMode == agentAuthorizationLocal {
@@ -600,7 +618,7 @@ func executeAgentPlanWithConfirmation(plan agentPlan, digest string, cfg config.
 	} else if plan.AuthorizationMode == agentAuthorizationPolicy {
 		authority = "configured-policy automatic"
 	}
-	summary := fmt.Sprintf("Agent run completed · %d %s step(s)", len(plan.Steps), authority)
+	summary := fmt.Sprintf("Agent run completed · %d %s step(s)", executed, authority)
 	if knownCostJobs > 0 {
 		summary += fmt.Sprintf(" · tracked cost $%.6f across %d step(s)", knownCost, knownCostJobs)
 	} else {
@@ -617,7 +635,15 @@ func executeAgentPlanWithConfirmation(plan agentPlan, digest string, cfg config.
 // This is not an adapter payload validator or a promise of worker availability.
 // Dynamic requests still undergo strict JSON and adapter-side checks at runtime.
 func validateAgentExecutionTargets(cfg config.Config, plan agentPlan) error {
+	if err := validateAgentVerificationGates(plan.Steps); err != nil {
+		return err
+	}
 	for _, step := range plan.Steps {
+		if step.VerificationGate != nil {
+			if _, err := agentVerificationDefinition(cfg, step); err != nil {
+				return fmt.Errorf("agent preflight step %s: %w", step.ID, err)
+			}
+		}
 		if _, err := agentRouteForTarget(cfg, step.Provider, step.Profile); err != nil {
 			return fmt.Errorf("agent preflight step %s route: %w", step.ID, err)
 		}
@@ -1112,13 +1138,14 @@ func decodeAgentProposal(raw []byte) (agentPlannerProposal, error) {
 		Version int    `json:"version"`
 		Summary string `json:"summary"`
 		Steps   []struct {
-			ID          string          `json:"id"`
-			Provider    string          `json:"provider"`
-			Profile     string          `json:"profile,omitempty"`
-			Instruction json.RawMessage `json:"instruction"`
-			UsePrevious *bool           `json:"use_previous"`
-			InputSteps  []string        `json:"input_steps,omitempty"`
-			OutputMode  string          `json:"output_mode,omitempty"`
+			ID               string                 `json:"id"`
+			Provider         string                 `json:"provider"`
+			Profile          string                 `json:"profile,omitempty"`
+			Instruction      json.RawMessage        `json:"instruction"`
+			UsePrevious      *bool                  `json:"use_previous"`
+			InputSteps       []string               `json:"input_steps,omitempty"`
+			OutputMode       string                 `json:"output_mode,omitempty"`
+			VerificationGate *agentVerificationGate `json:"verification_gate,omitempty"`
 		} `json:"steps"`
 	}
 	if len(raw) > agentMaximumPlanFileBytes {
@@ -1136,7 +1163,7 @@ func decodeAgentProposal(raw []byte) (agentPlannerProposal, error) {
 			return proposal, fmt.Errorf("step %s requires explicit boolean use_previous; missing data flow is not inferred", input.ID)
 		}
 		step := agentStep{ID: input.ID, Provider: input.Provider, Profile: input.Profile,
-			UsePrevious: *input.UsePrevious, InputSteps: input.InputSteps, OutputMode: input.OutputMode}
+			UsePrevious: *input.UsePrevious, InputSteps: input.InputSteps, OutputMode: input.OutputMode, VerificationGate: input.VerificationGate}
 		instruction := bytes.TrimSpace(input.Instruction)
 		switch {
 		case len(instruction) > 0 && instruction[0] == '"':
@@ -1239,6 +1266,9 @@ func validateAgentPlan(plan agentPlan) error {
 		return fmt.Errorf("agent plan must contain 1 to %d steps", policy.MaxSteps)
 	}
 	ids := map[string]bool{}
+	if err := validateAgentVerificationGates(plan.Steps); err != nil {
+		return err
+	}
 	for index, step := range plan.Steps {
 		if !agentStepIDPattern.MatchString(step.ID) || ids[step.ID] {
 			return fmt.Errorf("agent step %d has an invalid or duplicate id", index+1)
@@ -1614,6 +1644,9 @@ func printAgentPlan(plan agentPlan, digest string) {
 		}
 		if step.OutputMode != "" {
 			input += " · output " + step.OutputMode
+		}
+		if step.VerificationGate != nil {
+			input += " · verify " + step.VerificationGate.Check + " (pass=end run; fail=continue; inconclusive=stop)"
 		}
 		fmt.Fprintf(os.Stderr, "  %d. %s · %s · %s\n     %s\n", index+1, step.ID, provider, input, step.Instruction)
 	}

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Added opt-in, approval-bound agent `verification_gate` steps with operator-
+  pinned adapter checks. Valid pass receipts stop remaining work; finite check
+  failures permit only remaining preapproved steps; inconclusive, mismatched,
+  malformed or ambiguous results stop without replay. Exhausted gated repairs
+  exit unsuccessfully. Defaults, one-attempt dispatch and scopes are unchanged;
+  passing does not promote code or prove general correctness. See the
+  [runtime gate contract](docs/agent-verification.md).
+
 - Added optional `input_steps` for bounded model steps: select multiple earlier
   results and preserve the original goal in an explicitly untrusted evidence
   bundle with step/job provenance and content digests. Selection is approval-

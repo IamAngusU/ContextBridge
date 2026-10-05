@@ -313,8 +313,10 @@ system instructions. No unselected result or implicit predecessor is added.
 An allowed workspace adapter's task-memory read can supply `memory`, while a
 separate inspection or test action supplies other inputs. Persistent storage,
 compaction, pin/todo rules, access control and writes remain the adapter's job.
-Automatic memory loading/saving, conditional stop/repair, durable resume and
-validated recipe promotion are **not** implemented by `input_steps`.
+Automatic memory loading/saving, durable resume and validated recipe promotion
+are **not** implemented by `input_steps`. Optional conditional stop/repair is a
+separate [operator-pinned verification gate](agent-verification.md), not inferred
+from model prose or test-looking text.
 
 Run the CLI transport proof with an explicitly built binary:
 

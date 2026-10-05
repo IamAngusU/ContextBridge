@@ -60,7 +60,10 @@ their file paths may be referenced by options. Setup output lists option keys,
 never option values.
 
 An adapter intended for a bounded agent may expose one non-secret syntax hint
-with the reserved option `agent_instruction_contract`. The value is a single
+with the reserved option `agent_instruction_contract`. Explicitly trusted check
+adapters may also opt in to the [runtime verification gate contract](agent-verification.md)
+using `agent_verification_checks`; this is not a general readiness claim or code
+promotion permission. The instruction-contract value is a single
 printable string of at most 2 KiB. Only this option is copied into the planner
 prompt; paths, credentials, host policy, executable locations, and every other
 driver option stay hidden. The hint is not authority: the selected profile,
