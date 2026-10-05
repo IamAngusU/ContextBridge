@@ -116,6 +116,7 @@ type Engine struct {
 	MaxTotalImageBytes  int64         `yaml:"max_total_image_bytes,omitempty" json:"max_total_image_bytes,omitempty"`
 	ImageMediaTypes     []string      `yaml:"image_media_types,omitempty" json:"image_media_types,omitempty"`
 	ReasoningEffort     string        `yaml:"reasoning_effort,omitempty" json:"reasoning_effort,omitempty"`
+	OllamaThink         bool          `yaml:"ollama_think,omitempty" json:"ollama_think,omitempty"`
 	BalancePath         string        `yaml:"balance_path,omitempty" json:"balance_path,omitempty"`
 	MinimumBalanceUSD   float64       `yaml:"minimum_balance_usd,omitempty" json:"minimum_balance_usd,omitempty"`
 	Costing             EngineCosting `yaml:"costing,omitempty" json:"costing,omitempty"`
@@ -662,6 +663,9 @@ func (c Config) Validate() error {
 		}
 		if engine.MaxOutputTokens < 0 || engine.MaxOutputTokens > 1_000_000 {
 			return fmt.Errorf("engine %s max_output_tokens must be between 1 and 1000000 when set", name)
+		}
+		if engine.OllamaThink && (engine.Type != "ollama" || strings.TrimSpace(engine.Model) == "" || engine.Model == "auto" || engine.MaxOutputTokens <= 0) {
+			return fmt.Errorf("engine %s ollama_think requires type ollama, an explicit model and positive max_output_tokens", name)
 		}
 		if engine.ContextWindowTokens < 0 || engine.ContextWindowTokens > 10_000_000 {
 			return fmt.Errorf("engine %s context_window_tokens must be between 1 and 10000000 when set", name)

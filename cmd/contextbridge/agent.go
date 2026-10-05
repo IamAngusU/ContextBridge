@@ -859,7 +859,7 @@ Hard rules:
 - Do not include models, credentials, shell commands, executable selection, arbitrary host paths, arbitrary code execution, downloads, uploads, recursive delegation, or policy changes. A selected adapter contract may explicitly define bounded workspace-relative file, archive or isolated sandbox operations; only then encode those exact actions and fields. Never infer host execution from a sandbox action. Include a URL or other operation name only when that contract explicitly requires it.
 - Every step returns text or strict JSON. A later non-adapter step may set use_previous=true to receive the previous result as explicitly untrusted submitted content.
 - A later adapter step may set use_previous=true only when its profile has a listed contract, its immediately preceding step is non-adapter, and its instruction is exactly "contextbridge.previous-json.v1". Core then validates and submits the previous result as one strict JSON object; it never concatenates instructions or evidence into that request.
-- The first step must set use_previous=false.
+- Every step MUST include use_previous as an explicit boolean. Set it true whenever the step needs the previous result (including test diagnostics); false means that step receives no previous data. Never omit it. The first step must set use_previous=false.
 - Do not claim a provider or model has capabilities not stated in the goal. If the goal cannot fit these limits, return one step that clearly explains the limitation.
 - IDs must match ^[a-z][a-z0-9_-]{0,39}$.
 
@@ -877,7 +877,7 @@ Hard rules:
 - Allowed providers are exactly %s. Every step must use provider ollama and an empty profile.
 - Do not include models, credentials, URLs to call, shell commands, tools, code execution, file operations, downloads, uploads, network access, recursive delegation, or policy changes.
 - Every step returns text only. A later step may set use_previous=true to receive the previous text as explicitly untrusted submitted content.
-- The first step must set use_previous=false.
+- Every step MUST include use_previous as an explicit boolean. Set it true whenever the step needs the previous result; false means that step receives no previous data. Never omit it. The first step must set use_previous=false.
 - If the goal needs external data, adapter or API access, tools, files, images, audio, code execution, or more authority, return one text step that clearly explains that the local-only automatic tier cannot perform it.
 - IDs must match ^[a-z][a-z0-9_-]{0,39}$.
 
@@ -901,7 +901,7 @@ Hard rules:
 - Do not include models, credentials, shell commands, executable selection, arbitrary host paths, arbitrary code execution, downloads, uploads, recursive delegation, or policy changes. A selected adapter contract may explicitly define bounded workspace-relative file, archive or isolated sandbox operations; only then encode those exact actions and fields. Never infer host execution from a sandbox action. Include a URL or other operation name only when that contract explicitly requires it.
 - Every step returns text or strict JSON. A later non-adapter step may set use_previous=true to receive the previous result as explicitly untrusted submitted content.
 - A later adapter step may set use_previous=true only when its profile has a listed contract, its immediately preceding step is non-adapter, and its instruction is exactly "contextbridge.previous-json.v1". Core then validates and submits the previous result as one strict JSON object; it never concatenates instructions or evidence into that request.
-- The first step must set use_previous=false.
+- Every step MUST include use_previous as an explicit boolean. Set it true whenever the step needs the previous result (including test diagnostics); false means that step receives no previous data. Never omit it. The first step must set use_previous=false.
 - If the goal needs authority outside these rules, return one text step that clearly explains the configured policy boundary.
 - IDs must match ^[a-z][a-z0-9_-]{0,39}$.
 
@@ -1032,7 +1032,7 @@ func decodeAgentProposal(raw []byte) (agentPlannerProposal, error) {
 			Provider    string          `json:"provider"`
 			Profile     string          `json:"profile,omitempty"`
 			Instruction json.RawMessage `json:"instruction"`
-			UsePrevious bool            `json:"use_previous,omitempty"`
+			UsePrevious *bool           `json:"use_previous"`
 		} `json:"steps"`
 	}
 	if len(raw) > agentMaximumPlanFileBytes {
@@ -1046,7 +1046,10 @@ func decodeAgentProposal(raw []byte) (agentPlannerProposal, error) {
 	}
 	proposal.Version, proposal.Summary = wire.Version, wire.Summary
 	for _, input := range wire.Steps {
-		step := agentStep{ID: input.ID, Provider: input.Provider, Profile: input.Profile, UsePrevious: input.UsePrevious}
+		if input.UsePrevious == nil {
+			return proposal, fmt.Errorf("step %s requires explicit boolean use_previous; missing data flow is not inferred", input.ID)
+		}
+		step := agentStep{ID: input.ID, Provider: input.Provider, Profile: input.Profile, UsePrevious: *input.UsePrevious}
 		instruction := bytes.TrimSpace(input.Instruction)
 		switch {
 		case len(instruction) > 0 && instruction[0] == '"':

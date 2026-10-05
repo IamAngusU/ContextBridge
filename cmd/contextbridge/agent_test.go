@@ -280,6 +280,27 @@ func TestAgentExecutionBindingChangesWithRouteAndRelay(t *testing.T) {
 	}
 }
 
+func TestAgentExecutionBindingCoversOllamaThinkingOptIn(t *testing.T) {
+	cfg := config.Config{
+		Engines: map[string]config.Engine{"local-code": {Type: "ollama", Model: "fixed", MaxOutputTokens: 4096}},
+		Cluster: config.Cluster{Relay: config.ClusterRelay{PublicURL: "http://127.0.0.1:32147"}},
+	}
+	before, err := agentBindingForConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := cfg.Engines["local-code"]
+	engine.OllamaThink = true
+	cfg.Engines["local-code"] = engine
+	after, err := agentBindingForConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.ConfigSHA256 == after.ConfigSHA256 || before.ExecutionSHA256 == after.ExecutionSHA256 || before.Components.Engines == after.Components.Engines {
+		t.Fatal("changing thinking mode did not invalidate existing execution approval")
+	}
+}
+
 func TestAgentExecutionBindingExplainsChangesWithoutWeakeningAlphaGate(t *testing.T) {
 	cfg := config.Config{
 		Server:  config.Server{Token: "first-secret-value"},

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Fresh agent proposals must explicitly state each step's boolean
+  `use_previous`. Missing/null data-flow choices are rejected before execution
+  instead of silently dropping tool evidence. Existing hash-approved plan
+  encoding is unchanged; prompts now explain that `false` supplies no prior data.
+
+- Added opt-in `engines.<name>.ollama_think` for an explicit Ollama reasoning
+  model with an output-token ceiling. Default behavior is unchanged; only final
+  responses enter tool workflows, never private thinking. Mode changes are
+  covered by execution bindings and do not authorize retries or new tools.
+
 - Fixed named local-only agents incorrectly rejecting explicitly local adapter
   profiles as remote. Planning now checks every allowed profile independently
   using the same per-profile classification precedence as relay policy; remote

@@ -67,6 +67,20 @@ profile cannot authorize a remote sibling. Unclassified profiles retain the
 provider's conservative classification. This changes neither relay/tenant
 authorization nor the `--ask critical` confirmation gate for adapters.
 
+### Optional local reasoning
+
+For an explicitly selected thinking-capable Ollama model, an operator can set
+`ollama_think: true` on that `engines` entry, with an explicit model and positive
+`max_output_tokens`. Default remains `false`; prompts and jobs cannot toggle
+this setting. Use a separate engine/route when other tasks should remain fast.
+Check the model's support first: [Ollama thinking controls](https://docs.ollama.com/capabilities/thinking).
+Only the final `response` is consumed. The private `thinking` field is neither
+returned nor forwarded to later tools. Token/time/output limits still apply;
+thinking-only or truncated output is not a successful result, and there is no
+silent retry with a different mode. Changing this setting changes the execution
+binding and invalidates earlier approvals. This is an opt-in mechanism, not a
+quality or latency guarantee for any particular model.
+
 ## 3. Reviewed one-off plans
 
 Broader one-off work uses a separate plan and exact hash approval:
@@ -177,6 +191,13 @@ submitted content rather than its trusted prompt wrapper. Static adapter steps
 do not append previous results; the explicit `contextbridge.previous-json.v1`
 handoff described below is the only dynamic request path. A following model
 step can consume normalized adapter evidence instead.
+Every fresh proposed step must explicitly include boolean `use_previous`.
+Missing/null values are rejected before any execution. A step with `false`
+receives no previous result; use `true` for model steps that need diagnostics.
+Core does not guess data dependencies from natural language. Existing approved
+plan encoding is unchanged, and adding an omitted flag is never an automatic
+repair of a hash-approved plan.
+
 Contracted adapter evidence must be valid, unambiguous JSON; Core validates and
 compacts it before it can become the next step's submitted text.
 
