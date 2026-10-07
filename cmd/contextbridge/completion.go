@@ -76,7 +76,7 @@ $script:ContextBridgeOptions = @{
     'stop' = @('--config','--force')
     'uninstall' = @('--config','--install-dir','--purge','--force','--yes','--dry-run')
     'console' = @('--config','--token')
-    'do' = @('--config','--account','--token','--provider','--group','--model','--profile','--reasoning','--e2ee','--session','--prompt','--artifacts','--min-artifacts','--image','--min-images','--attach-image','--new-session','--new-session-per-job','--foreground-new-session','--egress','--max-cost-usd','--timeout','--policy','--mode','--task','--background','--fresh','--json','--design','--research','--request-id','--js-checks','--workspace-context','--diagnostic-workspace','--rules','--use')
+    'do' = @('--config','--account','--token','--provider','--group','--model','--profile','--reasoning','--e2ee','--session','--prompt','--artifacts','--min-artifacts','--image','--min-images','--attach-image','--new-session','--new-session-per-job','--foreground-new-session','--egress','--max-cost-usd','--timeout','--policy','--model-preference','--mode','--task','--background','--fresh','--json','--design','--research','--request-id','--js-checks','--workspace-context','--diagnostic-workspace','--rules','--use')
 	'jobs' = @('list','show','versions','diff','activity','cancel','resume','--config','--output','--version','--base','--path','--patch')
 	'tools' = @('list','call','--config','--arguments','--args','--set')
     'submit' = @('--file','--artifacts','--config')
@@ -154,6 +154,7 @@ $script:ContextBridgeValueOptions = @{
     '--reasoning' = @('instant','medium','high','xhigh','pro','max')
     '--mode' = @('standard','daybreak-blue','normal','lazy','local','client','relay','worker','all')
 	'--policy' = @('local','offline','local-agent','hybrid')
+	'--model-preference' = @('default','open-first','open-only')
 	'--task' = @('solve','code','diagnose')
 	'--base' = @('original','previous')
 	'--role' = @('admin','producer','node','observer')
@@ -168,7 +169,7 @@ $script:ContextBridgeTakesValue = @(
 	'--mode','--relay-url','--public-url','--listen','--role','--subject','--approve','--deny','--label','--driver','--route','--task','--model','--timeout-seconds','--principal','--classification','--option','--adapter','--arg','--profile-file','--job-file','--working-directory',
     '--managed-service','--samples','--warmup','--database-jobs','--idle-duration','--binary',
     '--goal','--goal-file','--planner-provider','--planner-profile','--planner-model','--allow-providers',
-	'--policy','--allow-adapter-profiles','--max-steps','--step-timeout','--max-runtime','--planner-timeout','--out','--plan','--approve','--design','--research','--request-id','--diagnostic-workspace','--rules','--use','--version','--base','--path','--args','--set'
+	'--policy','--model-preference','--allow-adapter-profiles','--max-steps','--step-timeout','--max-runtime','--planner-timeout','--out','--plan','--approve','--design','--research','--request-id','--diagnostic-workspace','--rules','--use','--version','--base','--path','--args','--set'
 )
 Register-ArgumentCompleter -Native -CommandName contextbridge, cb -ScriptBlock {
     param($wordToComplete, $commandAst, $cursorPosition)
@@ -256,6 +257,7 @@ _contextbridge_complete() {
     --reasoning) candidates="instant medium high xhigh pro max" ;;
     --mode) candidates="standard daybreak-blue normal lazy local client relay worker all" ;;
     --policy) candidates="local offline local-agent hybrid" ;;
+	--model-preference) candidates="default open-first open-only" ;;
     --task) candidates="solve code diagnose" ;;
     --base) candidates="original previous" ;;
     --role) candidates="admin producer node observer" ;;
@@ -272,7 +274,7 @@ _contextbridge_complete() {
     candidates=""
     case "$option_key" in
       "cluster chat") candidates="--config --account --token --provider --group --model --profile --reasoning --e2ee --session --prompt --artifacts --min-artifacts --image --min-images --attach-image --new-session --new-session-per-job --foreground-new-session --egress --max-cost-usd --timeout" ;;
-	  do) candidates="--config --account --token --provider --group --model --profile --reasoning --e2ee --session --prompt --artifacts --min-artifacts --image --min-images --attach-image --new-session --new-session-per-job --foreground-new-session --egress --max-cost-usd --timeout --policy --mode --task --background --fresh --json --design --research --request-id --js-checks --workspace-context --diagnostic-workspace --rules --use" ;;
+	  do) candidates="--config --account --token --provider --group --model --profile --reasoning --e2ee --session --prompt --artifacts --min-artifacts --image --min-images --attach-image --new-session --new-session-per-job --foreground-new-session --egress --max-cost-usd --timeout --policy --model-preference --mode --task --background --fresh --json --design --research --request-id --js-checks --workspace-context --diagnostic-workspace --rules --use" ;;
 	  jobs) candidates="list show versions diff activity cancel resume --config --output --version --base --path --patch" ;;
 	  tools) candidates="list call --config --arguments --args --set" ;;
 	  "cluster scheduled-action") candidates="preview confirm list show cancel --config --account --token --token-file --file --status --limit --json" ;;
@@ -427,7 +429,7 @@ if (( CURRENT == 2 )); then
 fi
 case "$words[2]" in
   do)
-    _arguments "${config[@]}" '--account[Named cluster account]:account:' '--token[Producer token]:token:' '--provider[Explicit pool provider]:provider:(adapter ollama nuextract jina)' '--group[Worker group]:group:' '--model[Specific pool model]:model:' '--profile[Operator-configured adapter profile]:profile:' '--reasoning[Pool reasoning level]:level:(instant medium high xhigh pro max)' '--e2ee[Encrypt pool prompts and results]' '--session[Stable pool session ID]:session:' '--prompt[Send one task and exit]:prompt:' '--artifacts[Pool artifact directory or auto/off]:directory:_directories' '--min-artifacts[Required verified pool files]:count:' '--image[Require a returned pool image]' '--min-images[Required verified pool images]:count:' '--attach-image[Attach a local image to the pool route]:image file:_files' '--new-session[Open a fresh adapter session]' '--new-session-per-job[Open a fresh adapter session for every turn]' '--foreground-new-session[Ask the adapter to foreground a fresh session]' '--egress[Pool execution boundary]:egress:(local_only remote_allowed)' '--max-cost-usd[Hard remote cost limit]:USD:' '--timeout[Local job budget or pool turn deadline]:duration:' '--policy[Local agent network policy]:policy:(local offline local-agent hybrid)' '--mode[Local capability or pool work style]:mode:(standard daybreak-blue normal lazy)' '--task[Local agent task]:task:(solve code diagnose)' '--background[Return a durable local job ID immediately]' '--fresh[Skip exact verified-code reuse]' '--json[Print the full local receipt]' '--design[Local design card ID, default or off]:design:' '--research[Explicit public search query]:query:' '--request-id[Stable local idempotency key]:key:' '--js-checks[Bounded pure-JS check JSON]:checks file:_files' '--workspace-context[Prepared workspace snapshot JSON]:context file:_files' '--diagnostic-workspace[Registered diagnostic workspace ID]:workspace:' '*--rules[Engineering rule profile]:rule:' '*--use[Component reference]:component:' '*:prompt:'
+    _arguments "${config[@]}" '--account[Named cluster account]:account:' '--token[Producer token]:token:' '--provider[Explicit pool provider]:provider:(adapter ollama nuextract jina)' '--group[Worker group]:group:' '--model[Specific pool model]:model:' '--profile[Operator-configured adapter profile]:profile:' '--reasoning[Pool reasoning level]:level:(instant medium high xhigh pro max)' '--e2ee[Encrypt pool prompts and results]' '--session[Stable pool session ID]:session:' '--prompt[Send one task and exit]:prompt:' '--artifacts[Pool artifact directory or auto/off]:directory:_directories' '--min-artifacts[Required verified pool files]:count:' '--image[Require a returned pool image]' '--min-images[Required verified pool images]:count:' '--attach-image[Attach a local image to the pool route]:image file:_files' '--new-session[Open a fresh adapter session]' '--new-session-per-job[Open a fresh adapter session for every turn]' '--foreground-new-session[Ask the adapter to foreground a fresh session]' '--egress[Pool execution boundary]:egress:(local_only remote_allowed)' '--max-cost-usd[Hard remote cost limit]:USD:' '--timeout[Local job budget or pool turn deadline]:duration:' '--policy[Local agent network policy]:policy:(local offline local-agent hybrid)' '--model-preference[Local model-license routing]:preference:(default open-first open-only)' '--mode[Local capability or pool work style]:mode:(standard daybreak-blue normal lazy)' '--task[Local agent task]:task:(solve code diagnose)' '--background[Return a durable job ID immediately]' '--fresh[Skip exact verified-code reuse]' '--json[Print the full local receipt]' '--design[Local design card ID, default or off]:design:' '--research[Explicit public search query]:query:' '--request-id[Stable local idempotency key]:key:' '--js-checks[Bounded pure-JS check JSON]:checks file:_files' '--workspace-context[Prepared workspace snapshot JSON]:context file:_files' '--diagnostic-workspace[Registered diagnostic workspace ID]:workspace:' '*--rules[Engineering rule profile]:rule:' '*--use[Component reference]:component:' '*:prompt:'
     ;;
   jobs)
     if (( CURRENT == 3 )); then

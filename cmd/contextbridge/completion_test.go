@@ -46,15 +46,15 @@ func TestCompletionScriptsExposeLocalAgentModesJobsAndTools(t *testing.T) {
 	}{
 		"powershell": {
 			powershellCompletionScript(),
-			[]string{"jobs = @('list','show','versions','diff','activity','cancel','resume')", "tools = @('list','call')", "'--mode' = @('standard','daybreak-blue'", "--workspace-context"},
+			[]string{"jobs = @('list','show','versions','diff','activity','cancel','resume')", "tools = @('list','call')", "'--mode' = @('standard','daybreak-blue'", "'--model-preference' = @('default','open-first','open-only')", "--workspace-context"},
 		},
 		"bash": {
 			bashCompletionScript(),
-			[]string{"do jobs tools submit", "jobs) candidates=\"list show versions diff activity cancel resume", "tools) candidates=\"list call", "standard daybreak-blue", "--workspace-context"},
+			[]string{"do jobs tools submit", "jobs) candidates=\"list show versions diff activity cancel resume", "tools) candidates=\"list call", "standard daybreak-blue", "default open-first open-only", "--workspace-context"},
 		},
 		"zsh": {
 			zshCompletionScript(),
-			[]string{"jobs:Inspect and control optional local agent jobs", "tools:Call typed read-only tools", "_values 'local job action' list show versions diff activity cancel resume", "_values 'local tool action' list call", "standard daybreak-blue"},
+			[]string{"jobs:Inspect and control optional local agent jobs", "tools:Call typed read-only tools", "_values 'local job action' list show versions diff activity cancel resume", "_values 'local tool action' list call", "standard daybreak-blue", "default open-first open-only"},
 		},
 	}
 	for name, test := range tests {
@@ -151,6 +151,7 @@ func TestPowerShellTabExpansionTracksTrailingSpaceAndOptionPosition(t *testing.T
 		{"node action", "contextbridge cluster node ", []string{"drain", "resume"}, []string{"status", "submit"}},
 		{"node options", "contextbridge cluster node drain node-a ", []string{"--config", "--token", "--json"}, []string{"status", "submit"}},
 		{"short alias provider", "cb cluster chat --provider ", []string{"adapter", "ollama"}, []string{"status", "selftest"}},
+		{"model preference values", "cb do --model-preference ", []string{"default", "open-first", "open-only"}, []string{"--provider", "status"}},
 		{"root selftest shortcut", "contextbridge selftest --run ", []string{"--config", "--image", "--job-timeout"}, []string{"status", "chat"}},
 		{"short selftest shortcut", "cb selftest ", []string{"--providers", "--run", "--timeout"}, []string{"status", "chat"}},
 		{"short selftest partial flag", "cb selftest --r", []string{"--run"}, []string{"--providers", "status", "chat"}},

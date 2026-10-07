@@ -8,6 +8,7 @@ authority. Existing installations retain their cluster default when unconfigured
 agent_api:
   url: http://127.0.0.1:8770
   default_policy: offline
+  default_model_preference: default
 ```
 
 The URL must be a literal loopback HTTP(S) origin, without credentials, path,
@@ -32,6 +33,7 @@ promoted to verification. Raw JSON output is unchanged.
 ```console
 cb do "Explain additive colour mixing"
 cb do --mode daybreak-blue --policy offline "Explain additive colour mixing"
+cb do --mode daybreak-blue --policy offline --model-preference open-only "Explain additive colour mixing"
 cb do --policy offline --task code --background --timeout 900s "Create a small accessible HTML form"
 cb do --policy offline --task code --design off --js-checks checks.json "Implement the specified function"
 cb jobs list
@@ -54,6 +56,15 @@ cb do --task diagnose --policy offline --diagnostic-workspace demo "Inspect proj
 cb tools list
 cb tools --set port=8770 call network.listeners
 ```
+
+`--model-preference default|open-first|open-only` is independent of the network
+policy. `open-first` asks the local service to prefer a byte-admitted model with
+a pinned open-license receipt, while an otherwise permitted fallback may use a
+different model. `open-only` requires that verified local evidence and forbids
+cloud inference for the request. For either non-default value the CLI first
+checks `/api/agent/capabilities`; an older service that could silently ignore
+the field is rejected before the task is submitted. Operators may set the CLI
+default with `agent_api.default_model_preference`.
 
 Flags precede positional arguments. `--use` selects an explicit component
 reference; `--design` selects a design card/default/off. `--research` is an

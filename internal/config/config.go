@@ -71,8 +71,9 @@ type Terminal struct {
 // AgentAPI is an explicitly configured, local-only optional outcome service.
 // It is not discovered automatically and does not inherit cluster credentials.
 type AgentAPI struct {
-	URL           string `yaml:"url"`
-	DefaultPolicy string `yaml:"default_policy"`
+	URL                    string `yaml:"url"`
+	DefaultPolicy          string `yaml:"default_policy"`
+	DefaultModelPreference string `yaml:"default_model_preference,omitempty"`
 }
 
 func (a AgentAPI) Validate() error {
@@ -89,9 +90,14 @@ func (a AgentAPI) Validate() error {
 	}
 	switch a.DefaultPolicy {
 	case "", "local", "offline", "local-agent", "hybrid":
-		return nil
 	default:
 		return errors.New("agent_api.default_policy must be local, offline, local-agent or hybrid")
+	}
+	switch a.DefaultModelPreference {
+	case "", "default", "open-first", "open-only":
+		return nil
+	default:
+		return errors.New("agent_api.default_model_preference must be default, open-first or open-only")
 	}
 }
 

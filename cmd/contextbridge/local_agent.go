@@ -23,7 +23,7 @@ import (
 )
 
 func agentExplicitClusterRoute(args []string) bool {
-	valueFlags := map[string]bool{"--prompt": true, "--config": true, "--policy": true, "--mode": true, "--task": true, "--timeout": true, "--use": true, "--design": true, "--rules": true, "--diagnostic-workspace": true, "--research": true, "--request-id": true, "--js-checks": true, "--workspace-context": true}
+	valueFlags := map[string]bool{"--prompt": true, "--config": true, "--policy": true, "--model-preference": true, "--mode": true, "--task": true, "--timeout": true, "--use": true, "--design": true, "--rules": true, "--diagnostic-workspace": true, "--research": true, "--request-id": true, "--js-checks": true, "--workspace-context": true}
 	for i := 0; i < len(args); i++ {
 		name := strings.SplitN(args[i], "=", 2)[0]
 		name = "--" + strings.TrimLeft(name, "-")
@@ -39,6 +39,42 @@ func agentExplicitClusterRoute(args []string) bool {
 }
 
 type agentClient struct{ api config.AgentAPI }
+
+type agentModelPreference string
+
+const (
+	agentModelDefault   agentModelPreference = "default"
+	agentModelOpenFirst agentModelPreference = "open-first"
+	agentModelOpenOnly  agentModelPreference = "open-only"
+)
+
+func parseAgentModelPreference(value string) (agentModelPreference, error) {
+	preference := agentModelPreference(value)
+	switch preference {
+	case agentModelDefault, agentModelOpenFirst, agentModelOpenOnly:
+		return preference, nil
+	default:
+		return "", errors.New("--model-preference must be default, open-first or open-only")
+	}
+}
+
+func requireAgentModelPreferenceCapability(c agentClient, ctx context.Context, preference agentModelPreference) error {
+	if preference == agentModelDefault {
+		return nil
+	}
+	caps, err := c.call(ctx, http.MethodGet, "/api/agent/capabilities", nil, "")
+	if err != nil {
+		return err
+	}
+	preferences, ok := caps["model_preferences"].(map[string]any)
+	if !ok {
+		return errors.New("local service does not advertise model-preference enforcement; request was not submitted")
+	}
+	if _, ok := preferences[string(preference)]; !ok {
+		return fmt.Errorf("local service does not advertise %s enforcement; request was not submitted", preference)
+	}
+	return nil
+}
 
 func (c agentClient) call(ctx context.Context, method, path string, body any, key string) (map[string]any, error) {
 	if c.api.URL == "" {
@@ -97,6 +133,11 @@ func localAgentCommand(api config.AgentAPI, args []string) error {
 		policy = "offline"
 	}
 	flags.StringVar(&policy, "policy", policy, "local, offline, local-agent (web/no cloud), hybrid (cloud consent still required)")
+	modelPreferenceDefault := api.DefaultModelPreference
+	if modelPreferenceDefault == "" {
+		modelPreferenceDefault = string(agentModelDefault)
+	}
+	modelPreferenceValue := flags.String("model-preference", modelPreferenceDefault, "default, open-first, or fail-closed open-only")
 	mode := flags.String("mode", "standard", "standard or separately granted daybreak-blue")
 	task := flags.String("task", "solve", "solve, code or diagnose (offline read-only host tools)")
 	prompt := flags.String("prompt", "", "task text")
@@ -150,10 +191,14 @@ func localAgentCommand(api config.AgentAPI, args []string) error {
 	default:
 		return errors.New("invalid --policy")
 	}
+	modelPreference, err := parseAgentModelPreference(*modelPreferenceValue)
+	if err != nil {
+		return err
+	}
 	if *key != "" && !regexp.MustCompile(`^[a-zA-Z0-9_-]{16,80}$`).MatchString(*key) {
 		return errors.New("--request-id requires 16 to 80 letters, digits, _ or -")
 	}
-	packet := map[string]any{"text": text, "task": *task, "policy": policy, "mode": *mode, "timeout_seconds": int(*budget / time.Second), "design": *design, "research_query": *research, "components": []string(components)}
+	packet := map[string]any{"text": text, "task": *task, "policy": policy, "model_preference": string(modelPreference), "mode": *mode, "timeout_seconds": int(*budget / time.Second), "design": *design, "research_query": *research, "components": []string(components)}
 	if len(rules) > 0 {
 		packet["rules"] = []string(rules)
 	}
@@ -212,6 +257,9 @@ func localAgentCommand(api config.AgentAPI, args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	c := agentClient{api: api}
+	if err := requireAgentModelPreferenceCapability(c, ctx, modelPreference); err != nil {
+		return err
+	}
 	if *workspace != "" {
 		caps, err := c.call(ctx, http.MethodGet, "/api/agent/capabilities", nil, "")
 		if err != nil {

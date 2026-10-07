@@ -21,6 +21,12 @@ func TestLocalAgentBoundary(t *testing.T) {
 	if (config.AgentAPI{URL: "http://127.0.0.1:8770", DefaultPolicy: "offline"}).Validate() != nil {
 		t.Fatal("loopback origin rejected")
 	}
+	if (config.AgentAPI{URL: "http://127.0.0.1:8770", DefaultModelPreference: "open-only"}).Validate() != nil {
+		t.Fatal("open-only default rejected")
+	}
+	if (config.AgentAPI{URL: "http://127.0.0.1:8770", DefaultModelPreference: "mostly-open"}).Validate() == nil {
+		t.Fatal("unknown model preference accepted")
+	}
 }
 
 func TestLocalAgentClientDoesNotForwardCredentialsOrFollowRedirect(t *testing.T) {
@@ -49,6 +55,66 @@ func TestLocalAgentRoutingDoesNotReadPromptAsFlags(t *testing.T) {
 	}
 	if !agentExplicitClusterRoute([]string{"--provider=ollama", "--prompt", "x"}) {
 		t.Fatal("explicit cluster route lost")
+	}
+	if agentExplicitClusterRoute([]string{"--model-preference", "--provider", "task"}) {
+		t.Fatal("model-preference value changed route")
+	}
+}
+
+func TestLocalAgentModelPreferenceIsAdvertisedAndForwarded(t *testing.T) {
+	posts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/agent/capabilities":
+			json.NewEncoder(w).Encode(map[string]any{"model_preferences": map[string]any{
+				"default": "configured routing", "open-first": "open preferred", "open-only": "no cloud",
+			}})
+		case "/api/agent/jobs":
+			posts++
+			var packet map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&packet); err != nil {
+				t.Fatal(err)
+			}
+			if packet["model_preference"] != "open-only" || packet["policy"] != "offline" {
+				t.Errorf("model preference or policy lost: %#v", packet)
+			}
+			json.NewEncoder(w).Encode(map[string]any{"id": "0123456789abcdef0123456789abcdef", "state": "running"})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	api := config.AgentAPI{URL: server.URL, DefaultModelPreference: "open-only"}
+	if err := localAgentCommand(api, []string{"--background", "task"}); err != nil {
+		t.Fatal(err)
+	}
+	if posts != 1 {
+		t.Fatalf("submitted %d jobs, want one", posts)
+	}
+}
+
+func TestLocalAgentNonDefaultModelPreferenceFailsClosedAgainstOlderService(t *testing.T) {
+	posts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/agent/jobs" {
+			posts++
+		}
+		json.NewEncoder(w).Encode(map[string]any{"id": "0123456789abcdef0123456789abcdef", "state": "running"})
+	}))
+	defer server.Close()
+
+	api := config.AgentAPI{URL: server.URL}
+	for _, preference := range []string{"open-first", "open-only"} {
+		if err := localAgentCommand(api, []string{"--model-preference", preference, "--background", "task"}); err == nil {
+			t.Fatalf("older service accepted %s", preference)
+		}
+	}
+	if posts != 0 {
+		t.Fatalf("fail-closed check submitted %d jobs", posts)
+	}
+	if err := localAgentCommand(api, []string{"--model-preference", "mostly-open", "--background", "task"}); err == nil {
+		t.Fatal("unknown model preference accepted")
 	}
 }
 

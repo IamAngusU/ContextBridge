@@ -16,6 +16,13 @@ terminal:
   style: panel # panel or classic; applies to interactive terminals only
   max_prompt_characters: 4096 # bounded interactive `send`; relay byte limits still apply
 
+# Optional loopback Companion Agent used by `cb do` when no explicit pool route
+# is selected. Non-default model preferences are capability-checked before send.
+agent_api:
+  url: ""
+  default_policy: offline
+  default_model_preference: default # default, open-first or fail-closed open-only
+
 portable_resources:
   enabled: true # bounded marker discovery only; never auto-runs removable-drive code
   scan_roots: [] # empty = local fixed/removable volumes and common mount roots

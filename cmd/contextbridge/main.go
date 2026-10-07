@@ -245,7 +245,7 @@ unfinished job; cancellation is best-effort and never replays the prompt.
 
 When agent_api.url is configured, plain do uses that local service instead.
 Agent flags: --task solve|code|diagnose, --policy offline|local-agent|hybrid|local,
---mode standard|daybreak-blue,
+--model-preference default|open-first|open-only, --mode standard|daybreak-blue,
 --background, --timeout 900s, --design ID|default|off, --use ID, --json.
 Use --workspace-context FILE for a prepared source snapshot and --js-checks FILE
 for explicit pure-JS development checks (code only, no host shell permission).
