@@ -64,6 +64,10 @@ func main() {
 		err = consoleCommand(os.Args[2:])
 	case "do":
 		err = doCommand(os.Args[2:])
+	case "jobs":
+		err = localAgentJobsCommand(os.Args[2:])
+	case "tools":
+		err = localToolsCommand(os.Args[2:])
 	case "submit":
 		err = submitCommand(os.Args[2:])
 	case "schedule":
@@ -189,6 +193,7 @@ LOCAL RESOURCES AND INTEGRATIONS
   contextbridge integrate openai|litellm|mcp|relay|ui Print copy-ready integration settings
   contextbridge adapter list|details|doctor|setup|enable|disable
                                                Inspect and gate optional external adapters
+  contextbridge tools list|call NAME          Typed diagnostics of the configured local agent
   contextbridge mcp serve                     Expose the bounded MCP surface
 
 OPERATE AND MAINTAIN
@@ -234,6 +239,20 @@ also skips local tools unless --tools auto is supplied.
 Without a prompt, open a bounded interactive session. Advanced options are the
 same as ` + "`contextbridge cluster chat`" + `. Put flags before a trailing prompt,
 or use --prompt to make mixed arguments unambiguous.
+Use --timeout 20s to bound each turn including queue/provider time (0 keeps
+existing route limits). Interruption requests cancellation of an acknowledged
+unfinished job; cancellation is best-effort and never replays the prompt.
+
+When agent_api.url is configured, plain do uses that local service instead.
+Agent flags: --task solve|code|diagnose, --policy offline|local-agent|hybrid|local,
+--mode standard|daybreak-blue,
+--background, --timeout 900s, --design ID|default|off, --use ID, --json.
+Use --workspace-context FILE for a prepared source snapshot and --js-checks FILE
+for explicit pure-JS development checks (code only, no host shell permission).
+Code supports --rules ID|default|off. Diagnose is offline-only; optional
+--diagnostic-workspace ID admits a pre-registered read-only project scope.
+Use contextbridge jobs list|show|versions|diff|activity|cancel|resume [latest|ID] for those jobs.
+Explicit --provider/--model/--profile/--account keeps the cluster chat route.
 `
 	case "schedule":
 		help = "Usage: contextbridge schedule add|list|show|pause|resume|run|delete [options]\n"

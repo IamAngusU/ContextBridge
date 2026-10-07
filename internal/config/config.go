@@ -32,6 +32,7 @@ type Config struct {
 	Storage         Storage                   `yaml:"storage"`
 	Runtime         Runtime                   `yaml:"runtime"`
 	Terminal        Terminal                  `yaml:"terminal"`
+	AgentAPI        AgentAPI                  `yaml:"agent_api"`
 	Portable        PortableResources         `yaml:"portable_resources" json:"portable_resources"`
 	Updates         updater.Settings          `yaml:"updates" json:"updates"`
 	Routes          map[string]Route          `yaml:"routes"`
@@ -65,6 +66,33 @@ type Runtime struct {
 type Terminal struct {
 	Style               string `yaml:"style"`
 	MaxPromptCharacters int    `yaml:"max_prompt_characters,omitempty"`
+}
+
+// AgentAPI is an explicitly configured, local-only optional outcome service.
+// It is not discovered automatically and does not inherit cluster credentials.
+type AgentAPI struct {
+	URL           string `yaml:"url"`
+	DefaultPolicy string `yaml:"default_policy"`
+}
+
+func (a AgentAPI) Validate() error {
+	if a.URL == "" {
+		return nil
+	}
+	u, err := url.Parse(a.URL)
+	if err != nil {
+		return errors.New("agent_api.url must be a literal loopback HTTP(S) origin")
+	}
+	ip := net.ParseIP(u.Hostname())
+	if (u.Scheme != "http" && u.Scheme != "https") || ip == nil || !ip.IsLoopback() || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		return errors.New("agent_api.url must be a literal loopback HTTP(S) origin")
+	}
+	switch a.DefaultPolicy {
+	case "", "local", "offline", "local-agent", "hybrid":
+		return nil
+	default:
+		return errors.New("agent_api.default_policy must be local, offline, local-agent or hybrid")
+	}
 }
 
 // PortableResources enables bounded discovery of declarative resource-pack
@@ -532,6 +560,9 @@ func Save(path string, cfg Config) error {
 }
 
 func (c Config) Validate() error {
+	if err := c.AgentAPI.Validate(); err != nil {
+		return err
+	}
 	if c.Version != 1 {
 		return fmt.Errorf("unsupported config version %d", c.Version)
 	}

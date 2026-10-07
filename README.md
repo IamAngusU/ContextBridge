@@ -189,6 +189,16 @@ overrides; `do` accepts those same flags when they are needed. Put flags before
 a trailing prompt, for example `cb do --e2ee "Explain this locally"`, or use
 `--prompt` to make a mixed invocation unambiguous.
 
+Use `cb do --timeout 20s "Explain this briefly"` to bound a turn's queue and
+provider wait. The optional duration must be between `0` and `24h`; `0` (the
+default) retains existing route limits. Each interactive turn gets a fresh
+deadline. Ctrl+C or deadline expiry sends a best-effort cancellation for an
+acknowledged unfinished job using the same scoped credential, with at most a
+further three seconds to contact the relay. This is not proof that an external
+provider stopped immediately. An ambiguous submission without a returned job ID
+cannot be cancelled here and is never automatically replayed. Routing, model
+selection, remote-egress policy and global configuration are unchanged.
+
 Your local relay queues the request, your worker runs a compatible installed model, and the answer returns to the terminal. `auto` selects an available compatible model, not a promised quality tier.
 
 Already have a model from Hugging Face? Compatible GGUF models can be declared,

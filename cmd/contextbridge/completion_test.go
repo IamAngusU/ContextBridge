@@ -39,6 +39,35 @@ func TestPowerShellCompletionEscapesSingleQuotes(t *testing.T) {
 	}
 }
 
+func TestCompletionScriptsExposeLocalAgentModesJobsAndTools(t *testing.T) {
+	tests := map[string]struct {
+		script string
+		want   []string
+	}{
+		"powershell": {
+			powershellCompletionScript(),
+			[]string{"jobs = @('list','show','versions','diff','activity','cancel','resume')", "tools = @('list','call')", "'--mode' = @('standard','daybreak-blue'", "--workspace-context"},
+		},
+		"bash": {
+			bashCompletionScript(),
+			[]string{"do jobs tools submit", "jobs) candidates=\"list show versions diff activity cancel resume", "tools) candidates=\"list call", "standard daybreak-blue", "--workspace-context"},
+		},
+		"zsh": {
+			zshCompletionScript(),
+			[]string{"jobs:Inspect and control optional local agent jobs", "tools:Call typed read-only tools", "_values 'local job action' list show versions diff activity cancel resume", "_values 'local tool action' list call", "standard daybreak-blue"},
+		},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			for _, want := range test.want {
+				if !strings.Contains(test.script, want) {
+					t.Errorf("completion script is missing %q", want)
+				}
+			}
+		})
+	}
+}
+
 func TestCompletionScriptsExposeGuidedPairing(t *testing.T) {
 	cases := map[string]struct {
 		script string

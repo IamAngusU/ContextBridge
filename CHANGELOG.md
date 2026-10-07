@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- Restore the built-in calculator before the optional agent route for plain
+  foreground `do`, including existing tool/provenance terminal output. Preserve
+  explicit job/JSON/code contracts; invalid recognized arithmetic never falls
+  through to a model. Show method/source/review evidence for service answers.
+
+- Add an explicitly configured loopback-only outcome service for `do`, with
+  offline/local-agent/hybrid policies, bounded code checks and `jobs` commands.
+  Unconfigured and explicitly selected cluster routes retain their behaviour.
+  No inherited cluster credentials, environment proxies, redirects, automatic
+  runtime startup or implicit remote fallback. See `docs/local-agent-api.md`.
+  Explicit `--workspace-context` snapshots add capability-gated, local-first
+  source context without granting directory traversal or workspace write authority.
+  Add code-version list/show/resume and `do --fresh` for compatible services;
+  saving/exporting remains create-only and never applies generated code.
+  Add read-only `jobs diff` (version/base/file/patch) and `jobs activity` for
+  compatible local services; proposal statistics are not workspace-write evidence.
+  Add `tools list/call` for service-owned typed local diagnostics and explicit
+  offline `do --task diagnose`; no arbitrary shell or process-stop authority.
+  Code requests can pin engineering preferences with repeatable `--rules`.
+
+- Add opt-in `do` / `cluster chat --timeout` per-turn deadlines including queue
+  wait, and best-effort scoped cancellation of acknowledged unfinished jobs on
+  interruption or deadline expiry. Default limits and routes are unchanged;
+  unknown submissions are never replayed and terminal jobs are not cancelled.
+
 - Carry opt-in resource snapshots through fenced adapter progress and expose
   `/v1/cluster/jobs/{id}/activity/stream`. Full bounded snapshots replace prior
   snapshots, reconnect reads current state, and live connections recheck token
