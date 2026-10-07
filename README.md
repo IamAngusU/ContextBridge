@@ -174,11 +174,30 @@ or unsupported requests are not extracted into partial calculations; this is not
 yet a general autonomous tool-selection loop. MCP clients can explicitly use the
 same bounded resolver through `contextbridge.local_tool` with a `prompt` string.
 
+Decimal commas and points may be mixed **between numbers**: `cb do "Was macht
+(4,2 * 10.1) mal 3 / 30 + 5?"` computes exactly `9.242`. Results use decimal
+points (or an exact fraction). Unambiguous comma decimals such as `4,2` also work
+in English and bare expressions. German requests retain their comma-decimal
+convention; without that context, `1,234` is ambiguous and asks for an ungrouped
+integer (`1234`) or a decimal point (`1.234`). Thousands grouping such as
+`1.234,56` or `1,234.56` is not supported: write `1234.56`. Malformed or ambiguous
+recognized arithmetic remains a calculator error, never an LLM fallback.
+
 Run `cb do` without a prompt for an interactive session. `cluster chat` remains
 the explicit surface for provider, model, profile, artifact, E2EE, and budget
 overrides; `do` accepts those same flags when they are needed. Put flags before
 a trailing prompt, for example `cb do --e2ee "Explain this locally"`, or use
 `--prompt` to make a mixed invocation unambiguous.
+
+Use `cb do --timeout 20s "Explain this briefly"` to bound a turn's queue and
+provider wait. The optional duration must be between `0` and `24h`; `0` (the
+default) retains existing route limits. Each interactive turn gets a fresh
+deadline. Ctrl+C or deadline expiry sends a best-effort cancellation for an
+acknowledged unfinished job using the same scoped credential, with at most a
+further three seconds to contact the relay. This is not proof that an external
+provider stopped immediately. An ambiguous submission without a returned job ID
+cannot be cancelled here and is never automatically replayed. Routing, model
+selection, remote-egress policy and global configuration are unchanged.
 
 Your local relay queues the request, your worker runs a compatible installed model, and the answer returns to the terminal. `auto` selects an available compatible model, not a promised quality tier.
 

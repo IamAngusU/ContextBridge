@@ -7,13 +7,15 @@ import (
 )
 
 var completionRootCommands = []string{
-	"init", "serve", "run", "stop", "console", "do", "submit", "schedule", "result", "review",
+	"init", "serve", "run", "stop", "console", "do", "jobs", "tools", "submit", "schedule", "result", "review",
 	"health", "dashboard", "status", "doctor", "guide", "hardware", "models", "resources", "uninstall",
 	"pull", "runtime", "mcp", "integrate", "adapter", "benchmark", "verification", "relay", "pair", "worker", "cluster", "route", "selftest", "update", "completion", "version", "help",
 }
 
 var completionSubcommands = map[string][]string{
 	"schedule":     {"add", "list", "show", "pause", "resume", "run", "delete"},
+	"jobs":         {"list", "show", "versions", "diff", "activity", "cancel", "resume"},
+	"tools":        {"list", "call"},
 	"runtime":      {"install"},
 	"mcp":          {"serve"},
 	"integrate":    {"openai", "litellm", "mcp", "relay", "ui"},
@@ -64,6 +66,8 @@ $script:ContextBridgeSubcommands = @{
     route = @('explain')
     update = @('status','check','apply','enable','disable','auto')
     completion = @('powershell','bash','zsh')
+	jobs = @('list','show','versions','diff','activity','cancel','resume')
+	tools = @('list','call')
 }
 $script:ContextBridgeOptions = @{
     'init' = @('--config')
@@ -72,7 +76,9 @@ $script:ContextBridgeOptions = @{
     'stop' = @('--config','--force')
     'uninstall' = @('--config','--install-dir','--purge','--force','--yes','--dry-run')
     'console' = @('--config','--token')
-    'do' = @('--config','--account','--token','--provider','--group','--model','--profile','--reasoning','--e2ee','--session','--prompt','--artifacts','--min-artifacts','--image','--min-images','--attach-image','--new-session','--new-session-per-job','--foreground-new-session','--egress','--max-cost-usd')
+    'do' = @('--config','--account','--token','--provider','--group','--model','--profile','--reasoning','--e2ee','--session','--prompt','--artifacts','--min-artifacts','--image','--min-images','--attach-image','--new-session','--new-session-per-job','--foreground-new-session','--egress','--max-cost-usd','--timeout','--policy','--mode','--task','--background','--fresh','--json','--design','--research','--request-id','--js-checks','--workspace-context','--diagnostic-workspace','--rules','--use')
+	'jobs' = @('list','show','versions','diff','activity','cancel','resume','--config','--output','--version','--base','--path','--patch')
+	'tools' = @('list','call','--config','--arguments','--args','--set')
     'submit' = @('--file','--artifacts','--config')
     'schedule' = @('--file','--config','--interactive')
     'result' = @('--config')
@@ -114,7 +120,7 @@ $script:ContextBridgeOptions = @{
 	'cluster protocol' = @('--config','--token','--json')
 	'cluster conformance' = @('relay','worker','resilience','--config','--token','--node','--json')
     'cluster submit' = @('--config','--account','--file','--token','--wait','--e2ee','--stream','--artifacts','--idempotency-key','--interactive')
-    'cluster chat' = @('--config','--account','--token','--provider','--group','--model','--profile','--reasoning','--e2ee','--session','--prompt','--artifacts','--min-artifacts','--image','--min-images','--attach-image','--new-session','--new-session-per-job','--foreground-new-session','--egress','--max-cost-usd')
+    'cluster chat' = @('--config','--account','--token','--provider','--group','--model','--profile','--reasoning','--e2ee','--session','--prompt','--artifacts','--min-artifacts','--image','--min-images','--attach-image','--new-session','--new-session-per-job','--foreground-new-session','--egress','--max-cost-usd','--timeout')
 	'cluster scheduled-action' = @('preview','confirm','list','show','cancel','--config','--account','--token','--token-file','--file','--status','--limit','--json')
     'cluster agent' = @('plan','run','auto','--config','--token','--goal','--goal-file','--policy','--planner-provider','--planner-profile','--planner-model','--allow-providers','--allow-adapter-profiles','--max-steps','--step-timeout','--max-runtime','--planner-timeout','--out','--plan','--approve')
 	'cluster selftest' = @('--config','--providers','--local-model','--run','--dry-run','--image','--image-profile','--artifacts','--keep-artifacts','--timeout','--job-timeout','--poll')
@@ -146,20 +152,23 @@ $script:ContextBridgeValueOptions = @{
     '--provider' = @('adapter','ollama','nuextract','jina')
 
     '--reasoning' = @('instant','medium','high','xhigh','pro','max')
-    '--mode' = @('local','client','relay','worker','all')
+    '--mode' = @('standard','daybreak-blue','normal','lazy','local','client','relay','worker','all')
+	'--policy' = @('local','offline','local-agent','hybrid')
+	'--task' = @('solve','code','diagnose')
+	'--base' = @('original','previous')
 	'--role' = @('admin','producer','node','observer')
 	'--max-priority' = @('0','20','40','60','80','100')
 	'--classification' = @('local','remote')
 }
 $script:ContextBridgeTakesValue = @(
-	'--config','--install-dir','--file','--job','--artifacts','--artifact','--attach-image','--identity','--job-dir','--token-file','--pool-authority-file','--trust-key','--evidence-dir','--write-env','--write-config','--bundle','--advertise-host','--certificate-out','--scheduled-actions-policy',
+	'--config','--install-dir','--file','--job','--artifacts','--artifact','--attach-image','--identity','--job-dir','--token-file','--pool-authority-file','--trust-key','--evidence-dir','--write-env','--write-config','--bundle','--advertise-host','--certificate-out','--scheduled-actions-policy','--js-checks','--workspace-context','--output','--arguments',
     '--slots','--endpoint','--relay','--name','--providers','--models','--tasks','--groups',
     '--token','--account','--provider','--group','--model','--profile','--reasoning','--session','--prompt',
 	'--min-artifacts','--min-images','--local-model','--image-profile','--timeout','--job-timeout','--poll','--after','--limit','--offset','--idempotency-key','--subject','--groups','--allowed-tenants','--allowed-subjects','--lifetime-hours','--max-queued-jobs','--max-jobs-per-hour','--max-priority',
 	'--mode','--relay-url','--public-url','--listen','--role','--subject','--approve','--deny','--label','--driver','--route','--task','--model','--timeout-seconds','--principal','--classification','--option','--adapter','--arg','--profile-file','--job-file','--working-directory',
     '--managed-service','--samples','--warmup','--database-jobs','--idle-duration','--binary',
     '--goal','--goal-file','--planner-provider','--planner-profile','--planner-model','--allow-providers',
-    '--policy','--allow-adapter-profiles','--max-steps','--step-timeout','--max-runtime','--planner-timeout','--out','--plan','--approve'
+	'--policy','--allow-adapter-profiles','--max-steps','--step-timeout','--max-runtime','--planner-timeout','--out','--plan','--approve','--design','--research','--request-id','--diagnostic-workspace','--rules','--use','--version','--base','--path','--args','--set'
 )
 Register-ArgumentCompleter -Native -CommandName contextbridge, cb -ScriptBlock {
     param($wordToComplete, $commandAst, $cursorPosition)
@@ -224,7 +233,7 @@ _contextbridge_complete() {
   if (( COMP_CWORD > 2 )); then
     subcommand="${COMP_WORDS[2]:-}"
     case "$command" in
-      schedule|runtime|mcp|integrate|adapter|verification|cluster|route|update)
+      schedule|jobs|tools|runtime|mcp|integrate|adapter|verification|cluster|route|update)
         if [[ -n "$subcommand" && "$subcommand" != -* ]]; then
           option_key="$command $subcommand"
         fi
@@ -239,17 +248,20 @@ _contextbridge_complete() {
 	--working-directory)
 	  if declare -F _filedir >/dev/null 2>&1; then _filedir -d; else COMPREPLY=( $(compgen -d -- "$current") ); fi
 	  return ;;
-	--config|--file|--artifacts|--artifact|--attach-image|--identity|--job-dir|--token-file|--pool-authority-file|--binary|--trust-key|--evidence-dir|--write-env|--write-config|--certificate-out|--out|--bundle|--adapter|--profile-file|--job-file|--scheduled-actions-policy)
+	--config|--file|--artifacts|--artifact|--attach-image|--identity|--job-dir|--token-file|--pool-authority-file|--binary|--trust-key|--evidence-dir|--write-env|--write-config|--certificate-out|--out|--bundle|--adapter|--profile-file|--job-file|--scheduled-actions-policy|--js-checks|--workspace-context|--output|--arguments)
       if declare -F _filedir >/dev/null 2>&1; then _filedir; else COMPREPLY=( $(compgen -f -- "$current") ); fi
       return ;;
     --provider) candidates="adapter ollama nuextract jina" ;;
 
     --reasoning) candidates="instant medium high xhigh pro max" ;;
-    --mode) candidates="local client relay worker all" ;;
+    --mode) candidates="standard daybreak-blue normal lazy local client relay worker all" ;;
+    --policy) candidates="local offline local-agent hybrid" ;;
+    --task) candidates="solve code diagnose" ;;
+    --base) candidates="original previous" ;;
     --role) candidates="admin producer node observer" ;;
 	--max-priority) candidates="0 20 40 60 80 100" ;;
 	--classification) candidates="local remote" ;;
-    --wait|--e2ee|--require-e2ee|--stream|--json|--follow|--pipeline|--interactive|--show-token|--check|--live|--no-open|--topmost|--image|--new-session|--new-session-per-job|--foreground-new-session|--run|--dry-run|--keep-artifacts|--no-updates|--discover|--force|--relay-only|--require-artifact|--require-evidence|--create-token) boolean_previous=1 ;;
+    --wait|--e2ee|--require-e2ee|--stream|--json|--follow|--pipeline|--interactive|--show-token|--check|--live|--no-open|--topmost|--image|--new-session|--new-session-per-job|--foreground-new-session|--run|--dry-run|--keep-artifacts|--no-updates|--discover|--force|--relay-only|--require-artifact|--require-evidence|--create-token|--background|--fresh|--patch) boolean_previous=1 ;;
   esac
   if [ -n "${candidates:-}" ]; then
     COMPREPLY=( $(compgen -W "$candidates" -- "$current") )
@@ -259,8 +271,10 @@ _contextbridge_complete() {
   if [[ "$current" == -* || ( "$boolean_previous" -eq 1 && -z "$current" ) ]]; then
     candidates=""
     case "$option_key" in
-      "cluster chat") candidates="--config --account --token --provider --group --model --profile --reasoning --e2ee --session --prompt --artifacts --min-artifacts --image --min-images --attach-image --new-session --new-session-per-job --foreground-new-session --egress --max-cost-usd" ;;
-	  do) candidates="--config --account --token --provider --group --model --profile --reasoning --e2ee --session --prompt --artifacts --min-artifacts --image --min-images --attach-image --new-session --new-session-per-job --foreground-new-session --egress --max-cost-usd" ;;
+      "cluster chat") candidates="--config --account --token --provider --group --model --profile --reasoning --e2ee --session --prompt --artifacts --min-artifacts --image --min-images --attach-image --new-session --new-session-per-job --foreground-new-session --egress --max-cost-usd --timeout" ;;
+	  do) candidates="--config --account --token --provider --group --model --profile --reasoning --e2ee --session --prompt --artifacts --min-artifacts --image --min-images --attach-image --new-session --new-session-per-job --foreground-new-session --egress --max-cost-usd --timeout --policy --mode --task --background --fresh --json --design --research --request-id --js-checks --workspace-context --diagnostic-workspace --rules --use" ;;
+	  jobs) candidates="list show versions diff activity cancel resume --config --output --version --base --path --patch" ;;
+	  tools) candidates="list call --config --arguments --args --set" ;;
 	  "cluster scheduled-action") candidates="preview confirm list show cancel --config --account --token --token-file --file --status --limit --json" ;;
       "cluster agent") candidates="plan run auto --config --token --goal --goal-file --policy --planner-provider --planner-profile --planner-model --allow-providers --allow-adapter-profiles --max-steps --step-timeout --max-runtime --planner-timeout --out --plan --approve" ;;
 	  "cluster selftest") candidates="--config --providers --local-model --run --dry-run --image --image-profile --artifacts --keep-artifacts --timeout --job-timeout --poll" ;;
@@ -336,10 +350,12 @@ _contextbridge_complete() {
 	elif [[ "$option_key" == "cluster lan" && "$COMP_CWORD" -eq 3 ]]; then
 	  candidates="init relocate join status"
   elif [ "$COMP_CWORD" -eq 1 ]; then
-    candidates="init serve run stop uninstall console do submit schedule result review health dashboard status doctor guide hardware models resources pull runtime mcp integrate adapter benchmark verification relay pair worker cluster route selftest update completion version help"
+    candidates="init serve run stop uninstall console do jobs tools submit schedule result review health dashboard status doctor guide hardware models resources pull runtime mcp integrate adapter benchmark verification relay pair worker cluster route selftest update completion version help"
   elif [ "$COMP_CWORD" -eq 2 ]; then
     case "$command" in
       schedule) candidates="add list show pause resume run delete" ;;
+      jobs) candidates="list show versions diff activity cancel resume" ;;
+      tools) candidates="list call" ;;
       runtime) candidates="install" ;;
       mcp) candidates="serve" ;;
       integrate) candidates="openai litellm mcp relay ui" ;;
@@ -371,7 +387,9 @@ root=(
     'stop:Safely stop the local ContextBridge process'
     'uninstall:Remove owned program files and optionally managed data'
     'console:Attach a live terminal to the running service'
-    'do:Ask the configured pool with safe route defaults'
+    'do:Solve through local tools, the optional local agent, or an explicit pool route'
+	'jobs:Inspect and control optional local agent jobs'
+	'tools:Call typed read-only tools exposed by the optional local agent'
     'submit:Submit a local JSON job'
     'schedule:Manage durable schedules'
     'result:Read a saved job result'
@@ -409,7 +427,21 @@ if (( CURRENT == 2 )); then
 fi
 case "$words[2]" in
   do)
-    _arguments "${config[@]}" '--account[Named cluster account]:account:' '--token[Producer token]:token:' '--provider[Generation provider]:provider:(adapter ollama nuextract jina)' '--group[Worker group]:group:' '--model[Specific model]:model:' '--profile[Operator-configured adapter profile]:profile:' '--reasoning[Reasoning level]:level:(instant medium high xhigh pro max)' '--e2ee[Encrypt prompts and results]' '--session[Stable session ID]:session:' '--prompt[Send one turn and exit]:prompt:' '--artifacts[Artifact directory or auto/off]:directory:_directories' '--min-artifacts[Required verified files]:count:' '--image[Require a returned image]' '--min-images[Required verified images]:count:' '--attach-image[Attach a local image]:image file:_files' '--new-session[Open a fresh adapter session]' '--new-session-per-job[Open a fresh adapter session for every turn]' '--foreground-new-session[Ask the adapter to foreground a fresh session]' '--egress[Execution boundary]:egress:(local_only remote_allowed)' '--max-cost-usd[Hard remote cost limit]:USD:' '*:prompt:'
+    _arguments "${config[@]}" '--account[Named cluster account]:account:' '--token[Producer token]:token:' '--provider[Explicit pool provider]:provider:(adapter ollama nuextract jina)' '--group[Worker group]:group:' '--model[Specific pool model]:model:' '--profile[Operator-configured adapter profile]:profile:' '--reasoning[Pool reasoning level]:level:(instant medium high xhigh pro max)' '--e2ee[Encrypt pool prompts and results]' '--session[Stable pool session ID]:session:' '--prompt[Send one task and exit]:prompt:' '--artifacts[Pool artifact directory or auto/off]:directory:_directories' '--min-artifacts[Required verified pool files]:count:' '--image[Require a returned pool image]' '--min-images[Required verified pool images]:count:' '--attach-image[Attach a local image to the pool route]:image file:_files' '--new-session[Open a fresh adapter session]' '--new-session-per-job[Open a fresh adapter session for every turn]' '--foreground-new-session[Ask the adapter to foreground a fresh session]' '--egress[Pool execution boundary]:egress:(local_only remote_allowed)' '--max-cost-usd[Hard remote cost limit]:USD:' '--timeout[Local job budget or pool turn deadline]:duration:' '--policy[Local agent network policy]:policy:(local offline local-agent hybrid)' '--mode[Local capability or pool work style]:mode:(standard daybreak-blue normal lazy)' '--task[Local agent task]:task:(solve code diagnose)' '--background[Return a durable local job ID immediately]' '--fresh[Skip exact verified-code reuse]' '--json[Print the full local receipt]' '--design[Local design card ID, default or off]:design:' '--research[Explicit public search query]:query:' '--request-id[Stable local idempotency key]:key:' '--js-checks[Bounded pure-JS check JSON]:checks file:_files' '--workspace-context[Prepared workspace snapshot JSON]:context file:_files' '--diagnostic-workspace[Registered diagnostic workspace ID]:workspace:' '*--rules[Engineering rule profile]:rule:' '*--use[Component reference]:component:' '*:prompt:'
+    ;;
+  jobs)
+    if (( CURRENT == 3 )); then
+      _values 'local job action' list show versions diff activity cancel resume
+      return
+    fi
+    _arguments "${config[@]}" '--output[Create a receipt file without overwriting]:output file:_files' '--version[Saved code version]:version:' '--base[Diff base]:base:(original previous)' '--path[Exact relative result path]:path:' '--patch[Include bounded unified patches]' '*:job ID:'
+    ;;
+  tools)
+    if (( CURRENT == 3 )); then
+      _values 'local tool action' list call
+      return
+    fi
+    _arguments "${config[@]}" '--arguments[Strict JSON argument object]:arguments file:_files' '--args[Inline strict JSON argument object]:JSON:' '*--set[Typed FIELD=VALUE argument]:field:' '*:tool name:'
     ;;
   schedule)
     if (( CURRENT == 3 )); then
@@ -494,7 +526,7 @@ case "$words[2]" in
 		_arguments "${config[@]}" '--token[Producer, observer, or admin token]:token:' '--node[Exact worker ID or unique worker name]:worker:' '--json[Print machine-readable conformance report]'
 		;;
       submit) _arguments "${config[@]}" '--account[Named cluster account]:account:' '--file[Cluster job JSON]:job file:_files' '--token[Producer token]:token:' '--wait[Wait for a final result]' '--e2ee[Encrypt payload]' '--stream[Stream adapter text]' '--artifacts[Artifact output directory]:directory:_directories' '--idempotency-key[Deduplicate an exact retry]:key:' '--interactive[Guide unresolved submission values in a real terminal]' ;;
-	  chat) _arguments "${config[@]}" '--account[Named cluster account]:account:' '--token[Producer token]:token:' '--provider[Generation provider]:provider:(adapter ollama nuextract jina)' '--group[Worker group]:group:' '--model[Specific model]:model:' '--profile[Operator-configured adapter profile]:profile:' '--reasoning[Reasoning level]:level:(instant medium high xhigh pro max)' '--e2ee[Encrypt prompts and results]' '--session[Stable session ID]:session:' '--prompt[Send one turn and exit]:prompt:' '--artifacts[Artifact directory or auto/off]:directory:_directories' '--min-artifacts[Required verified files]:count:' '--image[Require a returned image]' '--min-images[Required verified images]:count:' '--attach-image[Attach a local image]:image file:_files' '--new-session[Open a fresh adapter session]' '--new-session-per-job[Open a fresh adapter session for every turn]' '--foreground-new-session[Ask the adapter to foreground a fresh session]' ;;
+	  chat) _arguments "${config[@]}" '--account[Named cluster account]:account:' '--token[Producer token]:token:' '--provider[Generation provider]:provider:(adapter ollama nuextract jina)' '--group[Worker group]:group:' '--model[Specific model]:model:' '--profile[Operator-configured adapter profile]:profile:' '--reasoning[Reasoning level]:level:(instant medium high xhigh pro max)' '--e2ee[Encrypt prompts and results]' '--session[Stable session ID]:session:' '--prompt[Send one turn and exit]:prompt:' '--artifacts[Artifact directory or auto/off]:directory:_directories' '--min-artifacts[Required verified files]:count:' '--image[Require a returned image]' '--min-images[Required verified images]:count:' '--attach-image[Attach a local image]:image file:_files' '--new-session[Open a fresh adapter session]' '--new-session-per-job[Open a fresh adapter session for every turn]' '--foreground-new-session[Ask the adapter to foreground a fresh session]' '--timeout[Per-turn deadline including queue/provider time]:duration:' ;;
 	  scheduled-action)
 		if (( CURRENT == 4 )); then
 		  _values 'scheduled action' preview confirm list show cancel

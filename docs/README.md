@@ -47,6 +47,8 @@ described as vendor integrations here.
   version- and time-bounded statement format for future reviewed verification.
 - [Bounded agents](bounded-agent.md): manual approval, local-only auto mode,
   and operator-owned authority envelopes.
+- [Optional lazy work style](lazy-mode.md): reuse-first prompt guidance without
+  changing permissions, offline rules or typed adapter contracts.
 - [Application integrations](integrations.md): native jobs, OpenAI-compatible
   input, one-command connection settings, MCP, PHP, and the folder inbox.
 - [Management API](management-api.md): scoped dashboard credentials, identity,

@@ -32,6 +32,7 @@ type Config struct {
 	Storage         Storage                   `yaml:"storage"`
 	Runtime         Runtime                   `yaml:"runtime"`
 	Terminal        Terminal                  `yaml:"terminal"`
+	AgentAPI        AgentAPI                  `yaml:"agent_api"`
 	Portable        PortableResources         `yaml:"portable_resources" json:"portable_resources"`
 	Updates         updater.Settings          `yaml:"updates" json:"updates"`
 	Routes          map[string]Route          `yaml:"routes"`
@@ -65,6 +66,33 @@ type Runtime struct {
 type Terminal struct {
 	Style               string `yaml:"style"`
 	MaxPromptCharacters int    `yaml:"max_prompt_characters,omitempty"`
+}
+
+// AgentAPI is an explicitly configured, local-only optional outcome service.
+// It is not discovered automatically and does not inherit cluster credentials.
+type AgentAPI struct {
+	URL           string `yaml:"url"`
+	DefaultPolicy string `yaml:"default_policy"`
+}
+
+func (a AgentAPI) Validate() error {
+	if a.URL == "" {
+		return nil
+	}
+	u, err := url.Parse(a.URL)
+	if err != nil {
+		return errors.New("agent_api.url must be a literal loopback HTTP(S) origin")
+	}
+	ip := net.ParseIP(u.Hostname())
+	if (u.Scheme != "http" && u.Scheme != "https") || ip == nil || !ip.IsLoopback() || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		return errors.New("agent_api.url must be a literal loopback HTTP(S) origin")
+	}
+	switch a.DefaultPolicy {
+	case "", "local", "offline", "local-agent", "hybrid":
+		return nil
+	default:
+		return errors.New("agent_api.default_policy must be local, offline, local-agent or hybrid")
+	}
 }
 
 // PortableResources enables bounded discovery of declarative resource-pack
@@ -116,6 +144,7 @@ type Engine struct {
 	MaxTotalImageBytes  int64         `yaml:"max_total_image_bytes,omitempty" json:"max_total_image_bytes,omitempty"`
 	ImageMediaTypes     []string      `yaml:"image_media_types,omitempty" json:"image_media_types,omitempty"`
 	ReasoningEffort     string        `yaml:"reasoning_effort,omitempty" json:"reasoning_effort,omitempty"`
+	OllamaThink         bool          `yaml:"ollama_think,omitempty" json:"ollama_think,omitempty"`
 	BalancePath         string        `yaml:"balance_path,omitempty" json:"balance_path,omitempty"`
 	MinimumBalanceUSD   float64       `yaml:"minimum_balance_usd,omitempty" json:"minimum_balance_usd,omitempty"`
 	Costing             EngineCosting `yaml:"costing,omitempty" json:"costing,omitempty"`
@@ -203,9 +232,9 @@ type AdapterProfile struct {
 }
 
 const (
-	// AdapterAgentInstructionContractOption is the only adapter option exposed
-	// to an agent planner. All other options may describe paths, credentials, or
-	// runtime policy and therefore stay outside prompt material.
+	// AdapterAgentInstructionContractOption is exposed to an agent planner,
+	// alongside safe IDs of explicitly pinned verification checks. All other
+	// options may describe paths, credentials, or runtime policy and stay local.
 	AdapterAgentInstructionContractOption       = "agent_instruction_contract"
 	AdapterAgentInstructionContractMaximumBytes = 2 << 10
 )
@@ -531,6 +560,9 @@ func Save(path string, cfg Config) error {
 }
 
 func (c Config) Validate() error {
+	if err := c.AgentAPI.Validate(); err != nil {
+		return err
+	}
 	if c.Version != 1 {
 		return fmt.Errorf("unsupported config version %d", c.Version)
 	}
@@ -633,6 +665,9 @@ func (c Config) Validate() error {
 		if len(profile.Options) > 64 {
 			return fmt.Errorf("adapter profile %s has more than 64 options", name)
 		}
+		if _, err := AgentVerificationChecks(profile); err != nil {
+			return fmt.Errorf("adapter profile %s: %w", name, err)
+		}
 		for option, value := range profile.Options {
 			if len(option) > 80 || !safeNamePattern.MatchString(option) || strings.Contains(option, "..") {
 				return fmt.Errorf("adapter profile %s has an invalid option name", name)
@@ -662,6 +697,9 @@ func (c Config) Validate() error {
 		}
 		if engine.MaxOutputTokens < 0 || engine.MaxOutputTokens > 1_000_000 {
 			return fmt.Errorf("engine %s max_output_tokens must be between 1 and 1000000 when set", name)
+		}
+		if engine.OllamaThink && (engine.Type != "ollama" || strings.TrimSpace(engine.Model) == "" || engine.Model == "auto" || engine.MaxOutputTokens <= 0) {
+			return fmt.Errorf("engine %s ollama_think requires type ollama, an explicit model and positive max_output_tokens", name)
 		}
 		if engine.ContextWindowTokens < 0 || engine.ContextWindowTokens > 10_000_000 {
 			return fmt.Errorf("engine %s context_window_tokens must be between 1 and 10000000 when set", name)

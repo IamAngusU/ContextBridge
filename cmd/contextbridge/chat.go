@@ -43,6 +43,9 @@ func doCommand(args []string) error {
 		return err
 	}
 	provider, model, profile := defaultChatRoute(cfg, "adapter")
+	if cfg.AgentAPI.URL != "" && !agentExplicitClusterRoute(chatArgs) {
+		return localAgentCommand(cfg.AgentAPI, chatArgs)
+	}
 	return clusterChatCommandWithDefaults(chatArgs, "do", provider, model, profile)
 }
 
@@ -85,7 +88,9 @@ func chatHelpRequested(args []string) bool {
 		"--artifacts": true, "-artifacts": true, "--min-artifacts": true, "-min-artifacts": true,
 		"--min-images": true, "-min-images": true, "--attach-image": true, "-attach-image": true,
 		"--egress": true, "-egress": true, "--max-cost-usd": true, "-max-cost-usd": true,
+		"--mode": true, "-mode": true,
 		"--tools": true, "-tools": true,
+		"--timeout": true, "-timeout": true,
 	}
 	for index := 0; index < len(args); index++ {
 		arg := args[index]
@@ -170,8 +175,16 @@ func clusterChatCommandWithDefaults(args []string, commandName, defaultProvider,
 	egress := flags.String("egress", "", "execution boundary: local_only or remote_allowed")
 	maxCostUSD := flags.Float64("max-cost-usd", 0, "hard remote cost upper bound in USD; unknown pricing fails closed")
 	toolMode := flags.String("tools", "auto", "auto resolves unambiguous arithmetic/random requests locally; off always uses the selected provider")
+	turnTimeout := flags.Duration("timeout", 0, "per-turn deadline including queue/provider time, e.g. 20s; 0 keeps existing route limits (maximum 24h)")
+	workMode := flags.String("mode", "", "optional coding style: normal or lazy; no new permissions; adapter requests stay unchanged")
 	if err := flags.Parse(args); err != nil {
 		return err
+	}
+	if err := validateWorkMode(*workMode); err != nil {
+		return err
+	}
+	if *turnTimeout < 0 || *turnTimeout > 24*time.Hour {
+		return errors.New("--timeout must be between 0 and 24h")
 	}
 	e2eeExplicit := false
 	modelExplicit := false
@@ -278,11 +291,13 @@ func clusterChatCommandWithDefaults(args []string, commandName, defaultProvider,
 	defer stop()
 	state := &chatState{relayURL: clusterClientBaseURL(cfg), token: *token, provider: *provider, group: *group, model: *model, profile: *profile, reasoning: *reasoning, egress: *egress, maxCostUSD: *maxCostUSD, e2ee: *e2ee, poolAuthority: poolAuthority, sessionID: *sessionID, artifactDir: *artifactDir, minArtifacts: *minArtifacts, minImages: *minImages, requireImage: *minImages > 0, images: images, newSession: *newSession || *newSessionPerJob, newSessionPerJob: *newSessionPerJob, foregroundNewSession: *foregroundNewSession}
 	state.localTools = *toolMode == "auto" && (!routeExplicit || toolsExplicit)
+	state.workMode = *workMode
+	state.turnTimeout = *turnTimeout
 
 	if strings.TrimSpace(*prompt) != "" {
 		return state.turn(ctx, strings.TrimSpace(*prompt))
 	}
-	fmt.Printf("\n  ContextBridge Chat · %s\n  session %s · follow-ups stay in the same adapter session unless --new-session-per-job is set\n  /model, /reasoning, /profile, /egress, /max-cost-usd, /image, /min-images, /min-artifacts and /e2ee change this session · /settings shows it · /exit closes it\n\n", chatProviderLabel(*provider), *sessionID)
+	fmt.Printf("\n  ContextBridge Chat · %s\n  session %s · follow-ups stay in the same adapter session unless --new-session-per-job is set\n  /model, /reasoning, /profile, /egress, /max-cost-usd, /image, /min-images, /min-artifacts, /mode and /e2ee change this session · /settings shows it · /exit closes it\n\n", chatProviderLabel(*provider), *sessionID)
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 64<<10), 1<<20)
 	for {
@@ -325,7 +340,7 @@ func looksLikePastedChatFlag(line string) bool {
 	}
 	for _, name := range []string{"--config", "--account", "--token", "--provider", "--group", "--model", "--profile", "--reasoning",
 		"--e2ee", "--session", "--prompt", "--artifacts", "--min-artifacts", "--image", "--min-images",
-		"--attach-image", "--new-session", "--new-session-per-job", "--foreground-new-session", "--egress", "--max-cost-usd", "--tools"} {
+		"--attach-image", "--new-session", "--new-session-per-job", "--foreground-new-session", "--egress", "--max-cost-usd", "--tools", "--mode", "--timeout"} {
 		if first[0] == name || strings.HasPrefix(first[0], name+"=") {
 			return true
 		}
@@ -370,6 +385,14 @@ func (s *chatState) command(line string) (bool, string) {
 	}
 	value := strings.TrimSpace(strings.TrimPrefix(line, parts[0]))
 	switch parts[0] {
+	case "/mode":
+		if err := validateWorkMode(value); err != nil {
+			return true, "  ! use /mode lazy or /mode normal; permissions stay unchanged"
+		}
+		if value != "" {
+			s.workMode = value
+		}
+		return true, "  ✓ mode: " + workModeLabel(s.workMode) + " · style only; exact adapter requests unchanged"
 	case "/tools":
 		if value != "auto" && value != "off" {
 			return true, "  ! use /tools auto or /tools off"
@@ -455,7 +478,7 @@ func (s *chatState) command(line string) (bool, string) {
 		s.maxCostUSD = budget
 		return true, fmt.Sprintf("  ✓ cost budget: %.6f USD", budget)
 	case "/settings":
-		return true, fmt.Sprintf("  session %s · provider %s · profile %s · model %s · reasoning %s · egress %s · max cost %.6f USD · required images %d · required files %d · fresh session %t · per job %t · E2EE %t", s.sessionID, s.provider, emptyChatSetting(s.profile), emptyChatSetting(s.model), emptyChatSetting(s.reasoning), emptyChatSetting(s.egress), s.maxCostUSD, s.minImages, s.minArtifacts, s.newSession, s.newSessionPerJob, s.e2ee)
+		return true, fmt.Sprintf("  session %s · provider %s · profile %s · model %s · reasoning %s · egress %s · max cost %.6f USD · required images %d · required files %d · fresh session %t · per job %t · E2EE %t · mode %s", s.sessionID, s.provider, emptyChatSetting(s.profile), emptyChatSetting(s.model), emptyChatSetting(s.reasoning), emptyChatSetting(s.egress), s.maxCostUSD, s.minImages, s.minArtifacts, s.newSession, s.newSessionPerJob, s.e2ee, workModeLabel(s.workMode))
 	default:
 		return false, ""
 	}
@@ -490,6 +513,8 @@ type chatState struct {
 	newSessionPerJob     bool
 	foregroundNewSession bool
 	localTools           bool
+	workMode             string
+	turnTimeout          time.Duration
 	nodeID               string
 }
 
@@ -555,25 +580,36 @@ func chatUsedReport(provider, model string) string {
 }
 
 func (s *chatState) turn(ctx context.Context, prompt string) error {
+	if s.turnTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.turnTimeout)
+		defer cancel()
+	}
 	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validateWorkMode(s.workMode); err != nil {
 		return err
 	}
 	if s.localToolsEligible() {
 		result, handled, err := localtools.Resolve(prompt)
 		if handled {
-			fmt.Printf("  → tool: %s · local · no model or pool job\n", result.Tool)
-			if err != nil {
-				return err
-			}
-			fmt.Printf("ai  › %s\n", result.Text)
-			fmt.Println("  ↳ used: " + result.Tool + " · verified computation (not an LLM answer)")
-			return nil
+			return printLocalToolOutcome(os.Stdout, result, err)
 		}
 	}
 	if s.token == "" {
 		return errors.New("a producer token is required for pool requests; configure cluster.client_token or a named account")
 	}
 	fmt.Println(chatRequestSummary(s.provider, s.profile, s.model, s.reasoning))
+	if s.turnTimeout > 0 {
+		fmt.Printf("  · turn deadline: %s including queue/provider time; cancellation is best-effort\n", s.turnTimeout)
+	}
+	if s.workMode != "" {
+		fmt.Println("  → mode: " + workModeLabel(s.workMode) + " · style only; adapter contracts unchanged")
+		if !strings.EqualFold(s.provider, "adapter") {
+			prompt = applyWorkMode(s.workMode, prompt)
+		}
+	}
 	minimum := s.minArtifacts
 	if s.requireImage || s.minImages > 0 {
 		minimum = max(minimum, max(1, s.minImages))
@@ -648,6 +684,23 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 			return err
 		}
 	}
+	// Keep the acknowledged ID separate: a failed poll can return a zero Job.
+	// Cancellation must use a fresh bounded context and the exact same scoped
+	// credential, never an admin fallback or a resubmitted request.
+	submittedJobID := job.ID
+	defer func() {
+		if ctx.Err() == nil || submittedJobID == "" || chatJobTerminal(job.Status) {
+			return
+		}
+		cancelCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		cancelled, err := client.Cancel(cancelCtx, submittedJobID)
+		if err != nil || !chatJobTerminal(cancelled.Status) {
+			fmt.Fprintf(os.Stderr, "  ! cancellation not confirmed for job %s; check job status; no request was replayed\n", shortChatID(submittedJobID))
+			return
+		}
+		fmt.Fprintln(os.Stderr, "  · relay acknowledged terminal job state; adapter shutdown may lag")
+	}()
 	spinner := newChatSpinner("Queued · waiting for a worker")
 	if s.e2ee {
 		spinner.update("encrypted", "E2EE · waiting for encrypted final result", 0)
@@ -787,6 +840,10 @@ func (s *chatState) turn(ctx context.Context, prompt string) error {
 			return fmt.Errorf("job %s: %s", job.Status, job.Error)
 		}
 	}
+}
+
+func chatJobTerminal(status string) bool {
+	return status == cluster.JobCompleted || status == cluster.JobFailed || status == cluster.JobCancelled
 }
 
 func (s *chatState) localToolsEligible() bool {

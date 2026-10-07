@@ -72,6 +72,16 @@ providers:
     principals: {}
 
 engines:
+  # Optional Ollama reasoning is per engine, off by default:
+  # local-code:
+  #   type: ollama
+  #   url: http://127.0.0.1:11434
+  #   model: YOUR_EXPLICIT_THINKING_MODEL
+  #   ollama_think: true
+  #   max_output_tokens: 4096
+  #   timeout_seconds: 240
+  # Select this engine on a route; check the model's thinking support first.
+  # Only the final response is returned. There is no retry if it is missing.
   # Optional operator-reviewed model passport fields can be added to an engine:
   # capabilities: [text, vision]
   # context_window_tokens: 32768

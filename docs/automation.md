@@ -84,7 +84,10 @@ child job. See [dag-pipelines.md](dag-pipelines.md).
 
 Use an agent when the model must propose the text-step decomposition. There are
 three authority levels: local-only automatic, named operator policy, and exact
-hash-reviewed one-off plan. See [bounded-agent.md](bounded-agent.md).
+hash-reviewed one-off plan. `agent plan --policy NAME` also lets you preview work
+inside an existing named envelope and require a separate exact hash approval;
+`agent auto --policy NAME` retains immediate bounded execution.
+See [bounded-agent.md](bounded-agent.md).
 
 No automation layer turns generated text into shell code or silently expands
 its own provider, cost, egress, retry, tenant, or tool authority.

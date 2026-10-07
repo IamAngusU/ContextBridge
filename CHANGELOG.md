@@ -2,6 +2,112 @@
 
 ## Unreleased
 
+- Restore the built-in calculator before the optional agent route for plain
+  foreground `do`, including existing tool/provenance terminal output. Preserve
+  explicit job/JSON/code contracts; invalid recognized arithmetic never falls
+  through to a model. Show method/source/review evidence for service answers.
+
+- Add an explicitly configured loopback-only outcome service for `do`, with
+  offline/local-agent/hybrid policies, bounded code checks and `jobs` commands.
+  Unconfigured and explicitly selected cluster routes retain their behaviour.
+  No inherited cluster credentials, environment proxies, redirects, automatic
+  runtime startup or implicit remote fallback. See `docs/local-agent-api.md`.
+  Explicit `--workspace-context` snapshots add capability-gated, local-first
+  source context without granting directory traversal or workspace write authority.
+  Add code-version list/show/resume and `do --fresh` for compatible services;
+  saving/exporting remains create-only and never applies generated code.
+  Add read-only `jobs diff` (version/base/file/patch) and `jobs activity` for
+  compatible local services; proposal statistics are not workspace-write evidence.
+  Add `tools list/call` for service-owned typed local diagnostics and explicit
+  offline `do --task diagnose`; no arbitrary shell or process-stop authority.
+  Code requests can pin engineering preferences with repeatable `--rules`.
+
+- Add opt-in `do` / `cluster chat --timeout` per-turn deadlines including queue
+  wait, and best-effort scoped cancellation of acknowledged unfinished jobs on
+  interruption or deadline expiry. Default limits and routes are unchanged;
+  unknown submissions are never replayed and terminal jobs are not cancelled.
+
+- Carry opt-in resource snapshots through fenced adapter progress and expose
+  `/v1/cluster/jobs/{id}/activity/stream`. Full bounded snapshots replace prior
+  snapshots, reconnect reads current state, and live connections recheck token
+  validity and job scope. No resource metadata enters generic history/events.
+  Adapter-v2 status advertises support before adapters send the new fields.
+  Running evidence is explicitly partial; terminal results and existing
+  ambiguous/restart behavior remain authoritative.
+
+- Added opt-in `output.activity` adapter resource receipts, approval-bound agent
+  `--activity`, and the authenticated `/v1/cluster/jobs/{id}/activity` projection.
+  Strict bounded evidence distinguishes read/cited/inspected/created/reused;
+  ordinary model prose is never promoted into tool evidence. Existing result
+  ACL/retention, E2EE and content-minimized lifecycle SSE remain unchanged.
+  Missing/invalid reports are explicit and do not replay completed mutations.
+  See [resource activity](docs/resource-activity.md) for scope and limitations.
+
+- Added opt-in, approval-bound agent `verification_gate` steps with operator-
+  pinned adapter checks. Valid pass receipts stop remaining work; finite check
+  failures permit only remaining preapproved steps; inconclusive, mismatched,
+  malformed or ambiguous results stop without replay. Exhausted gated repairs
+  exit unsuccessfully. Defaults, one-attempt dispatch and scopes are unchanged;
+  passing does not promote code or prove general correctness. See the
+  [runtime gate contract](docs/agent-verification.md).
+
+- Added optional `input_steps` for bounded model steps: select multiple earlier
+  results and preserve the original goal in an explicitly untrusted evidence
+  bundle with step/job provenance and content digests. Selection is approval-
+  bound, local run-only and capped at 128 KiB without silent truncation. Unknown,
+  future or duplicate references, selections on adapter steps, or mixed `use_previous` input modes
+  fail closed. Exact adapter handoffs, old plan hashes, offline and authority
+  defaults remain unchanged. This does not add automatic persistent memory,
+  conditional repair, resume or a model-quality guarantee.
+- Added optional approval-bound `output_mode: json` for model steps, including
+  final answers. Core requests the actual provider JSON contract and rejects
+  text/Markdown or mixed envelopes instead of treating a prompt's formatting
+  request as a guarantee. Defaults remain text; adapter output contracts and
+  required exact JSON handoffs cannot be overridden.
+
+- Added optional `--mode lazy|normal` to `do`, cluster chat and agent plan/auto,
+  plus interactive `/mode`. Reuse-first guidance applies to model prompts only;
+  exact adapter requests, deterministic tools, offline policy and authority are
+  unchanged. Saved style is approval-hash-bound. Defaults and global settings
+  remain unchanged; no coding-quality or performance gain is claimed.
+
+- Added `cluster agent plan --policy NAME`: preview inside the existing named
+  authority, then execute only after exact hash approval. Planner, tenant/group,
+  egress, provider/profile and cost limits remain bound; CLI overrides and
+  changed policy/configuration are rejected. Preview still runs one authorized
+  planner job, but never the proposed work steps.
+- Added whole-plan local target preflight before the first work step: missing or
+  ambiguous routes and missing dynamic adapter contracts fail early instead of
+  allowing preceding steps to execute first. Runtime payload/lease checks remain
+  independent; no rollback, new shell authority or model-quality guarantee.
+
+- Fresh agent proposals must explicitly state each step's boolean
+  `use_previous`. Missing/null data-flow choices are rejected before execution
+  instead of silently dropping tool evidence. Existing hash-approved plan
+  encoding is unchanged; prompts now explain that `false` supplies no prior data.
+
+- Added opt-in `engines.<name>.ollama_think` for an explicit Ollama reasoning
+  model with an output-token ceiling. Default behavior is unchanged; only final
+  responses enter tool workflows, never private thinking. Mode changes are
+  covered by execution bindings and do not authorize retries or new tools.
+
+- Fixed named local-only agents incorrectly rejecting explicitly local adapter
+  profiles as remote. Planning now checks every allowed profile independently
+  using the same per-profile classification precedence as relay policy; remote
+  sibling profiles, tenant denials, cost opt-ins and critical confirmations
+  remain enforced.
+- Clarified planner request-object nesting and step metadata separation, avoiding
+  double-escaped source and metadata incorrectly inserted into adapter payloads.
+  Scoped sandbox actions are distinguished from arbitrary host execution;
+  adapter-side permission and validation boundaries remain unchanged.
+
+- Fixed local arithmetic rejecting mixed decimal commas and points in separate
+  numbers, such as `(4,2 * 10.1) * 3 / 30 + 5`. The shared `do`/chat/MCP resolver
+  now normalizes each literal independently and accepts unambiguous comma
+  decimals in English/bare expressions. German comma conventions remain intact;
+  ambiguous thousands-style commas and malformed/grouped literals fail without
+  model fallback. Exact rational arithmetic and resource limits are unchanged.
+
 - Accept strict structured adapter instructions in fresh agent proposals before
   policy validation and hash approval. Existing saved-plan representation,
   profile restrictions and adapter validation remain unchanged; non-adapter

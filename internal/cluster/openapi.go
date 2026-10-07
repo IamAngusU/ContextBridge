@@ -102,16 +102,18 @@ func relayOpenAPI() map[string]interface{} {
 			"get":    operation("Get one visible job", []string{"admin", "observer", "producer"}, "Object"),
 			"delete": operation("Cancel one owned job", []string{"admin", "producer"}, "Object"),
 		}),
-		"/v1/cluster/jobs/{id}/events":        pathItem("id", map[string]interface{}{"get": operation("Get authoritative job events", []string{"admin", "observer", "producer"}, "Object")}),
-		"/v1/cluster/jobs/{id}/events/stream": pathItem("id", map[string]interface{}{"get": streamOperation("Stream authoritative job events as SSE")}),
-		"/v1/cluster/jobs/{id}/route":         pathItem("id", map[string]interface{}{"get": operation("Get the durable routing decision", []string{"admin", "observer", "producer"}, "Object")}),
-		"/v1/cluster/jobs/{id}/estimate":      pathItem("id", map[string]interface{}{"get": operation("Get a historical runtime estimate", []string{"admin", "observer", "producer"}, "Object")}),
-		"/v1/cluster/contracts/validate":      map[string]interface{}{"post": operation("Validate a job contract without admission", []string{"admin", "producer"}, "Object")},
-		"/v1/cluster/assign":                  map[string]interface{}{"post": assignmentOperation},
-		"/v1/cluster/routes/explain":          map[string]interface{}{"post": routeExplainOperation},
-		"/v1/cluster/adapters":                map[string]interface{}{"get": operation("List visible leased external adapters", []string{"admin", "observer", "producer"}, "AdapterPresenceList")},
-		"/v1/cluster/adapters/heartbeat":      map[string]interface{}{"post": operation("Register or renew an owned external adapter lease", []string{"producer"}, "Object")},
-		"/v1/cluster/adapters/{id}":           pathItem("id", map[string]interface{}{"get": operation("Inspect one visible leased external adapter", []string{"admin", "observer", "producer"}, "AdapterPresenceList")}),
+		"/v1/cluster/jobs/{id}/events":          pathItem("id", map[string]interface{}{"get": operation("Get authoritative job events", []string{"admin", "observer", "producer"}, "Object")}),
+		"/v1/cluster/jobs/{id}/activity":        pathItem("id", map[string]interface{}{"get": operation("Get bounded opt-in adapter-reported resource activity", []string{"admin", "observer", "producer"}, "JobResourceActivity")}),
+		"/v1/cluster/jobs/{id}/activity/stream": pathItem("id", map[string]interface{}{"get": activityStreamOpenAPI(operation("Stream current opt-in resource activity snapshots", []string{"admin", "observer", "producer"}, "JobResourceActivity"))}),
+		"/v1/cluster/jobs/{id}/events/stream":   pathItem("id", map[string]interface{}{"get": streamOperation("Stream authoritative job events as SSE")}),
+		"/v1/cluster/jobs/{id}/route":           pathItem("id", map[string]interface{}{"get": operation("Get the durable routing decision", []string{"admin", "observer", "producer"}, "Object")}),
+		"/v1/cluster/jobs/{id}/estimate":        pathItem("id", map[string]interface{}{"get": operation("Get a historical runtime estimate", []string{"admin", "observer", "producer"}, "Object")}),
+		"/v1/cluster/contracts/validate":        map[string]interface{}{"post": operation("Validate a job contract without admission", []string{"admin", "producer"}, "Object")},
+		"/v1/cluster/assign":                    map[string]interface{}{"post": assignmentOperation},
+		"/v1/cluster/routes/explain":            map[string]interface{}{"post": routeExplainOperation},
+		"/v1/cluster/adapters":                  map[string]interface{}{"get": operation("List visible leased external adapters", []string{"admin", "observer", "producer"}, "AdapterPresenceList")},
+		"/v1/cluster/adapters/heartbeat":        map[string]interface{}{"post": operation("Register or renew an owned external adapter lease", []string{"producer"}, "Object")},
+		"/v1/cluster/adapters/{id}":             pathItem("id", map[string]interface{}{"get": operation("Inspect one visible leased external adapter", []string{"admin", "observer", "producer"}, "AdapterPresenceList")}),
 		"/v1/cluster/adapters/{id}/{action}": map[string]interface{}{
 			"parameters": []map[string]interface{}{
 				{"name": "id", "in": "path", "required": true, "schema": map[string]string{"type": "string"}},
@@ -149,9 +151,10 @@ func relayOpenAPI() map[string]interface{} {
 		"components": map[string]interface{}{
 			"securitySchemes": map[string]interface{}{"bearerAuth": map[string]string{"type": "http", "scheme": "bearer"}},
 			"schemas": map[string]interface{}{
-				"OpenAPI": map[string]string{"type": "object"},
-				"Object":  map[string]string{"type": "object"},
-				"Array":   map[string]interface{}{"type": "array", "items": map[string]string{"type": "object"}},
+				"OpenAPI":             map[string]string{"type": "object"},
+				"Object":              map[string]string{"type": "object"},
+				"JobResourceActivity": jobResourceActivitySchema(),
+				"Array":               map[string]interface{}{"type": "array", "items": map[string]string{"type": "object"}},
 				"AdapterPresenceList": map[string]interface{}{
 					"type": "object", "required": []string{"schema", "adapters", "total", "available", "setup_required", "degraded", "disabled"},
 					"properties": map[string]interface{}{

@@ -409,13 +409,15 @@ type ExecutionMetadata struct {
 }
 
 type JobProgress struct {
-	Sequence  uint64    `json:"sequence"`
-	Text      string    `json:"text"`
-	Phase     string    `json:"phase,omitempty"`
-	Detail    string    `json:"detail,omitempty"`
-	Percent   int       `json:"percent,omitempty"`
-	Busy      bool      `json:"busy"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Activity       json.RawMessage `json:"activity,omitempty"`
+	ActivityStatus string          `json:"activity_status,omitempty"`
+	Sequence       uint64          `json:"sequence"`
+	Text           string          `json:"text"`
+	Phase          string          `json:"phase,omitempty"`
+	Detail         string          `json:"detail,omitempty"`
+	Percent        int             `json:"percent,omitempty"`
+	Busy           bool            `json:"busy"`
+	UpdatedAt      time.Time       `json:"updated_at"`
 }
 
 type SealedEnvelope struct {

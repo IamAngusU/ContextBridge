@@ -62,6 +62,22 @@ func TestAgentPlanBindsAndValidatesExplicitPolicy(t *testing.T) {
 	}
 }
 
+func TestAgentResourceActivityIsOptInAndApprovalBound(t *testing.T) {
+	plan := validAgentPlanForTest(t)
+	before, raw, err := encodeAgentPlan(plan)
+	if err != nil || strings.Contains(string(raw), "report_activity") {
+		t.Fatalf("default changed: %s %v", raw, err)
+	}
+	plan.ReportActivity = true
+	after, raw, err := encodeAgentPlan(plan)
+	if err != nil || before == after || !strings.Contains(string(raw), `"report_activity": true`) {
+		t.Fatalf("activity not approval-bound: %s %v", raw, err)
+	}
+	if _, err := decodeAgentProposal([]byte(`{"version":8,"summary":"s","report_activity":true,"steps":[]}`)); err == nil {
+		t.Fatal("planner acquired telemetry publication choice")
+	}
+}
+
 func TestAgentPlanRejectsUnsafeShape(t *testing.T) {
 	plan := validAgentPlanForTest(t)
 	plan.Version--
@@ -111,14 +127,14 @@ func TestAgentAggregateCostBudgetConsumesPlannerAndStepReservations(t *testing.T
 	if err := budget.authorize("deepseek", &first); err != nil || math.Abs(first.MaxCostUSD-.8) > 1e-9 {
 		t.Fatalf("first step did not receive the post-planner remainder: %#v %v", first, err)
 	}
-	if err := budget.consume("deepseek", cluster.Usage{ReservedCostUSD: .6}); err != nil {
+	if err := budget.consume("deepseek", "", cluster.Usage{ReservedCostUSD: .6}); err != nil {
 		t.Fatal(err)
 	}
 	second := agentRequirements(cfg, policy, "deepseek", "")
 	if err := budget.authorize("deepseek", &second); err != nil || math.Abs(second.MaxCostUSD-.2) > 1e-9 {
 		t.Fatalf("second step received duplicated authority: %#v %v", second, err)
 	}
-	if err := budget.consume("deepseek", cluster.Usage{ReservedCostUSD: .6}); err == nil || !strings.Contains(err.Error(), "remaining aggregate authority") {
+	if err := budget.consume("deepseek", "", cluster.Usage{ReservedCostUSD: .6}); err == nil || !strings.Contains(err.Error(), "remaining aggregate authority") {
 		t.Fatalf("aggregate over-reservation was accepted: %v", err)
 	}
 	if math.Abs(budget.remaining-.2) > 1e-9 {
@@ -277,6 +293,27 @@ func TestAgentExecutionBindingChangesWithRouteAndRelay(t *testing.T) {
 	relayChanged, err := agentBindingForConfig(cfg)
 	if err != nil || relayChanged.RelayURL != "https://other-relay.example.test" {
 		t.Fatalf("relay binding was not normalized: %#v / %v", relayChanged, err)
+	}
+}
+
+func TestAgentExecutionBindingCoversOllamaThinkingOptIn(t *testing.T) {
+	cfg := config.Config{
+		Engines: map[string]config.Engine{"local-code": {Type: "ollama", Model: "fixed", MaxOutputTokens: 4096}},
+		Cluster: config.Cluster{Relay: config.ClusterRelay{PublicURL: "http://127.0.0.1:32147"}},
+	}
+	before, err := agentBindingForConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := cfg.Engines["local-code"]
+	engine.OllamaThink = true
+	cfg.Engines["local-code"] = engine
+	after, err := agentBindingForConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.ConfigSHA256 == after.ConfigSHA256 || before.ExecutionSHA256 == after.ExecutionSHA256 || before.Components.Engines == after.Components.Engines {
+		t.Fatal("changing thinking mode did not invalidate existing execution approval")
 	}
 }
 

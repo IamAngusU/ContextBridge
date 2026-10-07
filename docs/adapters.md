@@ -60,7 +60,10 @@ their file paths may be referenced by options. Setup output lists option keys,
 never option values.
 
 An adapter intended for a bounded agent may expose one non-secret syntax hint
-with the reserved option `agent_instruction_contract`. The value is a single
+with the reserved option `agent_instruction_contract`. Explicitly trusted check
+adapters may also opt in to the [runtime verification gate contract](agent-verification.md)
+using `agent_verification_checks`; this is not a general readiness claim or code
+promotion permission. The instruction-contract value is a single
 printable string of at most 2 KiB. Only this option is copied into the planner
 prompt; paths, credentials, host policy, executable locations, and every other
 driver option stay hidden. The hint is not authority: the selected profile,
@@ -236,6 +239,18 @@ itself policy, credentials, budget, or queue ownership.
 The cluster worker observes local adapter progress through an operator-only
 endpoint outside `/v1/adapter/*` and `/v2/adapter/*`. Adapter credentials can
 neither call nor discover operator state through that path.
+
+## Optional resource activity
+
+Optional resource receipts can accompany a successful v2 completion when the
+job explicitly requests `output.activity`. When scoped status advertises
+`features: ["resource_activity_progress_v1"]`, an adapter can also publish
+the same bounded manifest through its existing fenced progress endpoint.
+Omit new progress fields when support is absent; older strict Core decoders may
+reject them. The relay offers a separate authenticated snapshot SSE endpoint.
+See the provider-neutral
+[resource activity contract](resource-activity.md) for schema, bounds, privacy,
+and the distinction between adapter reports and authoritative lifecycle events.
 
 ## v1 migration
 
