@@ -6,7 +6,7 @@ require (
 	github.com/coder/websocket v1.8.15
 	go.etcd.io/bbolt v1.5.0
 	go.etcd.io/raft/v3 v3.7.0
-	golang.org/x/sys v0.45.0
+	golang.org/x/sys v0.49.0
 	google.golang.org/protobuf v1.36.12
 	gopkg.in/yaml.v3 v3.0.1
 )
